@@ -356,7 +356,7 @@ def _dequantize_f8_reference(
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
 
-    result = tensor.to(target_dtype)
+    result = tensor.to(torch.float32)
     if scale is not None:
         scale_tensor = _expand_scale(scale.to(result.dtype), result, axis_hint=axis)
         result = result * scale_tensor
@@ -366,7 +366,7 @@ def _dequantize_f8_reference(
             result = result * scale_tensor
         else:
             result = result / scale_tensor
-    return result
+    return result.to(target_dtype)
 
 
 def _dequantize_f4_reference(
@@ -393,7 +393,7 @@ def _dequantize_f4_reference(
         unpacked = unpack_uint4(tensor.reshape(-1))
         expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
         unpacked = unpacked.view(*expanded_shape)
-        result = f4_unpacked_to_f32(unpacked).to(target_dtype)
+        result = f4_unpacked_to_f32(unpacked)
     else:
         _warn_torch_only_fp4_fallback()
 
@@ -404,12 +404,12 @@ def _dequantize_f4_reference(
         lookup = torch.tensor(
             (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
              -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
-            dtype=target_dtype,
+            dtype=torch.float32,
             device=tensor.device,
         )
         packed = tensor.contiguous().view(torch.uint8)
         expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
-        result = torch.empty(*expanded_shape, dtype=target_dtype, device=tensor.device)
+        result = torch.empty(*expanded_shape, dtype=torch.float32, device=tensor.device)
         result[..., 0::2] = lookup[(packed & 0x0F).to(torch.long)]
         result[..., 1::2] = lookup[(packed >> 4).to(torch.long)]
 
@@ -422,7 +422,7 @@ def _dequantize_f4_reference(
             result = result * scale_tensor
         else:
             result = result / scale_tensor
-    return result
+    return result.to(target_dtype)
 
 _DTYPE_SUPPORT_CACHE: dict[tuple[str, Optional[int], bool], "DeviceDTypeSupport"] = {}
 

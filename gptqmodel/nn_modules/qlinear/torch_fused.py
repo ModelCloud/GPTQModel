@@ -46,9 +46,9 @@ class Int4PackedOp(torch.nn.Module):
 
     def forward(self, x):
         out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x, self.qweight_uint8, self.group_size, self.scales_and_zeros
+            x.to(self.scales_and_zeros.dtype), self.qweight_uint8, self.group_size, self.scales_and_zeros
         )
-        return out
+        return out.to(x.dtype)
 
 
 class TorchFusedLinear(PackableQuantLinear):
@@ -247,10 +247,6 @@ class TorchFusedLinear(PackableQuantLinear):
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
                 ).eval()
-                import torch._inductor.config as config
-                config.freezing = True
-                config.max_autotune = True
-                # Need to compile the whole model to get optimized performance for CPU
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )

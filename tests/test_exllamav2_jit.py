@@ -76,7 +76,7 @@ def test_exllamav2_forward_uses_jit_gemm(monkeypatch):
 
     assert calls["gemm"] == {
         "x_shape": (2, module.in_features),
-        "x_dtype": torch.float16,
+        "x_dtype": torch.float32,
         "q_handle": 77,
         "output_shape": (2, module.out_features),
         "force_cuda": False,

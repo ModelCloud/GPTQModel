@@ -23,17 +23,13 @@ from .cpp import (
 class ScratchSpace:
     def __init__(self, scratch_bytes, dev):
         self.scratch_bytes = scratch_bytes
-        self.scratch = torch.empty(
-            self.scratch_bytes // 2,
-            dtype=torch.float16,
-            device=dev,
-        )
+        self.device = dev
 
     def get_slice(self, size_bytes):
-        size_halfs = next_multiple(size_bytes, 128) // 2
-        scratch_slice = self.scratch.narrow(0, 0, size_halfs)
-
-        return scratch_slice
+        # Callers own the temporary allocation; never keep expanded weights
+        # reachable from model/device scratch objects between operations.
+        return torch.empty(next_multiple(size_bytes, 128) // 2,
+                           dtype=torch.float16, device=self.device)
 
 
 def next_multiple(x, multiple):

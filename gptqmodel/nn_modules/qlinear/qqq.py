@@ -25,6 +25,15 @@ from ._runtime_cache import tensor_cache_key
 log = setup_logger()
 
 
+@lru_cache(maxsize=1)
+def _qqq_gpu_quantizer():
+    try:
+        from .qqq_triton import dynamic_quant
+    except ImportError:
+        return None
+    return dynamic_quant
+
+
 _INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
 
 # The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
@@ -484,7 +493,15 @@ class QQQLinear(GroupedQuantLinear):
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
-        quant_scale = x.abs().max(dim=-1, keepdim=True)[0].div(127.0).to(torch.float32)
+        if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
+                and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and not torch.compiler.is_compiling()):
+            quantizer = _qqq_gpu_quantizer()
+            if quantizer is not None:
+                return quantizer(x)
+        x = x.float()
+        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
+        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         return x, quant_scale
 

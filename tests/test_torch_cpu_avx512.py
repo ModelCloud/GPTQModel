@@ -675,11 +675,8 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     )
 
     x = torch.randn(tokens, in_features, dtype=dtype)
-    # ATen int4pack requires scales/zero-points to share the activation dtype.
-    # The FP16 checkpoint scales are therefore rounded to BF16 for a BF16
-    # activation. Use that same representation in the arithmetic oracle so
-    # this test isolates kernel error from the intentional input conversion.
-    arithmetic_scales = scales.to(dtype)
+    # Asymmetric offsets that cannot be represented exactly use FP32 compute.
+    arithmetic_scales = scales.float()
     weight = _aten_affine_oracle(codes, zeros, arithmetic_scales, g_idx)
     reference_fp32 = torch.matmul(x.float(), weight)
 
@@ -691,8 +688,8 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == dtype
-    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=0.2, rtol=0.01)
+    assert layer.scales.dtype == torch.float32
+    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
 

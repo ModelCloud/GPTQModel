@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp16.h>
 #include "semaphore.h"
 #include "gemm_cuda.h"
@@ -25,8 +26,12 @@
 #define KERNEL_LAUNCH_CODE                                                                                                                              \
   int num_mn_tiles = (num_in_feats + CTA_M - 1) / CTA_M * (num_out_channels + CTA_N - 1) / CTA_N;                                                       \
   /* Split-K tiles use these semaphores for inter-CTA ordering, so they must start at zero. */                                                          \
-  torch::Tensor _semaphores = torch::zeros({num_mn_tiles}, options_int);                                                                                \
-  auto semaphores = reinterpret_cast<int *>(_semaphores.data_ptr<int>());                                                                               \
+  torch::Tensor _semaphores;                                                                                                                          \
+  int *semaphores = nullptr;                                                                                                                          \
+  if constexpr (SPLITK > 1) {                                                                                                                        \
+    _semaphores = torch::zeros({num_mn_tiles}, options_int);                                                                                           \
+    semaphores = _semaphores.data_ptr<int>();                                                                                                         \
+  }                                                                                                                                                  \
   constexpr int NUM_WARPS = (CTA_M / WARP_M) * (CTA_N / WARP_N) * (CTA_K / WARP_K);                                                                     \
   constexpr int SCALES_SMEM_SIZE = (G >= CTA_K) ? (CTA_N / (G / CTA_K) * STAGES * 2) : (CTA_N * (CTA_K / G) * STAGES * 2);                              \
   constexpr int kSmemByteSize = (CTA_M * (CTA_K + SMEM_PAD_A) + CTA_N * (CTA_K + SMEM_PAD_B) / kInterleave + SCALES_SMEM_SIZE) * STAGES * sizeof(half); \
@@ -40,8 +45,8 @@
   dim3 threads_per_block(WARP_SIZE, NUM_WARPS);                                                                                                         \
   auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK>;                                                     \
   cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                        \
-  kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(                                                                                        \
-      in_feats, kernel, scales, zeros, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);
+  kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(                                                                                        \
+      in_feats, kernel, scales, zeros, partials, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);
 
 template <int N>
 __inline__ __host__ __device__ int get_log_tile(int n)
@@ -289,7 +294,7 @@ __device__ __inline__ void share_to_reg_one_stage_B(half *src, half *src_scales,
 }
 
 template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK>
-__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, half *__restrict__ C, int *__restrict__ semaphores, int M, int N, int K)
+__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, float *__restrict__ C, half *__restrict__ output, int *__restrict__ semaphores, int M, int N, int K)
 {
   constexpr int NUM_WARPS_MN = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int NUM_WARPS = NUM_WARPS_MN * CTA_K / WARP_K;
@@ -512,7 +517,7 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
 
   if (slice_id == 0)
   {
-    Semaphore semaphore(semaphores + blockIdx_y, threadIdx.x);
+    Semaphore semaphore(SPLITK > 1 ? semaphores + blockIdx_y : nullptr, threadIdx.x);
 
     if constexpr (SPLITK > 1)
     {
@@ -520,50 +525,33 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
     }
 
     if (blockIdx_z != 0)
-    {
       semaphore.wait(blockIdx_z);
-      for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
-      {
-        for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
-        {
-          for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
-          {
-            int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
 
-            if (write_row < M)
-            {
-              half2 *existing_psum_ptr = reinterpret_cast<half2 *>(
-                  C + write_row * N +
-                  cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-                  (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2);
-
-              *existing_psum_ptr = __hadd2(*existing_psum_ptr,
-                                           __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                                         ax1_0_1 * 8 + local_id)));
-            }
-          };
-        }
-      }
-    }
-    else
+    // Keep every intermediate split in FP32; only the final owner rounds.
+    for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
     {
-      for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+      for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
       {
-        for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+        for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
         {
-          for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
+          int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
+          if (write_row < M)
           {
-            int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
-            if (write_row < M)
+            int index = write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                        (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2;
+            float2 value = *reinterpret_cast<float2 *>(
+                C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
+            if (blockIdx_z != 0)
             {
-              *reinterpret_cast<half2 *>(
-                  C + write_row * N +
-                  cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-                  (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-                  __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                ax1_0_1 * 8 + local_id));
+              const float2 previous = *reinterpret_cast<float2 *>(C + index);
+              value.x += previous.x;
+              value.y += previous.y;
             }
-          };
+            if (blockIdx_z + 1 == SPLITK)
+              *reinterpret_cast<half2 *>(output + index) = __floats2half2_rn(value.x, value.y);
+            else
+              *reinterpret_cast<float2 *>(C + index) = value;
+          }
         }
       }
     }
@@ -915,12 +903,12 @@ __global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *
         int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
         if (write_row < M)
         {
+          const float2 value = *reinterpret_cast<float2 *>(
+              C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
           *reinterpret_cast<half2 *>(
-              C + write_row * N +
-              cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+              C + write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
               (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-              __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                            ax1_0_1 * 8 + local_id));
+              __floats2half2_rn(value.x, value.y);
         }
       };
     }
@@ -942,10 +930,17 @@ torch::Tensor gemm_forward_cuda_prefill(
   auto scales = reinterpret_cast<half *>(_scales.data_ptr<at::Half>());
   auto zeros = reinterpret_cast<half *>(_zeros.data_ptr<at::Half>());
   auto options =
-      torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+      torch::TensorOptions().dtype(torch::kFloat32).device(_in_feats.device());
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt32).device(_in_feats.device());
-  at::Tensor _out_feats = torch::empty(output_shape, options);
+  at::Tensor _out_feats = torch::empty(output_shape, _in_feats.options());
+  // Only M <= 32 uses split-K. Larger prefills write the final dtype directly.
+  at::Tensor _partials;
+  float *partials = nullptr;
+  if (num_in_feats <= 32) {
+    _partials = torch::empty(output_shape, options);
+    partials = _partials.data_ptr<float>();
+  }
   int num_out_feats = _out_feats.numel() / _out_feats.size(-1);
   int num_out_channels = _out_feats.size(-1);
   auto out_feats = reinterpret_cast<half *>(_out_feats.data_ptr<at::Half>());
@@ -1026,7 +1021,7 @@ torch::Tensor gemm_forward_cuda_prefill(
     dim3 threads_per_block(WARP_SIZE, NUM_WARPS);
     auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G>;
     cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
-    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(
+    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(
         in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
   }
 
