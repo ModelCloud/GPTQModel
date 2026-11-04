@@ -1382,3 +1382,65 @@ def test_torch_ops_jit_extension_build_lock_wait_is_bounded(monkeypatch, tmp_pat
     finally:
         holder.kill()
         holder.wait()
+
+
+def test_torch_ops_jit_extension_reports_ninja_on_path(monkeypatch, tmp_path):
+    """A JIT failure must name the build tools it actually found."""
+
+    loader = _make_loader(tmp_path)
+    monkeypatch.setattr(cpp_module.shutil, "which", lambda name: f"/opt/tools/{name}")
+    monkeypatch.setattr(
+        cpp_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="1.11.1\n", stderr="", returncode=0),
+    )
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+    lines = loader._toolchain_diagnostic_lines()
+
+    assert "ninja=/opt/tools/ninja (1.11.1)" in lines
+    assert "cmake=/opt/tools/cmake (1.11.1)" in lines
+    assert not any(line.startswith("hint=") for line in lines)
+
+
+def test_torch_ops_jit_extension_hints_at_conda_env_ninja(monkeypatch, tmp_path):
+    """The reported real-world case: ninja exists in $CONDA_PREFIX/bin, not PATH."""
+
+    loader = _make_loader(tmp_path)
+    env_bin = tmp_path / "conda_env" / "bin"
+    env_bin.mkdir(parents=True)
+    (env_bin / "ninja").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(cpp_module.shutil, "which", lambda name: None)
+    monkeypatch.setenv("CONDA_PREFIX", str(tmp_path / "conda_env"))
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+
+    lines = loader._toolchain_diagnostic_lines()
+
+    assert "ninja=<not on PATH>" in lines
+    hint = next(line for line in lines if line.startswith("PATH_hint="))
+    assert str(env_bin) in hint
+    assert str(env_bin / "ninja") in hint
+    assert any("needs `ninja` on PATH" in line for line in lines)
+
+
+def test_torch_ops_jit_extension_build_failure_includes_toolchain(monkeypatch, tmp_path):
+    """The diagnostics reach `last_error_message()`, which callers show on skip/failure."""
+
+    loader = _make_loader(tmp_path)
+    logger = _FakeLogger()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: False)
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+    monkeypatch.setattr(cpp_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        cpp_module,
+        "load",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Ninja is required to load C++ extensions")),
+    )
+
+    assert loader.load() is False
+    message = loader.last_error_message()
+    assert "Ninja is required" in message
+    assert "ninja=<not on PATH>" in message
+    assert "needs `ninja` on PATH" in message
