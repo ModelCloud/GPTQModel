@@ -3,7 +3,8 @@
 
 import pytest
 import torch
-from test_inference_numeric_range import check
+
+from .test_inference_numeric_range import check
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
@@ -72,7 +73,7 @@ def test_qqq_quantization_layout_and_empty(monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("bits", ["q4_0", "q8_0", "q4_k", "q5_k", "q6_k"])
 def test_gguf_fused_chunk_accumulation(dtype, bits):
-    from test_gguf_torch_cpu import _build_module, _oracle_dequantize
+    from .test_gguf_torch_cpu import _build_module, _oracle_dequantize
 
     _, module = _build_module(bits, in_features=513, out_features=65, seed=73)
     weight = torch.from_numpy(_oracle_dequantize(module.qweight, bits.upper())[:, :513]).double()
