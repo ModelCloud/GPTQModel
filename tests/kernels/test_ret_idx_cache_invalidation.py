@@ -106,3 +106,115 @@ def test_in_place_g_idx_mutation_is_observed(cls):
 
     rebuilt = module._build_ret_idx()
     assert torch.equal(rebuilt, _oracle_ret_idx(module.g_idx, GROUP_SIZE))
+
+
+# ---------------------------------------------------------------------------
+# Derived fused metadata must follow the packed buffers a load replaces.
+# ---------------------------------------------------------------------------
+
+
+def _fused_checkpoint(seed, order, dtype=torch.float16):
+    generator = torch.Generator().manual_seed(seed)
+    return {
+        "qweight": torch.randint(
+            -(2 ** 31), 2 ** 31 - 1, (IN_FEATURES // 8, OUT_FEATURES),
+            dtype=torch.int32, generator=generator,
+        ),
+        # Symmetric GPTQ zero code (8) packed eight times into every word.
+        "qzeros": torch.full(
+            (IN_FEATURES // GROUP_SIZE, OUT_FEATURES // 8),
+            8 * 0x11111111 - 2 ** 32,
+            dtype=torch.int32,
+        ),
+        "scales": torch.rand(
+            (IN_FEATURES // GROUP_SIZE, OUT_FEATURES), dtype=dtype,
+            generator=generator,
+        ) * 0.002 + 0.001,
+        "g_idx": _group_labels(order),
+    }
+
+
+def _fused_module(cls, checkpoint):
+    module = cls(
+        bits=4, group_size=GROUP_SIZE, sym=True, desc_act=True,
+        in_features=IN_FEATURES, out_features=OUT_FEATURES, bias=False,
+        pack_dtype=torch.int32, enable_wf_unsqueeze=True,
+    )
+    for name, value in checkpoint.items():
+        setattr(module, name, value.clone())
+    module.eval()
+    module._init_wf_unsqueeze_buffers()
+    return module
+
+
+def _dense_oracle(checkpoint, activation):
+    """Independent float64 dequantization of a checkpoint-layout layer."""
+    word = torch.arange(0, 32, 4, dtype=torch.int32)
+    codes = (
+        (checkpoint["qweight"].unsqueeze(1) >> word.view(1, -1, 1)) & 0xF
+    ).double().reshape(-1, OUT_FEATURES)
+    zeros = (
+        (checkpoint["qzeros"].unsqueeze(2) >> word.view(1, 1, -1)) & 0xF
+    ).double().reshape(checkpoint["qzeros"].shape[0], -1)
+    g_idx = checkpoint["g_idx"].long()
+    weight = checkpoint["scales"].double()[g_idx] * (codes - zeros[g_idx])
+    return (activation.double() @ weight).float()
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+def test_derived_fused_metadata_follows_loaded_checkpoint(cls):
+    """A load must not keep serving scales/zero points the module no longer owns.
+
+    ``load_state_dict`` copies ``scales``/``qzeros`` into the existing buffers
+    after the one-time transform built ``scales_and_zeros``. Without a refresh
+    the fused op keeps the pre-load derived tensor, so the output silently
+    ignores the checkpoint that was just loaded.
+    """
+    activation = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    checkpoint = _fused_checkpoint(seed=2, order=(3, 0, 2, 1))
+
+    source = _fused_module(cls, checkpoint)
+    with torch.no_grad():
+        expected = source(activation).clone()
+
+    target = _fused_module(cls, _fused_checkpoint(seed=1, order=(0, 1, 2, 3)))
+    with torch.no_grad():
+        _ = target(activation)  # build the one-time fused state
+    target.load_state_dict(source.state_dict())
+
+    with torch.no_grad():
+        actual = target(activation)
+
+    # The loaded checkpoint has a different g_idx, so the activation-reorder
+    # index must be rebuilt for it as well as the derived scales/zero points.
+    assert not torch.equal(target.g_idx, _group_labels((0, 1, 2, 3)))
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+    oracle = _dense_oracle(checkpoint, activation)
+    # ``actual`` keeps the activation dtype; compare the values, not the dtype.
+    torch.testing.assert_close(
+        actual.float(), oracle, rtol=2e-3, atol=2e-3
+    )
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+def test_cache_clear_keeps_packed_storage_only(cls):
+    """Refreshing derived metadata must not create a dense weight cache."""
+    module = _fused_module(cls, _fused_checkpoint(seed=5, order=(0, 1, 2, 3)))
+    activation = torch.randn(2, IN_FEATURES, dtype=torch.bfloat16)
+    with torch.no_grad():
+        module(activation)
+
+    packed = module.qweight
+    module.clear_weight_cache()
+
+    assert module.qweight is packed
+    assert module.qweight.dtype in (torch.uint8, torch.int32)
+    for tensor in module.list_buffers():
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            continue
+        if tensor.numel() < IN_FEATURES * OUT_FEATURES:
+            continue
+        assert tensor.dtype != torch.float32
+    derived = getattr(module, "scales_and_zeros", None)
+    if derived is not None:
+        assert derived.numel() < IN_FEATURES * OUT_FEATURES

@@ -120,15 +120,44 @@ class TorchFusedLinear(PackableQuantLinear):
         super().optimize()
 
     def clear_weight_cache(self) -> None:
-        """Drop the activation-reorder index derived from ``g_idx``.
+        """Drop derived state that depends on the loaded packed buffers.
 
         ``ret_idx`` is indexing metadata, not a packed weight, but it is only
         valid for the ``g_idx`` it was built from. ``load_state_dict`` copies
         into the existing buffers, so neither the object identity nor the
         version of ``g_idx`` is guaranteed to change; the base class calls this
         hook on load and on device/dtype moves instead.
+
+        Once transformed, the fused op also owns a ``scales_and_zeros`` tensor
+        derived from the checkpoint's scales and zero points. A state-dict load
+        copies those buffers in place, leaving that derived tensor stale. The
+        packed ``qweight`` stays valid, so ``linear_mode`` is preserved and the
+        op is simply rebuilt from the current packed weight and metadata; no
+        dense weight is created.
         """
         self.ret_idx = None
+        self._refresh_fused_op()
+
+    def _refresh_fused_op(self) -> None:
+        """Rebuild the packed fused op after its source buffers changed."""
+        if getattr(self, "linear_mode", None) != LinearMode.INFERENCE:
+            return
+        qweight = getattr(self, "qweight", None)
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if qweight is None or scales is None or qzeros is None:
+            return
+        if qweight.device.type != "cpu":
+            # The xpu path reads ``scales``/``qzeros`` directly; nothing derived.
+            return
+        # Keep the compute dtype chosen by the one-time transform so a later
+        # load or device/dtype move cannot silently change fused numerics.
+        current = getattr(self, "scales_and_zeros", None)
+        dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
+        self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        self.torch_fused_op = Int4PackedOp(
+            self.qweight, self.scales_and_zeros, self.group_size
+        ).eval()
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)

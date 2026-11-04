@@ -158,14 +158,37 @@ class TorchAtenLinear(PackableQuantLinear):
         return True
 
     def clear_weight_cache(self) -> None:
-        """Drop the activation-reorder index derived from ``g_idx``.
+        """Drop derived state that depends on the loaded packed buffers.
 
-        See ``TorchFusedLinear.clear_weight_cache``: ``ret_idx`` and the cached
-        identity flag stay valid only for the ``g_idx`` they were built from,
-        and ``load_state_dict`` may copy that tensor in place.
+        ``ret_idx`` and the cached identity flag stay valid only for the
+        ``g_idx`` they were built from, and ``load_state_dict`` may copy that
+        tensor in place. Once transformed, ``scales_and_zeros`` is likewise
+        derived from the checkpoint's scales and zero points; a load copies
+        those in place and would otherwise leave the fused op on stale data.
+        The packed ``qweight`` is already in the ATen layout, so the derived
+        metadata is rebuilt from it rather than from dense weights.
         """
         self.ret_idx = None
         self._ret_idx_identity = None
+        self._refresh_fused_state()
+
+    def _refresh_fused_state(self) -> None:
+        """Rebuild derived int4pack metadata after its sources changed."""
+        if not getattr(self, "_cpu_transformed", False):
+            return
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if scales is None or qzeros is None:
+            return
+        current = getattr(self, "scales_and_zeros", None)
+        if not isinstance(current, torch.Tensor):
+            return
+        # The one-time transform already chose the compute dtype; reuse it so a
+        # later load or move cannot silently change fused numerics.
+        dtype = current.dtype
+        self.scales_and_zeros = pack_scales_and_zeros(
+            scales.to(dtype), qzeros.to(dtype)
+        )
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)
