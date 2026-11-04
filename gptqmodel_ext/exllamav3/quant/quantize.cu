@@ -335,14 +335,57 @@ void quantize_tiles
     if (mul1) cb = 2;
 
     // Largest dynamic shared-memory request the current device can satisfy.
+    //
+    // Read the device property directly instead of going through
+    // ``cudaDevAttrMaxSharedMemoryPerBlockOptin``: torch's hipify table maps
+    // that attribute onto ``hipDeviceAttributeMaxSharedMemoryPerBlock``, the
+    // *non*-opt-in limit, which is a flat 64 KiB on every AMD part. On CDNA4
+    // (gfx950, 160 KiB) and CDNA5 (gfx1250, 320 KiB) that would reject a 2-bit
+    // codebook the device can actually host.
     int max_shmem = 0;
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+    cudaDeviceProp device_props;
+    cudaGetDeviceProperties(&device_props, device);
+    max_shmem = (int) device_props.sharedMemPerBlockOptin;
+#else
     cudaDeviceGetAttribute
     (
         &max_shmem,
         cudaDevAttrMaxSharedMemoryPerBlockOptin,
         device
     );
+#endif
     TORCH_CHECK(max_shmem > 0, "EXL3 quantize_tiles could not query the device shared-memory limit.");
+
+    // Both the request and the kernel instantiation depend only on K/cb, so
+    // resolve them once: the attribute is per-device-invariant and the launch
+    // config does not change between batches.
+    const int kernel_idx = K - 1 + 8 * cb;
+    const int shmem = 2 * (65536 >> K) * sizeof(half) + 512 + 64 + 128;
+
+    // The 2-bit instantiations need 66240 B of dynamic shared memory, which
+    // exceeds the 64 KiB per-block opt-in limit on RDNA4 (gfx1200/gfx1201).
+    // Without this guard cudaFuncSetAttribute fails silently, the launch
+    // reports ``invalid argument``, and gpu_assert() calls exit(), killing
+    // the whole process instead of raising a catchable error.
+    TORCH_CHECK
+    (
+        shmem <= max_shmem,
+        "EXL3 quantize_tiles needs ", shmem, " B of dynamic shared memory "
+        "for K=", K, ", but this device allows at most ", max_shmem,
+        " B per block. Use bits >= 3 for this codebook on this GPU."
+    );
+
+    cudaFuncSetAttribute
+    (
+        // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
+        // template overload that accepts a function pointer directly has no
+        // HIP equivalent. Casting keeps one spelling valid for both runtimes.
+        (const void*) quantize_tiles_kernel_instances[kernel_idx],
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shmem
+    );
+    cuda_check(cudaPeekAtLastError());
 
     int batch_i = 0;
     do
@@ -356,35 +399,6 @@ void quantize_tiles
         uint16_t* temp_edges_ptr = (uint16_t*) temp_edges.data_ptr();
 
         int bsz = batch_j - batch_i;
-        int kernel_idx = K - 1 + 8 * cb;
-        int shmem = 2 * (65536 >> K) * sizeof(half) + 512 + 64 + 128;
-
-        // The 2-bit instantiations need 66240 B of dynamic shared memory, which
-        // exceeds the 64 KiB per-block opt-in limit on RDNA4 (gfx1200/gfx1201).
-        // Without this guard cudaFuncSetAttribute fails silently, the launch
-        // reports ``invalid argument``, and gpu_assert() calls exit(), killing
-        // the whole process instead of raising a catchable error.
-        if (shmem > max_shmem)
-        {
-            TORCH_CHECK
-            (
-                false,
-                "EXL3 quantize_tiles needs ", shmem, " B of dynamic shared memory "
-                "for K=", K, ", but this device allows at most ", max_shmem,
-                " B per block. Use bits >= 3 for this codebook on this GPU."
-            );
-        }
-
-        cudaFuncSetAttribute
-        (
-            // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
-            // template overload that accepts a function pointer directly has no
-            // HIP equivalent. Casting keeps one spelling valid for both runtimes.
-            (const void*) quantize_tiles_kernel_instances[kernel_idx],
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            shmem
-        );
-        cuda_check(cudaPeekAtLastError());
 
         // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it
         // to a local identifier before the launch.
