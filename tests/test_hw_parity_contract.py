@@ -73,17 +73,19 @@ def test_ada_is_not_promoted_to_hopper():
 
 
 def test_paroquant_launch_table_is_per_family_and_row_banded():
-    """ParoQuant must keep its historical tile off-RDNA4 and a measured RDNA4 tile."""
+    """ParoQuant keeps its historical tile off-table and measured Ada/RDNA4 tiles."""
 
     from gptqmodel.quantization.paroquant.modules.triton import gemm as paro_gemm
 
     table = paro_gemm._PAROQUANT_GEMM_LAUNCH_CONFIGS
     assert "rdna4" in table, "ParoQuant: no measured RDNA4 launch entry"
+    assert "ada" in table, "ParoQuant: no measured Ada launch entry"
 
-    # Unmeasured families keep the tile that shipped before the table existed.
-    for family in ("other", "ada", "hopper", "blackwell", "cdna4"):
+    # Families with no measured entry keep the tile that shipped before the
+    # table existed.  Ada and RDNA4 are measured now and are covered below.
+    for family in ("other", "hopper", "blackwell", "cdna4"):
         assert (
-            paro_gemm.paroquant_gemm_launch_config("decode", (8, 9) if family == "ada" else "gfx942")
+            paro_gemm.paroquant_gemm_launch_config("decode", "gfx942")
             == paro_gemm._PAROQUANT_GEMM_DEFAULT_CONFIGS["decode"]
         )
     assert (
@@ -103,6 +105,15 @@ def test_paroquant_launch_table_is_per_family_and_row_banded():
     for tile in (small, medium, large):
         assert tile[3] in (4, 8)
     assert medium[3] == 4 and large[3] == 4
+
+    # Ada (RTX 4090) is row-banded the same way with its own measured tiles.
+    ada_small = paro_gemm.paroquant_gemm_launch_config("decode", (8, 9), rows=8)
+    ada_medium = paro_gemm.paroquant_gemm_launch_config("prefill", "sm_89", rows=9)
+    ada_large = paro_gemm.paroquant_gemm_launch_config("prefill", (8, 9), rows=65)
+    assert ada_small == table["ada"]["decode"]
+    assert ada_medium == table["ada"]["prefill"]
+    assert ada_large == table["ada"]["prefill_large"]
+    assert len({ada_small, ada_medium, ada_large}) == 3
 
 
 def test_gguf_qk_table_is_ada_only_and_rdna4_falls_through():

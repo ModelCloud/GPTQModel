@@ -36,9 +36,10 @@ FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 #
 # Before this table the kernel hardcoded one pair for every GPU: decode
 # (4,128,32,warps=4,stages=2) and prefill (32,128,32,warps=8,stages=4).  Those
-# stay the fallback for families nobody measured here (including Ada, Hopper and
-# Blackwell, which the CUDA tuning agent owns) so no unmeasured target is
-# silently retuned.
+# stay the fallback for families nobody measured here (Hopper, Blackwell,
+# cdna4 and rdna3) so no unmeasured target is silently retuned.
+#
+# ``ada`` (RTX 4090, SM 8.9) has its own measured entry below.
 #
 # ``rdna4`` was measured on an AMD Radeon AI PRO R9700 (gfx1201, wave32,
 # HIP 7.16.26385, torch 2.16.0.dev20261025+rocm10.1): 4-bit ParoQuant,
@@ -65,6 +66,29 @@ FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 #   M=128 K=5120  N=8192  186.06 vs 296.69 us  (1.59x)
 #   M=1024 K=14336 N=4096 1680.99 vs 2893.65 us (1.72x)
 _PAROQUANT_GEMM_LAUNCH_CONFIGS: dict[str, dict[str, tuple[int, int, int, int, int]]] = {
+    # ``ada`` was measured on an NVIDIA GeForce RTX 4090 (SM 8.9, torch
+    # 2.15.0+cu132, Triton 3.9.0): 4-bit ParoQuant, group_size 128, FP16
+    # activations, median of 41 iterations after 15 warm-up iterations, a 256 MiB
+    # L2 flush before every timed call and ``torch.cuda.synchronize`` around each
+    # call (scripts/benchmark_rdna4_inference.py methodology).  Swept the same
+    # grid as ``rdna4``: BLOCK_M {1,2,4,8,16,32,64}, BLOCK_N {64,128},
+    # BLOCK_K {32,64}, num_warps {2,4,8}, num_stages {1,2,4} (252 tiles) on
+    # (K,N) in {(2048,2048), (4096,4096), (5120,8192), (14336,4096),
+    # (4096,11008)} at M in {1,2,4,8} / {16,32,64} / {65,128,1024}.
+    #
+    # Findings: ``num_stages=4`` wins the small-M bands (Triton pipelines the
+    # K-loop across Ada's cp.async stages) while the >64-row band prefers four
+    # warps with a 64-wide N tile; ``BLOCK_N=128`` only wins at the 1024-row tail
+    # of the largest (K=14336/5120/4096-wide) shapes and loses badly below it,
+    # so the band keeps 64 for a single uniform tile.  The historical default
+    # (decode (4,128,32,4,2), prefill (32,128,32,8,4)) is 1.56x-3.40x slower
+    # across the swept matrix; these tiles are its per-band measured winner.
+    "ada": {
+        # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)
+        "decode": (16, 64, 64, 4, 4),
+        "prefill": (32, 64, 64, 8, 4),
+        "prefill_large": (64, 64, 64, 8, 4),
+    },
     "rdna4": {
         # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)
         "decode": (4, 64, 64, 4, 1),
@@ -80,8 +104,10 @@ _PAROQUANT_GEMM_DEFAULT_CONFIGS: dict[str, tuple[int, int, int, int, int]] = {
     "prefill": (32, 128, 32, 8, 4),
 }
 
-# Row band at which ``rdna4`` switches from the medium to the large tile.  The
-# small/medium split is the module's own decode boundary (8 rows).
+# Row band at which a banded family (``ada``/``rdna4``) switches from the medium
+# to the large tile.  The small/medium split is the module's own decode
+# boundary (8 rows), so the constant is shared and its meaning is unchanged for
+# non-Ada families.
 _RDNA4_MEDIUM_MAX_ROWS = 64
 
 
@@ -92,7 +118,7 @@ def paroquant_gemm_launch_config(
 
     ``kind`` is ``"decode"`` (the module's M<=8 fused path) or ``"prefill"``.
     ``rows`` is the flattened row count of the current input; when it is given,
-    families with a row-banded table (currently ``rdna4``) pick the tile from
+    families with a row-banded table (``ada`` and ``rdna4``) pick the tile from
     the measured band instead of from the decode/prefill label.  Families
     without a measured entry always keep the historical tile.
     """
