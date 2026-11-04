@@ -23,6 +23,7 @@ from .deepseek_v3 import DeepSeekV3QModel
 from .deepseek_v32 import DeepSeekV32QModel
 from .raon1_mini import Raon1MiniQModel
 from .flint import FlintQModel
+from .ricursive import RicursiveQModel
 from .deepseek_v4 import DeepSeekV4QModel
 from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl import DeepSeekVLQModel
