@@ -14,6 +14,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import bitsandbytes_triton as bt
 
+
 bnb = pytest.importorskip("bitsandbytes")
 
 

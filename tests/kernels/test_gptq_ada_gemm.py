@@ -13,7 +13,6 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import torch as torch_linear_mod
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.triton_utils import gptq_gemm as gemm_mod
 from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
     _DEFAULT_LAUNCH,
     _LAUNCH_CONFIGS,

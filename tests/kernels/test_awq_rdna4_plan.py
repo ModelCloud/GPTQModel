@@ -27,7 +27,6 @@ from gptqmodel.quantization.awq.modules.triton.scheduler import (
     _VERIFIED_4090_PROFILE,
     _VERIFIED_RDNA4_FP16_RULES,
     _VERIFIED_RDNA4_PROFILE,
-    AwqTritonPlan,
     _builtin_plan,
     clear_awq_triton_plan_cache,
     device_identity,
