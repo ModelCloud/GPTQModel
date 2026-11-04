@@ -445,6 +445,37 @@ BF16 is within 1.25 ULP of the once-rounded truth (the raw relative error is
 2.0e-03-3.4e-03 because BF16 output rounding dominates). Output dtype always
 equals the input dtype and repeated forwards are bit-identical.
 
+### bitsandbytes 4-bit (NF4/FP4)
+
+bitsandbytes 0.50.2 installs and runs on ROCm 10.1, but its HIP 4-bit GEMM is
+tuned for CDNA wave64 and falls off a cliff at `M >= 16` on RDNA4 (a different,
+much slower kernel is selected). `BitsAndBytesLinear` routes that row band to
+the fused Triton kernel in
+`gptqmodel/nn_modules/qlinear/bitsandbytes_triton.py`, which dequantizes the
+packed codes inside the matmul (no dense weight buffer). Below `M = 16`
+bitsandbytes' own GEMV is faster and is kept.
+
+| shape | M | bnb native | fused Triton | speedup |
+|---|---:|---:|---:|---:|
+| K=N=2048 | 16 | 109 us | 76 us | 1.44x |
+| K=N=2048 | 64 | 133 us | 69 us | 1.93x |
+| K=N=4096 | 16 | 378 us | 83 us | 4.55x |
+| K=N=4096 | 64 | 327 us | 103 us | 3.17x |
+| K=4096 N=11008 | 16 | 1025 us | 183 us | 5.59x |
+| K=4096 N=11008 | 64 | 1006 us | 287 us | 3.51x |
+
+Measured end to end through the module (FP16, median of 50 iterations) on
+gfx1201. The packed layout was verified against
+`bitsandbytes.functional.dequantize_4bit` for NF4/FP4, block sizes 32/64/128,
+with and without `compress_statistics`: even element in the high nibble, odd
+element in the low nibble, `absmax[(n * K + k) // block_size]`. Oracle error
+against an independent FP64 decode: dequantize is exact to FP32; the matmul is
+within 3.5e-04 (FP16) and 2.7e-03 (BF16) of the output maximum.
+
+Ada keeps bitsandbytes' cublas-backed kernels, which are measured faster than
+the Triton tile on every shape tested; the `ada` launch entry exists for the
+parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
+
 ## Known limitations
 
 - **EXL3:** the tensor-core GEMM implementation has no ROCm kernel (all entries
@@ -460,6 +491,10 @@ equals the input dtype and repeated forwards are bit-identical.
   `QQQTorchLinear`. See *QQQ has no Triton port*.
 - **AWQ GEMV:** the native `FORMAT.GEMV` extension is CUDA-only. On ROCm use
   `BACKEND.AWQ_GEMV_TRITON` (explicit; decode-shaped M==1) or `FORMAT.GEMM`.
+- **bitsandbytes:** the fused Triton 4-bit kernel is enabled by default only on
+  ROCm families with a measured tile (`rdna4`). CUDA keeps the vendor kernels
+  because they are faster there. INT8 bitsandbytes already runs at a usable
+  speed on RDNA4 and is not replaced.
 - `tl.dot` may silently lower to FMA instead of WMMA on AMD targets
   (`get_min_dot_size()` returns `(1, 1, 1)`), so a fused kernel's speed must be
   proven from its `.amdgcn` (`v_wmma`) and measured timings, never assumed.

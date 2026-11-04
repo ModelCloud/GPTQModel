@@ -28,6 +28,7 @@ TUNED_PIPELINES = [
     ("gptq_dequant", "gptqmodel.nn_modules.triton_utils.dequant", "_DEQUANT_LAUNCH_CONFIGS"),
     ("paroquant_gemm", "gptqmodel.quantization.paroquant.modules.triton.gemm", "_PAROQUANT_GEMM_LAUNCH_CONFIGS"),
     ("awq_gemv", "gptqmodel.quantization.awq.modules.triton.gemv", "_AWQ_GEMV_LAUNCH_CONFIGS"),
+    ("bitsandbytes_4bit_gemm", "gptqmodel.nn_modules.qlinear.bitsandbytes_triton", "_BNB_GEMM_LAUNCH"),
 ]
 
 
