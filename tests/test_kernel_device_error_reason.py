@@ -13,7 +13,10 @@ thing.
 import pytest
 import torch
 
+import gptqmodel.nn_modules.qlinear.machete as machete_module
+from gptqmodel.models._const import PLATFORM
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 def _validate_kwargs():
@@ -29,13 +32,24 @@ def _validate_kwargs():
     }
 
 
-def test_validate_device_reason_survives(monkeypatch):
-    reason = "Machete kernel is Hopper-only (SM90); found compute capability 12.0"
+def _reject(monkeypatch, reason):
+    """Make validate_device reject, and make the platform gate accept anything.
+
+    Machete declares Linux-only support, so on macOS and Windows the platform
+    check returns before validate_device is ever consulted. These tests are
+    about the device-message path, not about which OS the kernel ships for.
+    """
 
     def reject(cls, device):
         raise NotImplementedError(reason)
 
+    monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
     monkeypatch.setattr(MacheteLinear, "validate_device", classmethod(reject))
+
+
+def test_validate_device_reason_survives(monkeypatch):
+    reason = "Machete kernel is Hopper-only (SM90); found compute capability 12.0"
+    _reject(monkeypatch, reason)
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False
     assert isinstance(err, NotImplementedError)
@@ -45,19 +59,31 @@ def test_validate_device_reason_survives(monkeypatch):
 
 
 def test_empty_reason_keeps_the_plain_message(monkeypatch):
-    def reject(cls, device):
-        raise NotImplementedError()
-
-    monkeypatch.setattr(MacheteLinear, "validate_device", classmethod(reject))
+    _reject(monkeypatch, "")
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False
     assert str(err).strip().endswith("cuda:0")
 
 
+def test_rocm_rejection_reason_survives(monkeypatch):
+    """The ROCm refusal is the same code path with a different reason.
+
+    Patched rather than detected so this covers the branch on any platform,
+    including the CUDA machines that never enter it.
+    """
+    monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
+    monkeypatch.setattr(machete_module, "IS_ROCM", True)
+    ok, err = MacheteLinear.validate(**_validate_kwargs())
+    assert ok is False
+    assert "not supported on ROCm" in str(err), str(err)
+
+
 def test_real_hopper_only_message_reaches_the_caller():
-    """On a non-Hopper GPU the concrete reason has to be visible end to end."""
+    """On a non-Hopper CUDA GPU the concrete reason has to be visible end to end."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
+    if IS_ROCM:
+        pytest.skip("Machete rejects ROCm before the Hopper check; see the mocked test")
     capability = torch.cuda.get_device_capability()
     if capability[0] == 9:
         pytest.skip("Hopper supports Machete; this checks the rejection path")
