@@ -27,15 +27,14 @@
 ## Latest News 🗞️🚀
 
 * **7.9.0**:
-  * **Quantization and inference correctness:** Fixed overflow, underflow, and cancellation errors across GPTQ/AWQ, GGUF, FP8, QQQ, VPTQ, and ExLlamaV2 packing and inference paths. Corrected 8-bit BitBLAS zero points, preserved FP32 reductions and BF16 bias precision, and made fused Torch layers refresh stale metadata after checkpoint loads and tensor changes.
-  * **MoE coverage:** Fixed routed experts being silently left unquantized in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE. Quantization now warns when configured module paths match no layers.
-  * **Quantized storage:** Removed retained FP8 weight expansion from the experimental NVFP4 mixed-precision path and dense-weight scratch plumbing from ExLlamaV2. Expanded operands are temporary; packed weights and quantization metadata remain resident.
-  * **Backend API migration:** Use `BACKEND.MARLIN`, `BACKEND.MACHETE`, and `BACKEND.SWORDFISH` in place of their separate `GPTQ_*` / `AWQ_*` enum names. The quantization method and checkpoint format select the implementation. Legacy method-qualified string aliases remain accepted by the stable `hf_` selection and repacking APIs.
-  * **GPU kernels:** Added opt-in `BACKEND.ALLSPARK` W8A16 inference for compatible per-channel 8-bit GPTQ/AWQ checkpoints on CUDA and RDNA4 (gfx1200/gfx1201), with FP16/BF16 activations. EXL3 2-bit quantization now runs within RDNA4's 64 KiB shared-memory limit instead of rejecting the configuration.
-  * **Hugging Face loading:** Added a native GPTQModel checkpoint load bridge for Transformers/Optimum that preserves per-module `dynamic` settings, fused/MoE structure, rotation state, and saved W4A activation policies.
-  * **Apple silicon performance:** Accelerated MLX GPTQ/RTN quantization, GPTQ/AWQ group-16 decoding and short prefill, and GGUF Q4_K/Q5_K/Q6_K/TQ1_0/TQ2_0 packing. GPTQ and RTN quantization measured 4.95x and 2.6x faster, respectively, on 17408×5120 weights with group size 32; those quantizer changes preserve packed codes exactly.
-  * **GSQ/RCO:** Added teacher-KL optimization and per-projection bit allocation, plus native MLX allocation search for dense Llama and Qwen3 on Apple silicon. Added token-based batching limits and device/disk teacher caches; GSQ/RCO uses supported GPU backends.
-  * **Models and checkpoint resume:** Added LFM3, LFM3-VL, and LFM3-Omni text-decoder quantization, plus OLMo and Helium support. Extended resumable quantization to Qwen2 checkpoints.
+  * **Correctness:** Fixed packing/inference overflow, underflow, FP32 reductions, BF16 bias cancellation, 8-bit BitBLAS zero points, and stale fused Torch metadata after checkpoint loads or tensor changes.
+  * **MoE:** Fixed skipped routed experts in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE; added warnings for unresolved module paths.
+  * **Memory:** Removed retained FP8 weight expansion from the experimental NVFP4 path and dense-weight scratch from ExLlamaV2.
+  * **Kernels:** Added opt-in AllSpark W8A16 for compatible per-channel 8-bit GPTQ/AWQ on CUDA and RDNA4 (gfx1200/gfx1201). EXL3 2-bit quantization now fits RDNA4's 64 KiB shared memory.
+  * **MLX:** Accelerated GPTQ/RTN quantization, GPTQ/AWQ group-16 decode and short prefill, and GGUF K-quant/ternary packing.
+  * **GSQ/RCO:** Added teacher-KL optimization, per-projection bit allocation, and native MLX search for dense Llama/Qwen3, with token-based batching and device/disk teacher caches.
+  * **Models:** Added LFM3, LFM3-VL, and LFM3-Omni text-decoder quantization, OLMo/Helium support, and Qwen2 quantization resume.
+  * **Compat:** Added native Transformers/Optimum load hooks preserving dynamic settings, fused/MoE structure, rotation, and W4A policies. Replaced method-specific Marlin/Machete/Swordfish enums with `BACKEND.MARLIN`, `BACKEND.MACHETE`, and `BACKEND.SWORDFISH`; legacy string aliases remain supported by the `hf_` APIs.
 
 * **7.8.0**:
   * **GSQ:** Added staged GSQ training with public method adapters, distributed staged training that reuses captured activations, and per-block bit allocation driven by an RCO search verified bit-identical against the IST-DASLab reference (measured results on Llama 3.2 1B). Added a paper-reproduction harness, best-epoch restore, HIPRTC-compiled fused scalar relaxation on ROCm, and segment-sum scale gradients.
