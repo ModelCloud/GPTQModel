@@ -204,9 +204,9 @@ def test_gguf_chunk_cancellation(device):
 @pytest.mark.parametrize('device', DEVICES)
 @pytest.mark.parametrize('dtype,value', [(torch.float16, 60000.), (torch.bfloat16, 100000.)])
 def test_exl3_transform_range(device, dtype, value):
-    from test_exllamav3_cpu import _independent_weight_oracle, _pack_symbols
-
     from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+
+    from ..test_exllamav3_cpu import _independent_weight_oracle, _pack_symbols
     symbols = torch.randint(0, 16, (8, 8, 256), generator=torch.Generator().manual_seed(21))
     suh = torch.ones(128, dtype=torch.float16)
     svh = torch.full((128,), 2**-12, dtype=torch.float16)
