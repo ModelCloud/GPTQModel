@@ -25,6 +25,7 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
 from ..looper.weight_only_processor import WeightOnlyProcessor
@@ -68,7 +69,7 @@ from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 log = setup_logger()
 
 
-class WeightOnlyLooper(DeviceAssignmentState):
+class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -81,6 +82,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
         """Initializes the looper with the model being quantized and its processor."""
 
         self.gptq_model = model
+        self.layer_module_coverage = LayerModuleCoverageTracker()
         self.processor = processor
         self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
@@ -692,10 +694,12 @@ class WeightOnlyLooper(DeviceAssignmentState):
         if resolved is None:
             resolved, _ = get_module_by_name_prefix(layer_module, module_name)
             if resolved is None:
+                self.layer_module_coverage.record_miss(module_name, layer_index)
                 if self.gptq_model.layer_modules_strict:
                     raise ValueError(f"layer module item `{module_name}` not found in model, please check your model config.")
                 return None
 
+        self.layer_module_coverage.record_hit(module_name, layer_index)
         if isinstance(resolved, NamedModule):
             return resolved
 
