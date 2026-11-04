@@ -17,6 +17,7 @@ import torch
 
 import gptqmodel.nn_modules.qlinear.machete as machete_module
 from gptqmodel.models._const import PLATFORM
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.utils.rocm import IS_ROCM
 
@@ -65,6 +66,30 @@ def test_empty_reason_keeps_the_plain_message(monkeypatch):
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False
     assert str(err).strip().endswith("cuda:0")
+
+
+def test_device_family_reason_is_not_repeated(monkeypatch):
+    """The base reason already names the mismatch; do not append it verbatim.
+
+    With only the stock ``validate_device`` in place, an unsupported family
+    raises `only supports [...]`, which the wrapping sentence restates. Keeping
+    the outer message alone avoids:
+    `does not support device: cpu (only supports ... actual device = cpu)`.
+    """
+    monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
+    monkeypatch.setattr(
+        MacheteLinear,
+        "validate_device",
+        classmethod(BaseQuantLinear.validate_device.__func__),
+    )
+    ok, err = MacheteLinear._validate_shared(
+        pack_dtype=torch.int32, device=torch.device("cpu"),
+    )
+    assert ok is False
+    message = str(err)
+    assert message.count("does not support device") == 1
+    assert "actual device" not in message, message
+    assert message.endswith("cpu"), message
 
 
 def test_rocm_rejection_reason_survives(monkeypatch):
