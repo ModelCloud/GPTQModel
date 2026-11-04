@@ -772,7 +772,7 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
         return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
-def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code) -> None:
+def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
     """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
 
     Those three layouts are only readable by the native CUDA AWQ extension
@@ -788,6 +788,10 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code) -> None:
     if export_quant_method != METHOD.AWQ:
         return
     if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+        return
+    # The portable Triton GEMV reads the GEMV layout without the extension, so an
+    # explicit selection of it is a supported ROCm placement.
+    if backend == BACKEND.AWQ_GEMV_TRITON:
         return
 
     from ..nn_modules.qlinear.gemv_awq import AWQ_GEMV_ROCM_UNSUPPORTED
@@ -1597,7 +1601,7 @@ def ModelLoader(cls):
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
-        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code)
+        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
 

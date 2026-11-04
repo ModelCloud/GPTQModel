@@ -52,6 +52,7 @@ class BACKEND(str, Enum):
     AWQ_GEMM = "awq_gemm"
     AWQ_GEMM_TRITON = "awq_gemm_triton"
     AWQ_GEMV = "awq_gemv"
+    AWQ_GEMV_TRITON = "awq_gemv_triton"  # portable Triton GEMV (same packed layout)
     AWQ_GEMV_FAST = "awq_gemv_fast"
     AWQ_TORCH_INT8 = "awq_torch_int8"
     AWQ_TORCH_FUSED = "awq_torch_fused"
@@ -98,6 +99,7 @@ class BACKEND(str, Enum):
     GEMM = "gemm"
     GEMM_TRITON = "gemm_triton"
     GEMV = "gemv"
+    GEMV_TRITON = "gemv_triton"
     GEMV_FAST = "gemv_fast"
     TORCH_INT8_AWQ = "torch_int8_awq"
     TORCH_FUSED_AWQ = "torch_fused_awq"
@@ -126,6 +128,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.GEMM: BACKEND.AWQ_GEMM,
         BACKEND.GEMM_TRITON: BACKEND.AWQ_GEMM_TRITON,
         BACKEND.GEMV: BACKEND.AWQ_GEMV,
+        BACKEND.GEMV_TRITON: BACKEND.AWQ_GEMV_TRITON,
         BACKEND.GEMV_FAST: BACKEND.AWQ_GEMV_FAST,
         BACKEND.TORCH: BACKEND.AWQ_TORCH,
         BACKEND.TORCH_AWQ: BACKEND.AWQ_TORCH,

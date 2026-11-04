@@ -101,3 +101,147 @@ def test_rocm_awq_triton_matches_independent_torch_oracle(
     assert actual.shape == reference_visible.shape
     torch.testing.assert_close(actual, reference_visible, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(actual.float(), reference_fp32, rtol=2e-3, atol=2e-3)
+
+
+# ---------------------------------------------------------------------------
+# Portable Triton GEMV for the FORMAT.GEMV packing.
+#
+# The GEMV layout is *not* the GEMM layout: qweight is [N, K/8] with plain
+# little-nibble order, qzeros is [N, ceil(groups/8)] padded up to a word, and
+# scales is [N, padded_groups] FP16.  The oracle below unpacks that layout with
+# its own arithmetic; it never calls the kernel or reuses its intermediates.
+# ---------------------------------------------------------------------------
+
+
+def _gemv_layout_dense(qweight, qzeros, scales, group_size):
+    """FP64 dense weight from the GEMV packed buffers (independent oracle)."""
+
+    nibbles = torch.arange(0, 8, device=qweight.device, dtype=torch.int64)
+    out_features = qweight.shape[0]
+    in_features = qweight.shape[1] * 8
+    codes = ((qweight.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        out_features, in_features
+    )
+    zeros = ((qzeros.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        qzeros.shape[0], -1
+    )
+    group = torch.arange(in_features, device=qweight.device) // group_size
+    return (codes.to(torch.float64) - zeros.to(torch.float64)[:, group]) * scales.to(
+        torch.float64
+    )[:, group]
+
+
+def _build_gemv_modules(in_features, out_features, group_size, device, dtype):
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear, AwqGEMVTritonLinear
+
+    groups = in_features // group_size
+    scales = (
+        torch.rand(out_features, groups, device=device, dtype=torch.float16) * 0.1 + 0.01
+    ).contiguous()
+    zeros = torch.randint(0, 15, (out_features, groups), device=device, dtype=torch.int32)
+    # A dense reference layer only drives the inherited packer; it is released
+    # before any forward so it cannot act as a weight cache.
+    dense_layer = torch.nn.Linear(in_features, out_features, bias=False).to(device=device)
+
+    modules = []
+    for cls in (AwqGEMVLinear, AwqGEMVTritonLinear):
+        module = cls(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            register_buffers=True,
+        ).to(device).eval()
+        module.pack(dense_layer, scales.clone(), zeros.clone())
+        module.post_init()
+        modules.append(module)
+    del dense_layer
+    return modules
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rows", [1, 4, 8])
+@pytest.mark.parametrize(
+    "in_features,out_features,group_size",
+    [(512, 512, 128), (512, 512, 64), (2048, 2048, 128)],
+)
+def test_rocm_awq_gemv_triton_matches_independent_oracle(
+    dtype, rows, in_features, out_features, group_size
+):
+    torch.manual_seed(101 + rows + group_size + int(dtype == torch.bfloat16))
+    device = torch.device("cuda:0")
+    native, triton = _build_gemv_modules(in_features, out_features, group_size, device, dtype)
+
+    # Same inherited packer => byte-identical packed buffers.
+    assert torch.equal(triton.qweight, native.qweight)
+    assert torch.equal(triton.qzeros, native.qzeros)
+    assert torch.equal(triton.scales, native.scales)
+
+    inputs = torch.randn(rows, in_features, device=device, dtype=dtype)
+    dense = _gemv_layout_dense(triton.qweight, triton.qzeros, triton.scales, group_size)
+    truth = inputs.to(torch.float64) @ dense.t()
+    rounded = truth.to(dtype).to(torch.float64)
+
+    with torch.inference_mode():
+        first = triton(inputs)
+        # Repeated forwards must keep returning identical results and must not
+        # grow any dense/dequantized attribute on the module.
+        for _ in range(3):
+            repeated = triton(inputs)
+    torch.cuda.synchronize(device)
+
+    assert first.dtype == inputs.dtype
+    assert repeated.dtype == inputs.dtype
+    assert torch.equal(first, repeated)
+    # No dense/dequantized weight may survive the forwards.
+    for name in ("dense_weight", "dequantized_weight", "_dense_cache", "_expanded_weight"):
+        assert getattr(triton, name, None) is None, f"persistent dense cache: {name}"
+    assert triton.qweight.dtype == torch.int32 and triton.qzeros.dtype == torch.int32
+
+    # Arithmetic check: the kernel's FP32-accumulated result must match the FP64
+    # truth after the one mandatory output cast.  FP16 stays inside 2e-3; BF16 is
+    # limited by its ~3 decimal digits, so it is checked as <=1 ULP of the
+    # already-rounded truth rather than a flat relative bound (docs/rocm-rdna4.md
+    # records the same 1.25-ULP floor for the ParoQuant BF16 output).
+    delta = (first.to(torch.float64) - rounded).abs()
+    ulp = torch.finfo(dtype).eps * rounded.abs()
+    assert torch.all(delta <= ulp * 1.25 + 1e-6), (
+        f"max delta {delta.max().item():.3e} exceeds 1.25 ULP {float((ulp * 1.25).max()):.3e}"
+    )
+    if dtype == torch.float16:
+        torch.testing.assert_close(first, rounded.to(dtype), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("rows", [1, 8])
+def test_rocm_awq_gemv_triton_is_never_auto_selected(rows):
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear, AwqGEMVTritonLinear
+    from gptqmodel.utils.importer import (
+        get_auto_backend_kernel_mapping,
+        get_kernel_for_backend,
+    )
+
+    mapping = get_auto_backend_kernel_mapping()
+    auto_entries = mapping[METHOD.AWQ][FORMAT.GEMV]
+    assert list(auto_entries) == [BACKEND.AWQ_GEMV], (
+        "the Triton GEMV must stay explicit-only so CUDA keeps the native kernel "
+        f"and ROCm keeps its actionable refusal; got {list(auto_entries)}"
+    )
+    assert get_kernel_for_backend(BACKEND.AWQ_GEMV, METHOD.AWQ, FORMAT.GEMV) is AwqGEMVLinear
+    assert (
+        get_kernel_for_backend(BACKEND.AWQ_GEMV_TRITON, METHOD.AWQ, FORMAT.GEMV)
+        is AwqGEMVTritonLinear
+    )
+
+
+def test_awq_gemv_triton_launch_table_has_rdna4_and_default():
+    from gptqmodel.quantization.awq.modules.triton import gemv as gemv_module
+
+    assert "rdna4" in gemv_module._AWQ_GEMV_LAUNCH_CONFIGS
+    cfg = gemv_module.launch_config("gfx1201")
+    assert cfg == gemv_module._AWQ_GEMV_LAUNCH_CONFIGS["rdna4"]
+    # Unregistered and explicit-CUDA metadata keep the portable fallback.
+    assert gemv_module.launch_config("gfx942") == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
+    assert gemv_module.launch_config((8, 9)) == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
