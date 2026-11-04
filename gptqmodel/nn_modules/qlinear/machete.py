@@ -36,6 +36,11 @@ from ...utils.rocm import IS_ROCM
 
 log = setup_logger()
 
+MACHETE_ROCM_UNSUPPORTED = (
+    "Machete (BACKEND.MACHETE) is CUDA-only: it is a Hopper CUTLASS GEMM "
+    "(SM90) with no HIP port. Use BACKEND.GPTQ_TORCH (or AUTO) on ROCm."
+)
+
 
 class MacheteLinear(GPTQQuantLinear):
     # GPTQ sub-kernel of the shared Machete backend. ``BACKEND.MACHETE`` plus
@@ -164,6 +169,9 @@ class MacheteLinear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Hopper-only CUTLASS kernel: reject ROCm before probing the extension.
+        if IS_ROCM:
+            return False, NotImplementedError(MACHETE_ROCM_UNSUPPORTED)
         if not machete_extension_available():
             return False, ImportError(machete_extension_error())
         return True, None

@@ -37,6 +37,24 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
+def _is_rocm_selector(device) -> bool:
+    """True when ``device`` names a ROCm (HIP) target on a ROCm host.
+
+    ``DEVICE.ROCM`` is always a ROCm request.  A ``cuda``/``cuda:N`` device is
+    ROCm when the active torch build is a HIP build, because HIP reuses the CUDA
+    device namespace.  This is used only to make a rejection message actionable;
+    it never widens a kernel's device support.
+    """
+
+    if t.version.hip is None:
+        return False
+    if device == DEVICE.ROCM:
+        return True
+    if isinstance(device, t.device):
+        return device.type == "cuda"
+    return False
+
+
 def input_rows(x: t.Tensor) -> int:
     """Return the number of logical Linear rows in an arbitrary-rank input.
 
@@ -448,8 +466,29 @@ class BaseQuantLinear(nn.Module):
         if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None:
             try:
                 cls.validate_device(device)
-            except NotImplementedError:
+            except NotImplementedError as exc:
                 e = f"{cls} does not support device: {device}"
+                # ``validate_device`` implementations that reject a device for a
+                # specific reason (ROCm, compute capability, ...) say so in their
+                # own message.  Keep that detail: it is what tells the user which
+                # portable backend to select instead.
+                detail = str(exc)
+                generic = (
+                    f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: "
+                    f"actual device = `{device}`"
+                )
+                if detail and detail != generic:
+                    e = f"{e} ({detail})"
+                elif _is_rocm_selector(device):
+                    # A CUDA-only kernel rejecting a HIP target is the steady
+                    # state on ROCm (Machete, W4A-NVFP4, native AWQ GEMV, ...).
+                    # Say so, and point at the portable backend family instead of
+                    # leaving a bare "unsupported device" string.
+                    e = (
+                        f"{e} ({cls.__name__} is CUDA-only and does not run on ROCm; "
+                        "select a portable `*Torch` or `*Triton` backend for this "
+                        "quantization method instead)"
+                    )
                 return False, NotImplementedError(e)
 
         if trainable and not cls.SUPPORTS_TRAINING:
