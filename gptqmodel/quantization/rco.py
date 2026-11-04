@@ -30,6 +30,7 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -170,7 +171,7 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     # table on the host: the search calls this once per Gumbel draw, so a Python
     # loop over positions here would dominate the step time.
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
-    gained = scores.detach().double().cpu().numpy()
+    gained = scores.detach().cpu().double().numpy()
     steps = unit_costs.detach().cpu().numpy()
 
     table = np.full(budget + 1, -np.inf, dtype=np.float64)
@@ -248,7 +249,13 @@ class InterpolatedLlamaLayers:
         """
         self.model = model
         self.layer_weights = layer_weights
-        self.control_device = torch.device(control_device or 'cuda:0')
+        if control_device is None:
+            control_device = next(model.parameters()).device
+        elif isinstance(control_device, str) and control_device.lower() == 'auto':
+            from ..utils.torch import auto_select_torch_device
+
+            control_device = auto_select_torch_device()
+        self.control_device = torch.device(control_device)
         # Every control tensor must live on the same device as ``alpha``: the
         # budget helpers combine them elementwise, and the database is built on
         # the host while the search runs on an accelerator.
@@ -362,9 +369,85 @@ class _WeightInterpolation(torch.nn.Module):
         return mixed
 
 
+class LlamaTeacherKL:
+    """Mean-token KL from a frozen dense Llama teacher to the searched model.
+
+    Construct before installing weight interpolation. Cache final teacher
+    hidden states on the search device or disk, then reconstruct teacher
+    distributions with the unchanged LM head. Checkpoint token chunks of the KL
+    to bound vocabulary intermediates in both forward and backward; no
+    full-corpus logits cache.
+    Batches must contain fixed-length, unpadded token IDs. Every position is a
+    next-token context, including the last. The caller owns the cache directory
+    lifetime and must keep the embedding/output head outside the search.
+    """
+
+    def __init__(self, model, batches, directory, *, chunk_tokens=128, resident_cache=False):
+        if model.training or not batches:
+            raise ValueError('RCO teacher KL requires an eval model and nonempty batches')
+        if isinstance(chunk_tokens, bool) or not isinstance(chunk_tokens, int) or chunk_tokens < 1:
+            raise ValueError('RCO KL chunk_tokens must be a positive integer')
+        self.model, self.batches = model, batches
+        self.chunk_tokens = chunk_tokens
+        self.resident_cache = resident_cache
+        self._resident = []
+        self.head = model.get_output_embeddings()
+        if any(parameter.requires_grad for parameter in self.head.parameters()):
+            raise ValueError('RCO teacher KL requires a frozen output head')
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.paths = []
+        with torch.no_grad():
+            for index, ids in enumerate(batches):
+                if ids.ndim != 2 or ids.numel() == 0:
+                    raise ValueError('RCO KL batches require nonempty [batch, tokens] IDs')
+                hidden = model.model(input_ids=ids, use_cache=False).last_hidden_state
+                if self.resident_cache:
+                    self._resident.append(hidden.detach())
+                    self.paths.append(None)
+                else:
+                    path = directory / f'{index:05d}.pt'
+                    torch.save(hidden.detach().cpu(), path)
+                    self.paths.append(path)
+
+    def cleanup(self):
+        """Release teacher scratch; the caller owns the cache directory."""
+        self._resident.clear()
+        self.paths.clear()
+
+    def __call__(self, index):
+        from torch.utils.checkpoint import checkpoint
+
+        student = self.model.model(input_ids=self.batches[index], use_cache=False).last_hidden_state
+        if self.resident_cache:
+            reference = self._resident[index]
+        else:
+            reference = torch.load(self.paths[index], map_location='cpu', weights_only=True)
+        if reference.shape != student.shape:
+            raise ValueError('RCO teacher/student hidden shapes differ')
+        student = student.reshape(-1, student.shape[-1])
+        reference = reference.reshape_as(student)
+
+        def chunk_loss(hidden, teacher_hidden):
+            logits = self.head(hidden)
+            # FP32 softmax for low-precision models; retain FP64 oracle inputs.
+            dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+            log_student = torch.log_softmax(logits.to(dtype), dim=-1)
+            with torch.no_grad():
+                log_teacher = torch.log_softmax(self.head(teacher_hidden).to(dtype), dim=-1)
+            return (log_teacher.exp() * (log_teacher - log_student)).sum()
+
+        loss = student.new_zeros((), dtype=torch.float64 if student.dtype == torch.float64 else torch.float32)
+        for start in range(0, len(student), self.chunk_tokens):
+            stop = start + self.chunk_tokens
+            target = reference[start:stop].to(device=student.device, dtype=student.dtype)
+            loss = loss + checkpoint(chunk_loss, student[start:stop], target, use_reentrant=False)
+        return loss / len(student)
+
+
 def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                             tau_init=1.0, tau_min=0.01, gumbel_samples=1,
-                            objective=None, log_every=25):
+                            objective=None, log_every=25, batch_weights=None):
     """Run the projected Gumbel-STE search and return per-layer probabilities.
 
     Each step draws Gumbel noise at an exponentially annealed temperature, solves
@@ -372,23 +455,32 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
     straight-through gradient through the softmax of the same perturbed logits.
     The gradient is projected off the budget normal, Adam takes the step, the
     retraction restores the budget exactly and momentum is transported.
+    Optional batch_weights make a partial final batch contribute by its token
+    count; omitted weights retain the equal-batch behavior.
     """
     import torch.nn.functional as F
 
     if objective is None:
         raise ValueError('RCO search requires an objective callable')
+    if not batches or steps < 1 or gumbel_samples < 1:
+        raise ValueError('RCO search requires batches, positive steps and Gumbel samples')
+    batch_weights = [1.] * len(batches) if batch_weights is None else list(batch_weights)
+    if (len(batch_weights) != len(batches)
+            or any(not math.isfinite(w) or w <= 0 for w in batch_weights)):
+        raise ValueError('RCO batch weights must be finite, positive and match the batches')
+    total_weight = sum(batch_weights)
+    batch_fractions = [w / total_weight for w in batch_weights]
     optimizer = torch.optim.Adam([interpolated.alpha], lr=lr)
     history = []
     for step in range(steps):
         progress = step / max(steps - 1, 1)
         tau = max(tau_min, tau_init * (tau_min / tau_init) ** progress)
         optimizer.zero_grad()
-        total, count = 0.0, 0
+        total = 0.0
         # Average the loss over every batch and Gumbel sample in the step, as
         # the reference implementation does. Summing instead would scale the
         # gradient by the batch count, making the configured learning rate
         # depend on how the corpus happens to be split.
-        scale = 1.0 / (len(batches) * gumbel_samples)
         for _sample in range(gumbel_samples):
             uniform = torch.rand_like(interpolated.alpha).clamp(1e-20, 1 - 1e-20)
             noise = -torch.log(-torch.log(uniform) + 1e-20)
@@ -402,22 +494,22 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                 hard = budget_constrained_argmax(detached, interpolated.weights,
                                                   interpolated.costs, target)
                 onehot = F.one_hot(hard, interpolated.n_options).float()
-            for batch in batches:
+            for batch, fraction in zip(batches, batch_fractions):
                 noisy = (interpolated.alpha + noise) / tau
                 soft = F.softmax(noisy, dim=-1)
                 interpolated.set_probs(onehot - soft.detach() + soft)
                 with torch.enable_grad():
                     loss = objective(batch)
+                scale = fraction / gumbel_samples
                 (loss * scale).backward()
-                total += float(loss.detach())
-                count += 1
+                total += float(loss.detach()) * scale
         interpolated.clear_probs()
         project_gradient(interpolated.alpha, interpolated.costs, interpolated.fraction)
         optimizer.step()
         achieved = interpolated.retract(target)
         vector_transport(optimizer, interpolated.alpha, interpolated.costs, interpolated.fraction)
         history.append({'step': step, 'tau': tau,
-                        'loss': total / max(count, 1),
+                        'loss': total,
                         'budget': achieved, 'drift': abs(achieved - target)})
         if log_every and (step % log_every == 0 or step == steps - 1):
             print(f'  rco step {step+1:4d}/{steps} tau={tau:.4f} '

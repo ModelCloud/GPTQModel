@@ -520,11 +520,11 @@ class VPTQ:
         if qcfg.enable_norm:
             norm_dim = int(qcfg.norm_dim)
             # Mirror the runtime kernel: codebooks and scales are stored in the
-            # model dtype, so apply the affine transform in that dtype too.
-            scale = weight_scale.to(dtype=target_dtype)
-            bias = weight_bias.to(dtype=target_dtype)
+            # model dtype, but residual and affine arithmetic stay in FP32.
+            scale = weight_scale.to(dtype=target_dtype).float()
+            bias = weight_bias.to(dtype=target_dtype).float()
             quantized = (
-                quantized.to(dtype=target_dtype) * scale.unsqueeze(norm_dim) + bias.unsqueeze(norm_dim)
+                quantized.float() * scale.unsqueeze(norm_dim) + bias.unsqueeze(norm_dim)
             ).to(dtype=torch.float32)
 
         loss = self.hessian_weighted_error(

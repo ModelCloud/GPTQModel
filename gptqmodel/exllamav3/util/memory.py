@@ -4,7 +4,6 @@ from collections import deque
 from dataclasses import dataclass
 
 import torch
-from pydantic import PydanticUserError
 
 
 # @lru_cache
@@ -76,6 +75,15 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
     import warnings
 
     from ...utils.logger import render_table
+
+    # Pydantic is an optional server dependency, only needed here when inspecting
+    # its objects. Normal quantization must not require it just to call free_mem.
+    try:
+        from pydantic import PydanticUserError
+    except ImportError:
+        pydantic_errors = ()
+    else:
+        pydantic_errors = (PydanticUserError,)
 
     # Suppress FutureWarning from Torch every time we try to access certain objects
     warnings.simplefilter(action = 'ignore', category = FutureWarning)
@@ -172,7 +180,7 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
                     if id(value) not in visited:
                         visited.add(id(value))
                         queue.append((new_path, value))
-        except PydanticUserError:
+        except pydantic_errors:
             pass
 
         # If object is a dictionary, iterate through all its items

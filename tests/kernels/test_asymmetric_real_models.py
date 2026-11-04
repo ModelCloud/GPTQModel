@@ -104,6 +104,22 @@ _GPTQ_REAL_CASES = (
 )
 
 
+def _require_candidate_backend(case: _RealModelCase) -> None:
+    """Skip unsupported hardware without hiding extension build failures.
+
+    ``torch.cuda.is_available()`` is not sufficient: it is true on ROCm, and
+    true on CUDA hosts whose compute capability the kernel does not target.
+    Use the candidate's device-only validation for the exact target GPU. Runtime
+    availability checks also compile/load extensions; their failures must reach
+    the test through model loading instead of being converted to skips.
+    """
+
+    try:
+        case.candidate_cls.validate_device(_DEVICE)
+    except NotImplementedError as exc:
+        pytest.skip(str(exc))
+
+
 def _module_device(module: torch.nn.Module) -> torch.device:
     for tensor in module.parameters(recurse=False):
         if tensor is not None and not tensor.is_meta:
@@ -241,6 +257,7 @@ def _assert_generation_tracks_torch(candidate_text: str, baseline_text: str) -> 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _AWQ_REAL_CASES, ids=lambda case: case.name)
 def test_awq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:
@@ -265,6 +282,7 @@ def test_awq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _GPTQ_REAL_CASES, ids=lambda case: case.name)
 def test_gptq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:
@@ -289,6 +307,7 @@ def test_gptq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) ->
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _AWQ_REAL_CASES + _GPTQ_REAL_CASES, ids=lambda case: f"{case.name}_generation")
 def test_asymmetric_real_generation_matches_torch_and_is_sane(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:

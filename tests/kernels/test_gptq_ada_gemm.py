@@ -98,8 +98,11 @@ def test_ada_gate_and_dtypes():
     # ``None`` is "the current device" in ``utils.arch`` (same convention as
     # ``is_ada``/``tuning_family``/``cuda_capability``), so it tracks the host.
     host_family = arch.tuning_family(None)
+    # Registered non-Ada hosts (e.g. an RDNA4 GPU running the ROCm suite) still
+    # resolve their own gate; only truly unregistered families stay disabled.
+    _KNOWN_HOST_GATES = {"ada": ADA_GATE, "cdna4": (16, 5120), "rdna4": (16, 17408)}
     assert gate_max_out_features(None) == (2048 if host_family == "ada" else 0)
-    assert arch.gate_limits(None) == (ADA_GATE if host_family == "ada" else (0, 0))
+    assert arch.gate_limits(None) == _KNOWN_HOST_GATES.get(host_family, (0, 0))
     # The kernel-module helpers keep ``None`` = "unknown caller" -> disabled,
     # and only ``gemm_fused_max_out_features`` follows the shared device default.
     assert gate_limits(None) == (0, 0)
@@ -274,7 +277,10 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
         path = "fused GEMM"
     else:
         split_weight = _decoded_weights(module).to(dtype)
-        visible_ref = (x @ split_weight).to(dtype)
+        # The CUDA split path keeps low-precision partial sums in FP32
+        # (``matmul_fp32_reduce``), so the oracle must request the same wide
+        # accumulation instead of a default reduced-precision ``torch.matmul``.
+        visible_ref = torch.mm(x, split_weight, out_dtype=torch.float32).to(dtype)
         path = "dequantize + matmul"
     expected_visible = visible_ref + module.bias if module.bias is not None else visible_ref
     assert torch.equal(visible, expected_visible), f"visible output is not round({path}) + bias"

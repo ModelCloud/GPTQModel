@@ -223,10 +223,11 @@ class AwqGEMVLinear(AWQuantLinear):
                 inputs, self.qweight, self.scales, self.qzeros, self.group_size
             )
 
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
-
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # Preserve the FP16 kernel result and bias until after addition:
+            # rounding either operand to BF16 first can destroy cancellation.
+            out = out.float() + self.bias.float()
+        out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -236,7 +237,7 @@ class AwqGEMVLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -259,9 +260,9 @@ class AwqGEMVLinear(AWQuantLinear):
         # scales as [out_features, groups], so the group index selects columns.
         group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data + scale_zeros.index_select(1, group_index))
-            / self.scales.index_select(1, group_index)
-        ).to(torch.int32)
+            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            / self.scales.index_select(1, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
         zeros = zeros.to(dtype=torch.int32)

@@ -5,11 +5,9 @@
 
 """Materialize an RCO assignment into a loadable model for held-out scoring.
 
-Staged GSQ trains each decoder block independently and writes one checkpoint
-per block, so a non-uniform assignment needs no retraining: install block
-``n`` from the arm whose width the assignment chose for ``n``, then run the
-normal staged export. The result is an ordinary mixed-width GPTQModel
-checkpoint whose per-module widths live in ``dynamic``.
+Install each selected projection from its staged width arm, then run normal
+staged export. Both legacy block assignments and projection assignments are
+accepted. Per-module widths are preserved in the checkpoint's dynamic config.
 
     python scripts/gsq_paper/rco_materialize.py \
         --model /monster/data/model/Llama-3.2-1B-Instruct \
@@ -19,32 +17,14 @@ checkpoint whose per-module widths live in ``dynamic``.
 """
 
 import argparse
-import contextlib
 import json
-import os
 from pathlib import Path
 
 import torch
 
+
 PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
                'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-
-
-@contextlib.contextmanager
-def _one_visible_device(device):
-    """Restrict visible accelerators so load-time placement cannot split."""
-    original = os.environ.get('ROCR_VISIBLE_DEVICES'), os.environ.get('HIP_VISIBLE_DEVICES')
-    index = device.split(':')[-1] if ':' in device else '0'
-    os.environ['ROCR_VISIBLE_DEVICES'] = index
-    os.environ['HIP_VISIBLE_DEVICES'] = index
-    try:
-        yield
-    finally:
-        for name, value in zip(('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES'), original):
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
 
 
 def parse_args():
@@ -54,52 +34,90 @@ def parse_args():
     parser.add_argument('--assignment', required=True)
     parser.add_argument('--arms', required=True, help='template with {bits}')
     parser.add_argument('--out', required=True)
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='auto', help='Torch device; auto prefers CUDA, then MPS, then CPU')
     return parser.parse_args()
+
+
+def assignment_projection_bits(payload, layer_count):
+    """Expand legacy blocks or validate a complete per-projection assignment."""
+    expected = {f'model.layers.{index}.{name}' for index in range(layer_count) for name in PROJECTIONS}
+    if 'projection_bits' in payload:
+        result = dict(payload['projection_bits'])
+    else:
+        result = {f'model.layers.{int(index)}.{name}': width
+                  for index, width in payload['layer_bits'].items() for name in PROJECTIONS}
+    if set(result) != expected:
+        raise ValueError('RCO materialization requires every projection of every decoder block')
+    if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
+           for width in result.values()):
+        raise ValueError('RCO staged materialization requires W2/W3/W4')
+    return result
+
+
+def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
+    """Merge selected packed tensors, checking the shared non-projection state."""
+    from gptqmodel.looper.gsq_training_model import _restore_packed_layer
+
+    states = {}
+    for width in sorted(set(widths.values())):
+        checkpoint = Path(arms.format(bits=width)) / f'layer-{block:02d}.pt'
+        saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
+        if (saved.get('layer_index') != block or saved['signature'].get('bits') != width
+                or saved['signature']['group_size'] != group_size):
+            raise ValueError(f'Block, width or group size mismatch in {checkpoint}')
+        states[width] = saved['state_dict']
+
+    def shared(key):
+        return not any(key.startswith(name + '.') for name in PROJECTIONS)
+
+    first = states[min(states)]
+    merged = {key: value for key, value in first.items() if shared(key)}
+    for state in states.values():
+        other = {key: value for key, value in state.items() if shared(key)}
+        if other.keys() != merged.keys() or any(not torch.equal(other[key], value) for key, value in merged.items()):
+            raise ValueError('RCO width arms disagree on shared block state')
+    for name, width in widths.items():
+        merged.update({key: value for key, value in states[width].items() if key.startswith(name + '.')})
+    return _restore_packed_layer(layer, merged, names=PROJECTIONS, bits=widths,
+                                 group_size=group_size, device=device)
 
 
 def main():
     args = parse_args()
     out = Path(args.out)
     payload = json.loads(Path(args.assignment).read_text())
-    layer_bits = {int(index): int(width) for index, width in payload['layer_bits'].items()}
     print(f"target={payload['target_bits']} widths={payload['width_counts']}", flush=True)
 
     from gptqmodel import GPTQModel
     from gptqmodel.looper.gsq_training_model import (
-        _restore_packed_layer,
         finalize_llama_gsq_wrapper,
     )
-    from gptqmodel.models._const import DEVICE
     from gptqmodel.quantization import FORMAT, GPTQConfig
+    from gptqmodel.utils.torch import resolve_torch_device, torch_empty_cache
 
-    base = min(layer_bits.values())
-    config = GPTQConfig(bits=base, group_size=128, sym=True, desc_act=False,
-                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=DEVICE.CUDA,
+    device = resolve_torch_device(args.device)
+    base = min(payload.get('projection_bits', payload.get('layer_bits', {})).values())
+    group_size = payload.get('group_size', 128)
+    config = GPTQConfig(bits=base, group_size=group_size, sym=True, desc_act=False,
+                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=device,
                         offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                              attn_implementation='sdpa')
-    model = wrapper.model.to(args.device)
+    model = wrapper.model.to(device)
 
-    for block, width in sorted(layer_bits.items()):
-        checkpoint = Path(args.arms.format(bits=width)) / f'layer-{block:02d}.pt'
-        if not checkpoint.exists():
-            raise SystemExit(f'Missing block checkpoint: {checkpoint}')
-        saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
-        if saved['signature'].get('bits') != width:
-            raise SystemExit(f'{checkpoint} is not W{width}')
-        restored = _restore_packed_layer(
-            model.model.layers[block], saved['state_dict'], names=PROJECTIONS, bits=width,
-            group_size=saved['signature']['group_size'], device=args.device)
-        model.model.layers[block] = restored
-        print(f'  block {block:02d} <- W{width}', flush=True)
+    projection_bits = assignment_projection_bits(payload, len(model.model.layers))
+    for block in range(len(model.model.layers)):
+        widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in PROJECTIONS}
+        model.model.layers[block] = restore_assignment_block(
+            model.model.layers[block], block, widths, args.arms, group_size=group_size, device=device)
+        print(f'  block {block:02d} <- {widths}', flush=True)
 
     run = {
         'state': 'complete',
-        'layer_indices': list(range(len(layer_bits))),
-        'bits': {block: width for block, width in layer_bits.items()},
-        'layer_bits': dict(layer_bits),
-        'group_size': 128,
+        'layer_indices': list(range(len(model.model.layers))),
+        'bits': base,
+        'projection_bits': projection_bits,
+        'group_size': group_size,
         'gsq_training': payload.get('recipe') or {'enabled': True},
     }
     model.gsq_training_runs = [run]
@@ -108,27 +126,26 @@ def main():
     wrapper.save_quantized(str(out))
     print(f'saved {out}', flush=True)
 
-    # Verify the widths survive a reload: load-time resolution reads `dynamic`.
-    # A single visible device keeps auto-placement from splitting this small
-    # model across cards, which would break the first normalization.
-    with _one_visible_device(args.device):
-        reloaded = GPTQModel.load(str(out), backend=None, dtype=torch.bfloat16,
-                                  attn_implementation='sdpa')
-        reloaded.model.to(args.device).eval()
+    # Pin placement explicitly while verifying that dynamic widths reload.
+    reloaded = GPTQModel.load(str(out), backend=None, device=device, dtype=torch.float16,
+                              attn_implementation='sdpa')
+    reloaded.model.to(device).eval()
     mismatched = []
-    for block, width in sorted(layer_bits.items()):
-        for name in PROJECTIONS:
-            module = reloaded.model.get_submodule(f'model.layers.{block}.{name}')
-            if int(module.bits) != width:
-                mismatched.append((block, name, int(module.bits), width))
+    for name, width in sorted(projection_bits.items()):
+        module = reloaded.model.get_submodule(name)
+        if int(module.bits) != width:
+            mismatched.append((name, int(module.bits), width))
     print('reload width mismatches:', len(mismatched), flush=True)
     if mismatched:
         raise SystemExit(f'Reload did not preserve widths: {mismatched[:5]}')
 
     with torch.inference_mode():
-        ids = torch.tensor([[1, 2, 3, 4]], device=args.device)
+        ids = torch.tensor([[1, 2, 3, 4]], device=device)
         loss = float(reloaded.model(input_ids=ids, labels=ids).loss)
-    print(f'reloaded forward loss={loss:.4f} finite={bool(torch.isfinite(torch.tensor(loss)))}', flush=True)
+    if not torch.isfinite(torch.tensor(loss)):
+        raise RuntimeError('RCO materialized model produced a nonfinite reload loss')
+    print(f'reloaded forward loss={loss:.4f}', flush=True)
+    torch_empty_cache(device, gc=False)
 
 
 if __name__ == '__main__':

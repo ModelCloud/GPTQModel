@@ -32,6 +32,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
+from ._numerics import matmul_fp32_reduce
 from .gguf import _apply_optional_smoother
 
 
@@ -96,7 +97,9 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     eps = torch.finfo(torch.float32).tiny
     return torch.where(
         abs_max > 0,
-        torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps),
+        # tiny bounds the denominator but does not bound the quotient: even
+        # fp8_max / tiny overflows FP32. Keep zero*scale finite too.
+        (torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps)).clamp_max(torch.finfo(torch.float32).max),
         torch.ones_like(abs_max),
     )
 
@@ -494,9 +497,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
     def _dequantize_native(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
-        weight = weight.to(target_dtype)
-        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=target_dtype)
-        return (weight / scale_inv).transpose(0, 1).contiguous()
+        weight = weight.to(torch.float32)
+        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32)
+        return (weight / scale_inv).to(target_dtype).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         # ``dequantize_fp8`` treats ``scale_inv`` heuristically (it multiplies
@@ -557,7 +560,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return torch.matmul(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight)
 
     def optimize(
         self,

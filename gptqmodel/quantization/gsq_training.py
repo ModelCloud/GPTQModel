@@ -881,7 +881,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         batch_size //= distributed.world_size
     attention_implementation = layer.self_attn.config._attn_implementation
     if attention_implementation not in ('eager', 'sdpa'):
-        raise ValueError('Staged GSQ requires eager or SDPA Llama attention')
+        raise ValueError('Staged GSQ requires eager or SDPA decoder attention')
     if target_cache not in ('none', 'cpu', 'device'):
         raise ValueError('GSQ target cache must be none, cpu or device')
     if target_cache != 'none' and attention_implementation != 'sdpa':
@@ -901,7 +901,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
-        raise ValueError('Llama GSQ requires all seven projection initializers and nonempty batches')
+        raise ValueError('Dense-decoder GSQ requires all seven projection initializers and nonempty batches')
     width = resolve_projection_bits(bits, names)
     initializers = dict(initializers)
     initialization_batches = batches if initialization_batches is None else initialization_batches

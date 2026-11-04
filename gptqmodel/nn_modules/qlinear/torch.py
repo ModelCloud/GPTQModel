@@ -28,6 +28,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -403,7 +404,7 @@ class TorchLinear(PackableQuantLinear):
             # caller tensor during multi-device kernel validation; matmul still
             # needs both operands on the same device and dtype.
             weights = weights.to(device=x.device, dtype=x.dtype)
-        out = torch.matmul(x, weights).reshape(out_shape)
+        out = matmul_fp32_reduce(x, weights).reshape(out_shape)
         del weights
         if self.bias is not None:
             bias = self.bias

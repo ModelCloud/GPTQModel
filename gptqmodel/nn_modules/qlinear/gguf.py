@@ -34,6 +34,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._numerics import matmul_fp32_reduce
 
 
 try:
@@ -371,7 +372,9 @@ def _gguf_e8m0_to_fp32_half(values: np.ndarray) -> np.ndarray:
 def _gguf_quantize_mxfp4(blocks: np.ndarray) -> np.ndarray:
     d = np.abs(blocks).max(axis=-1, keepdims=True)
     with np.errstate(divide="ignore"):
-        e = np.where(d > 0, np.floor(np.log2(d)) - 2 + 127, 0).astype(np.uint8)
+        # Negative exponents must saturate at the smallest E8M0 scale, not
+        # wrap to a large unsigned exponent (255 is reserved for NaN).
+        e = np.clip(np.where(d > 0, np.floor(np.log2(d)) - 2 + 127, 0), 0, 254).astype(np.uint8)
     scales = _gguf_e8m0_to_fp32_half(e)
     errors = np.abs(
         scales.reshape(blocks.shape[0], 1, 1) * _GGUF_FP4_VALUES.astype(np.float32).reshape(1, 1, 16)
@@ -1131,7 +1134,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         0,
         int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS", "0")),
     )
-    GGUF_FUSED_CHUNK_BLOCKS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "8")))
+    # A positive block count is an explicit override. Zero selects the
+    # byte-budgeted default, which uses one GEMM for ordinary layers and
+    # narrows the K chunk only when the expanded chunk would exceed the
+    # transient-memory budget.
+    GGUF_FUSED_CHUNK_BLOCKS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "0")))
+    GGUF_FUSED_CHUNK_BYTES = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BYTES", str(32 * 1024 * 1024))))
     GGUF_FUSED_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP", "1")))
     GGUF_FUSED_AUTOTUNE_ITERS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS", "2")))
     GGUF_FUSED_AUTOTUNE_MARGIN = max(0.0, float(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN", "0.05")))
@@ -1160,6 +1168,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_cpu_max_rows = self.GGUF_FUSED_CPU_MAX_ROWS
         self.gguf_fused_cpu_min_matrix_elements = self.GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS
         self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
+        self.gguf_fused_chunk_bytes = self.GGUF_FUSED_CHUNK_BYTES
+        self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
@@ -1205,7 +1215,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.bias = None
 
     def clear_weight_cache(self) -> None:
-        return None
+        self._k_scale_overflow_cache = {}
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1436,17 +1446,25 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             tensor = tensor.to(device=target_device, dtype=target_dtype)
         return tensor
 
-    def _dequantize_q4_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+    def _dequantize_q4_k_blocks(
+        self,
+        blocks: torch.Tensor,
+        target_dtype: torch.dtype,
+        *,
+        compute_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         rows, num_blocks = blocks.shape[0], blocks.shape[1]
+        if compute_dtype is None:
+            compute_dtype = target_dtype
 
-        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
-        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(compute_dtype)
+        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(compute_dtype)
         scales = blocks[..., 4:16]
         qs = blocks[..., 16:]
 
         sc, mins = _unpack_q4_k_scale_min_torch(scales)
-        d = d.unsqueeze(-1) * sc.to(target_dtype)
-        dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
+        d = d.unsqueeze(-1) * sc.to(compute_dtype)
+        dm = dmin.unsqueeze(-1) * mins.to(compute_dtype)
 
         q = qs.reshape(rows, num_blocks, 4, 1, 32)
         q = _torch_right_shift(
@@ -1455,20 +1473,31 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         )
         q = torch.bitwise_and(q, 0x0F).reshape(rows, num_blocks, 8, 32)
 
-        return (d.unsqueeze(-1) * q.to(target_dtype) - dm.unsqueeze(-1)).reshape(rows, num_blocks * 256)
+        weight = d.unsqueeze(-1) * q.to(compute_dtype) - dm.unsqueeze(-1)
+        if weight.dtype != target_dtype:
+            weight = weight.to(target_dtype)
+        return weight.reshape(rows, num_blocks * 256)
 
-    def _dequantize_q5_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+    def _dequantize_q5_k_blocks(
+        self,
+        blocks: torch.Tensor,
+        target_dtype: torch.dtype,
+        *,
+        compute_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         rows, num_blocks = blocks.shape[0], blocks.shape[1]
+        if compute_dtype is None:
+            compute_dtype = target_dtype
 
-        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
-        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(compute_dtype)
+        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(compute_dtype)
         scales = blocks[..., 4:16]
         qh = blocks[..., 16:48]
         qs = blocks[..., 48:]
 
         sc, mins = _unpack_q4_k_scale_min_torch(scales)
-        d = d.unsqueeze(-1) * sc.to(target_dtype)
-        dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
+        d = d.unsqueeze(-1) * sc.to(compute_dtype)
+        dm = dmin.unsqueeze(-1) * mins.to(compute_dtype)
 
         ql = qs.reshape(rows, num_blocks, 4, 1, 32)
         ql = _torch_right_shift(
@@ -1484,16 +1513,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         qh = torch.bitwise_and(qh, 0x01).reshape(rows, num_blocks, 8, 32)
         q = torch.bitwise_or(ql, _torch_left_shift(qh, 4))
 
-        return (d.unsqueeze(-1) * q.to(target_dtype) - dm.unsqueeze(-1)).reshape(rows, num_blocks * 256)
+        weight = d.unsqueeze(-1) * q.to(compute_dtype) - dm.unsqueeze(-1)
+        if weight.dtype != target_dtype:
+            weight = weight.to(target_dtype)
+        return weight.reshape(rows, num_blocks * 256)
 
     def _dequantize_q6_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
         rows, num_blocks = blocks.shape[0], blocks.shape[1]
 
         ql = blocks[..., :128]
         qh = blocks[..., 128:192]
-        scales = blocks[..., 192:208].contiguous().view(torch.int8).to(target_dtype)
+        scales = blocks[..., 192:208].contiguous().view(torch.int8)
         d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
-        d = (d.unsqueeze(-1) * scales).reshape(rows, num_blocks, 16, 1)
 
         ql = ql.reshape(rows, num_blocks, 2, 1, 64)
         ql = _torch_right_shift(
@@ -1510,9 +1541,15 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         qh = torch.bitwise_and(qh, 0x03).reshape(rows, num_blocks, 8, 32)
 
         q = torch.bitwise_or(ql, _torch_left_shift(qh, 4)).to(torch.int16) - 32
-        q = q.reshape(rows, num_blocks, 16, 16).to(target_dtype)
-
-        return (d * q).reshape(rows, num_blocks * 256)
+        # Multiply the two exact integer factors first: |q| <= 32 and
+        # |scales| <= 127, so the int16 product cannot overflow and a zero
+        # code stays exactly zero. Only then widen to the target dtype, where
+        # a genuinely out-of-range weight rounds to inf instead of turning
+        # 0 * inf into NaN. Keeping both operands int16 also avoids the much
+        # slower mixed int16 x int8 broadcast on ROCm.
+        scales_i16 = scales.to(torch.int16)
+        q = (q.reshape(rows, num_blocks, 16, 16) * scales_i16.unsqueeze(-1)).to(target_dtype)
+        return (q * d.unsqueeze(-1).unsqueeze(-1)).reshape(rows, num_blocks * 256)
 
     def dequantize_weight(
         self,
@@ -1521,9 +1558,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         target_device, output_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
-        # Reconstruct in FP32 before the final CPU cast; BF16 scale arithmetic
-        # otherwise rounds each intermediate, not just the reconstructed weight.
-        dtype = torch.float32 if target_device.type == "cpu" else output_dtype
+        # Q4_K/Q5_K subtract a per-subblock minimum from a scale product. That
+        # product can exceed the target range even when the final weight is
+        # representable, so those formats compute in FP32 and cast the final
+        # result. Other formats only multiply by an integer code; if that
+        # product overflows the target dtype, so does the final weight. CPU
+        # keeps FP32 reconstruction to match the existing dense fallback.
+        compute_dtype = torch.float32 if target_device.type == "cpu" else output_dtype
+        dtype = compute_dtype
         if self.gguf_tensor_qtype == "Q4_0":
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
@@ -1532,14 +1574,17 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             weight = self._dequantize_sign_only(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q2_0":
             weight = self._dequantize_numpy(_dequantize_q2_0_numpy, device=device, dtype=dtype)
-        elif self.gguf_tensor_qtype == "Q4_K":
-            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        elif self.gguf_tensor_qtype in ("Q4_K", "Q5_K"):
+            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=output_dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
-            weight = self._dequantize_q4_k_blocks(blocks, target_dtype)
-        elif self.gguf_tensor_qtype == "Q5_K":
-            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
-            blocks, _, _ = self._reshape_blocks(device=target_device)
-            weight = self._dequantize_q5_k_blocks(blocks, target_dtype)
+            # Only widen when a scale product can actually leave range. CPU
+            # keeps the FP32 dense fallback contract unconditionally.
+            wide = target_device.type == "cpu" or self._k_scale_overflows(blocks, target_dtype)
+            compute_dtype = torch.float32 if wide else target_dtype
+            if self.gguf_tensor_qtype == "Q4_K":
+                weight = self._dequantize_q4_k_blocks(blocks, target_dtype, compute_dtype=compute_dtype)
+            else:
+                weight = self._dequantize_q5_k_blocks(blocks, target_dtype, compute_dtype=compute_dtype)
         elif self.gguf_tensor_qtype == "Q6_K":
             target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
@@ -1634,7 +1679,50 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return torch.matmul(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight)
+
+    def _fused_chunk_blocks(self, num_blocks: int, compute_dtype: torch.dtype) -> int:
+        if self.gguf_fused_chunk_blocks > 0:
+            return self.gguf_fused_chunk_blocks
+        # Budget the widest intermediate: out_features x chunk-K values in the
+        # dequantization compute dtype. The GEMM accumulator and its FP32
+        # output are bounded by the same rows x columns shape.
+        element_bytes = torch.finfo(compute_dtype).bits // 8
+        bytes_per_block = self.out_features * self.gguf_block_size * element_bytes
+        budget_blocks = self.gguf_fused_chunk_bytes // max(1, bytes_per_block)
+        return min(num_blocks, max(1, budget_blocks))
+
+    def _k_scale_overflows(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
+        # `_version` advances on in-place writes, so an overwritten weight
+        # invalidates the cached answer even when the storage address is reused.
+        key = (blocks.data_ptr(), blocks._version, blocks.shape, target_dtype)
+        cached = self._k_scale_overflow_cache.get(key)
+        if cached is None:
+            cached = self._compute_k_scale_overflow(blocks, target_dtype)
+            self._k_scale_overflow_cache[key] = cached
+        return cached
+
+    def _compute_k_scale_overflow(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
+        """True when a Q4_K/Q5_K term can leave `target_dtype` range.
+
+        Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`. Both terms
+        peak at `d_max * 63 * code_max`, with `code_max` 15 for Q4_K and 31
+        for Q5_K, so a product that still fits at `d * 63` can overflow once
+        the code is applied. Bounding `d * 63` alone is therefore unsound and
+        lets an out-of-range weight saturate to inf on the narrow path. Only
+        the per-block `d`/`d_min` columns and two extremes are inspected, so
+        the check stays O(num_blocks) rather than O(weights).
+        """
+        if not target_dtype.is_floating_point:
+            return True
+        code_max = 31.0 if self.gguf_tensor_qtype == "Q5_K" else 15.0
+        saturation = code_max * 63.0
+        for column in (slice(0, 2), slice(2, 4)):
+            raw = blocks[..., column].contiguous().view(torch.float16).reshape(blocks.shape[0], -1)
+            peak = raw.to(torch.float32).abs().amax(dim=-1).mul_(saturation)
+            if bool((peak > torch.finfo(target_dtype).max).any()):
+                return True
+        return False
 
     def _forward_fused_k(
         self,
@@ -1643,39 +1731,63 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_dtype = x_flat.dtype
         is_cpu = x_flat.device.type == "cpu"
-        accum_dtype = torch.float32 if is_cpu else target_dtype
+        accum_dtype = torch.float32
+        # BF16 operands round the reconstructed weights before the GEMM and
+        # violate the existing 2e-3 fusion contract. Keep that path wide;
+        # FP16 retains exact source values and can use the tensor-core path.
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
+        # Q4_K/Q5_K need a wide scale product only when that product can leave
+        # the target range; otherwise FP16 reconstruction is exact enough and
+        # is much cheaper than building FP32 chunks.
+        k_wide = (
+            self.gguf_tensor_qtype in ("Q4_K", "Q5_K")
+            and not (is_cpu or target_dtype == torch.bfloat16)
+            and self._k_scale_overflows(blocks, target_dtype)
+        )
+        use_fp32_operands = is_cpu or target_dtype == torch.bfloat16 or k_wide
+        weight_dtype = accum_dtype if use_fp32_operands else target_dtype
+        chunk_blocks = self._fused_chunk_blocks(num_blocks, accum_dtype)
 
         if x_flat.shape[-1] != self.padded_in_features:
             x_work = F.pad(x_flat, (0, self.padded_in_features - x_flat.shape[-1]))
         else:
             x_work = x_flat
 
-        output = torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=accum_dtype)
+        if use_fp32_operands:
+            x_work = x_work.to(accum_dtype)
+        output = torch.empty((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=accum_dtype)
         precision_context = cpu_bf16x3_matmul() if is_cpu else nullcontext()
 
         with precision_context:
-            for start in range(0, num_blocks, self.gguf_fused_chunk_blocks):
-                end = min(start + self.gguf_fused_chunk_blocks, num_blocks)
+            for start in range(0, num_blocks, chunk_blocks):
+                end = min(start + chunk_blocks, num_blocks)
                 block_chunk = blocks[:, start:end, :]
 
                 if self.gguf_tensor_qtype == "Q4_K":
-                    weight_chunk = self._dequantize_q4_k_blocks(block_chunk, accum_dtype)
+                    weight_chunk = self._dequantize_q4_k_blocks(
+                        block_chunk,
+                        weight_dtype,
+                        compute_dtype=accum_dtype if use_fp32_operands else weight_dtype,
+                    )
                 elif self.gguf_tensor_qtype == "Q5_K":
-                    weight_chunk = self._dequantize_q5_k_blocks(block_chunk, accum_dtype)
+                    weight_chunk = self._dequantize_q5_k_blocks(
+                        block_chunk,
+                        weight_dtype,
+                        compute_dtype=accum_dtype if use_fp32_operands else weight_dtype,
+                    )
                 elif self.gguf_tensor_qtype == "Q6_K":
-                    weight_chunk = self._dequantize_q6_k_blocks(block_chunk, accum_dtype)
+                    weight_chunk = self._dequantize_q6_k_blocks(block_chunk, weight_dtype)
                 elif self.gguf_tensor_qtype == "Q4_0":
-                    weight_chunk = self._dequantize_q4_0_blocks(block_chunk, accum_dtype)
+                    weight_chunk = self._dequantize_q4_0_blocks(block_chunk, weight_dtype)
                 elif self.gguf_tensor_qtype == "Q8_0":
-                    weight_chunk = self._dequantize_q8_0_blocks(block_chunk, accum_dtype)
+                    weight_chunk = self._dequantize_q8_0_blocks(block_chunk, weight_dtype)
                 elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
                     weight_chunk = _dequantize_sign_only_torch(
                         block_chunk.reshape(block_chunk.shape[0], -1),
                         block_size=self.gguf_block_size,
                         type_size=self.gguf_type_size,
                         device=x_flat.device,
-                        dtype=accum_dtype,
+                        dtype=weight_dtype,
                     )
                 else:
                     # Generic chunked numpy dequant for every remaining GGUF
@@ -1685,12 +1797,25 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                         np.ascontiguousarray(
                             _dequantize_gguf_tensor_numpy(packed_chunk, self.gguf_tensor_qtype)
                         )
-                    ).to(device=x_flat.device, dtype=accum_dtype)
+                    ).to(device=x_flat.device, dtype=weight_dtype)
 
                 x_chunk = x_work[
                     :, start * self.gguf_block_size : end * self.gguf_block_size
-                ].to(accum_dtype)
-                output = output + torch.matmul(x_chunk, weight_chunk.transpose(0, 1))
+                ]
+                if use_fp32_operands:
+                    # beta=0 on the first chunk avoids reading the uninitialized output.
+                    output.addmm_(x_chunk, weight_chunk.transpose(0, 1), beta=0 if start == 0 else 1)
+                else:
+                    # Low-precision operands use tensor cores on CUDA and the
+                    # equivalent matrix path on ROCm, while out_dtype keeps
+                    # the accumulation and epilogue in FP32.
+                    output = torch.addmm(
+                        output,
+                        x_chunk,
+                        weight_chunk.transpose(0, 1),
+                        beta=0 if start == 0 else 1,
+                        out_dtype=accum_dtype,
+                    )
 
         if bias is not None:
             output = output + bias.to(device=x_flat.device, dtype=accum_dtype)

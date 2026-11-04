@@ -115,6 +115,20 @@ def _fp8_carrier(x: torch.Tensor) -> W4AActivation:
     )
 
 
+def _decode_e2m1_planes(plane: torch.Tensor) -> torch.Tensor:
+    """Decode one packed E2M1 plane through the format's numeric codebook.
+
+    Independent of the module helpers: the nibbles are read directly and each
+    four-bit code is looked up in the E2M1 value table, so a packing bug cannot
+    cancel itself out. Codes are ``magnitude | (sign << 3)``.
+    """
+    values = torch.tensor((0., .5, 1., 1.5, 2., 3., 4., 6.))
+    data = plane.view(torch.uint8)
+    rows, cols = data.shape
+    codes = torch.stack((data & 15, data >> 4), dim=1).reshape(rows * 2, cols)
+    return values[(codes & 7).long()] * torch.where((codes & 8) == 0, 1., -1.)
+
+
 # --------------------------------------------------------------------------
 # CPU kernel stand-ins. `w4a_triton` cannot be imported on a CPU-only host
 # (its Triton build lacks `mma_v2`), so the forward's lazy import is served a
@@ -783,10 +797,10 @@ def test_fused_unpack_all_zero_and_all_fifteen_words():
 
 
 # --------------------------------------------------------------------------
-# W4ANVFP4Linear stages its own operand caches and so skips
+# W4ANVFP4Linear stages its own *packed* operand caches and so skips
 # W4AFP8Linear.post_init; its post_init must still revalidate the packed
 # checkpoint layout before decoding, or a bad checkpoint silently corrupts
-# every weight it exports.
+# every weight it exports. The FP8 lane it inherits is per-forward only.
 # --------------------------------------------------------------------------
 
 @pytest.mark.skipif(
@@ -906,6 +920,179 @@ def test_nvfp4_failed_repost_init_clears_operand_caches():
         assert getattr(module, name).numel() == 0
     with pytest.raises(RuntimeError, match="weight cache is absent"):
         module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_post_init_retains_only_packed_planes():
+    """The NVFP4 caches are packed layouts, not expanded weight planes.
+
+    ``_weight_both`` is two E2M1 planes at 4 bits per weight, so 1 B/weight in
+    total; that is an allowed alternate packed layout. A full-layer E4M3 plane
+    is one code per weight (an expansion) and must not be retained even though
+    the mixed FP8 attention lane needs it on demand.
+    """
+    module = _module(W4ANVFP4Linear)
+
+    assert not hasattr(module, "_weight_e4m3")
+    assert "_weight_e4m3" not in module._buffers
+    assert "_weight_e4m3" not in module.__dict__
+    assert "_weight_e4m3" not in module._WEIGHT_CACHE_NAMES
+    assert module._w4a_weights_ready is True
+
+    # The retained packed planes are 1 B/weight; native INT4 is 0.5 B/weight.
+    assert _bytes(module.qweight) == K * N // 2
+    assert _bytes(module._weight_both) == K * N
+    assert _bytes(module._unit_weight_scales) < K * N
+    assert _expanded_weight_tensors(module) == []
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "activation_global_scale_bits",
+    }
+
+    # Independent E2M1 decode: the packed planes must reconstruct every
+    # centered INT4 code, so removing the E4M3 plane changed no weights.
+    centered = (
+        _decode_e2m1_planes(module._weight_both[:, :N])
+        + 4 * _decode_e2m1_planes(module._weight_both[:, N:])
+    )
+    assert torch.equal(centered, _decode_centered_codes(module).float())
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_operand_is_staged_per_forward(cpu_kernels):
+    """The mixed FP8 lane materializes and drops one E4M3 operand per call."""
+    module = _module(W4ANVFP4Linear)
+    native_state = {name: value.clone() for name, value in module.state_dict().items()}
+    baseline_buffers = {name: _bytes(value) for name, value in module._buffers.items()}
+
+    x = torch.randn((3, K), dtype=torch.bfloat16)
+    x[0].zero_()
+    seen: list[torch.Tensor] = []
+    references: list[weakref.ref] = []
+    original = module.fp8_weight_operand
+
+    def tracking():
+        weight = original()
+        assert weight.dtype == torch.float8_e4m3fn
+        assert weight.numel() == K * N
+        seen.append(weight)
+        references.append(weakref.ref(weight))
+        return weight
+
+    module.fp8_weight_operand = tracking
+    try:
+        for _ in range(2):
+            out = module._forward_fp8_operand(_fp8_carrier(x))
+            assert out.dtype == torch.bfloat16 and out.shape == (3, N)
+            assert torch.isfinite(out).all()
+    finally:
+        del module.fp8_weight_operand
+
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+    seen.clear()
+    gc.collect()
+    assert all(ref() is None for ref in references), "the per-forward E4M3 operand outlived its forward"
+
+    assert not hasattr(module, "_weight_e4m3")
+    assert _expanded_weight_tensors(module) == []
+    assert {name: _bytes(value) for name, value in module._buffers.items()} == baseline_buffers
+    for name, value in native_state.items():
+        assert torch.equal(module.state_dict()[name], value)
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_operand_matches_independent_int4_decode():
+    module = _module(W4ANVFP4Linear)
+    expected = _decode_centered_codes(module)
+    operand = module.fp8_weight_operand()
+
+    assert operand.dtype == torch.float8_e4m3fn and operand.shape == (K, N)
+    assert torch.equal(
+        operand.view(torch.uint8),
+        expected.to(torch.float8_e4m3fn).view(torch.uint8),
+    )
+    # Staging the operand must not install it as module state.
+    assert not hasattr(module, "_weight_e4m3")
+    assert _expanded_weight_tensors(module) == []
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_forward_rejects_a_stale_packed_cache():
+    """An in-place qweight write must invalidate the packed planes."""
+    module = _module(W4ANVFP4Linear)
+    module.qweight[0, 0] ^= 1
+
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+    # Explicit invalidation has the same effect and drops the packed planes.
+    module.post_init()
+    module.invalidate_weight_layout()
+    assert module._weight_both.numel() == 0
+    with pytest.raises(RuntimeError, match="weight cache is absent"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_staging_cannot_launder_a_stale_packed_cache():
+    """Staging the FP8 operand must not make the packed planes look current.
+
+    The inherited ``fp8_weight_operand()`` revalidates a changed layout and then
+    rewrites ``_w4a_layout_token`` to the *new* weights. Nothing rebuilds
+    ``_weight_both`` there, so a refresh would let the next ``forward()`` pass
+    its freshness check while the FP4 planes still encode the old codes. NVFP4
+    therefore rejects changed weights instead of revalidating them.
+    """
+    module = _module(W4ANVFP4Linear)
+    before = _decode_centered_codes(module)
+    assert module._weights_are_current() is True
+
+    module.qweight[0, 0] ^= 1
+    mutated = _decode_centered_codes(module)
+    assert not torch.equal(before, mutated)
+    assert module._weights_are_current() is False
+
+    # The public FP8 staging helper must refuse, not silently refresh the token.
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.fp8_weight_operand()
+    assert module._weights_are_current() is False, (
+        "FP8 staging refreshed the layout token without rebuilding the packed cache"
+    )
+
+    # The FP8 lane and the NVFP4 lane both refuse the mutated module.
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module._forward_fp8_operand(_fp8_carrier(torch.zeros(2, K, dtype=torch.bfloat16)))
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+    # Rebuilding restores agreement between both weight representations.
+    module.post_init()
+    assert module._weights_are_current() is True
+    assert torch.equal(_decode_centered_codes(module), mutated)
+    planes = (
+        _decode_e2m1_planes(module._weight_both[:, :N])
+        + 4 * _decode_e2m1_planes(module._weight_both[:, N:])
+    )
+    assert torch.equal(planes, mutated.float())
+    assert torch.equal(
+        module.fp8_weight_operand().view(torch.uint8),
+        mutated.to(torch.float8_e4m3fn).view(torch.uint8),
+    )
 
 
 def test_failed_repost_init_clears_w4a_readiness():

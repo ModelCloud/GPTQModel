@@ -12,6 +12,7 @@ from torch.amp import custom_bwd, custom_fwd
 
 from ...utils.arch import arch_class, normalize_arch, tuning_family
 from ...utils.torch import HAS_XPU
+from ..qlinear._numerics import matmul_fp32_reduce
 
 
 class DequantLaunch(NamedTuple):
@@ -343,9 +344,12 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
 
 def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
     W = dequant(input.dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
-    if transpose:
-        return input @ W.t()
-    return input @ W
+    weight = W.t() if transpose else W
+    # Match every other low-precision inference kernel: keep the reduction in
+    # FP32 and round once at the epilogue. A plain `input @ W` accumulates in
+    # the activation dtype and loses ~1 ulp per output element versus the Torch
+    # backend, which uses the same FP32-reduce helper.
+    return matmul_fp32_reduce(input, weight)
 
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod

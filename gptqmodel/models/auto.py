@@ -150,6 +150,9 @@ from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
+from .definitions.lfm3 import LFM3QModel  # noqa: E402
+from .definitions.lfm3_omni import LFM3OmniQModel  # noqa: E402
+from .definitions.lfm3_vl import LFM3VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llava import LlavaQModel  # noqa: E402
@@ -165,7 +168,7 @@ from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
 from .definitions.minicpmv import MiniCPMVQModel  # noqa: E402
 from .definitions.minicpmv_4_6 import MiniCPMV4_6QModel  # noqa: E402
-from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.minimax_m2 import MiniMaxM2GPTQ, MiniMaxQModel  # noqa: E402
 from .definitions.minimax_m3_vl import MiniMaxM3VLGPTQ  # noqa: E402
 from .definitions.ministral3 import Ministral3GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
@@ -334,7 +337,7 @@ MODEL_MAP = {
     "minicpmo": MiniCPMOQModel,
     "minicpmv": MiniCPMVQModel,
     "minicpmv4_6": MiniCPMV4_6QModel,
-    "minimax": MiniMaxM2GPTQ,
+    "minimax": MiniMaxQModel,
     "minimax_m2": MiniMaxM2GPTQ,
     "minimax_m3_vl": MiniMaxM3VLGPTQ,
     "muse_glimmer": MuseGlimmerQModel,
@@ -380,8 +383,10 @@ MODEL_MAP = {
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
+    "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
+    "helium": LlamaQModel, # 100% llama clone (HeliumModel == LlamaModel module layout)
     "olmoe": OlmoeQModel,
     "openvla": OpenVLAQModel,
     "ouro": OuroQModel,
@@ -421,6 +426,9 @@ MODEL_MAP = {
     "lfm2": LFM2QModel,
     "lfm2_moe": LFM2MoeQModel,
     "lfm2_vl": LFM2VLQModel,
+    "lfm3": LFM3QModel,
+    "lfm3_omni": LFM3OmniQModel,
+    "lfm3_vl": LFM3VLQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,

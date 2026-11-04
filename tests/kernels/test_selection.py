@@ -520,8 +520,11 @@ def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monke
     )
 
     assert candidates[0] is GGUFTritonKernel
-    assert GGUFCudaKernel not in candidates
-    assert candidates[1] is GGUFTorchLinear
+    # GGUFCudaKernel advertises 1-bit since #3434 and ggml's CUDA backend
+    # handles sign-only Q1_0 (the only 1-bit type AUTO can route here). AUTO
+    # still prefers Triton, so it must only appear after it.
+    assert GGUFCudaKernel in candidates
+    assert candidates.index(GGUFCudaKernel) > candidates.index(GGUFTritonKernel)
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):

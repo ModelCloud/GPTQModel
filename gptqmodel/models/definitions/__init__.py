@@ -68,6 +68,9 @@ from .internvl import InternVLQModel
 from .internvl_chat import InternVLChatQModel
 from .k2_horizon import K2HorizonGPTQ, K2HorizonQModel
 from .lfm2_vl import LFM2VLQModel
+from .lfm3 import LFM3QModel
+from .lfm3_omni import LFM3OmniQModel
+from .lfm3_vl import LFM3VLQModel
 from .mage_vl import MageVLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel

@@ -136,7 +136,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         if need_zeros:
             zero_offset = 1 << (self.bits - 1)
-            zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
+            zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
 
         gptq_qweight = self.pack_awq_qweight(iweight)
         gptq_qzeros = self.pack_awq_qzeros(izeros)
@@ -187,7 +187,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         # Compute zeros: (zero_offset - izeros) * scales
         zero_offset = 1 << (self.bits - 1)
-        zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
+
+        from .torch_aten_kernel import _cpu_int4pack_scale_dtype
+
+        dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
@@ -195,6 +198,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
         self.scales = self.scales.to(dtype=dtype).contiguous()
+        zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
@@ -275,9 +279,6 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
                 ).eval()
-                import torch._inductor.config as config
-                config.freezing = True
-                config.max_autotune = True
         elif self.linear_mode is None:
             self.linear_mode = LinearMode.TRAIN
 

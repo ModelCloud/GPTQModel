@@ -18,9 +18,19 @@ void gemm_half_q_half_cuda
     int size_m,
     int size_n,
     int size_k,
-    bool clear = false,
-    half* reconstruct = NULL,
-    bool force_cuda = false
+    bool clear = false
+);
+
+void gemm_half_half_cuda
+(
+    cublasHandle_t cublas_handle,
+    const half* a,
+    const half* b,
+    half* c,
+    int size_m,
+    int size_n,
+    int size_k,
+    bool clear
 );
 
 void clear_tensor_cuda

@@ -53,7 +53,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -133,8 +133,10 @@ class ExllamaV2Linear(GPTQQuantLinear):
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        temp_dq = scratch_space.get_slice(self.temp_dq_size())
-        self.q_handle = self.ext_make_q_matrix(self.q_tensors, temp_dq)
+        # No dense reconstruction buffer is attached to the handle: the
+        # quantized kernel decodes inside its launch, and the row-count
+        # fallback in the extension allocates a transient tensor per call.
+        self.q_handle = self.ext_make_q_matrix(self.q_tensors)
 
         super().post_init()
 
@@ -151,13 +153,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
             return self.empty_linear_output(x)
 
         x_dtype = x.dtype
-        if x_dtype != torch.float16:
-            # log.warn.once(
-            #     f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            # )
-
-            x = x.to(dtype=torch.float16)
-
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.in_features:
@@ -175,7 +170,13 @@ class ExllamaV2Linear(GPTQQuantLinear):
         return out.to(dtype=x_dtype)
 
     def temp_dq_size(self):
-        return self.in_features * self.out_features * 2 + 128
+        """Bytes of retained dense-weight scratch: zero by design.
+
+        The kernel never keeps a reconstructed FP16 weight. The row-count
+        fallback in the extension allocates a transient tensor per call, so no
+        dense buffer is attached to the handle or the model.
+        """
+        return 0
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
         return self.out_features * max_input_len * max_batch_size * 4 + 128
@@ -187,11 +188,11 @@ class ExllamaV2Linear(GPTQQuantLinear):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.view(-1, x.shape[-1])
-        output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
+        output = torch.empty((x.shape[0], q4_width), dtype=x.dtype, device=x.device)
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 
-    def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):
+    def ext_make_q_matrix(self, w: dict, key: str = None):
         """
         Create Q matrix
         """
@@ -211,7 +212,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     None,
                     None,
                     None,
-                    temp_dq,
                 )
         # GPTQ
         elif "qweight" in w:
@@ -237,7 +237,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     w["qzeros"],
                     w["scales"],
                     w["g_idx"].cpu(),
-                    temp_dq,
                 )
             # GPTQ without g_idx
             else:
@@ -251,7 +250,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     w["qzeros"],
                     w["scales"],
                     None,
-                    temp_dq,
                 )
         else:
             raise ValueError("q_weight not found in exllama v2 quantized weights")

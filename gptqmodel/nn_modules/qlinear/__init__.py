@@ -37,7 +37,22 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
-def _is_rocm_selector(device) -> bool:
+def _device_family(device: DEVICE | t.device):
+    """Map a concrete torch device onto its declared support family.
+
+    DEVICE declarations describe families, so a `torch.device("cuda:1")`
+    selector is checked as `DEVICE.CUDA`. Unknown device types fall back to
+    their raw string so the caller reports a mismatch instead of raising.
+    """
+    if isinstance(device, t.device):
+        try:
+            return DEVICE(device.type)
+        except ValueError:
+            return device.type
+    return device
+
+
+def _is_rocm_target(device) -> bool:
     """True when ``device`` names a ROCm (HIP) target on a ROCm host.
 
     ``DEVICE.ROCM`` is always a ROCm request.  A ``cuda``/``cuda:N`` device is
@@ -50,9 +65,7 @@ def _is_rocm_selector(device) -> bool:
         return False
     if device == DEVICE.ROCM:
         return True
-    if isinstance(device, t.device):
-        return device.type == "cuda"
-    return False
+    return isinstance(device, t.device) and device.type == "cuda"
 
 
 def input_rows(x: t.Tensor) -> int:
@@ -467,19 +480,25 @@ class BaseQuantLinear(nn.Module):
             try:
                 cls.validate_device(device)
             except NotImplementedError as exc:
+                # `validate_device` overrides raise for reasons that are not
+                # about the device family - compute capability, missing ROCm,
+                # a kernel image that only exists for one SM version. Replacing
+                # that with "does not support device" hides the only actionable
+                # part, so keep the original text.
                 e = f"{cls} does not support device: {device}"
-                # ``validate_device`` implementations that reject a device for a
-                # specific reason (ROCm, compute capability, ...) say so in their
-                # own message.  Keep that detail: it is what tells the user which
-                # portable backend to select instead.
-                detail = str(exc)
+                # A kernel-specific rejection (compute capability, a missing
+                # extension, ...) must keep its own text: it is what tells the
+                # user which portable backend to select instead.  The base
+                # family check only restates the sentence above, so it is
+                # dropped.
+                reason = str(exc).strip()
                 generic = (
                     f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: "
                     f"actual device = `{device}`"
                 )
-                if detail and detail != generic:
-                    e = f"{e} ({detail})"
-                elif _is_rocm_selector(device):
+                if reason and reason != generic:
+                    e = f"{e} ({reason})"
+                elif _is_rocm_target(device):
                     # A CUDA-only kernel rejecting a HIP target is the steady
                     # state on ROCm (Machete, W4A-NVFP4, native AWQ GEMV, ...).
                     # Say so, and point at the portable backend family instead of
@@ -572,18 +591,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_device(cls, device: DEVICE | t.device):
-        # DEVICE declarations describe support families.  Keep concrete
-        # torch.device values intact for specialized kernels, while mapping
-        # them to a family for this common declaration check.
-        if isinstance(device, t.device):
-            try:
-                family = DEVICE(device.type)
-            except ValueError:
-                family = device.type
-        else:
-            family = device
-
-        if family not in cls.SUPPORTS_DEVICES:
+        if _device_family(device) not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
     # use optimize so we don't override native module.compile()
@@ -1228,9 +1236,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         g_idx = g_idx.to("cpu")
         self.register_buffer("g_idx", g_idx)
 
-        # ---------- ORIGINAL scales/zeros logic (unchanged) ----------
-        scales = scales.T.contiguous()  # [G, out]
-        zeros = zeros.T.contiguous()  # [G, out]
+        # ---------- affine parameters ----------
+        # Match the native/GPU packers: affine intermediates can overflow FP16
+        # even when the original and reconstructed weights are finite.
+        scales = scales.T.to(t.float32).contiguous()  # [G, out]
+        zeros = zeros.T.to(t.float32).contiguous()  # [G, out]
         scale_zeros = zeros * scales  # [G, out]
         num_groups = scales.shape[0]
 
@@ -1375,7 +1385,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)  # [out, blk]
+            int_block = t.round((Wblk.to(t.float32) + sz_blk_T) / s_blk_T)  # [out, blk]
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
@@ -1681,8 +1691,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
             self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
 
-            scales = scales.T.contiguous()
-            zeros = zeros.T.contiguous()
+            # Widen before multiplying/adding, not after a low-precision
+            # intermediate has already overflowed or rounded an endpoint.
+            W = W.to(t.float32)
+            scales = scales.T.to(t.float32).contiguous()
+            zeros = zeros.T.to(t.float32).contiguous()
             scale_zeros = zeros * scales
 
             # TODO why clone?

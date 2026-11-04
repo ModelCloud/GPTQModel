@@ -774,7 +774,7 @@ def apply_awq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+    use_atomic_add = not use_fp32_reduce and should_use_atomic_add_reduce(m=reshaped_x.size(0),
                                                   n=output_size_per_partition,
                                                   k=reshaped_x.size(1),
                                                   device=input.device,

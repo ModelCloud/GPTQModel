@@ -439,15 +439,17 @@ match the `IST-DASLab/RCO` reference numerically (`alpha` difference 0.0 at
 tolerance 0.05 and 1e-6), and its knapsack rounder is bit-identical to the
 reference solver at 16 and 112 groups.
 
-Because a staged GSQ checkpoint stores one width per decoder block, the search
-runs at block granularity. That keeps the budget it enforces equal to the
-budget a checkpoint can actually express; a per-projection search would have to
-be reduced to per-block widths afterwards, which moves the achieved budget.
+The legacy driver searches at block granularity using cross-entropy, W2/W3
+options and one Gumbel draw per update. The measurements below used that
+configuration, selected explicitly with `--preset legacy`. The default
+`paper` preset described below searches
+individual projections and materializes their selected packed tensors directly;
+it does not reduce projection decisions to one width per block.
 
 ```bash
 python scripts/gsq_paper/rco_allocate.py --model meta-llama/Llama-3.2-1B-Instruct \
     --corpus /models/datasets/gsq-bench/fineweb-paper \
-    --out /workspace/rco-2375 --target-bits 2.375 \
+    --out /workspace/rco-2375 --target-bits 2.375 --preset legacy \
     --arms '/workspace/w{bits}gsq4096/ckpt' --layers 16 --steps 200
 python scripts/gsq_paper/rco_materialize.py --model meta-llama/Llama-3.2-1B-Instruct \
     --assignment /workspace/rco-2375/assignment.json \
@@ -494,3 +496,182 @@ Two things remain untested and would be the next steps: a wider option set than
 {W2, W3} (the paper searches more widths, which gives the optimizer more room
 to differentiate blocks), and a larger model where per-layer sensitivity is
 actually heterogeneous.
+
+
+### Teacher-KL and per-projection allocation
+
+The default `paper` preset uses the RCO paper's LLM distillation objective,
+independent projection decisions and four Gumbel draws per update. It
+uses W2/W3/W4 staged arms and 200 steps. Explicit `--objective ce|kl`,
+`--grouping block|projection`, `--gumbel-samples`, and `--options` override its
+defaults. Use `--preset legacy` for cross-entropy, block decisions, W2/W3 arms
+and one Gumbel draw.
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/rco_allocate.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --corpus /workspace/fineweb-paper-llama31 \
+    --arms '/workspace/w{bits}-gsq/ckpt' \
+    --out /workspace/rco-kl-2375 --target-bits 2.375
+
+PYTHONPATH=. python scripts/gsq_paper/rco_materialize.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --assignment /workspace/rco-kl-2375/assignment.json \
+    --arms '/workspace/w{bits}-gsq/ckpt' --out /workspace/rco-kl-2375/model
+```
+
+Create all selected width arms first, from the same source model and group
+size. Use GPTQ-only staged arms to evaluate the paper's GPTQ-database setting,
+or GSQ-refined arms to evaluate allocation over those deployed candidates.
+The current staged arm format supports W2/W3/W4, not the paper's full W2-W8
+option set. Calibration still defaults to 64 validation sequences from the
+supplied corpus. This is a paper-style allocation configuration, not a claim
+of reproducing the paper's complete dataset, option set or measured results.
+
+The teacher is captured from the dense model before any candidate weights are
+installed. Its final hidden states are retained on the search device by default
+or temporarily cached on disk, and the unchanged output head reconstructs its
+distributions. KL is averaged over all calibration token positions, including
+the last next-token context. Uneven final batches receive their token-count
+weight. `--kl-chunk-tokens` (default 128) bounds vocabulary intermediates using
+activation checkpointing; the cache stores hidden states rather than the much
+larger full-vocabulary logits. The temporary cache is removed on normal
+completion and handled exceptions. Decoder activations and the candidate weight
+database still consume memory; this option does not bound their size.
+
+`assignment.json` records the effective objective, grouping, sample count,
+calibration size, group size, per-projection widths and measured code bits per
+quantized projection parameter. The budget excludes scale storage and the
+unquantized embedding/head. The existing 500-tick DP grid is retained, so the
+continuous expected-budget equality does not imply an exactly equal decoded
+code budget. Materialization preserves each selected projection's packed codes
+and exports its width through `dynamic`; legacy block assignment files remain
+accepted. Arm block indices, group sizes and shared non-projection state are
+validated before combining tensors.
+
+Allocation uses the validation split for optimization. Evaluate quality on a
+separate test corpus or the zero-shot suite; NLL on that same validation split
+is a search diagnostic. No full-model quality gain is established by the
+numerical and tiny-model round-trip tests for this configuration.
+
+### Apple Silicon backend
+
+On macOS on Apple silicon, the allocation search defaults to the native MLX
+implementation in `gptqmodel/quantization/rco_mlx.py`. Install its optional
+runtime with `pip install "gptqmodel[mlx]"`. `--backend auto` selects MLX when
+that package tree is importable and otherwise falls back to Torch. Select a
+backend explicitly with `--backend mlx` or `--backend torch`; explicit MLX
+selection fails rather than silently changing backends. `assignment.json`
+records the backend that actually ran the search. The MLX path supports dense
+Llama and Qwen3 decoder layouts; `qwen3_moe` is rejected because its expert
+routing is outside this interpolation adapter. Candidate interpolation, teacher KL,
+straight-through Gumbel gradients, Adam recurrence, and momentum
+transport run in MLX on Metal. The discrete budget DP runs in NumPy on the
+host. Search gradients are evaluated and accumulated one batch and draw at a time,
+and KL vocabulary chunks are checkpointed for backward recomputation.
+The CLI seeds MLX before search for reproducible runs. The rank-one retraction solves a scalar
+bisection on host NumPy after one transfer of the small control tensors; this
+avoids synchronizing Metal for every bisection probe. The Torch path remains
+available on CUDA and other platforms and is the implementation oracle.
+
+`--teacher-cache device` is the default. It retains detached dense-teacher
+hidden states in unified memory during the search; `--teacher-cache disk`
+streams those states from a temporary directory instead. Hidden-state storage
+is approximately sequences × tokens × hidden width × bytes per element:
+64 sequences of 2048 tokens at width 4096 in BF16 require 1 GiB. Use disk mode
+when these states and the remaining search working set do not fit. Teacher scratch is released when the allocation script exits. Dense candidate
+weights and teacher hidden states are offline search scratch only: the search
+neither loads nor modifies a packed inference checkpoint.
+
+The M5 Ultra has 256 GiB of unified memory and 1.2 TB/s memory bandwidth. It has
+no HBM. The active RCO target is its Metal GPU: MLX executes candidate replay,
+teacher KL, loss, and backward on Metal, while the CPU host handles only the
+small discrete budget DP and scalar retraction steps. Torch MPS and CUDA remain
+the explicit fallback and numerical implementation oracle.
+
+ANE/NPU is outside the maintained GPTQ/GSQ-RCO pipeline. The historical
+qualification failed its accuracy and performance gates, so ANE has no backend,
+dispatch path, or benchmark target here. Differentiable student, loss, and
+backward work remains on the GPU.
+
+A reproducible warm benchmark compares the same teacher-cache policy, model,
+and token IDs with a deterministic Gumbel seed in each backend on Torch MPS and
+MLX Metal. Backend RNGs differ, so equal seeds do not produce identical
+Gumbel draws; this is a timing comparison, not an accuracy comparison:
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/bench_rco_backends.py \
+    --model /path/to/SmolLM2-135M \
+    --tokens 16 --steps 3 --draws 2 --warmup 2 --repeats 7 \
+    --mlx-source /path/to/mlx \
+    --mlx-lm-source /path/to/mlx-lm \
+    --json-out /tmp/rco-backends.json
+```
+
+The benchmark synchronizes Torch MPS and evaluates MLX before stopping the
+timer. It records all samples, the median, model and search dimensions, dtype,
+Python/Torch/MLX versions, and optional source revisions. On 2026-11-02 it used
+SmolLM2-135M's 30 `mlp.down_proj` modules with 16 tokens, three steps, two draws,
+two warmups, and seven timed repetitions:
+
+| Search backend | Median | Seconds/step |
+| --- | ---: | ---: |
+| Torch 2.15.0, MPS, BF16 | 0.2503 s | 0.0834 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.0854 s** | **0.0285** |
+
+After the review fixes, MLX was 2.93x faster for this search-shaped workload. This is a tiny-model
+component benchmark, not an end-to-end quantization speedup or a claim about
+all model sizes. A final optimization moves only the scalar retraction
+bisection to host NumPy after one transfer of the small control tensors. The
+model replay, teacher KL, Gumbel gradient, and optimizer remain in MLX. This
+avoids a Metal synchronization for every bisection probe; the independent
+Torch retraction test requires the same budget and retracted logits. Compiling
+the full MLX value-and-gradient step was also measured, but was slower than the
+eager recurrence and is not enabled. The inspected upstream source checkouts were MLX main
+`c69303b00f5f61860436e832f23fa8c34b96f93a` and MLX-LM main
+`736ab0d8c1d0edc79c3d798044fe6904e2fa23be`. An official MLX
+`frontend-macOS-ARM64-py3.13` artifact reporting 0.32.5 was tested but failed
+to import with a missing `mlx::core::cu::get_arch_list()` symbol, so it is not
+part of this result. MLX main could not replace the release runtime in this
+environment because only Apple Command Line Tools are installed and the Metal
+compiler is absent.
+
+#### Qwen3 dense-decoder qualification
+
+The closest official dense checkpoint to the requested 0.8B Qwen3 size is
+`Qwen/Qwen3-0.6B` at revision
+`c1899de289a04d12100db370d81485cdf75e47ca`. It has 28 dense decoder layers,
+hidden width 1024 and MLP width 3072. The separately named Qwen3.5-0.8B uses a
+different hybrid architecture and was not substituted for this test.
+
+A reduced-budget pipeline run created W2/W3/W4 GSQ arms from two training
+sequences, two GPTQ initialization sequences and one validation sequence, each
+128 tokens. Every arm trained all 28 blocks on MPS with one epoch, one Q/K step,
+batch and microbatch size one. Quantization completed in 58.9 s, 60.3 s and
+57.5 s for W2, W3 and W4. These runs qualify architecture and checkpoint
+compatibility only; the tiny training budget does not establish quantization
+quality.
+
+The paper allocation preset then ran against those arms with teacher KL,
+per-projection decisions, four Gumbel draws and W2/W3/W4 candidates. With one
+128-token calibration sequence and eight steps, the native MLX search completed
+in 2.89 s and produced a 196-projection assignment. The discrete decoder chose
+162 W2 projections and 34 W3 projections, for 2.1548 code bits per quantized
+projection parameter under a 2.625 target. This underspend is expected from the
+current score-maximizing inequality constraint when the search strongly prefers
+the lower width; it is not a quality result. Materialization restored all
+selected widths with zero reload mismatches and a finite reload loss.
+
+A warm backend comparison used all 28 Qwen3 `mlp.down_proj` decisions, 16
+tokens, three steps, the paper's four Gumbel draws, two warmups and seven timed
+repetitions:
+
+| Search backend | Median | Seconds/step |
+| --- | ---: | ---: |
+| Torch 2.15.0, MPS, BF16 | 0.5239 s | 0.1746 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.2592 s** | **0.0864** |
+
+MLX was 2.02x faster for this Qwen3 search-component workload. Backend RNG
+streams differ, so the final losses are not a cross-backend accuracy
+comparison. The component benchmark does not measure GSQ training or complete
+quantization time.

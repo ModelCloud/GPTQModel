@@ -51,7 +51,8 @@ def build_case(in_features=256, out_features=128, group_size=128, dtype=torch.fl
 
 def oracle(module, activation, weight, channels):
     flattened = activation.reshape(-1, module.in_features)
-    scale = flattened.abs().amax(-1, keepdim=True).div(127).float()
+    scale = flattened.float().abs().amax(-1, keepdim=True).div(127)
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
     quantized = (flattened / scale).round().clamp(-128, 127).to(torch.int8)
     accum = quantized.float() @ weight
     raw = accum * scale * channels
@@ -77,7 +78,7 @@ def test_packed_qqq_oracle(packed_kernel, monkeypatch, dtype, group_size, tokens
         output = module(activation)
     assert output.dtype == dtype
     torch.testing.assert_close(output, visible, rtol=0, atol=0)
-    scale = activation.abs().amax(-1, keepdim=True).div(127).float()
+    scale = activation.float().abs().amax(-1, keepdim=True).div(127)
     torch.testing.assert_close(actual_accum * scale * channels, raw, rtol=0, atol=0)
     monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: None)
     with torch.inference_mode():

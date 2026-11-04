@@ -36,8 +36,6 @@ public:
     uint32_t* cuda_gptq_qzeros = NULL;
     half* cuda_gptq_scales = NULL;
 
-    half* temp_dq;
-
     bool failed;
 
     QMatrix
@@ -56,9 +54,7 @@ public:
 
         uint32_t* _gptq_qzeros,
         half* _gptq_scales,
-        uint32_t* _gptq_g_idx,
-
-        half* _temp_dq
+        uint32_t* _gptq_g_idx
     );
 
     ~QMatrix();

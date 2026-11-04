@@ -4629,6 +4629,18 @@ class GPTQConfig(PreProcessorConfig):
             )
             self.act_group_aware = False
 
+        # act ordering is expressed as a permutation of the input channels within a
+        # quantization group, so it has nothing to act on when a single group spans
+        # the whole input (group_size <= 0). Older builds rejected this combination
+        # at quantization time, which made group_size=-1 unusable with the default
+        # config even though the flag is a no-op there.
+        if self.act_group_aware and int(self.group_size or -1) <= 0:
+            log.warn(
+                f"QuantizeConfig: `act_group_aware` has no effect with `group_size={self.group_size}`; "
+                "disabling it. Set `act_group_aware=False` explicitly to silence this warning."
+            )
+            self.act_group_aware = False
+
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         if self.gptaq is None:
             meta_payload["gptaq"] = None

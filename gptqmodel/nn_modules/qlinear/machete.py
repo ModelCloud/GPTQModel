@@ -31,6 +31,7 @@ from ...utils.machete import (
 )
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
+from ...utils.packing_math import scaled_zero_offset
 from ...utils.rocm import IS_ROCM
 
 
@@ -226,6 +227,13 @@ class MacheteLinear(GPTQQuantLinear):
     def post_init(self):
         device = self.qweight.device
 
+        if not self.sym:
+            qzeros_unpacked = unpack_quantized_values_into_int32(
+                self.qzeros.data, self.weight_type, packed_dim=1,
+            )
+            # Validate before overwriting the checkpoint's weight layout.
+            qzeros_fp = scaled_zero_offset(self.scales, qzeros_unpacked)
+
         perm = None
         if self.desc_act:
             perm = torch.argsort(self.g_idx).to(torch.int32)
@@ -277,12 +285,6 @@ class MacheteLinear(GPTQQuantLinear):
             )
             self.has_zero_points = False
         else:
-            qzeros_unpacked = unpack_quantized_values_into_int32(
-                self.qzeros.data,
-                self.weight_type,
-                packed_dim=1,
-            )
-            qzeros_fp = (-1.0 * scales * qzeros_unpacked.to(scales.dtype)).contiguous()
             replace_parameter(
                 self,
                 "qzeros",
