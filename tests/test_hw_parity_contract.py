@@ -103,3 +103,30 @@ def test_paroquant_launch_table_is_per_family_and_row_banded():
     for tile in (small, medium, large):
         assert tile[3] in (4, 8)
     assert medium[3] == 4 and large[3] == 4
+
+
+def test_gguf_qk_table_is_ada_only_and_rdna4_falls_through():
+    """The GGUF Q4_K/Q5_K/Q6_K fixed tiles are keyed by qtype, not family.
+
+    They are the Ada (SM 8.9) path: every entry must be reachable through the
+    SM89 selector and must never fire on RDNA4/other capabilities, which keep
+    the kernel's own autotuned generic launch.
+    """
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    table = gguf_triton._GGUF_SM89_QK_SHAPES
+    assert table, "GGUF SM89 table is empty"
+    for qtype, bands in table.items():
+        for band, shapes in bands.items():
+            for (in_features, out_features), config in shapes.items():
+                rows = 1 if band == 1 else 8 if band == "mid" else 64
+                assert gguf_triton._select_gguf_qk_fixed_launch_config(
+                    qtype, capability=(8, 9), rows=rows,
+                    in_features=in_features, out_features=out_features,
+                ) == config
+                # RDNA4/other capability must fall through to the autotuner.
+                assert gguf_triton._select_gguf_qk_fixed_launch_config(
+                    qtype, capability=None, rows=rows,
+                    in_features=in_features, out_features=out_features,
+                ) is None

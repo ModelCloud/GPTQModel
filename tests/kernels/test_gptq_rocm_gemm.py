@@ -70,7 +70,10 @@ def _fake_rocm_device(monkeypatch, name):
         ("gfx1200", (32, 32, 256, 4, 2, 16, 17408)),
         ("gfx1201:sramecc+:xnack-", (32, 32, 256, 4, 2, 16, 17408)),
         ("gfx1250", (32, 32, 256, 4, 2, 16, 17408)),
-        ("sm_89", None),
+        # Ada (RTX 4090) has its own measured tile and gate; it is not a gfx
+        # string, but the shared tuning-family vocabulary must route it here.
+        ("sm_89", (16, 16, 256, 4, 2, 16, 2048)),
+        ("sm_90", None),
         ("gfx9999", None),
     ],
 )
@@ -113,8 +116,12 @@ def test_rdna4_launch_is_measured_not_a_cdna_placeholder():
         assert launch_config(name) == rdna
 
 
-def test_gate_limits_reject_non_gfx_arch():
-    assert gate_limits("sm_89") == (0, 0)
+def test_gate_limits_reject_unregistered_arch():
+    # Ada is registered (see test_launch_config_table); everything else that is
+    # not an explicit sm_*/gfx* target must keep the fused gate disabled.
+    assert gate_limits("sm_89") == (16, 2048)
+    assert gate_limits("sm_80") == (0, 0)
+    assert gate_limits("sm_90") == (0, 0)
     assert gate_limits(None) == (0, 0)
     assert gate_limits("") == (0, 0)
 
@@ -171,7 +178,9 @@ def test_unregistered_arch_keeps_fused_path_disabled(monkeypatch):
         ("gfx1201:sramecc+", {"float16"}),
         ("gfx1250", {"float16"}),
         ("gfx942", set()),
-        ("sm_89", set()),
+        # Ada measured the fused small-M GEMM in both dtypes inside its gate.
+        ("sm_89", {"float16", "bfloat16"}),
+        ("sm_90", set()),
         ("gfx9999", set()),
     ],
 )
