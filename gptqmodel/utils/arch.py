@@ -26,13 +26,17 @@ import torch
 __all__ = [
     "arch_class",
     "clear_arch_cache",
+    "cuda_arch",
+    "cuda_capability",
     "gate_limits",
     "gemm_fused_dtypes",
+    "is_ada",
     "is_gfx950",
     "is_rdna4",
     "is_rocm_fused_arch",
     "normalize_arch",
     "rocm_arch",
+    "tuning_family",
     "wave_size",
 ]
 
@@ -73,11 +77,20 @@ _RDNA4_GEMM_DTYPES = frozenset({"float16"})
 _FUSED_ARCH_PREFIXES = ("gfx950", "gfx120", "gfx125")
 
 _ARCH_CACHE: dict[tuple[int, bool], str | None] = {}
+# CUDA compute capability is cached per device index for the same reason as
+# ``_ARCH_CACHE``: dispatch asks for it from the forward hot path.
+_CAPABILITY_CACHE: dict[int, tuple[int, int] | None] = {}
+
+# NVIDIA tuning families.  ``ada`` is the RTX 4090 / SM 8.9 class: it has
+# fourth-generation tensor cores and FP8 ``mma`` but predates Hopper's TMA and
+# warp-specialization, so it must never inherit an SM90+ launch table.
+_ADA_CAPABILITY = (8, 9)
 
 
 def clear_arch_cache() -> None:
     """Drop the cached architecture strings (used by tests and device hot-plug)."""
     _ARCH_CACHE.clear()
+    _CAPABILITY_CACHE.clear()
 
 
 def normalize_arch(name) -> str:
@@ -271,3 +284,98 @@ def gate_limits(device_or_arch=None) -> tuple[int, int]:
     if cls == "rdna4":
         return _RDNA4_GATE
     return _DISABLED_GATE
+
+
+def cuda_capability(device: torch.device | str | int | None = None) -> tuple[int, int] | None:
+    """Return the NVIDIA compute capability for ``device``, or ``None`` off CUDA.
+
+    On ROCm this returns ``None``: HIP reuses the ``cuda`` device namespace but
+    reports a numeric pair that has nothing to do with the GPU generation, so
+    AMD dispatch must go through :func:`rocm_arch` instead.
+    """
+
+    if torch.version.hip is not None:
+        return None
+    try:
+        index = _device_index(device)
+    except Exception:
+        return None
+    if index is None:
+        return None
+    if index in _CAPABILITY_CACHE:
+        return _CAPABILITY_CACHE[index]
+    try:
+        capability = tuple(int(part) for part in torch.cuda.get_device_capability(index))
+    except Exception:
+        capability = None
+    _CAPABILITY_CACHE[index] = capability
+    return capability
+
+
+def cuda_arch(device: torch.device | str | int | None = None) -> str | None:
+    """Return ``sm_89``/``sm_90``-style name for ``device``, or ``None`` off CUDA."""
+
+    capability = cuda_capability(device)
+    if capability is None:
+        return None
+    return "sm_" + str(capability[0]) + str(capability[1])
+
+
+def is_ada(device_or_arch=None) -> bool:
+    """True for the Ada / RTX 4090 class (SM 8.9), the CUDA tuning baseline.
+
+    Accepts a device, an ``sm_89`` string, or a raw ``(8, 9)`` capability.
+    """
+
+    if isinstance(device_or_arch, tuple):
+        return tuple(device_or_arch[:2]) == _ADA_CAPABILITY
+    if isinstance(device_or_arch, str):
+        return normalize_arch(device_or_arch) in ("sm_89", "sm89")
+    return cuda_capability(device_or_arch) == _ADA_CAPABILITY
+
+
+def tuning_family(device_or_arch=None) -> str:
+    """Return the dispatch/tuning family used by every launch-constant table.
+
+    The vocabulary is shared by the ROCm tables (``cdna4``/``rdna4``/``rdna3``)
+    and the NVIDIA tables (``ada`` = RTX 4090 / SM 8.9, ``hopper`` = SM 9.x,
+    ``blackwell`` = SM 10.x+).  A pipeline that ships a tuned table must have an
+    entry for **both** ``ada`` and ``rdna4``; unregistered targets return
+    ``other`` and keep their portable fallback.
+
+    ``device_or_arch`` may be a device, a ``gfx*``/``sm_*`` string, or a
+    ``(major, minor)`` capability tuple.
+    """
+
+    if torch.version.hip is not None or (
+        isinstance(device_or_arch, str) and device_or_arch.lower().startswith("gfx")
+    ):
+        return arch_class(device_or_arch)
+
+    if isinstance(device_or_arch, str) and device_or_arch.lower().startswith("sm_"):
+        arch = normalize_arch(device_or_arch)
+        # ``sm_103a`` and friends carry an architecture-suffix letter.
+        digits = arch.split("sm_", 1)[-1].rstrip("abcdefghijklmnopqrstuvwxyz")
+        if len(digits) < 2 or not digits.isdigit():
+            return "other"
+        return _cuda_family((int(digits[:-1]), int(digits[-1])))
+
+    capability = (
+        tuple(device_or_arch[:2])
+        if isinstance(device_or_arch, tuple)
+        else cuda_capability(device_or_arch)
+    )
+    if capability is None:
+        return "other"
+    return _cuda_family(capability)
+
+
+def _cuda_family(capability: tuple[int, int]) -> str:
+    major, minor = int(capability[0]), int(capability[1])
+    if (major, minor) == _ADA_CAPABILITY:
+        return "ada"
+    if major == 9:
+        return "hopper"
+    if major >= 10:
+        return "blackwell"
+    return "other"
