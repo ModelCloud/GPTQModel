@@ -48,6 +48,17 @@ Two pipelines do not fit that shape and have dedicated assertions instead:
   name, CU count, memory size, or non-FP16 dtype resolves to the generic
   policy instead.
 
+**bitsandbytes 4-bit** (`nn_modules/qlinear/bitsandbytes_triton.py`) does fit
+the table shape — `_BNB_GEMM_LAUNCH` carries an `ada` and an `rdna4` tile and
+the pipeline is registered in `TUNED_PIPELINES` — but its *default* is
+family-dependent rather than unconditional. On ROCm the fused Triton GEMM
+replaces the vendor HIP kernel for `M >= 16` (2.4x-6.3x on gfx1201). On Ada
+the vendor cuBLAS path wins on every shape tested, so the `ada` entry exists
+for the contract and for forced A/B runs behind `GPTQMODEL_BNB_TRITON=1`, not
+as the default. Below `M = 16` bitsandbytes' own GEMV is kept on both
+families. Parity here means *a measured tile exists and is gated*, not that
+every family ships it enabled.
+
 ## Pipeline status
 
 Per-pipeline status is tracked in `docs/rocm-rdna4.md` (RDNA4 side) and in the

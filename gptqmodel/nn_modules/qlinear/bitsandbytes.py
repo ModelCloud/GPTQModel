@@ -205,6 +205,19 @@ def _mlx_quantization_available() -> bool:
     return True
 
 
+@lru_cache(maxsize=1)
+def _triton_backend():
+    """Load the RDNA Triton 4-bit kernels lazily; ``None`` when unavailable."""
+
+    try:
+        from . import bitsandbytes_triton
+
+        return bitsandbytes_triton
+    except Exception as exc:  # pragma: no cover - optional acceleration
+        log.debug("bitsandbytes Triton kernels unavailable: %s", exc)
+        return None
+
+
 def _mlx_array_to_cpu_tensor(value) -> torch.Tensor:
     return torch.from_dlpack(value).cpu().contiguous()
 
@@ -834,6 +847,29 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
         if self.is_4bit:
             x_compute = x.to(compute_dtype)
+            # RDNA (and other tuned ROCm families) get a fused Triton GEMM for
+            # the row band where the vendor HIP kernel is 2.4x-6.3x slower.
+            # Below that band, and everywhere on CUDA/CPU, bitsandbytes stays.
+            triton_backend = _triton_backend()
+            if (
+                triton_backend is not None
+                and self.weight.device.type == "cuda"
+                and not self._cpu_packing_active
+                and triton_backend.should_use(
+                    self.weight.device,
+                    compute_dtype,
+                    x.numel() // self.in_features,
+                )
+            ):
+                quant_state = self._refresh_quant_state()
+                out = triton_backend.matmul_4bit(
+                    x_compute,
+                    self.weight,
+                    quant_state,
+                    bias=bias,
+                    out_dtype=input_dtype,
+                )
+                return out.to(input_dtype)
             if self._cpu_packing_active:
                 if not self._cpu_packing_supported(x, compute_dtype):
                     self._ensure_unpacked(refresh=True)
