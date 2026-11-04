@@ -35,6 +35,12 @@ from ...utils.swordfish import (
 
 log = setup_logger()
 
+SWORDFISH_ROCM_UNSUPPORTED = (
+    "Swordfish (BACKEND.SWORDFISH) is CUDA-only: it is a Blackwell CUTLASS "
+    "GEMM for NVIDIA tensor cores and has no HIP port. "
+    "Use BACKEND.GPTQ_TORCH / AWQ_GEMM_TRITON (or AUTO) on ROCm."
+)
+
 
 class SwordfishLinear(GPTQQuantLinear):
     # GPTQ sub-kernel of the shared Swordfish backend. ``BACKEND.SWORDFISH``
@@ -166,6 +172,11 @@ class SwordfishLinear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: the CUTLASS
+        # ``sm100``/``sm110`` GEMM only targets NVIDIA tensor cores and the
+        # extension cannot be built against HIP.
+        if IS_ROCM:
+            return False, NotImplementedError(SWORDFISH_ROCM_UNSUPPORTED)
         if not swordfish_extension_available():
             return False, ImportError(swordfish_extension_error())
         return True, None
@@ -523,6 +534,11 @@ class AwqSwordfishLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: the CUTLASS
+        # ``sm100``/``sm110`` GEMM only targets NVIDIA tensor cores and the
+        # extension cannot be built against HIP.
+        if IS_ROCM:
+            return False, NotImplementedError(SWORDFISH_ROCM_UNSUPPORTED)
         if not swordfish_extension_available():
             return False, ImportError(swordfish_extension_error())
         return True, None

@@ -24,6 +24,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -239,6 +240,12 @@ _BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 BITBLAS_INSTALL_HINT = (
     "bitblas is not installed or the version is incompatible. "
     f"Please install via `pip install bitblas>={MINIMUM_BITBLAS_VERSION}`."
+)
+
+BITBLAS_ROCM_UNSUPPORTED = (
+    "BitBLAS (BACKEND.GPTQ_BITBLAS / AWQ_BITBLAS) is CUDA-only: it emits "
+    "NVIDIA TensorCore code and has no ROCm backend. Use BACKEND.GPTQ_TORCH / "
+    "AWQ_GEMM_TRITON (or AUTO) on ROCm."
 )
 
 
@@ -600,6 +607,10 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # BitBLAS compiles TensorCore IR for NVIDIA targets; there is no ROCm
+        # backend, so report that instead of a misleading "not installed" hint.
+        if IS_ROCM:
+            return False, NotImplementedError(BITBLAS_ROCM_UNSUPPORTED)
         if not bitblas_available():
             return False, ValueError(BITBLAS_INSTALL_HINT)
 

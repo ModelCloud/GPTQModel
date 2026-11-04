@@ -49,7 +49,11 @@ def _require_gpu_arch(arch_name: str) -> None:
         ("gfx1201:sramecc+:xnack-", (512, 16, 4)),
         ("gfx1250", (512, 16, 4)),
         ("gfx942", (512, 8, 8)),
-        ("sm_89", (512, 8, 8)),
+        # Ada (RTX 4090) has its own measured entry: the 256-deep K tile wins
+        # on the 4090 for K >= 256.  ``None`` keeps the portable 512 default.
+        ("sm_89", (256, 8, 8)),
+        ((8, 9), (256, 8, 8)),
+        (None, (512, 8, 8)),
     ],
 )
 def test_gemv_launch_constants_are_module_level(arch_name, expected):
@@ -60,7 +64,7 @@ def test_gemv_launch_constants_are_module_level(arch_name, expected):
     assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == (512, 8, 8)
     cfg = launch_config(arch_name)
     assert (cfg.max_block_k, cfg.block_n, cfg.num_warps) == expected
-    if arch_name.startswith("gfx950"):
+    if isinstance(arch_name, str) and arch_name.startswith("gfx950"):
         assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == expected
 
 

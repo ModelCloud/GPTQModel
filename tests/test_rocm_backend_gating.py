@@ -117,17 +117,30 @@ def test_gguf_capability_probe_short_circuits_on_rocm(monkeypatch):
     assert gguf_triton_module._cuda_device_capability(torch.device("cuda:0")) is None
     assert not gguf_triton_module._CUDA_DEVICE_CAPABILITY_CACHE, "no capability may be cached on ROCm"
 
-def test_gguf_triton_is_cuda_only_and_refuses_rocm(monkeypatch):
-    assert gguf_triton_module.GGUFTritonKernel.SUPPORTS_DEVICES == [DEVICE.CUDA]
+def test_gguf_triton_declares_rocm_and_validates(monkeypatch):
+    # The fused GGUF Triton kernels are plain tl.load/tl.dot, and every NVIDIA
+    # capability specialization is already skipped on ROCm, so the kernel is
+    # usable there with the generic launch configs.
+    assert gguf_triton_module.GGUFTritonKernel.SUPPORTS_DEVICES == [DEVICE.CUDA, DEVICE.ROCM]
     monkeypatch.setattr(gguf_triton_module, "IS_ROCM", True)
     GGUFTritonKernel = gguf_triton_module.GGUFTritonKernel
     GGUFTritonKernel.cached_validate_once.cache_clear()
 
     ok, error = GGUFTritonKernel.validate_once()
 
-    assert ok is False
-    assert isinstance(error, NotImplementedError)
-    assert "GGUF_TORCH" in str(error)
+    assert ok is True
+    assert error is None
+
+
+def test_gguf_triton_rocm_forward_admits_hip_devices(monkeypatch):
+    # HIP reuses the "cuda" device namespace; the forward guard must refuse only
+    # genuinely non-GPU placements.
+    source = gguf_triton_module.GGUFTritonKernel._forward_triton.__doc__ or ""
+    import inspect
+
+    body = inspect.getsource(gguf_triton_module.GGUFTritonKernel._forward_triton)
+    assert 'x_flat.device.type != "cuda"' in body
+    assert "or IS_ROCM" not in body, "the ROCm forward guard must be gone"
 
 def test_vptq_cuda_declares_cuda_only():
     assert VPTQCudaLinear.SUPPORTS_DEVICES == [DEVICE.CUDA]
@@ -293,3 +306,76 @@ def test_qqq_quantize_actually_packs_modules_on_rocm(tmp_path):
         y_new = reloaded_layer(x)
     # fp16 output granularity: allow one ULP of the output magnitude.
     assert torch.allclose(y_ref.float(), y_new.float(), rtol=1e-3, atol=1e-3)
+
+
+def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
+    """Marlin/Machete/Swordfish/BitBLAS/W4A-NVFP4 stay unsupported on ROCm.
+
+    Explicit selection must fail with a message that names the portable
+    alternative instead of a bare "unsupported device"; nothing here claims a
+    ROCm kernel exists for these backends.
+    """
+
+    from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
+    from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+    from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+    from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+
+    cases = [
+        (MarlinLinear, "ROCm"),
+        (MacheteLinear, "CUDA-only"),
+        (SwordfishLinear, "CUDA-only"),
+        (BitblasLinear, "CUDA-only"),
+        (W4ANVFP4Linear, "CUDA-only"),
+    ]
+    for cls, needle in cases:
+        cached = getattr(cls, "cached_validate_once", None)
+        if cached is not None and hasattr(cached, "cache_clear"):
+            cached.cache_clear()
+        ok, error = cls.validate(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            in_features=4096,
+            out_features=4096,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
+            dynamic=None,
+            device=DEVICE.ROCM,
+            trainable=False,
+        )
+        assert ok is False, f"{cls.__name__} must not validate on ROCm"
+        message = str(error)
+        assert needle in message, f"{cls.__name__}: unhelpful message {message!r}"
+        assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES
+
+
+def test_auto_on_rocm_never_selects_a_cuda_only_backend(monkeypatch):
+    from gptqmodel.quantization import FORMAT, METHOD
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.importer import get_auto_backend_kernel_mapping
+
+    denied = {
+        "marlin",
+        "machete",
+        "swordfish",
+        "gptq_bitblas",
+        "awq_bitblas",
+        "gptq_w4a_nvfp4",
+    }
+    for method in (METHOD.GPTQ, METHOD.AWQ):
+        for fmt, table in get_auto_backend_kernel_mapping()[method].items():
+            if fmt not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                continue
+            for backend, cls in table.items():
+                if backend.value in denied:
+                    # The candidate list is filtered by SUPPORTS_DEVICES before
+                    # validation, so a CUDA-only kernel can never be reached on
+                    # ROCm even though it is registered at priority 100+.
+                    assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES, (
+                        f"{backend.value} would be considered on ROCm"
+                    )

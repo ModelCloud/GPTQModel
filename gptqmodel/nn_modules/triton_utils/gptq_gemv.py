@@ -39,6 +39,35 @@ wave64 ``num_warps=8`` (512 lanes).  The wider ``block_n`` with fewer warps is
 what wins at every K in the table above; the one measured exception is
 K=8192/N=2048, where ``num_warps=8`` was marginally faster (44.1 vs 45.6 us),
 so the shipped tile trades that single point for the rest.
+
+Ada (RTX 4090, SM 8.9) uses ``max_block_k=256, block_n=8, num_warps=8``.  It
+was selected from a sweep over ``block_k`` in {256, 512, 1024}, ``block_n`` in
+{4, 8, 16, 32} and ``num_warps`` in {4, 8} measured on one 4090 (torch
+2.15.0+cu132, Triton 3.9.0, 4-bit gs=128, FP16, single token, median of 80
+iterations with ``torch.cuda.synchronize`` around every launch, alternating
+hot and 256 MiB L2-flushed iterations).  ``block_k=256`` had the lowest
+worst-case regret of the tested tiles (hot max 1.079x / mean 1.017x of the
+per-shape best, L2-flushed max 1.252x / mean 1.083x).  Against the
+A100-derived default ``(512, 8, 8)`` it wins on the larger projections:
+
+======  =========  ======  ==========  ==========  ==========
+K       N           M       (256,8,8)   (512,8,8)   note
+======  =========  ======  ==========  ==========  ==========
+896     128         1       16.0/16.4   15.9/16.4   ~equal (hot/flushed us)
+896     1280        1       16.3/16.4   16.0/17.1   ~equal
+2048    1024        1       16.2/20.7   16.3/20.5   ~equal
+2048    2048        1       16.4/24.1   16.8/24.6   1.02x
+3584    3584        1       21.3/37.7   22.5/38.5   1.06x
+4096    4096        1       22.2/40.1   24.2/40.9   1.09x
+4096    11008       1       36.8/60.4   43.0/67.7   1.17x
+5120    5120        1       27.7/47.0   33.3/58.2   1.20x
+5120    12288       1       45.1/72.7   53.3/81.9   1.18x
+8192    2048        1       25.4/48.7   27.3/49.2   1.07x
+======  =========  ======  ==========  ==========  ==========
+
+A larger ``block_k`` (1024) with ``block_n=8`` is faster at a few large-N /
+small-K shapes (e.g. 8192x2048: 23.6/40.7 us) but its worst-case regret rises
+to 1.80x, so it is deliberately not shipped.
 """
 
 from typing import NamedTuple
@@ -47,7 +76,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ...utils.arch import arch_class, normalize_arch, rocm_arch
+from ...utils.arch import arch_class, normalize_arch, tuning_family
 
 
 class GemvLaunch(NamedTuple):
@@ -71,6 +100,10 @@ _GEMV_LAUNCH_CONFIGS: dict[str, GemvLaunch] = {
     # every other measured K.  See the module docstring table and
     # docs/rocm-rdna4.md.
     "rdna4": GemvLaunch(max_block_k=512, block_n=16, num_warps=4),
+    # Measured on RTX 4090 (SM 8.9).  ``block_k=256`` has the lowest
+    # worst-case regret of the tested tiles and beats the (512, 8, 8) default
+    # by 1.02x-1.20x on the large projections; see the module docstring table.
+    "ada": GemvLaunch(max_block_k=256, block_n=8, num_warps=8),
 }
 
 _DEFAULT_GEMV_LAUNCH = GemvLaunch(max_block_k=512, block_n=8, num_warps=8)
@@ -82,15 +115,30 @@ GEMV_NUM_WARPS = _DEFAULT_GEMV_LAUNCH.num_warps
 
 
 def launch_config(arch=None) -> GemvLaunch:
-    """Return the GEMV launch constants for an architecture string or device."""
+    """Return the GEMV launch constants for an architecture string or device.
 
-    if not isinstance(arch, str):
-        return _GEMV_LAUNCH_CONFIGS.get(arch_class(arch), _DEFAULT_GEMV_LAUNCH)
+    Resolves through the shared :func:`gptqmodel.utils.arch.tuning_family`
+    vocabulary, so a device, a ``gfx*``/``sm_*`` string, or a ``(major, minor)``
+    capability tuple all reach the ``cdna4``/``rdna4``/``ada`` entries.  Anything
+    unregistered keeps the A100-tested default (which equals the Ada values, but
+    stays a distinct default so an unmeasured GPU never inherits a tuned tile).
+    """
+
+    if arch is None:
+        # Explicit "no architecture information": keep the portable default
+        # rather than silently inheriting whatever device happens to be current.
+        return _DEFAULT_GEMV_LAUNCH
+    family = tuning_family(arch) if not isinstance(arch, str) else _family_from_str(arch)
+    return _GEMV_LAUNCH_CONFIGS.get(family, _DEFAULT_GEMV_LAUNCH)
+
+
+def _family_from_str(arch: str) -> str:
+    """Classify a string through the shared family vocabulary (keeps defaults)."""
 
     name = normalize_arch(arch)
-    if not name.startswith("gfx"):
-        return _DEFAULT_GEMV_LAUNCH
-    return _GEMV_LAUNCH_CONFIGS.get(arch_class(name), _DEFAULT_GEMV_LAUNCH)
+    if not name.startswith("gfx") and not name.startswith("sm_"):
+        return arch_class(name)
+    return tuning_family(name)
 
 
 def block_k_for(in_features: int, arch=None) -> int:
@@ -146,9 +194,8 @@ def gptq_gemv(x: torch.Tensor, qweight: torch.Tensor, scales: torch.Tensor,
               out_dtype: torch.dtype = None, bits: int = 4) -> torch.Tensor:
     in_features = x.shape[1]
     out_features = qweight.shape[1]
-    arch = rocm_arch(x.device)
-    cfg = launch_config(arch)
-    block_k = block_k_for(in_features, arch)
+    cfg = launch_config(x.device)
+    block_k = block_k_for(in_features, x.device)
     block_n = cfg.block_n
     output = torch.empty(
         (x.shape[0], out_features), device=x.device, dtype=x.dtype if out_dtype is None else out_dtype,

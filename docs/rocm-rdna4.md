@@ -48,15 +48,15 @@ table instead of a single module-level constant set.
 |---|---|---|---|---|
 | GPTQ Torch (fused GEMV / small-M GEMM / dequant) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 GEMV `block_n=16/num_warps=4`, GEMM `(32, 32)/num_warps=4`, gate `(16, 17408)`; `tl.dot` lowers to `v_wmma_f32_16x16x16_f16`; **fused small-M GEMM is FP16-only** (BF16 goes through dequantize + matmul), GEMV keeps both dtypes |
 | GPTQ Triton dequant (`triton_utils/dequant.py`) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 `x_block=2048/num_warps=4/num_stages=1` (74.5 us geomean vs the CDNA tile's 81.7 us on gfx1201). Output is bit-identical to the CDNA tile; the tile only changes the launch shape |
-| AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured | ✅ | portable Triton; capability-based dispatch removed for ROCm |
-| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ | ❌ | ❌ | native CUDA extension only (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`); hipcc rejects the sources (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask). Loading one on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`; use `FORMAT.GEMM` instead |
-| QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only: CUDA inline PTX that hipify cannot lower; AUTO selects `QQQTorchLinear` |
-| ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ | ✅ | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel |
-| GGUF | ✅ via `GGUF_TORCH` (`GGUF_TRITON` is CUDA-only) | ✅ | ✅ | AUTO selects the Torch path on ROCm |
+| AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured (per-device plan table) | ✅ (family table) | portable Triton; capability-based dispatch removed for ROCm. A HIP host reports a seven-field `device_identity` (the HIP arch is appended, `capability` is `None`), and the scheduler now has an exact-match RDNA4 rule set instead of always falling back to the generic tile. Measured 1.67x-10.01x faster than that generic policy at the 4090 rule shapes (`(M,N,K,G)` in the M<=128 band), FP16 only. See *AWQ GEMM scheduler on RDNA4* below |
+| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (explicit) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. Its `SUPPORTS_FORMATS` priority is `0`, so AUTO never picks it; select it explicitly. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path |
+| QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only and there is **no** Triton port (see *QQQ* below); AUTO selects `QQQTorchLinear` |
+| ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
+| GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
 | FP8 Torch | ✅ (family table) | ✅ measured | ✅ (family table) | `_scaled_mm` accepts `float8_e4m3fn`/`e5m2` and rejects the `fnuz` encodings on gfx1201; a rejected dtype is logged once and falls back to dequantize + matmul |
 | VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | |
 | EXL3 | ✅ `EXL3_TORCH` only | ✅ | ✅ | tensor-core GEMM tables are `nullptr` on ROCm; AUTO selects `EXL3_TORCH` |
-| Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | explicitly unsupported on ROCm; not optimized |
+| Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | deliberately unsupported: NVIDIA-only kernels (Marlin `mma.sync`/`cp.async` with tile permutes, Hopper/Blackwell CUTLASS for Machete/Swordfish, BitBLAS TensorCore IR, SM12.1 FP4 tensor cores for W4A-NVFP4) with no HIP lowering. None lists `DEVICE.ROCM`, so the AUTO candidate list filters them out before validation; an explicit selection fails with an actionable error naming the portable backend. See *Deliberately unsupported backends* below |
 
 ### hipBLASLt is present but untuned
 
@@ -106,6 +106,87 @@ is 5.4e-03 against a 7.2e-03 half-ULP (0.75 ULP). The fused ParoQuant rotation
 (`gptqmodel_ext/paroquant`) also loads and runs on gfx1201; its error versus an
 FP64 no-rounding oracle is smaller than the pure-Torch reference path's
 (FP16 3.7e-04 vs 4.4e-04 at K=1024, BF16 3.4e-03 vs 3.6e-03).
+
+### ParoQuant per-family launch table
+
+`quantization/paroquant/modules/triton/gemm.py` used to hardcode the CUDA tiles
+for every GPU: decode `(BLOCK_M=4, BLOCK_N=128, BLOCK_K=32, warps=4, stages=2)`
+and prefill `(32, 128, 32, warps=8, stages=4)`. Those are wave64/CDNA shapes;
+`num_warps=8` is 256 threads with a wave32 mapping on RDNA4, which is not the
+scheduling the tile was tuned for.
+
+It is now a per-`tuning_family` table with row bands (decode `M <= 8`,
+medium `M <= 64`, large above):
+
+| family | decode | prefills 9-64 rows | prefill > 64 rows |
+|---|---|---|---|
+| `rdna4` | `(4, 64, 64, 4, 1)` | `(32, 64, 64, 4, 2)` | `(64, 128, 64, 4, 2)` |
+| every other family | `(4, 128, 32, 4, 2)` (historical) | `(32, 128, 32, 8, 4)` (historical) | same |
+
+Only `rdna4` is retuned; `cdna4`/`ada`/`hopper`/`blackwell` keep the historical
+tile until each is measured. A latent bug was fixed at the same time:
+`block_size_k` is now clamped to `group_size` (`min(block_size_k, group_size)`),
+because a K tile that spans more than one quantization group multiplies the
+wrong scale into half of the tile (BLOCK_K=64 with group_size=32 gave 0.6-1.0
+relative error before the clamp).
+
+Measured on gfx1201, 4-bit, `group_size=128`, FP16, median of 21 iterations
+after 5 warm-ups, 256 MiB L2 flush before every iteration and CUDA events
+around the launch; new tile vs the historical tile:
+
+| M | K | N | new us | old us | speedup |
+|---|---|---|---|---|---|
+| 1 | 14336 | 4096 | 181.30 | 269.13 | 1.48x |
+| 4 | 4096 | 4096 | 77.72 | 102.18 | 1.31x |
+| 16 | 14336 | 4096 | 206.87 | 288.76 | 1.40x |
+| 64 | 14336 | 4096 | 222.37 | 325.10 | 1.46x |
+| 128 | 5120 | 8192 | 186.06 | 296.69 | 1.59x |
+| 1024 | 14336 | 4096 | 1680.99 | 2893.65 | 1.72x |
+
+The new tile is bit-identical to the old one for group sizes 32/64/128 in FP16
+and BF16 (the tile only changes which scale each lane loads), and against an
+FP64 oracle FP16 stays at 4.99e-04 max relative error.
+
+### QQQ has no Triton port (deliberate)
+
+`QQQLinear` is a Marlin-derived W4A8 kernel (`gptqmodel_ext/qqq/qqq_gemm.cu`,
+1122 lines) whose inner loop is CUDA inline PTX: `cp.async.{cg,ca}` pipeline
+stages, `mma.sync.aligned.m16n8k16.row.col.satfinite.s32.s8.s8.s32`,
+`ldmatrix.sync.aligned.m8n8.x2`, `__cvta_generic_to_shared`, `cvt.rn.f16.f32`
+and `ld.global.acquire.gpu` for the split-K workspace lock. hipcc cannot lower
+any of that, and a Triton rewrite would first have to reimplement the packed
+format itself: the Marlin tile permutation `_perm`/`_perm_i`, the two
+`_scale_perm*` permutations, the `(in_features/16, out_features*2)` int32
+layout, the per-token INT8 `dynamic_quant` and the FP32 `s_channel`/FP16
+`s_group` rescale. That is a new kernel plus a new logistic-quantization
+contract, not a port, so it is **not** attempted here.
+
+`AUTO` on ROCm selects the portable `QQQTorchLinear` (the same class the CPU
+path uses) and `QQQLinear` rejects a HIP host in `validate_once()` without
+attempting the ~18 s JIT build. `QQQ_ROCM_UNSUPPORTED` states this.
+
+### Deliberately unsupported backends
+
+Marlin, Machete, Swordfish, BitBLAS and W4A-NVFP4 are **not** ported:
+
+| Backend | Why not |
+|---|---|
+| Marlin (`GPTQ Marlin`/`AWQ Marlin`) | CUDA `mma.sync`/`cp.async`/`ldmatrix` with Marlin tile permutes and a split-K workspace protocol; the same reason QQQ is not portable |
+| Machete | Hopper-only CUTLASS (SM90) GEMM; no HIP target in the vendored sources |
+| Swordfish | Blackwell (SM100/SM110) CUTLASS w4a16/w8a16 GEMM |
+| BitBLAS | emits NVIDIA TensorCore IR and compiles CUDA modules; no ROCm backend |
+| W4A-NVFP4 | block-scaled FP4 tensor cores, SM12.1 only; gfx1201 has no FP4 MMA |
+
+None of them lists `DEVICE.ROCM`, so `get_auto_backend_kernel_mapping()`'s
+candidate list is filtered by `SUPPORTS_DEVICES` before validation and `AUTO`
+can never reach them (they are registered at priority 100+ for NVIDIA, which
+does not matter on ROCm). An explicit selection fails with a message that names
+the portable alternative: `Marlin kernel is not supported on ROCm.`,
+`Swordfish (BACKEND.SWORDFISH) is CUDA-only: ... Use BACKEND.GPTQ_TORCH /
+AWQ_GEMM_TRITON (or AUTO) on ROCm.`, the equivalent Machete/BitBLAS text, and
+for any other CUDA-only kernel
+`... is CUDA-only and does not run on ROCm; select a portable *Torch or
+*Triton backend for this quantization method instead`.
 
 ## Measured RDNA4 numbers (gfx1201, R9700)
 
@@ -201,6 +282,169 @@ kernel limitation, but that sweep crashed the GPU (`HSA_STATUS_ERROR_MEMORY_FAUL
 and is not a trustworthy basis for shipping a second launch table; retuning BF16
 on RDNA4 is left as future work.
 
+Re-measured on 2026-11-04 at the shipped `(32, 32)` tile, 4-bit gs=128, M in
+{2, 8, 16}, median of 21 iterations after 5 warm-ups with a 256 MiB L2 flush and
+CUDA events (`scripts/benchmark_rdna4_inference.py` harness, BF16 module vs an
+explicit `dequantize_weight() + matmul`), the gate still holds for BF16:
+
+| K | N | FP16 | BF16 |
+|---|---|---|---|
+| 2048 | 2048 | 0.65x | 0.56-0.58x |
+| 4096 | 4096 | 1.31-1.37x | 1.08-1.13x |
+| 5120 | 8192 | 1.53-1.63x | 1.19-1.33x |
+| 8192 | 2048 | 0.98-1.07x | 0.77-0.79x |
+
+BF16 is never the larger win and loses outright at 2048x2048 and 8192x2048, so
+`{float16}` stays the RDNA4 `gemm_fused_dtypes()` value. The programme-covered
+shapes are unchanged: `(16, 17408)` gate, `(32, 32, 256, 4, 2)` tile, `(512,
+block_n=16, 4)` GEMV.
+
+Note for `(K=8192, N=2048)`: FP16 fused is ~1.0x, i.e. the bottom edge of the
+gate's measured range. It is left enabled because it is not a regression, but it
+is the shape to re-check if the tile ever changes.
+
+### AWQ GEMV Triton (decode, M == 1)
+
+`BACKEND.AWQ_GEMV_TRITON` (`quantization/awq/modules/triton/gemv.py`) consumes the
+stored `FORMAT.GEMV` layout unchanged: `qweight [N, K/8]` int32 with nibble `i`
+of word `w` addressing input column `w*8+i` (plain order, **not** the
+`FORMAT.GEMM` `[0,2,4,6,1,3,5,7]` interleave), `qzeros [N, ceil(groups/8)]`
+padded to a word, `scales [N, padded_groups]` FP16. The kernel expands the
+nibbles in registers, accumulates in FP32 and writes `output.dtype ==
+input.dtype`; `BLOCK_K` is clamped to `group_size` so a tile never spans two
+groups.
+
+Numerics, real `AwqGEMVTritonLinear` modules against an independent FP64 oracle
+that unpacks `qweight`/`qzeros` itself (not by calling the kernel):
+
+| Check | Result |
+|---|---|
+| FP16 max relative error vs FP64 truth | <= 4.5e-04 (2e-3 budget) |
+| BF16 | within 1.25 ULP of the once-rounded truth |
+| output dtype | equals input dtype in both dtypes and all row counts |
+| deterministic | first forward bit-identical to repeated forwards |
+| storage | `qweight`/`qzeros` stay int32 and byte-identical to the native pack; no dense cache |
+
+Measured on gfx1201, M=1, FP16, 4-bit, `group_size=128`, median of 41
+iterations after 20 warm-ups, 256 MiB L2 flush before every timed call and CUDA
+events around each launch. Every column is a real module forward
+(`AwqGEMVTritonLinear` vs the shipped `AwqGEMMTritonLinear`), so the ~15 us of
+Python launch overhead each path pays is included; "split" is this package's own
+dequantize-to-dense + `torch.matmul` from the same packed buffers:
+
+| K | N | GEMV us | GEMM us | split us | vs GEMM | vs split |
+|---|---|---|---|---|---|---|
+| 2048 | 2048 | 68.0 | 93.5 | 448.6 | 1.38x | 6.6x |
+| 4096 | 4096 | 111.8 | 117.1 | 2134.0 | 1.05x | 19.1x |
+| 5120 | 8192 | 170.2 | 165.1 | 5222.8 | 0.97x | 30.7x |
+| 14336 | 4096 | 248.4 | 200.5 | 7286.3 | 0.81x | 29.3x |
+| 4096 | 11008 | 186.0 | 175.6 | 5593.1 | 0.94x | 30.1x |
+
+The 6.6-30.7x gain is over the dequantize + matmul floor this fused kernel
+replaces. Against the *shipped* `FORMAT.GEMM` Triton kernel at M==1 the two are
+at parity (0.81-1.38x, i.e. within run-to-run noise on the large shapes): the
+GEMV path is a portability/correctness fix for ROCm, not a decode speedup over
+`FORMAT.GEMM`, and the matrix row above is worded that way.
+
+Launch entry: `_AWQ_GEMV_LAUNCH_CONFIGS["rdna4"] = AwqGemvLaunch(block_n=64,
+max_block_k=512, num_warps=4, num_stages=1)`; other families use the same
+default. `SUPPORTS_FORMATS[FORMAT.GEMV] = 0` keeps it out of AUTO on every
+platform.
+
+### AWQ GEMM scheduler on RDNA4
+
+`quantization/awq/modules/triton/scheduler.py` had a measured rule table only
+for the RTX 4090. Its `_builtin_plan` also returned early whenever `identity[6]`
+was set - which is *always* on ROCm - so every RDNA4 shape fell through to the
+generic Triton tile (`BLOCK_M/N/K = 32/32/32`, `split_k_iters=8`), a wave64/CDNA
+shape that pays a split-K atomic-reduction pass on wave32.
+
+A HIP host reports a **seven**-field `device_identity`: the six CUDA fields plus
+the normalized `gcnArchName` appended last, with `capability = None`
+(`torch.cuda.get_device_capability` is unrelated to the GPU on ROCm). On the
+reference R9700 the tuple is
+
+```
+('cuda', 0, 'AMD Radeon AI PRO R9700', None, 32, 34208743424, 'gfx1201')
+```
+
+The new `_VERIFIED_RDNA4_PROFILE` therefore matches `(name, gfx arch, compute
+units, total_memory)` from indices 2/6/4/5 exactly - a different gfx arch, board
+name, CU count or memory size does not inherit the tiles. The CUDA 4090 branch is
+unchanged and is reached only by six-field CUDA identities, so neither profile
+can match the other's device.
+
+Measured on gfx1201, 4-bit AWQ `FORMAT.GEMM`, group_size 128, FP16,
+`mode="auto"`, median of 41 iterations after 20 warm-ups, 256 MiB L2 flush
+before every timed call and CUDA events around each launch. "generic" is the
+`legacy_plan` tile the device used before this table:
+
+| (M, N, K, G) | tile (BM, BN, BK, split, warps, stages) | us | generic us | speedup |
+|---|---|---|---|---|
+| (32, 8192, 2048, 128) | (32, 64, 64, 1, 4, 2) | 89.3 | 348.8 | 3.90x |
+| (64, 8192, 2048, 128) | (64, 64, 64, 1, 4, 2) | 107.9 | 654.7 | 6.07x |
+| (64, 4096, 4096, 128) | (32, 64, 64, 1, 4, 4) | 105.9 | 366.8 | 3.46x |
+| (64, 2048, 8192, 128) | (16, 64, 64, 1, 4, 2) | 141.1 | 235.2 | 1.67x |
+| (127, 8192, 2048, 128) | (64, 128, 64, 1, 4, 2) | 121.9 | 1220.7 | 10.01x |
+| (128, 2048, 2048, 128) | (32, 64, 64, 1, 4, 4) | 78.0 | 339.6 | 4.35x |
+| (128, 8192, 2048, 128) | (64, 128, 64, 1, 4, 2) | 123.4 | 1228.7 | 9.96x |
+| (128, 4096, 4096, 128) | (64, 128, 64, 1, 4, 4) | 139.8 | 679.6 | 4.86x |
+
+Every swept shape won, so no shape is left to the generic policy;
+`split_k_iters=1` won everywhere and `num_warps=4` is 128 lanes on wave32. The
+table is FP16-only because `awq_gemm_triton` rejects non-FP16 input and scales;
+`_builtin_plan` enforces the dtype triple, so a BF16 call keeps the generic
+tile. Independently checked against an FP64 Torch oracle that unpacks the packed
+`qweight`/`qzeros` itself: max relative error 3.8e-04..4.6e-04 (budget 2e-3),
+output dtype preserved, repeated forwards bit-identical, and no dense
+dequantized weight is materialized.
+
+`tests/kernels/test_awq_rdna4_plan.py` pins the guard without a GPU: the exact
+profile matches, a wrong arch/name/CU/memory does not, non-FP16 returns `None`,
+the CUDA 4090 profile still matches only a CUDA-shaped identity, and a
+cross-shaped lookalike matches neither.
+
+
+### GGUF Triton on ROCm
+
+`GGUFTritonKernel` declares `DEVICE.ROCM`. `_cuda_device_capability()` returns
+`None` on a HIP device, so the SM80/SM89 layout and fixed-launch selectors all
+answer "no specialization" and the generic configs are used. The kernels only
+use `tl.load`/`tl.dot`/`tl.store`, and the retained cache holds reshaped packed
+metadata (sign bytes / `qs` / `qh` / scales / min) keyed by
+`qweight.data_ptr()`; no dequantized weight is stored.
+
+Measured on gfx1201, FP16, median of 21 iterations after 5 warm-ups with a
+256 MiB L2 flush and CUDA events; `GGUFTorchLinear` and its own
+`_forward_fused_k` decode path are the references:
+
+| qtype | K | N | M | Triton us | Torch us | fused-K us | speedup vs Torch |
+|---|---|---|---|---|---|---|---|
+| Q4_K | 4096 | 4096 | 1 | 119.10 | 891.42 | 901.62 | 7.57x |
+| Q4_K | 4096 | 4096 | 16 | 118.34 | 847.14 | 896.25 | 7.57x |
+| Q4_K | 4096 | 4096 | 128 | 188.53 | 918.71 | 947.63 | 5.03x |
+| Q4_K | 4096 | 11008 | 1 | 155.61 | 2313.50 | 2037.15 | 13.09x |
+| Q4_K | 4096 | 11008 | 16 | 161.45 | 2048.70 | 2037.36 | 12.62x |
+| Q4_K | 4096 | 11008 | 128 | 379.36 | 2351.67 | 2114.07 | 5.57x |
+| Q6_K | 4096 | 4096 | 1 | 163.14 | 1126.65 | 1194.93 | 7.32x |
+| Q6_K | 4096 | 4096 | 128 | 232.89 | 1197.67 | 1250.42 | 5.37x |
+| Q5_K | 8192 | 2048 | 1 | 164.42 | 1149.65 | 1883.04 | 11.45x |
+| Q5_K | 8192 | 2048 | 128 | 247.03 | 1169.68 | 1778.08 | 7.20x |
+| Q4_K | 14336 | 4096 | 1 | 256.29 | 3040.09 | 3182.40 | 12.42x |
+| Q4_K | 14336 | 4096 | 128 | 504.44 | 3654.16 | 3277.17 | 6.50x |
+
+Smaller projections behave the same way (Q4_K 512x512 M=1 60.61 vs 293.25 us,
+Q6_K 512x512 66.43 vs 242.06 us, Q1_0 1024x512 63.13 vs 115.51 us), so the win
+is not shape-specific. Triton is faster at decode *and* prefill, which is why
+AUTO (priority 45 vs 15) resolves to `GGUFTritonKernel` on ROCm; selecting
+`BACKEND.GGUF_TORCH` still works.
+
+Numerics against the independent numpy GGUF block dequantizer
+(`_dequantize_gguf_tensor_numpy`): FP16 max relative error 2.3e-04 to 9.0e-04;
+BF16 is within 1.25 ULP of the once-rounded truth (the raw relative error is
+2.0e-03-3.4e-03 because BF16 output rounding dominates). Output dtype always
+equals the input dtype and repeated forwards are bit-identical.
+
 ## Known limitations
 
 - **EXL3:** the tensor-core GEMM implementation has no ROCm kernel (all entries
@@ -208,7 +452,14 @@ on RDNA4 is left as future work.
   EXL3 on ROCm uses `EXL3_TORCH`; AUTO now does the same instead of selecting
   `EXL3_EXLLAMA_V3`.
 - **hipBLASLt:** libraries are shipped but not tuned for RDNA4.
-- **Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4:** no ROCm support.
+- **Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4:** no ROCm support and
+  deliberately not ported; see *Deliberately unsupported backends* for the
+  per-backend reason. AUTO filters all of them out and an explicit selection
+  fails with a message naming the portable backend.
+- **QQQ:** `QQQLinear` (W4A8, CUDA inline PTX) has no Triton port; AUTO uses
+  `QQQTorchLinear`. See *QQQ has no Triton port*.
+- **AWQ GEMV:** the native `FORMAT.GEMV` extension is CUDA-only. On ROCm use
+  `BACKEND.AWQ_GEMV_TRITON` (explicit; decode-shaped M==1) or `FORMAT.GEMM`.
 - `tl.dot` may silently lower to FMA instead of WMMA on AMD targets
   (`get_min_dot_size()` returns `(1, 1, 1)`), so a fused kernel's speed must be
   proven from its `.amdgcn` (`v_wmma`) and measured timings, never assumed.

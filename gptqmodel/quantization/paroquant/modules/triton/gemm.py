@@ -23,12 +23,123 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.arch import tuning_family
 from gptqmodel.utils.env import env_flag
 
 
 PAROQUANT_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 # Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+
+
+# Per-tuning-family launch tiles for the fused ParoQuant GEMM.
+#
+# Before this table the kernel hardcoded one pair for every GPU: decode
+# (4,128,32,warps=4,stages=2) and prefill (32,128,32,warps=8,stages=4).  Those
+# stay the fallback for families nobody measured here (Hopper, Blackwell,
+# cdna4 and rdna3) so no unmeasured target is silently retuned.
+#
+# ``ada`` (RTX 4090, SM 8.9) has its own measured entry below.
+#
+# ``rdna4`` was measured on an AMD Radeon AI PRO R9700 (gfx1201, wave32,
+# HIP 7.16.26385, torch 2.16.0.dev20261025+rocm10.1): 4-bit ParoQuant,
+# group_size 128, FP16 activations, median of 21 iterations after 5 warm-up
+# iterations, a 256 MiB L2 flush before every timed call and
+# ``torch.cuda.synchronize`` around each call (scripts/benchmark_rdna4_inference.py
+# methodology).  Swept BLOCK_M {1,2,4,8,16,32,64}, BLOCK_N {64,128},
+# BLOCK_K {32,64}, num_warps {2,4,8}, num_stages {1,2,4} on
+# (K,N) in {(2048,2048), (4096,4096), (5120,8192), (14336,4096), (4096,11008)}.
+#
+# Findings (all reproducible with the shipped tiles):
+# * ``num_warps=8`` never won a decode shape and lost the prefill band badly
+#   (K=4096/N=4096/M=16: 83.2 us at warps=4 vs 137.6 us at warps=8).  On wave32
+#   four warps already cover 128 lanes, so eight mainly add scheduling overhead.
+# * ``BLOCK_N=64`` beat 128 up to ~64 rows; above that 128 amortises better.
+# * The M band matters more than the decode/prefill label: rows <= 8 want a
+#   narrow BLOCK_M and no pipelining, 9..64 want BLOCK_M 32, and > 64 rows want
+#   BLOCK_M 64 / BLOCK_N 128.
+# Representative medians (small / medium / large vs the old tile):
+#   M=1   K=14336 N=4096  181.30 vs 269.13 us  (1.48x)
+#   M=4   K=4096  N=4096   77.72 vs 102.18 us  (1.31x)
+#   M=16  K=14336 N=4096  206.87 vs 288.76 us  (1.40x)
+#   M=64  K=14336 N=4096  222.37 vs 325.10 us  (1.46x)
+#   M=128 K=5120  N=8192  186.06 vs 296.69 us  (1.59x)
+#   M=1024 K=14336 N=4096 1680.99 vs 2893.65 us (1.72x)
+_PAROQUANT_GEMM_LAUNCH_CONFIGS: dict[str, dict[str, tuple[int, int, int, int, int]]] = {
+    # ``ada`` was measured on an NVIDIA GeForce RTX 4090 (SM 8.9, torch
+    # 2.15.0+cu132, Triton 3.9.0): 4-bit ParoQuant, group_size 128, FP16
+    # activations, median of 41 iterations after 15 warm-up iterations, a 256 MiB
+    # L2 flush before every timed call and ``torch.cuda.synchronize`` around each
+    # call (scripts/benchmark_rdna4_inference.py methodology).  Swept the same
+    # grid as ``rdna4``: BLOCK_M {1,2,4,8,16,32,64}, BLOCK_N {64,128},
+    # BLOCK_K {32,64}, num_warps {2,4,8}, num_stages {1,2,4} (252 tiles) on
+    # (K,N) in {(2048,2048), (4096,4096), (5120,8192), (14336,4096),
+    # (4096,11008)} at M in {1,2,4,8} / {16,32,64} / {65,128,1024}.
+    #
+    # Findings: ``num_stages=4`` wins the small-M bands (Triton pipelines the
+    # K-loop across Ada's cp.async stages) while the >64-row band prefers four
+    # warps with a 64-wide N tile; ``BLOCK_N=128`` only wins at the 1024-row tail
+    # of the largest (K=14336/5120/4096-wide) shapes and loses badly below it,
+    # so the band keeps 64 for a single uniform tile.  The historical default
+    # (decode (4,128,32,4,2), prefill (32,128,32,8,4)) is 1.14x-3.29x slower
+    # across the swept matrix (hot; 1.11x-3.29x L2-flushed); these tiles are its
+    # per-band measured winner.  Worst reference-side oracle error over the same
+    # sweep is 4.7e-4 relative against an FP64 oracle.
+    "ada": {
+        # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)
+        "decode": (16, 64, 64, 4, 4),
+        "prefill": (32, 64, 64, 8, 4),
+        "prefill_large": (64, 64, 64, 8, 4),
+    },
+    "rdna4": {
+        # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)
+        "decode": (4, 64, 64, 4, 1),
+        "prefill": (32, 64, 64, 4, 2),
+        "prefill_large": (64, 128, 64, 4, 2),
+    },
+}
+# Historical tile shipped by every pre-table release: (M, N, K, warps, stages).
+# Kept verbatim so unmeasured families, and callers that do not pass a row
+# count, behave exactly as before.
+_PAROQUANT_GEMM_DEFAULT_CONFIGS: dict[str, tuple[int, int, int, int, int]] = {
+    "decode": (4, 128, 32, 4, 2),
+    "prefill": (32, 128, 32, 8, 4),
+}
+
+# Row band at which a banded family (``ada``/``rdna4``) switches from the medium
+# to the large tile.  The small/medium split is the module's own decode
+# boundary (8 rows), so the constant is shared and its meaning is unchanged for
+# non-Ada families.
+_RDNA4_MEDIUM_MAX_ROWS = 64
+
+
+def paroquant_gemm_launch_config(
+    kind: str, device_or_arch=None, rows: int | None = None
+) -> tuple[int, int, int, int, int]:
+    """Return ``(block_m, block_n, block_k, num_warps, num_stages)``.
+
+    ``kind`` is ``"decode"`` (the module's M<=8 fused path) or ``"prefill"``.
+    ``rows`` is the flattened row count of the current input; when it is given,
+    families with a row-banded table (``ada`` and ``rdna4``) pick the tile from
+    the measured band instead of from the decode/prefill label.  Families
+    without a measured entry always keep the historical tile.
+    """
+
+    family = tuning_family(device_or_arch)
+    table = _PAROQUANT_GEMM_LAUNCH_CONFIGS.get(family)
+    if table is None:
+        return _PAROQUANT_GEMM_DEFAULT_CONFIGS[kind]
+    if "prefill_large" not in table:
+        return table[kind]
+    if rows is not None:
+        if rows <= 8:
+            return table["decode"]
+        if rows <= _RDNA4_MEDIUM_MAX_ROWS:
+            return table["prefill"]
+        return table["prefill_large"]
+    # Without a row count keep the label's tile; the label itself already means
+    # "decode rows" vs "prefill rows".
+    return table[kind]
 
 
 def get_same_device_cm(t):
@@ -285,6 +396,12 @@ def _paroquant_gemm_triton(
 ) -> torch.Tensor:
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
 
+    # ``paroquant_gemm_kernel`` loads one scale/zero group per K tile and
+    # broadcasts it across the whole tile, so a tile may never span more than
+    # one group: ``BLOCK_SIZE_K <= group_size``.  Supported group sizes are
+    # powers of two, so clamping keeps the tile group-aligned.
+    block_size_k = min(block_size_k, group_size)
+
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_SIZE_M"]) * triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
 
@@ -318,16 +435,19 @@ def paroquant_gemm_triton_decode(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
 ) -> torch.Tensor:
+    block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
+        paroquant_gemm_launch_config("decode", input.device, rows=input.shape[0])
+    )
     return _paroquant_gemm_triton(
         input,
         qweight,
         scales,
         qzeros,
-        block_size_m=4,
-        block_size_n=128,
-        block_size_k=32,
-        num_warps=4,
-        num_stages=2,
+        block_size_m=block_size_m,
+        block_size_n=block_size_n,
+        block_size_k=block_size_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
         fp32_accum=FP32_ACCUM,
     )
 
@@ -338,22 +458,26 @@ def paroquant_gemm_triton_prefill(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
 ) -> torch.Tensor:
+    block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
+        paroquant_gemm_launch_config("prefill", input.device, rows=input.shape[0])
+    )
     return _paroquant_gemm_triton(
         input,
         qweight,
         scales,
         qzeros,
-        block_size_m=32,
-        block_size_n=128,
-        block_size_k=32,
-        num_warps=8,
-        num_stages=4,
+        block_size_m=block_size_m,
+        block_size_n=block_size_n,
+        block_size_k=block_size_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
         fp32_accum=FP32_ACCUM,
     )
 
 
 __all__ = [
     "paroquant_dequantize_triton",
+    "paroquant_gemm_launch_config",
     "paroquant_gemm_triton_decode",
     "paroquant_gemm_triton_prefill",
 ]

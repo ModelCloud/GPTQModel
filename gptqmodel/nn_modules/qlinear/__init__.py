@@ -52,6 +52,22 @@ def _device_family(device: DEVICE | t.device):
     return device
 
 
+def _is_rocm_target(device) -> bool:
+    """True when ``device`` names a ROCm (HIP) target on a ROCm host.
+
+    ``DEVICE.ROCM`` is always a ROCm request.  A ``cuda``/``cuda:N`` device is
+    ROCm when the active torch build is a HIP build, because HIP reuses the CUDA
+    device namespace.  This is used only to make a rejection message actionable;
+    it never widens a kernel's device support.
+    """
+
+    if t.version.hip is None:
+        return False
+    if device == DEVICE.ROCM:
+        return True
+    return isinstance(device, t.device) and device.type == "cuda"
+
+
 def input_rows(x: t.Tensor) -> int:
     """Return the number of logical Linear rows in an arbitrary-rank input.
 
@@ -470,15 +486,28 @@ class BaseQuantLinear(nn.Module):
                 # that with "does not support device" hides the only actionable
                 # part, so keep the original text.
                 e = f"{cls} does not support device: {device}"
-                # When the family itself is unsupported the base check raised,
-                # and its text only restates the sentence above. Appending it
-                # would read `does not support device: cpu (... actual device =
-                # cpu)`, so the extra detail is only worth keeping for the
-                # kernel-specific rejections this change is about.
-                if _device_family(device) in cls.SUPPORTS_DEVICES:
-                    reason = str(exc).strip()
-                    if reason:
-                        e = f"{e} ({reason})"
+                # A kernel-specific rejection (compute capability, a missing
+                # extension, ...) must keep its own text: it is what tells the
+                # user which portable backend to select instead.  The base
+                # family check only restates the sentence above, so it is
+                # dropped.
+                reason = str(exc).strip()
+                generic = (
+                    f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: "
+                    f"actual device = `{device}`"
+                )
+                if reason and reason != generic:
+                    e = f"{e} ({reason})"
+                elif _is_rocm_target(device):
+                    # A CUDA-only kernel rejecting a HIP target is the steady
+                    # state on ROCm (Machete, W4A-NVFP4, native AWQ GEMV, ...).
+                    # Say so, and point at the portable backend family instead of
+                    # leaving a bare "unsupported device" string.
+                    e = (
+                        f"{e} ({cls.__name__} is CUDA-only and does not run on ROCm; "
+                        "select a portable `*Torch` or `*Triton` backend for this "
+                        "quantization method instead)"
+                    )
                 return False, NotImplementedError(e)
 
         if trainable and not cls.SUPPORTS_TRAINING:
