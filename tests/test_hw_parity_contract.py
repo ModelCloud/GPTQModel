@@ -26,6 +26,8 @@ TUNED_PIPELINES = [
     ("gptq_gemv", "gptqmodel.nn_modules.triton_utils.gptq_gemv", "_GEMV_LAUNCH_CONFIGS"),
     ("gptq_gemm", "gptqmodel.nn_modules.triton_utils.gptq_gemm", "_LAUNCH_CONFIGS"),
     ("gptq_dequant", "gptqmodel.nn_modules.triton_utils.dequant", "_DEQUANT_LAUNCH_CONFIGS"),
+    ("paroquant_gemm", "gptqmodel.quantization.paroquant.modules.triton.gemm", "_PAROQUANT_GEMM_LAUNCH_CONFIGS"),
+    ("awq_gemv", "gptqmodel.quantization.awq.modules.triton.gemv", "_AWQ_GEMV_LAUNCH_CONFIGS"),
 ]
 
 
@@ -141,3 +143,52 @@ def test_gguf_qk_table_is_ada_only_and_rdna4_falls_through():
                     qtype, capability=None, rows=rows,
                     in_features=in_features, out_features=out_features,
                 ) is None
+
+
+def test_awq_gemm_scheduler_has_both_measured_device_profiles():
+    """The AWQ GEMM scheduler must ship a measured plan set for each target.
+
+    Unlike the launch tables above, the AWQ scheduler keys its rules on an exact
+    device profile rather than a family token, because neighbouring shapes were
+    not stable enough to bucket.  That makes it easy to add one target and
+    forget the other, so the contract pins both profiles and proves that a
+    near-miss cannot inherit either.
+    """
+
+    from gptqmodel.quantization.awq.modules.triton import scheduler
+
+    cuda_identity = ("cuda", 0, *scheduler._VERIFIED_4090_PROFILE)
+    rdna4_name, rdna4_arch, rdna4_cus, rdna4_mem = scheduler._VERIFIED_RDNA4_PROFILE
+    # A HIP host reports the six CUDA fields plus the gcnArchName last, with
+    # ``capability`` always None (get_device_capability is meaningless on ROCm).
+    rocm_identity = ("cuda", 0, rdna4_name, None, rdna4_cus, rdna4_mem, rdna4_arch)
+    assert len(cuda_identity) == 6
+    assert len(rocm_identity) == 7
+    assert scheduler._VERIFIED_4090_PROFILE != scheduler._VERIFIED_RDNA4_PROFILE
+    assert scheduler._VERIFIED_4090_FP16_RULES
+    assert scheduler._VERIFIED_RDNA4_FP16_RULES
+
+    def plan(identity, *, M, N, K, G, dtype=torch.float16):
+        return scheduler._builtin_plan(
+            identity, M=M, N=N, K=K, G=G,
+            input_dtype=dtype, compute_dtype=dtype, output_dtype=dtype,
+            fp32_accum=True,
+        )
+
+    shape = dict(M=32, N=8192, K=2048, G=128)
+    assert plan(cuda_identity, **shape) == scheduler._VERIFIED_4090_FP16_RULES[(32, 8192, 2048, 128)]
+    assert plan(rocm_identity, **shape) == scheduler._VERIFIED_RDNA4_FP16_RULES[(32, 8192, 2048, 128)]
+
+    # Neither profile may match the other target's device, a different gfx
+    # arch, or a different board/CU/memory count.
+    wrong_arch = ("cuda", 0, rdna4_name, None, rdna4_cus, rdna4_mem, "gfx942")
+    wrong_mem = ("cuda", 0 + 1, rdna4_name, None, rdna4_cus, 1, rdna4_arch)
+    wrong_name = ("cuda", 0 + 1, "AMD Radeon AI PRO R9600", None, rdna4_cus, rdna4_mem, rdna4_arch)
+    wrong_sms = ("cuda", 0 + 1, "NVIDIA GeForce RTX 4090", (8, 9), 96, 50_950_569_984)
+    for identity in (wrong_arch, wrong_mem, wrong_name, wrong_sms):
+        assert plan(identity, **shape) is None
+
+    # The rules are FP16-only: the kernel rejects non-FP16 input/scales, so a
+    # BF16 request must not inherit a tile.
+    assert plan(cuda_identity, **shape, dtype=torch.bfloat16) is None
+    assert plan(rocm_identity, **shape, dtype=torch.bfloat16) is None
