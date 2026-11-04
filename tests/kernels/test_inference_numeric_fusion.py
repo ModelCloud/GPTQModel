@@ -120,8 +120,8 @@ def test_awq_bias_add_preserves_bf16_output_dtype(cls_name, rows):
 
     Both native AWQ GEMV paths keep ``bias`` in FP16 because the kernel is FP16
     only. Adding it to the result *after* the result is cast back to BF16
-    promotes that sum to FP32 (BF16 + FP16 -> FP32), so the epilogue has to
-    match the result dtype.
+    promotes that sum to FP32 (BF16 + FP16 -> FP32), so the epilogue must
+    restore the input dtype after adding the bias.
 
     The fixture keeps every value an exact multiple of 2**-7 with magnitude
     below 16, which BF16 represents exactly. The oracle is independent FP64
@@ -164,3 +164,41 @@ def test_awq_bias_add_preserves_bf16_output_dtype(cls_name, rows):
     assert actual.dtype == torch.bfloat16
     # Every value above is exact in BF16, so this is not a rounding tolerance.
     torch.testing.assert_close(actual.cpu(), expected.to(torch.bfloat16), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or bool(torch.version.hip), reason="Native AWQ requires CUDA")
+@pytest.mark.parametrize("cls_name", ["gemv", "gemv_fast"])
+@pytest.mark.parametrize("shape", [(1, 2048), (2, 1, 2048), (9, 2048)])
+def test_awq_bf16_bias_cancellation(cls_name, shape):
+    """Do not round either FP16 operand to BF16 before adding the bias."""
+    if cls_name == "gemv":
+        from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear as cls
+    else:
+        from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear as cls
+
+    k, n = 2048, 256
+    weights = torch.zeros((n, k), dtype=torch.float64)
+    signs = torch.arange(n).remainder(2).double().mul(2).sub(1)
+    weights[:, 0] = signs
+    weights[n // 2:, 1] = signs[n // 2:]
+    bias = -signs * 255.5
+    bias[n // 2:] = -signs[n // 2:] * 256
+    linear = torch.nn.Linear(k, n, bias=True, dtype=torch.float16)
+    linear.weight.data.copy_(weights)
+    linear.bias.data.copy_(bias)
+    kwargs = {"pack_dtype": torch.int16} if cls_name == "gemv_fast" else {}
+    module = cls(bits=4, group_size=128, sym=True, desc_act=False, in_features=k,
+                 out_features=n, bias=True, register_buffers=True, **kwargs)
+    module.pack(linear, torch.ones((n, k // 128), dtype=torch.float16),
+                torch.full((n, k // 128), 8, dtype=torch.float16))
+    module = module.cuda().eval()
+    module.post_init()
+    source = torch.zeros(shape, dtype=torch.bfloat16)
+    source[..., 0] = 256
+    source[..., 1] = 0.5
+    expected = source.double() @ weights.t() + bias
+    with torch.inference_mode():
+        for _ in range(2):
+            actual = module(source.cuda())
+            assert actual.dtype == source.dtype
+            torch.testing.assert_close(actual.cpu().double(), expected, rtol=0, atol=0)
