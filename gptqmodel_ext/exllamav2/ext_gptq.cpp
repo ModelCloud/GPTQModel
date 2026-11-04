@@ -111,10 +111,20 @@ void gemm_half_q_half(
     if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
         auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
         qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
-        if (a.scalar_type() == at::kHalf)
-            c.copy_(at::mm(a, weights, at::kFloat));
-        else
+        if (a.scalar_type() == at::kHalf) {
+            gemm_half_half_cuda(
+                at::cuda::getCurrentCUDABlasHandle(),
+                (const half*) a.data_ptr(),
+                (const half*) weights.data_ptr(),
+                (half*) c.data_ptr(),
+                c.size(0),
+                c.size(1),
+                a.size(1),
+                true
+            );
+        } else {
             c.copy_(at::matmul(a.to(at::kFloat), weights.to(at::kFloat)));
+        }
         return;
     }
 
@@ -128,7 +138,7 @@ void gemm_half_q_half(
         a.size(1),
         true,
         NULL,
-        true
+        force_cuda
     );
 }
 
