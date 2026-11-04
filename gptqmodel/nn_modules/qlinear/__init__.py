@@ -37,6 +37,21 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
+def _device_family(device: DEVICE | t.device):
+    """Map a concrete torch device onto its declared support family.
+
+    DEVICE declarations describe families, so a `torch.device("cuda:1")`
+    selector is checked as `DEVICE.CUDA`. Unknown device types fall back to
+    their raw string so the caller reports a mismatch instead of raising.
+    """
+    if isinstance(device, t.device):
+        try:
+            return DEVICE(device.type)
+        except ValueError:
+            return device.type
+    return device
+
+
 def input_rows(x: t.Tensor) -> int:
     """Return the number of logical Linear rows in an arbitrary-rank input.
 
@@ -454,10 +469,16 @@ class BaseQuantLinear(nn.Module):
                 # a kernel image that only exists for one SM version. Replacing
                 # that with "does not support device" hides the only actionable
                 # part, so keep the original text.
-                reason = str(exc).strip()
                 e = f"{cls} does not support device: {device}"
-                if reason:
-                    e = f"{e} ({reason})"
+                # When the family itself is unsupported the base check raised,
+                # and its text only restates the sentence above. Appending it
+                # would read `does not support device: cpu (... actual device =
+                # cpu)`, so the extra detail is only worth keeping for the
+                # kernel-specific rejections this change is about.
+                if _device_family(device) in cls.SUPPORTS_DEVICES:
+                    reason = str(exc).strip()
+                    if reason:
+                        e = f"{e} ({reason})"
                 return False, NotImplementedError(e)
 
         if trainable and not cls.SUPPORTS_TRAINING:
@@ -541,18 +562,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_device(cls, device: DEVICE | t.device):
-        # DEVICE declarations describe support families.  Keep concrete
-        # torch.device values intact for specialized kernels, while mapping
-        # them to a family for this common declaration check.
-        if isinstance(device, t.device):
-            try:
-                family = DEVICE(device.type)
-            except ValueError:
-                family = device.type
-        else:
-            family = device
-
-        if family not in cls.SUPPORTS_DEVICES:
+        if _device_family(device) not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
     # use optimize so we don't override native module.compile()
