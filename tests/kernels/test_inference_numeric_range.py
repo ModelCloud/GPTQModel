@@ -125,6 +125,67 @@ def test_gguf_superblock_scale_range(device, fmt, dtype):
 
 
 @pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('fmt', ['q4_k', 'q5_k'])
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_gguf_superblock_scale_times_code_range(device, fmt, dtype):
+    """A scale term can overflow only after the code multiplier is applied.
+
+    `d * 63` fits FP16 here, but `d * 63 * 15` (Q4_K) or `d * 63 * 31` (Q5_K)
+    does not. Bounding the bare scale product would let this reconstruct to
+    inf, so the guard must include the code extreme. `d_min` is chosen per
+    format so the final weight stays representable: only the intermediate
+    overflows, which is exactly the case a range guard has to catch.
+    """
+    from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+    code_max = 31. if fmt == 'q5_k' else 15.
+    d = 74.
+    assert d * 63 <= torch.finfo(torch.float16).max
+    assert d * 63 * code_max > torch.finfo(torch.float16).max
+    # Keep d * 63 * code - d_min * 63 inside the target range, with d_min a
+    # whole FP16 value so the encoded bytes round-trip exactly.
+    d_min = float(round((d * 63 * code_max - 30000.) / 63))
+    assert abs(d * 63 * code_max - d_min * 63) <= torch.finfo(dtype).max
+
+    m = GGUFTorchLinear(bits=fmt, group_size=-1, sym=True, desc_act=False,
+                        in_features=256, out_features=64, bias=False).eval()
+    block = np.zeros((64, m.gguf_type_size), dtype=np.uint8)
+    block[:, :2] = np.array([d], np.float16).view(np.uint8)
+    block[:, 2:4] = np.array([d_min], np.float16).view(np.uint8)
+    # 6-bit subscale and minimum both at their 63 maximum.
+    block[:, 4:8] = 63
+    block[:, 8:12] = 63
+    block[:, 12:16] = 0
+    if fmt == 'q4_k':
+        block[:, 16:] = 0xFF
+    else:
+        # Q5_K carries a fifth bit plane before the low nibbles.
+        block[:, 16:48] = 0xFF
+        block[:, 48:] = 0xFF
+    m.qweight = torch.from_numpy(block).to(device)
+
+    blocks, _, _ = m._reshape_blocks(device=torch.device(device))
+    # The guard must track the real condition: whether the scale term leaves
+    # `dtype` once the code extreme is applied.
+    assert m._k_scale_overflows(blocks, dtype) == (d * 63 * code_max > torch.finfo(dtype).max)
+    if dtype is torch.float16:
+        assert m._k_scale_overflows(blocks, dtype)
+    dequant = (m._dequantize_q5_k_blocks if fmt == 'q5_k' else m._dequantize_q4_k_blocks)
+    weight = dequant(blocks, torch.float32, compute_dtype=torch.float32)
+    assert torch.isfinite(weight).all()
+    weight = weight[:, : m.in_features].to(dtype).transpose(0, 1).contiguous()
+
+    x = torch.full((1, 256), 2**-16, dtype=dtype, device=device)
+    with torch.inference_mode():
+        actual = m(x)
+    expected = (x.to(torch.float64) @ weight.to(torch.float64)).to(dtype)
+    assert torch.isfinite(actual).all()
+    # BF16 carries ~8 bits of mantissa, so its representable relative spacing
+    # is ~0.008; the 2e-3 inference tolerance is unreachable for that dtype.
+    tol = max(2e-3, 2 * torch.finfo(dtype).eps)
+    torch.testing.assert_close(actual, expected, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize('device', DEVICES)
 def test_gguf_chunk_cancellation(device):
     from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
     m = GGUFTorchLinear(bits='q4_0', group_size=-1, sym=True, desc_act=False,

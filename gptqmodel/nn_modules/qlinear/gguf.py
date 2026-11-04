@@ -1703,20 +1703,23 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         return cached
 
     def _compute_k_scale_overflow(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        """True when a Q4_K/Q5_K scale product can leave `target_dtype` range.
+        """True when a Q4_K/Q5_K term can leave `target_dtype` range.
 
-        Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`, so the two
-        scale products must stay in range even when every final weight is
-        representable. A zero code would otherwise multiply an infinite
-        product and produce NaN. Only the per-block `d`/`d_min` columns are
-        inspected, so the check costs O(num_blocks) rather than O(weights).
+        Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`. Both terms
+        peak at `d_max * 63 * code_max`, with `code_max` 15 for Q4_K and 31
+        for Q5_K, so a product that still fits at `d * 63` can overflow once
+        the code is applied. Bounding `d * 63` alone is therefore unsound and
+        lets an out-of-range weight saturate to inf on the narrow path. Only
+        the per-block `d`/`d_min` columns and two extremes are inspected, so
+        the check stays O(num_blocks) rather than O(weights).
         """
         if not target_dtype.is_floating_point:
             return True
+        code_max = 31.0 if self.gguf_tensor_qtype == "Q5_K" else 15.0
+        saturation = code_max * 63.0
         for column in (slice(0, 2), slice(2, 4)):
             raw = blocks[..., column].contiguous().view(torch.float16).reshape(blocks.shape[0], -1)
-            # 6-bit scales and minima max out at 63; d/d_min are FP16.
-            peak = raw.to(torch.float32).abs().amax(dim=-1).mul_(63.0)
+            peak = raw.to(torch.float32).abs().amax(dim=-1).mul_(saturation)
             if bool((peak > torch.finfo(target_dtype).max).any()):
                 return True
         return False
