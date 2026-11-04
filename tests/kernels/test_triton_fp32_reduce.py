@@ -55,6 +55,7 @@ def test_quant_matmul_matches_fp64_oracle(dtype, rows):
         )
 
     assert actual.dtype == dtype
+    assert torch.isfinite(actual).all(), "non-finite forward output"
     oracle = x.double() @ weight.double()
     bound = _fp32_error_bound(x, weight, dtype)
 
@@ -82,10 +83,9 @@ def test_quant_matmul_matches_fp64_oracle(dtype, rows):
 
     # The plain low-precision matmul is measurably worse on this shape, which is
     # the drift the Triton path used to have.
-    if not _wants_fp32_reduce(x):
-        pytest.skip("HIP already accumulates these operands in FP32")
-    narrow = (x @ weight).double()
-    assert (actual.double() - oracle).abs().max() <= (narrow - oracle).abs().max()
+    if _wants_fp32_reduce(x):
+        narrow = (x @ weight).double()
+        assert (actual.double() - oracle).abs().max() <= (narrow - oracle).abs().max()
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -106,6 +106,7 @@ def test_quant_matmul_backward_matches_fp64_oracle(dtype, rows):
         )
 
     assert actual.dtype == dtype
+    assert torch.isfinite(actual).all(), "non-finite backward output"
     oracle = grad.double() @ weight.double().t()
     bound = _fp32_error_bound(grad, weight.t(), dtype)
     excess = (actual.double() - oracle).abs() - bound
@@ -160,3 +161,21 @@ def test_fp32_reduce_is_device_gated(dtype):
         assert _wants_fp32_reduce(torch.zeros((1, 8), dtype=dtype, device="cuda")) is wide_on_cuda
     # FP32 activations never take the wide path.
     assert _wants_fp32_reduce(torch.zeros((1, 8), dtype=torch.float32)) is False
+
+
+@pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_quant_matmul_oracle_rejects_nonfinite(monkeypatch, backward, value):
+    _require_triton_gpu()
+
+    def nonfinite_matmul(x, qweight, scales, qzeros, g_idx, *args, transpose=False):
+        columns = g_idx.numel() if transpose else scales.shape[1]
+        return torch.full((x.shape[0], columns), value, device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(f"{__name__}._quant_matmul", lambda: nonfinite_matmul)
+    check = test_quant_matmul_backward_matches_fp64_oracle if backward else test_quant_matmul_matches_fp64_oracle
+    with pytest.raises(AssertionError, match="non-finite"):
+        try:
+            check(torch.float16, 1)
+        except pytest.skip.Exception as exc:
+            pytest.fail(f"Non-finite output was hidden by a skip: {exc}")
