@@ -17,8 +17,6 @@ from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.utils.machete import machete_runtime_error
-from gptqmodel.utils.marlin import marlin_runtime_error
 from tests.models.model_test import ModelTest
 
 
@@ -106,29 +104,20 @@ _GPTQ_REAL_CASES = (
 )
 
 
-_CANDIDATE_BACKEND_GATES = {
-    # Machete is Hopper-only (SM90, >=204800 bytes opt-in shared memory), so an
-    # Ada (SM89) or Blackwell host has CUDA but cannot run it. Marlin is
-    # CUDA-only, and ROCm reports `torch.cuda.is_available()` as True.
-    BACKEND.MACHETE: lambda: machete_runtime_error(_DEVICE),
-    BACKEND.MARLIN: lambda: marlin_runtime_error(_DTYPE),
-}
-
-
 def _require_candidate_backend(case: _RealModelCase) -> None:
-    """Skip candidates whose own runtime gate rejects this host.
+    """Skip unsupported hardware without hiding extension build failures.
 
     ``torch.cuda.is_available()`` is not sufficient: it is true on ROCm, and
     true on CUDA hosts whose compute capability the kernel does not target.
-    Ask the kernel's own gate instead of re-deriving those checks here.
+    Use the candidate's device-only validation for the exact target GPU. Runtime
+    availability checks also compile/load extensions; their failures must reach
+    the test through model loading instead of being converted to skips.
     """
 
-    gate = _CANDIDATE_BACKEND_GATES.get(case.candidate_backend)
-    if gate is None:
-        return
-    error = gate()
-    if error:
-        pytest.skip(error)
+    try:
+        case.candidate_cls.validate_device(_DEVICE)
+    except NotImplementedError as exc:
+        pytest.skip(str(exc))
 
 
 def _module_device(module: torch.nn.Module) -> torch.device:
