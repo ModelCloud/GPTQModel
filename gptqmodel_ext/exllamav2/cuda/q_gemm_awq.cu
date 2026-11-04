@@ -176,93 +176,67 @@ void gemm_half_q_half_cuda
     int size_m,
     int size_n,
     int size_k,
-    bool clear,
-    half* temp_dq,
-    bool force_cuda
+    bool clear
 )
 {
-    if (size_m > MAX_Q_GEMM_ROWS && !force_cuda)
-    {
-        //printf("cublas\n");
+    // Quantized matmul. This entry point is called only for activations and row
+    // counts that the ext_*.cpp dispatcher already mapped to the quantized
+    // kernel: it never reconstructs a dense weight, so it needs no scratch
+    // buffer. The dense fallback reconstructs into a transient per-call tensor
+    // in ext_*.cpp instead of model-owned storage.
 
-        // Reconstruct FP16 matrix, then cuBLAS
+    //if (clear) clear_tensor_cuda(c, size_m, size_n);
 
-        if (!temp_dq) temp_dq = b->temp_dq;
-        b->reconstruct(temp_dq);
+    const int split_count = DIVIDE(size_k, BLOCK_KN_SIZE);
+    const int64_t split_element_stride = (int64_t) size_m * size_n;
+    // Private per-split slices remove atomic contention and the pre-zeroing
+    // pass, but cost split_count times the old FP32 accumulator. Fall back
+    // to the single zeroed buffer with atomics when that would exceed the
+    // transient budget, so wide layers keep a bounded peak allocation.
+    const int64_t atomic_bytes = split_element_stride * (int64_t) sizeof(float);
+    const int64_t split_bytes = atomic_bytes * split_count;
+    const bool private_splits = split_bytes <= EXLLAMAV2_SPLIT_REDUCE_MAX_BYTES;
+    // The kernel always launches split_count K blocks; a zero element
+    // stride means "one shared buffer, accumulate with atomics".
+    const int64_t c_split_stride = private_splits ? split_element_stride : 0;
 
-        // FP16 operands with FP32 reduction, written directly to the FP16
-        // destination. cublasHgemm above computes and accumulates in FP16,
-        // which loses cancellation when the two halves of K cancel.
-
-        const float alpha = 1.0f;
-        const float beta = clear ? 0.0f : 1.0f;
-        cublasGemmEx(cublas_handle,
-                     CUBLAS_OP_N, CUBLAS_OP_N,
-                     size_n, size_m, size_k,
-                     &alpha, temp_dq, CUDA_R_16F, size_n,
-                             a,       CUDA_R_16F, size_k,
-                     &beta,  c,       CUDA_R_16F, size_n,
-                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
+    auto float_options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA);
+    at::Tensor accum;
+    if (b->is_gptq) {
+        accum = private_splits
+            ? at::empty({split_count * split_element_stride}, float_options)
+            : at::zeros({split_element_stride}, float_options);
     }
-    else
+    float* c_float = b->is_gptq ? accum.data_ptr<float>() : nullptr;
+
+    int max_chunks = size_m / BLOCK_M_SIZE_MAX;
+    int last_chunk = max_chunks * BLOCK_M_SIZE_MAX;
+    int last_chunk_size = size_m - last_chunk;
+
+    if (max_chunks)
     {
-        //printf("cuda\n");
-
-        // Quantized matmul
-
-        //if (clear) clear_tensor_cuda(c, size_m, size_n);
-
-        const int split_count = DIVIDE(size_k, BLOCK_KN_SIZE);
-        const int64_t split_element_stride = (int64_t) size_m * size_n;
-        // Private per-split slices remove atomic contention and the pre-zeroing
-        // pass, but cost split_count times the old FP32 accumulator. Fall back
-        // to the single zeroed buffer with atomics when that would exceed the
-        // transient budget, so wide layers keep a bounded peak allocation.
-        const int64_t atomic_bytes = split_element_stride * (int64_t) sizeof(float);
-        const int64_t split_bytes = atomic_bytes * split_count;
-        const bool private_splits = split_bytes <= EXLLAMAV2_SPLIT_REDUCE_MAX_BYTES;
-        // The kernel always launches split_count K blocks; a zero element
-        // stride means "one shared buffer, accumulate with atomics".
-        const int64_t c_split_stride = private_splits ? split_element_stride : 0;
-
-        auto float_options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA);
-        at::Tensor accum;
-        if (b->is_gptq) {
-            accum = private_splits
-                ? at::empty({split_count * split_element_stride}, float_options)
-                : at::zeros({split_element_stride}, float_options);
-        }
-        float* c_float = b->is_gptq ? accum.data_ptr<float>() : nullptr;
-
-        int max_chunks = size_m / BLOCK_M_SIZE_MAX;
-        int last_chunk = max_chunks * BLOCK_M_SIZE_MAX;
-        int last_chunk_size = size_m - last_chunk;
-
-        if (max_chunks)
-        {
-            gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, c_float, split_count, c_split_stride);
-        }
-
-        if (last_chunk_size)
-        {
-            // The tail block is dispatched with its own row origin: A and C are
-            // advanced by `last_chunk` rows and the partial buffer by
-            // `last_chunk * size_n` elements. That offset is smaller than one
-            // split slice, so split 0 still begins at the buffer base while the
-            // kernel's `blockIdx.z * c_split_stride` advances by whole slices;
-            // the two offsets compose without overlapping.
-            gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear, c_float ? c_float + last_chunk * size_n : nullptr, split_count, c_split_stride);
-        }
-        if (b->is_gptq) {
-            // Private slices are summed here; the shared fallback is one slice,
-            // which makes the same kernel a plain FP32->FP16 conversion.
-            c_reduce_splits_to_half(
-                c_float, c, c_split_stride,
-                private_splits ? split_count : 1,
-                (int64_t) size_m * size_n);
-        }
-
+        gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, c_float, split_count, c_split_stride);
     }
+
+    if (last_chunk_size)
+    {
+        // The tail block is dispatched with its own row origin: A and C are
+        // advanced by `last_chunk` rows and the partial buffer by
+        // `last_chunk * size_n` elements. That offset is smaller than one
+        // split slice, so split 0 still begins at the buffer base while the
+        // kernel's `blockIdx.z * c_split_stride` advances by whole slices;
+        // the two offsets compose without overlapping.
+        gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear, c_float ? c_float + last_chunk * size_n : nullptr, split_count, c_split_stride);
+    }
+    if (b->is_gptq) {
+        // Private slices are summed here; the shared fallback is one slice,
+        // which makes the same kernel a plain FP32->FP16 conversion.
+        c_reduce_splits_to_half(
+            c_float, c, c_split_stride,
+            private_splits ? split_count : 1,
+            (int64_t) size_m * size_n);
+    }
+
 }
 
 __global__ void clear_kernel

@@ -215,10 +215,11 @@ class AwqGEMVLinear(AWQuantLinear):
                 inputs, self.qweight, self.scales, self.qzeros, self.group_size
             )
 
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
-
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # Preserve the FP16 kernel result and bias until after addition:
+            # rounding either operand to BF16 first can destroy cancellation.
+            out = out.float() + self.bias.float()
+        out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

@@ -391,3 +391,51 @@ def test_exllamav2_split_reduction_and_stream(backend):
         check(m, x, 0.)
     stream.synchronize()
     assert not state_tensors(vars(scratch))
+
+
+@pytest.mark.skipif(not NVIDIA, reason='ExLlamaV2 requires NVIDIA CUDA')
+@pytest.mark.parametrize('backend', ['gptq', 'awq'])
+@pytest.mark.parametrize('rows', [64, 65])
+def test_exllamav2_retains_no_dense_weight_scratch(backend, rows):
+    """Prefill must not reconstruct weights into model-owned storage.
+
+    The row-count fallback used to write a full FP16 weight into the scratch
+    slice handed to ``make_q_matrix`` at construction. That slice was sized from
+    the largest layer and kept on ``model.device_tensors`` for the model's whole
+    lifetime. The GEMM now reconstructs into a transient per-call tensor, so the
+    handle, the module, and the model scratch must all stay free of a dense
+    weight.
+    """
+    from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+    from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+    from gptqmodel.utils.model import gptqmodel_post_init
+
+    cls = ExllamaV2Linear if backend == 'gptq' else AwqExllamaV2Linear
+    in_features, out_features = 1024, 256
+    m = cls(bits=4, group_size=128, sym=True, desc_act=False,
+            in_features=in_features, out_features=out_features, bias=False,
+            register_buffers=True,
+            checkpoint_format=FORMAT.GPTQ_V2 if backend == 'gptq' else FORMAT.GEMM).cuda().eval()
+    # Every code is 15 and every zero point is 8, so the dequantized weight is
+    # exactly 7 * 2**-10 in FP64; the sum over K is analytic.
+    m.qweight.fill_(-1)
+    m.qzeros.fill_(-2004318072)  # 0x88888888
+    m.scales.fill_(2 ** -10)
+
+    model = torch.nn.Module()
+    model.layer = m
+    # The model-level path owns the scratch allocation, so let it call
+    # post_init exactly once: the AWQ post_init re-packs qweight and is not
+    # idempotent.
+    gptqmodel_post_init(model, use_act_order=False)
+
+    dense_bytes = in_features * out_features * 2
+    retained = [t for t in state_tensors(vars(model)) if t.numel() * t.element_size() >= dense_bytes]
+    assert retained == [], [(tuple(t.shape), t.dtype) for t in retained]
+    assert m.temp_dq_size() == 0
+
+    x = torch.full((rows, in_features), 2 ** -8, dtype=torch.float16, device='cuda')
+    expected = float(x[0, 0]) * in_features * 7 / 1024
+    check(m, x, expected)
+    after = [t for t in state_tensors(vars(model)) if t.numel() * t.element_size() >= dense_bytes]
+    assert after == [], 'prefill retained a dense weight'

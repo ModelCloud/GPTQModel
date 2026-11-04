@@ -125,8 +125,14 @@ from gptqmodel.utils.exllamav2 import ScratchSpace
 from gptqmodel.utils.packing import hf_post_init, hf_repack_layer
 
 target = hf_repack_layer(source, backend="exllama_v2", device="cuda:1", post_init=False)
-hf_post_init(target, scratch_space=ScratchSpace(target.temp_dq_size(), dev="cuda:1"))
+hf_post_init(target, scratch_space=ScratchSpace(target.scratch_space_fixed(), dev="cuda:1"))
 ```
+
+`ScratchSpace` only covers per-forward temporaries: `temp_dq_size()` is `0`
+by design because the kernel keeps no reconstructed dense weight, and
+`ScratchSpace.get_slice()` allocates a fresh transient tensor per call rather
+than slicing model-owned storage. Use `scratch_space_fixed()` (the forward
+temporary size), not `temp_dq_size()`, so the value is not a stale zero.
 
 When the requested backend is already in use, the source module is returned
 unchanged. Targets that cannot consume the source layout raise

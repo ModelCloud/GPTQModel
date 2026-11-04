@@ -201,7 +201,6 @@ def exllamav2_make_q_matrix(
     gptq_qzeros,
     gptq_scales,
     gptq_g_idx,
-    temp_dq,
 ) -> int:
     return int(
         _extension_api().op("exllamav2", "make_q_matrix")(
@@ -214,7 +213,6 @@ def exllamav2_make_q_matrix(
             gptq_qzeros,
             gptq_scales,
             gptq_g_idx,
-            temp_dq,
         )
     )
 
@@ -255,7 +253,6 @@ def exllamav2_awq_make_q_matrix(
     gptq_qzeros,
     gptq_scales,
     gptq_g_idx,
-    temp_dq,
 ) -> int:
     return int(
         _extension_api().op("exllamav2_awq", "make_q_matrix_awq")(
@@ -268,7 +265,6 @@ def exllamav2_awq_make_q_matrix(
             gptq_qzeros,
             gptq_scales,
             gptq_g_idx,
-            temp_dq,
         )
     )
 

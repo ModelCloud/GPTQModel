@@ -16,6 +16,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ._runtime_cache import tensor_cache_key
 from .torch_fused import pack_scales_and_zeros
 
 
@@ -156,10 +157,54 @@ class TorchAtenLinear(PackableQuantLinear):
             return x.dtype == self._cpu_transform_dtype
         return True
 
+    def clear_weight_cache(self) -> None:
+        """Drop derived state that depends on the loaded packed buffers.
+
+        ``ret_idx`` and the cached identity flag stay valid only for the
+        ``g_idx`` they were built from, and ``load_state_dict`` may copy that
+        tensor in place. Once transformed, ``scales_and_zeros`` is likewise
+        derived from the checkpoint's scales and zero points; a load copies
+        those in place and would otherwise leave the fused op on stale data.
+        The packed ``qweight`` is already in the ATen layout, so the derived
+        metadata is rebuilt from it rather than from dense weights.
+        """
+        self.ret_idx = None
+        self._ret_idx_identity = None
+        self._ret_idx_key = None
+        self._fused_state_key = None
+        self._refresh_fused_state()
+
+    def _refresh_fused_state(self) -> None:
+        """Rebuild derived int4pack metadata after its sources changed."""
+        if not getattr(self, "_cpu_transformed", False):
+            return
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if scales is None or qzeros is None:
+            return
+        key = (tensor_cache_key(scales), tensor_cache_key(qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
+        current = getattr(self, "scales_and_zeros", None)
+        if not isinstance(current, torch.Tensor):
+            return
+        # Keep at least the original compute precision and the precision of
+        # replacement metadata; narrowing affine offsets can lose cancellation.
+        dtype = torch.promote_types(current.dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        self.scales_and_zeros = pack_scales_and_zeros(
+            scales.to(dtype), qzeros.to(dtype)
+        )
+        self._fused_state_key = key
+
     def _build_ret_idx(self) -> torch.Tensor:
+        key = tensor_cache_key(self.g_idx)
         existing = getattr(self, "ret_idx", None)
         total = self.g_idx.shape[0]
-        if isinstance(existing, torch.Tensor) and existing.numel() == total:
+        if (
+            isinstance(existing, torch.Tensor)
+            and existing.numel() == total
+            and getattr(self, "_ret_idx_key", None) == key
+        ):
             return existing
 
         device = self.g_idx.device
@@ -170,6 +215,7 @@ class TorchAtenLinear(PackableQuantLinear):
             ret_idx = torch.arange(total, dtype=torch.int32, device=device)
             self.ret_idx = ret_idx
             self._ret_idx_identity = True
+            self._ret_idx_key = key
             return ret_idx
 
         ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
@@ -194,11 +240,12 @@ class TorchAtenLinear(PackableQuantLinear):
         ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
         self.ret_idx = ret_idx
         self._ret_idx_identity = None
+        self._ret_idx_key = key
         return ret_idx
 
     def _ret_idx_is_identity(self) -> bool:
         cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None:
+        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
             return cached
         ret_idx = self._build_ret_idx()
         identity = torch.equal(
@@ -315,6 +362,7 @@ class TorchAtenLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
+        self._refresh_fused_state()
         if not self._ret_idx_is_identity():
             x = x[:, self.ret_idx].contiguous()
         elif not x.is_contiguous():
