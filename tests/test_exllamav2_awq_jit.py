@@ -6,7 +6,12 @@ import torch
 import gptqmodel.nn_modules.qlinear.exllamav2_awq as exllamav2_awq_module
 
 
-def _build_module() -> exllamav2_awq_module.AwqExllamaV2Linear:
+def _build_module(monkeypatch) -> exllamav2_awq_module.AwqExllamaV2Linear:
+    # Native calls are mocked below, so do not require a CUDA build to construct
+    # the module used by these dispatch-only tests.
+    monkeypatch.setattr(
+        exllamav2_awq_module.AwqExllamaV2Linear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
     return exllamav2_awq_module.AwqExllamaV2Linear(
         bits=4,
         group_size=128,
@@ -20,7 +25,7 @@ def _build_module() -> exllamav2_awq_module.AwqExllamaV2Linear:
 
 
 def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     calls = {}
 
     def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx):
@@ -50,7 +55,7 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
 
 
 def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     module.q_handle = 77
     calls = {}
 

@@ -8,7 +8,12 @@ import gptqmodel.utils.exllamav2 as exllamav2_utils
 from gptqmodel.utils import cpp as cpp_module
 
 
-def _build_module() -> exllamav2_module.ExllamaV2Linear:
+def _build_module(monkeypatch) -> exllamav2_module.ExllamaV2Linear:
+    # These tests stub the native ops; construction must not compile CUDA on
+    # CPU/ROCm hosts before those stubs can be installed.
+    monkeypatch.setattr(
+        exllamav2_module.ExllamaV2Linear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
     return exllamav2_module.ExllamaV2Linear(
         bits=4,
         group_size=128,
@@ -22,7 +27,7 @@ def _build_module() -> exllamav2_module.ExllamaV2Linear:
 
 
 def test_exllamav2_make_q_matrix_uses_jit_op(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     calls = {}
 
     def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx):
@@ -53,7 +58,7 @@ def test_exllamav2_make_q_matrix_uses_jit_op(monkeypatch):
 
 
 def test_exllamav2_forward_uses_jit_gemm(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     module.q_handle = 77
     calls = {}
 
