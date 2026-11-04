@@ -20,15 +20,41 @@ opt-in because it builds every model in the registry:
 
 import os
 import re
+from importlib import metadata
 from types import SimpleNamespace
 
 import pytest
 import torch
 import transformers
+from packaging.version import InvalidVersion, Version
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
+
+
+# `afmoe` and `bailing_hybrid` only defuse their routed experts from 0.0.29, so
+# on an older wheel their specs legitimately match no layer. Skip rather than
+# fail: without this the suite looks like a MoE regression on a stale install.
+_MIN_DEFUSER = Version("0.0.29")
+
+
+def _defuser_version():
+    try:
+        return Version(metadata.version("defuser"))
+    except (metadata.PackageNotFoundError, InvalidVersion):
+        return None
+
+
+def _requires_defuser(name: str) -> None:
+    if name not in _NEEDS_DEFUSER_029:
+        return
+    installed = _defuser_version()
+    if installed is None or installed < _MIN_DEFUSER:
+        pytest.skip(
+            f"{name} needs defuser>={_MIN_DEFUSER} to defuse routed experts; "
+            f"installed: {installed or 'unknown'}"
+        )
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -91,6 +117,10 @@ DEFUSER_FUSED_EXPERTS = frozenset({
 # real regression is still reported as a failure.
 PLACEHOLDER_EXPERT_MODELS = frozenset({"ernie4_5_vl_moe"})
 
+# Defuser gained the `afmoe` / `bailing_hybrid` expert registry entries in
+# 0.0.29. Older wheels leave those routed experts fused in 3-D parameters.
+_NEEDS_DEFUSER_029 = frozenset({"afmoe", "bailing_hybrid"})
+
 
 def _quantizable_specs(definition, model_config):
     blocks = definition.simple_layer_modules(
@@ -146,6 +176,7 @@ def _missing_specs(specs, resolved):
 
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
 def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
+    _requires_defuser(model_type)
     config, definition, layers = _build_defused_model(model_type)
 
     assert layers, f"{model_type}: no decoder layers resolved"
@@ -161,6 +192,7 @@ def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
 
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
 def test_fixed_moe_definitions_resolve_routed_experts(model_type):
+    _requires_defuser(model_type)
     config, definition, layers = _build_defused_model(model_type)
 
     specs = _quantizable_specs(definition, config)
@@ -182,6 +214,7 @@ def test_fixed_moe_definitions_resolve_routed_experts(model_type):
     "model_type", sorted(set(MODEL_MAP) & set(CONFIG_MAPPING))
 )
 def test_every_defined_model_type_resolves_routed_experts(model_type):
+    _requires_defuser(model_type)
     try:
         config, definition, layers = _build_defused_model(model_type)
     except Exception as exc:  # noqa: BLE001 - unsupported configs are skipped

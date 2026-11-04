@@ -1068,7 +1068,15 @@ class BaseQModel(nn.Module):
                         moe_simple[-1].extend(capture_only_modules)
                 else:
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
+                    # A block only enters this branch when at least one name
+                    # carries the placeholder, but it may also hold shared-expert
+                    # or dense-MLP entries that must be emitted once. Expanding
+                    # those with the expert count duplicated them once per
+                    # expert (3x spec inflation at 192 experts for `afmoe`).
                     for n in names:
+                        if EXPERT_INDEX_PLACEHOLDER not in n:
+                            moe_simple[-1].append(n)
+                            continue
                         for index in range(expert_count(n)):
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
 
@@ -2228,7 +2236,13 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(model=self, processors=processors)
 
-        module_looper.loop()
+        try:
+            module_looper.loop()
+        finally:
+            # The other two looper entry points report coverage in a `finally`
+            # too; EoRA generation could otherwise skip every routed expert
+            # without a warning.
+            module_looper.layer_module_coverage.report(type(self).__name__)
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return

@@ -141,3 +141,34 @@ def test_module_looper_create_named_modules_records_missing_spec():
     assert subset == {}
     snapshot = tracker.snapshot()
     assert snapshot["mlp.experts.#.gate_proj"]["miss_layers"] == 1
+
+
+def test_mixed_expert_block_does_not_duplicate_non_expert_specs():
+    """Non-placeholder specs must be emitted once, not once per routed expert.
+
+    ``build_moe_modules_if_need`` expands a block as soon as one name carries
+    ``{expert_index}``, but the same block also holds shared-expert and dense
+    MLP entries. Expanding those with the expert count inflated the planned
+    spec list 3x for `afmoe` at 192 experts.
+    """
+    from collections import Counter
+
+    from gptqmodel.models.definitions.afmoe import AfMoeQModel
+
+    config = SimpleNamespace(num_experts=8, num_local_experts=8, num_shared_experts=1)
+    blocks = AfMoeQModel.simple_layer_modules(
+        model_config=config,
+        quantize_config=SimpleNamespace(dynamic=None),
+    )
+
+    for index, block in enumerate(blocks):
+        duplicates = {name: count for name, count in Counter(block).items() if count > 1}
+        assert not duplicates, f"block {index} repeats specs: {duplicates}"
+
+    flat = {name for block in blocks for name in block}
+    # The non-expert entries still have to survive the expansion.
+    assert "mlp.shared_experts.gate_proj" in flat
+    assert "mlp.gate_proj" in flat
+    assert "mlp.down_proj" in flat
+    # ... and the placeholder still expands for every expert.
+    assert {f"mlp.experts.{expert}.gate_proj" for expert in range(8)} <= flat
