@@ -11,7 +11,7 @@ from test_inference_numeric_range import check
 @pytest.mark.parametrize("columns", [129, 1024, 4096, 32768])
 @pytest.mark.parametrize("power", [0, 8, 120, -20, -130])
 def test_qqq_fused_quantization_thresholds(dtype, columns, power):
-    from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
+    import gptqmodel.nn_modules.qlinear.qqq as qqq
 
     if dtype == torch.float16 and power in (-130, 120):
         pytest.skip("FP16 cannot represent this input range")
@@ -32,7 +32,7 @@ def test_qqq_fused_quantization_thresholds(dtype, columns, power):
     expected = (source.double() / scale.double()).float().double().round().clamp(-128, 127).to(torch.int8)
     x = source.cuda()
     before = x.clone()
-    codes, actual_scale = QQQLinear.dynamic_quant(None, x)
+    codes, actual_scale = qqq.QQQLinear.dynamic_quant(None, x)
     torch.testing.assert_close(codes.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(actual_scale.cpu(), scale, rtol=0, atol=0)
     torch.testing.assert_close(x, before, rtol=0, atol=0)
