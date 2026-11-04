@@ -347,27 +347,37 @@ def tuning_family(device_or_arch=None) -> str:
     ``(major, minor)`` capability tuple.
     """
 
-    if torch.version.hip is not None or (
-        isinstance(device_or_arch, str) and device_or_arch.lower().startswith("gfx")
-    ):
+    # An explicit NVIDIA shape -- an ``sm_XX`` string or a ``(major, minor)``
+    # capability tuple -- is portable metadata and must classify the same way
+    # on a CUDA host and on a ROCm host.  Only a ``gfx*`` string or a real
+    # device is resolved through :func:`arch_class`, because that is where the
+    # host's own runtime decides what the target is.
+    if isinstance(device_or_arch, tuple):
+        return _cuda_family(tuple(device_or_arch[:2]))
+    if isinstance(device_or_arch, str):
+        lowered = device_or_arch.strip().lower()
+        if lowered.startswith("gfx"):
+            return arch_class(device_or_arch)
+        if lowered.startswith("sm_"):
+            return _tuning_family_from_sm(device_or_arch)
+    if torch.version.hip is not None:
         return arch_class(device_or_arch)
 
-    if isinstance(device_or_arch, str) and device_or_arch.lower().startswith("sm_"):
-        arch = normalize_arch(device_or_arch)
-        # ``sm_103a`` and friends carry an architecture-suffix letter.
-        digits = arch.split("sm_", 1)[-1].rstrip("abcdefghijklmnopqrstuvwxyz")
-        if len(digits) < 2 or not digits.isdigit():
-            return "other"
-        return _cuda_family((int(digits[:-1]), int(digits[-1])))
-
-    capability = (
-        tuple(device_or_arch[:2])
-        if isinstance(device_or_arch, tuple)
-        else cuda_capability(device_or_arch)
-    )
+    capability = cuda_capability(device_or_arch)
     if capability is None:
         return "other"
     return _cuda_family(capability)
+
+
+def _tuning_family_from_sm(name: str) -> str:
+    """Map an ``sm_89``/``sm_90a``/``sm_103a`` style string to a CUDA family."""
+
+    arch = normalize_arch(name)
+    # ``sm_103a`` and friends carry an architecture-suffix letter.
+    digits = arch.split("sm_", 1)[-1].rstrip("abcdefghijklmnopqrstuvwxyz")
+    if len(digits) < 2 or not digits.isdigit():
+        return "other"
+    return _cuda_family((int(digits[:-1]), int(digits[-1])))
 
 
 def _cuda_family(capability: tuple[int, int]) -> str:

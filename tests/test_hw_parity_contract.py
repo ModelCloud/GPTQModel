@@ -70,3 +70,36 @@ def test_ada_is_not_promoted_to_hopper():
     assert arch.is_ada("sm_89") is True
     assert arch.is_ada((9, 0)) is False
     assert arch.is_ada((10, 0)) is False
+
+
+def test_paroquant_launch_table_is_per_family_and_row_banded():
+    """ParoQuant must keep its historical tile off-RDNA4 and a measured RDNA4 tile."""
+
+    from gptqmodel.quantization.paroquant.modules.triton import gemm as paro_gemm
+
+    table = paro_gemm._PAROQUANT_GEMM_LAUNCH_CONFIGS
+    assert "rdna4" in table, "ParoQuant: no measured RDNA4 launch entry"
+
+    # Unmeasured families keep the tile that shipped before the table existed.
+    for family in ("other", "ada", "hopper", "blackwell", "cdna4"):
+        assert (
+            paro_gemm.paroquant_gemm_launch_config("decode", (8, 9) if family == "ada" else "gfx942")
+            == paro_gemm._PAROQUANT_GEMM_DEFAULT_CONFIGS["decode"]
+        )
+    assert (
+        paro_gemm.paroquant_gemm_launch_config("prefill", "gfx942")
+        == paro_gemm._PAROQUANT_GEMM_DEFAULT_CONFIGS["prefill"]
+    )
+
+    # RDNA4 is row-banded: <=8 rows, 9..64 rows, >64 rows.
+    small = paro_gemm.paroquant_gemm_launch_config("decode", "gfx1201", rows=8)
+    medium = paro_gemm.paroquant_gemm_launch_config("prefill", "gfx1201", rows=9)
+    large = paro_gemm.paroquant_gemm_launch_config("prefill", "gfx1201", rows=65)
+    assert small == table["rdna4"]["decode"]
+    assert medium == table["rdna4"]["prefill"]
+    assert large == table["rdna4"]["prefill_large"]
+    assert len({small, medium, large}) == 3
+    # num_warps=8 lost the measured prefill band on wave32.
+    for tile in (small, medium, large):
+        assert tile[3] in (4, 8)
+    assert medium[3] == 4 and large[3] == 4
