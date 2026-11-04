@@ -117,17 +117,30 @@ def test_gguf_capability_probe_short_circuits_on_rocm(monkeypatch):
     assert gguf_triton_module._cuda_device_capability(torch.device("cuda:0")) is None
     assert not gguf_triton_module._CUDA_DEVICE_CAPABILITY_CACHE, "no capability may be cached on ROCm"
 
-def test_gguf_triton_is_cuda_only_and_refuses_rocm(monkeypatch):
-    assert gguf_triton_module.GGUFTritonKernel.SUPPORTS_DEVICES == [DEVICE.CUDA]
+def test_gguf_triton_declares_rocm_and_validates(monkeypatch):
+    # The fused GGUF Triton kernels are plain tl.load/tl.dot, and every NVIDIA
+    # capability specialization is already skipped on ROCm, so the kernel is
+    # usable there with the generic launch configs.
+    assert gguf_triton_module.GGUFTritonKernel.SUPPORTS_DEVICES == [DEVICE.CUDA, DEVICE.ROCM]
     monkeypatch.setattr(gguf_triton_module, "IS_ROCM", True)
     GGUFTritonKernel = gguf_triton_module.GGUFTritonKernel
     GGUFTritonKernel.cached_validate_once.cache_clear()
 
     ok, error = GGUFTritonKernel.validate_once()
 
-    assert ok is False
-    assert isinstance(error, NotImplementedError)
-    assert "GGUF_TORCH" in str(error)
+    assert ok is True
+    assert error is None
+
+
+def test_gguf_triton_rocm_forward_admits_hip_devices(monkeypatch):
+    # HIP reuses the "cuda" device namespace; the forward guard must refuse only
+    # genuinely non-GPU placements.
+    source = gguf_triton_module.GGUFTritonKernel._forward_triton.__doc__ or ""
+    import inspect
+
+    body = inspect.getsource(gguf_triton_module.GGUFTritonKernel._forward_triton)
+    assert 'x_flat.device.type != "cuda"' in body
+    assert "or IS_ROCM" not in body, "the ROCm forward guard must be gone"
 
 def test_vptq_cuda_declares_cuda_only():
     assert VPTQCudaLinear.SUPPORTS_DEVICES == [DEVICE.CUDA]

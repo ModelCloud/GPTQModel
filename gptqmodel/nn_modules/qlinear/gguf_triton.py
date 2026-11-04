@@ -1379,7 +1379,13 @@ class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # ROCm is supported: the fused kernels use only tl.load/tl.dot and every
+    # NVIDIA capability specialization below is already skipped there (see
+    # ``_cuda_device_capability``, which returns None on ROCm), so ROCm runs the
+    # generic launch configs.  Measured 5-13x faster than GGUF_TORCH on gfx1201
+    # at both decode and prefill, so AUTO selects this kernel on ROCm; see
+    # docs/rocm-rdna4.md for the numbers.
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -1439,15 +1445,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             return False, Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
 
         if IS_ROCM:
-            # ``SUPPORTS_DEVICES`` only lists DEVICE.CUDA, so the selector
-            # already skips this kernel on ROCm; make the contract explicit so
-            # AUTO falls back to GGUF_TORCH instead of running an untuned path.
+            # NVIDIA capability specializations are disabled on ROCm (generic
+            # launch configs only), which is what the RDNA4 measurements below
+            # were taken with.
             log.debug.once(
-                "GGUF Triton: unavailable on ROCm; falling back to GGUF_TORCH."
-            )
-            return False, NotImplementedError(
-                "GGUFTritonKernel requires CUDA: the fused GGUF Triton kernels are not "
-                "validated on ROCm. Use BACKEND.GGUF_TORCH for the portable torch fallback."
+                "GGUF Triton: ROCm host; generic launch configs (no NVIDIA "
+                "capability specializations)."
             )
 
         return True, None
@@ -1557,10 +1560,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
         return cached
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
-        if x_flat.device.type != "cuda" or IS_ROCM:
+        # HIP reuses the "cuda" device namespace, so this admits CUDA and ROCm
+        # while still refusing CPU/MPS/XPU placements.
+        if x_flat.device.type != "cuda":
             raise RuntimeError(
-                f"{self.__class__.__name__} only supports CUDA inference. "
-                "Load GGUF models on CUDA or use BACKEND.GGUF_TORCH for the torch fallback."
+                f"{self.__class__.__name__} only supports CUDA/ROCm inference. "
+                "Load GGUF models on CUDA/ROCm or use BACKEND.GGUF_TORCH for the torch fallback."
             )
 
         if x_flat.shape[-1] != self.padded_in_features:
