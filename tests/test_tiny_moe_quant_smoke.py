@@ -34,6 +34,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwe
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
+from gptqmodel.utils.tensor_layout import assert_model_tensors_contiguous
 
 
 pytestmark = [pytest.mark.cpu, pytest.mark.slow]
@@ -134,12 +135,17 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
         quantize_config=quantize_config,
         backend=BACKEND.TORCH,
     )
+    assert_model_tensors_contiguous(model.model, label="post-load")
     model.quantize(
         calibration,
         batch_size=1,
         backend=BACKEND.TORCH,
         calibration_data_min_length=1,
     )
+    # Kernels and the P2P peer-copy path both assume contiguous weights; a
+    # packing step that left a strided view behind would silently take the slow
+    # path or corrupt a raw byte copy.
+    assert_model_tensors_contiguous(model.model, label="post-quantize")
     model.save(quantized_dir)
 
     quantized_model = GPTQModel.load(
@@ -147,6 +153,7 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
         backend=BACKEND.TORCH,
         device="cpu",
     )
+    assert_model_tensors_contiguous(quantized_model.model, label="post-reload")
 
     # Assert the full expert set was quantized, not just whichever experts the
     # natural router happened to hit in this tiny calibration sample.

@@ -18,16 +18,19 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
-from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import get_layer_name, move_to, nested_move_to
-from ..utils.p2p import enable_for_devices
+from ..utils.p2p import (
+    P2P_NOT_APPLICABLE,
+    broadcast_module_to_device,
+    enable_for_devices,
+    get_p2p_config,
+    p2p_move_nested,
+)
+from ..utils.python import has_gil_disabled
 from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
-
-
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -82,10 +85,64 @@ __all__ = [
     "clear_non_picklable_state",
     "select_forward_devices",
     "normalize_device_like",
+    "move_module_to_device",
+    "move_nested_to_device",
     "clone_module_for_devices",
     "find_last_quantized_layer_index",
     "forward_batch_worker",
 ]
+
+
+def move_module_to_device(
+    module: torch.nn.Module,
+    device: torch.device | str,
+    *,
+    root_module: Optional[torch.nn.Module] = None,
+) -> torch.nn.Module:
+    """Move a module, preferring runtime peer copies over per-tensor moves.
+
+    The regular ``move_to`` + ``rehome_module_to_device`` path issues one
+    PyTorch copy per parameter/buffer. When the source and destination are both
+    CUDA and P2P is enabled, the runtime peer-copy batch replaces those with
+    one GIL-released enqueue per leaf.
+
+    Throughput depends on leaf size. The peer path is used only for small
+    leaves, where it measures 3-15% faster than ``Tensor.to``; larger leaves
+    fall back to the regular move (see ``_PEER_COPY_MAX_AVG_LEAF_BYTES``). It is
+    also preferred on free-threaded builds because it does not route through
+    ``torch.nn.parallel.replicate``/``broadcast_coalesced``.
+    """
+
+    target = device if isinstance(device, torch.device) else torch.device(str(device))
+    moved = False
+    if isinstance(module, torch.nn.Module) and target.type == "cuda":
+        try:
+            moved = broadcast_module_to_device(module, target)
+        except Exception:
+            log.debug("P2P peer-copy module move failed; falling back", exc_info=True)
+            moved = False
+
+    if not moved:
+        move_to(module, device=target)
+
+    # Realign Accelerate hooks and catch any leaves the peer-copy path skipped.
+    rehome_module_to_device(
+        module,
+        target,
+        move_parameters=True,
+        move_buffers=True,
+        root_module=root_module,
+    )
+    return module
+
+
+def move_nested_to_device(value, device: torch.device | str):
+    """Move a nested input structure, using runtime peer copies when possible."""
+
+    moved = p2p_move_nested(value, device)
+    if moved is not P2P_NOT_APPLICABLE:
+        return moved
+    return nested_move_to(value, device=device)
 
 
 def find_last_quantized_layer_index(
@@ -443,21 +500,21 @@ def clone_module_for_devices(
 
     def _prepare_module(target_device: torch.device, step_name: str) -> None:
         start_ts = time.perf_counter()
-        module.to(target_device)
+        # ``move_module_to_device`` is equivalent to ``module.to()`` plus
+        # ``rehome_module_to_device()``, but routes the cross-GPU copies
+        # through the runtime peer-copy path when P2P is enabled.
+        move_module_to_device(module, target_device, root_module=root_module)
         module.eval()
-        rehome_module_to_device(
-            module,
-            target_device,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=root_module,
-        )
         clear_state_fn(module)
         setattr(module, "_gptqmodule_device_hint", target_device)
         _record(step_name, start_ts)
 
     use_replicate = (
-        USE_TORCH_REPLICATE
+        get_p2p_config().use_torch_replicate
+        # ``torch.nn.parallel.replicate`` funnels into
+        # ``torch.cuda.comm.broadcast_coalesced``, which is unsafe on
+        # free-threaded builds. Use the deepcopy + peer-copy path instead.
+        and not has_gil_disabled()
         and homogeneous_type
         and backend_available(device_type)
         and device_type != "cpu"
@@ -476,7 +533,7 @@ def clone_module_for_devices(
 
             for idx, (dev, replica) in enumerate(zip(devices, replicas), start=1):
                 replica.eval()
-                rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+                move_module_to_device(replica, dev, root_module=replica)
                 clear_state_fn(replica)
                 setattr(replica, "_gptqmodule_device_hint", dev)
                 clones[dev] = replica
@@ -507,13 +564,7 @@ def clone_module_for_devices(
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
         replica.eval()
-        rehome_module_to_device(
-            replica,
-            dev,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=replica,
-        )
+        move_module_to_device(replica, dev, root_module=replica)
         clear_state_fn(replica)
         setattr(replica, "_gptqmodule_device_hint", dev)
         clones[dev] = replica
@@ -555,11 +606,11 @@ def forward_batch_worker(
 
     # Replica preparation may enqueue non-blocking parameter or buffer copies.
     torch_sync(device=module_device)
-    inputs = [move_to(inp, device=module_device) for inp in layer_input]
+    inputs = move_nested_to_device(layer_input, device=module_device)
 
     attn_tensor = None
     if attention_mask is not None:
-        attn_tensor = move_to(attention_mask, device=module_device)
+        attn_tensor = move_nested_to_device(attention_mask, device=module_device)
 
     additional_inputs: Dict[str, torch.Tensor] = {}
     accepts_var_kw, allowed_kwargs = get_supported_kwargs(module.forward)
@@ -570,10 +621,10 @@ def forward_batch_worker(
         additional_inputs["attention_mask"] = attn_tensor if support_batch_quantize else None
 
     if position_ids is not None:
-        additional_inputs["position_ids"] = move_to(position_ids, device=module_device)
+        additional_inputs["position_ids"] = move_nested_to_device(position_ids, device=module_device)
 
     for key, value in layer_input_kwargs.items():
-        additional_inputs[key] = nested_move_to(value, device=module_device)
+        additional_inputs[key] = move_nested_to_device(value, device=module_device)
 
     keep_mask = None
     if attn_tensor is not None:
@@ -585,7 +636,7 @@ def forward_batch_worker(
         mask_tls.value = keep_mask
 
     if reuse_kv and prev_kv is not None:
-        additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device)
+        additional_inputs["kv_last_layer"] = move_nested_to_device(prev_kv, device=module_device)
 
     # TODO: some models does not honor generate config.use_cache property so we are forced to hack this to false
     additional_inputs["use_cache"] = False
