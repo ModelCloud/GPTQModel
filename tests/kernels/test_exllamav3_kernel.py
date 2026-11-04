@@ -25,11 +25,8 @@ def _get_quantize_exl3():
 def _require_exl3_quantize_shmem(bits: int) -> None:
     """Skip when the device cannot satisfy the kernel's dynamic shared-memory request.
 
-    ``quantize_tiles`` asks for ``2 * (65536 >> K) * sizeof(half) + 704`` bytes.
-    At 2 bits that is 66240 B, above the 64 KiB per-block opt-in limit of RDNA4
-    (gfx1200/gfx1201), so those targets simply cannot run 2-bit codebooks.
-    The kernel now raises instead of aborting the process, but the combination
-    is still unsupported and should skip rather than fail.
+    The compact 2-bit kernel fits its cost buffers into exactly 64 KiB by
+    reusing dead storage for reduction scratch. Other layouts need 704 B extra.
     """
     if not torch.cuda.is_available():
         return
@@ -38,6 +35,8 @@ def _require_exl3_quantize_shmem(bits: int) -> None:
     limit = getattr(props, "shared_memory_per_block_optin", None)
     if limit is None:
         limit = props.shared_memory_per_block
+    if bits == 2 and 65536 <= limit < required:
+        required = 65536
     if required > limit:
         pytest.skip(
             f"{props.name} allows {limit} B of dynamic shared memory per block; "
