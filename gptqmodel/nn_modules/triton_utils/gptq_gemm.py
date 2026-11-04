@@ -59,6 +59,37 @@ assembly), so the win is real matrix-core throughput, not an FMA fallback.
 The activation dtype is a separate gate, applied by ``TorchLinear`` (see
 ``gptqmodel.utils.arch.gemm_fused_dtypes``): the RDNA4 fused small-M GEMM is a
 measured win in FP16 but not in BF16, so BF16 takes the split path there.
+
+``ada`` (RTX 4090, SM 8.9) reuses the ``(16, 16, 256, 4, 2)`` tile with
+``small_m_max=16``, measured on one 4090 (torch 2.15.0+cu132, Triton 3.9.0,
+4-bit gs=128, M in {2, 8, 16}, ``split / fused`` speedup, hot and 256 MiB
+L2-flushed medians with ``torch.cuda.synchronize`` around every launch).  A
+sweep over ``(block_m, block_n)`` in {16, 32, 64} x {16, 32, 64},
+``block_k`` in {128, 256}, warps {4, 8} and stages {2, 4} found this tile has
+the only uniform win region:
+
+  FP16 / BF16, K <= 2048 and N <= 1536: 1.09x-1.65x hot (1.10x-1.82x on the
+  initial wider sweep), and 1.10x-1.41x on L2-flushed inputs throughout
+  K <= 2048, N <= 2048.  The K=2048 / N=2048 corner is neutral hot
+  (FP16 0.98x-1.03x, BF16 1.11x-1.13x) but still 1.11x-1.33x flushed, so it
+  stays inside the gate as a non-regressing point rather than a hot win.
+
+It loses outside that rectangle, and the loss is not monotonic, so the gate is
+the conservative rectangle rather than a shape-dependent band (hot medians):
+
+  K=2048 N=2560/3072/3584   : 0.95x / 0.87x / 0.87x
+  K=1536 N=4096             : 0.89x
+  K=2048 N=6144             : 0.78x
+  K=2560..4096 N>=2560      : 0.78x-0.86x
+
+A second measured band (K <= 1536, N <= 4096, min 1.01x FP16 / 1.13x BF16) is
+not enabled because the enclosing rectangle regresses; ``TorchLinear``'s gate
+only expresses ``small_m_max``/``max_in_features``/``max_out_features``.
+Wider tiles (32x32, 16x32 with block_k=128, 64x64) recover some of the large-N
+points but lose worst-case elsewhere and are not shipped.
+
+BF16 is a measured win inside the gate (1.11x-1.82x), so Ada claims both
+dtypes; unlike RDNA4, no dtype is left on the split path for correctness.
 """
 
 from typing import NamedTuple
@@ -83,6 +114,10 @@ class GemmLaunch(NamedTuple):
     num_stages: int
     small_m_max: int
     max_in_features: int
+    # Optional output-width cap.  ``0`` (the default) disables it, which keeps
+    # the cdna4/rdna4 entries and their ``(small_m_max, max_in_features)``
+    # contract byte-for-byte unchanged.
+    max_out_features: int = 0
 
 
 # Launch table keyed by ``arch_class()``. ``cdna4`` is the gfx950 configuration
@@ -101,6 +136,14 @@ _LAUNCH_CONFIGS: dict[str, GemmLaunch] = {
     "rdna4": GemmLaunch(
         block_m=32, block_n=32, block_k=256, num_warps=4, num_stages=2,
         small_m_max=16, max_in_features=17408,
+    ),
+    # Ada (RTX 4090, SM 8.9): measured on one 4090.  The (16, 16) tile is a
+    # uniform win for K <= 2048 and N <= 2048 in FP16 and BF16; the output cap
+    # is what keeps the fused path off the wide-N regressions.  See the module
+    # docstring table.
+    "ada": GemmLaunch(
+        block_m=16, block_n=16, block_k=256, num_warps=4, num_stages=2,
+        small_m_max=16, max_in_features=2048, max_out_features=2048,
     ),
 }
 
@@ -125,33 +168,47 @@ NUM_STAGES = _LAUNCH_CONFIGS["cdna4"].num_stages
 def launch_config(arch=None) -> GemmLaunch:
     """Return the GEMM launch tile for an architecture string or device.
 
-    Accepts a normalized ``gfxXXXX``/``sm_XX`` string, a ``torch.device``, or
-    ``None``. Unregistered architectures get the conservative default, whose
+    Accepts a normalized ``gfxXXXX``/``sm_XX`` string, a ``(major, minor)``
+    capability tuple, a ``torch.device``, or ``None``.  Dispatch goes through
+    the shared :func:`gptqmodel.utils.arch.tuning_family` vocabulary so CUDA
+    reaches the ``ada`` entry and ROCm reaches ``cdna4``/``rdna4``.
+    Unregistered architectures get the conservative default, whose
     ``small_m_max``/``max_in_features`` are ``0`` so the fused path stays off.
     """
 
+    if arch is None:
+        return _DEFAULT_LAUNCH
     if not isinstance(arch, str):
-        return _LAUNCH_CONFIGS.get(_arch.arch_class(arch), _DEFAULT_LAUNCH)
+        return _LAUNCH_CONFIGS.get(_arch.tuning_family(arch), _DEFAULT_LAUNCH)
 
     name = _arch.normalize_arch(arch)
-    if not name.startswith("gfx"):
+    if not name.startswith("gfx") and not name.startswith("sm_"):
         return _DEFAULT_LAUNCH
-    return _LAUNCH_CONFIGS.get(_arch.arch_class(name), _DEFAULT_LAUNCH)
+    return _LAUNCH_CONFIGS.get(_arch.tuning_family(name), _DEFAULT_LAUNCH)
 
 
 def gate_limits(arch=None) -> tuple[int, int]:
     """Return ``(small_m_max, max_in_features)`` for the fused GEMM gate.
 
     Delegates to :func:`gptqmodel.utils.arch.gate_limits`; anything that is not
-    a ROCm ``gfx*`` architecture string yields ``(0, 0)`` (gate disabled).
+    a registered ``gfx*``/``sm_*`` architecture string yields ``(0, 0)`` (gate
+    disabled).
     """
 
-    if not isinstance(arch, str):
+    if arch is None:
         return (0, 0)
+    if not isinstance(arch, str):
+        return _arch_gate_limits(arch)
     name = _arch.normalize_arch(arch)
-    if not name.startswith("gfx"):
+    if not name.startswith("gfx") and not name.startswith("sm_"):
         return (0, 0)
     return _arch_gate_limits(name)
+
+
+def gate_max_out_features(arch=None) -> int:
+    """Return the fused GEMM output-width cap (``0`` = no cap)."""
+
+    return _arch.gemm_fused_max_out_features(arch)
 
 
 @triton.jit
@@ -215,7 +272,7 @@ def _gptq_gemm_small_m_kernel(
 def gptq_gemm(x: torch.Tensor, qweight: torch.Tensor, scales: torch.Tensor,
               qzeros: torch.Tensor, g_idx: torch.Tensor,
               out_dtype: torch.dtype = None, bits: int = 4) -> torch.Tensor:
-    cfg = launch_config(_arch.rocm_arch(x.device))
+    cfg = launch_config(x.device)
     m, in_features = x.shape
     out_features = qweight.shape[1]
     output = torch.empty(

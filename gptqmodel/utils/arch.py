@@ -30,6 +30,7 @@ __all__ = [
     "cuda_capability",
     "gate_limits",
     "gemm_fused_dtypes",
+    "gemm_fused_max_out_features",
     "is_ada",
     "is_gfx950",
     "is_rdna4",
@@ -54,6 +55,20 @@ _CDNA4_GATE = (16, 5120)
 # so RDNA4 keeps the full measured range while reusing the conservative
 # ``small_m_max`` (M>16 was not uniformly a win).
 _RDNA4_GATE = (16, 17408)
+# Ada (RTX 4090, SM 8.9) shape gate for the fused small-M GEMM, measured on a
+# 4090 (torch 2.15.0+cu132, Triton 3.9.0) with the (16, 16, 256, 4, 2) tile,
+# 4-bit gs=128, FP16 and BF16, M in {2, 8, 16}.  Inside the rectangle
+# K <= 2048 and N <= 2048 the fused kernel is never a material loss and is a
+# clear win on L2-flushed inputs: 1.09x-1.65x hot for K <= 2048 and N <= 1536
+# (1.10x-1.82x on the wider sweep), neutral-to-1.11x hot at the K=2048/N=2048
+# corner, and 1.10x-1.41x flushed everywhere in the rectangle.  Outside it the
+# serial K-loop and the grid width lose.  A second measured win band (K <= 1536, N <= 4096, min
+# 1.014x) is *not* enabled because the enclosing rectangle (K <= 2048,
+# N <= 4096) regresses (0.869x at 2048x3072), so the gate stays rectangular and
+# conservative instead of claiming a shape-dependent band the dispatcher cannot
+# express.  ``cdna4``/``rdna4`` values are unchanged.
+_ADA_GATE = (16, 2048)
+_ADA_MAX_OUT_FEATURES = 2048
 _DISABLED_GATE = (0, 0)
 
 # Activation dtypes the fused small-M GEMM is *measurably* faster in.  CDNA has
@@ -73,6 +88,11 @@ _DISABLED_GATE = (0, 0)
 # (FP16 1.64x-3.67x, BF16 1.40x-2.84x measured), so it is not gated here.
 _CDNA4_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
 _RDNA4_GEMM_DTYPES = frozenset({"float16"})
+# Ada was measured in *both* activation dtypes inside the gate above (same
+# shapes as FP16): FP16 1.10x-1.82x, BF16 1.11x-1.82x against
+# dequantize+matmul, so BF16 is a measured win there rather than an inherited
+# claim.  Outside the gate the fused kernel is disabled for both dtypes.
+_ADA_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
 
 _FUSED_ARCH_PREFIXES = ("gfx950", "gfx120", "gfx125")
 
@@ -262,11 +282,13 @@ def gemm_fused_dtypes(device_or_arch=None) -> frozenset[str]:
     GEMM is disabled for that architecture (see :func:`gate_limits`).
     """
 
-    cls = arch_class(device_or_arch)
-    if cls == "cdna4":
+    family = tuning_family(device_or_arch)
+    if family == "cdna4":
         return _CDNA4_GEMM_DTYPES
-    if cls == "rdna4":
+    if family == "rdna4":
         return _RDNA4_GEMM_DTYPES
+    if family == "ada":
+        return _ADA_GEMM_DTYPES
     return frozenset()
 
 
@@ -278,12 +300,27 @@ def gate_limits(device_or_arch=None) -> tuple[int, int]:
     Unregistered architectures return ``(0, 0)``, which disables the shape gate.
     """
 
-    cls = arch_class(device_or_arch)
-    if cls == "cdna4":
+    family = tuning_family(device_or_arch)
+    if family == "cdna4":
         return _CDNA4_GATE
-    if cls == "rdna4":
+    if family == "rdna4":
         return _RDNA4_GATE
+    if family == "ada":
+        return _ADA_GATE
     return _DISABLED_GATE
+
+
+def gemm_fused_max_out_features(device_or_arch=None) -> int:
+    """Return the fused small-M GEMM output-width cap (``0`` disables the cap).
+
+    ``cdna4``/``rdna4`` measured uniform wins out to the widest projection they
+    tested, so their cap stays disabled.  Ada's fused tile wins only while the
+    grid stays narrow; see ``_ADA_GATE``.
+    """
+
+    if tuning_family(device_or_arch) == "ada":
+        return _ADA_MAX_OUT_FEATURES
+    return 0
 
 
 def cuda_capability(device: torch.device | str | int | None = None) -> tuple[int, int] | None:

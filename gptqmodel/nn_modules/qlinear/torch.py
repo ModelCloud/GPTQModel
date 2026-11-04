@@ -19,7 +19,10 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
+from ...utils.arch import gemm_fused_max_out_features as _arch_gemm_max_out_features
+from ...utils.arch import is_ada as _arch_is_ada
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -57,6 +60,21 @@ log = setup_logger()
 def _rocm_arch_name(device: torch.device) -> str:
     """Normalized ROCm architecture (``gfx950``) or ``""`` when unavailable."""
     return rocm_arch(device) or ""
+
+
+def _fused_arch_key(device: torch.device) -> str:
+    """Architecture token for the fused-kernel tables (``gfx950``/``sm_89``).
+
+    The shared tables are keyed by the :func:`gptqmodel.utils.arch.tuning_family`
+    vocabulary, so CUDA devices must be probed through the compute capability
+    rather than ``gcnArchName`` (which is empty off ROCm).  ROCm behavior is
+    unchanged: the ``gfx*`` string is returned when present.
+    """
+
+    arch = _rocm_arch_name(device)
+    if arch:
+        return arch
+    return _arch_cuda_arch(device) or ""
 
 
 # One-shot diagnostics for fallbacks: the forward path is hot, so each reason is
@@ -413,7 +431,7 @@ class TorchLinear(PackableQuantLinear):
         """
         if _ROCM_GEMM_GATE_LIMITS is None:
             return _ROCM_GEMM_SMALL_M_MAX, _ROCM_GEMM_MAX_IN_FEATURES
-        return _ROCM_GEMM_GATE_LIMITS(_rocm_arch_name(x.device))
+        return _ROCM_GEMM_GATE_LIMITS(_fused_arch_key(x.device))
 
     def _rocm_gemm_dtype_supported(self, x: torch.Tensor) -> bool:
         """Return whether the fused GEMM is a measured win for this activation dtype.
@@ -423,7 +441,19 @@ class TorchLinear(PackableQuantLinear):
         the split path there.  CDNA keeps both dtypes (its historical values are
         unchanged).  Unregistered architectures have an empty set.
         """
-        return str(x.dtype).removeprefix("torch.") in _arch_gemm_fused_dtypes(_rocm_arch_name(x.device))
+        return str(x.dtype).removeprefix("torch.") in _arch_gemm_fused_dtypes(_fused_arch_key(x.device))
+
+    def _rocm_gemm_out_features_supported(self, x: torch.Tensor) -> bool:
+        """Return whether this output width is inside the measured fused win.
+
+        ``cdna4``/``rdna4`` measured uniform wins out to their widest tested
+        projection, so their cap is ``0`` (disabled) and this is a no-op.  Ada's
+        fused tile only beats the split path while the grid stays narrow, so the
+        cap is what excludes the wide-N regressions.
+        """
+
+        cap = _arch_gemm_max_out_features(_fused_arch_key(x.device))
+        return cap <= 0 or self.out_features <= cap
 
     def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
         small_m_max, max_in_features = self._rocm_gemm_gate(x)
@@ -432,14 +462,21 @@ class TorchLinear(PackableQuantLinear):
             and 2 <= x.shape[0] <= small_m_max
             and x.shape[1] == self.in_features
             and self.in_features <= max_in_features
+            and self._rocm_gemm_out_features_supported(x)
             and self._rocm_gemm_dtype_supported(x)
             and self._can_use_rocm_fused(x)
         )
 
     def _can_use_rocm_fused(self, x: torch.Tensor) -> bool:
-        """Preconditions shared by the fused ROCm GPTQ GEMV / small-M GEMM kernels."""
+        """Preconditions shared by the fused GPTQ GEMV / small-M GEMM kernels.
+
+        Enabled on ROCm for the registered ``gfx*`` families and on Ada
+        (RTX 4090 / SM 8.9), whose launch entries and gates are measured in the
+        `gptq_gemv`/`gptq_gemm` tables.  Every other CUDA family keeps the
+        portable dequantize + matmul path.
+        """
         return (
-            IS_ROCM
+            (IS_ROCM or _arch_is_ada(x.device))
             and self._triton_dequant_enabled
             and self._can_use_triton_dequant()
             and self.bits in (2, 4, 8)
@@ -466,6 +503,10 @@ class TorchLinear(PackableQuantLinear):
         behaviour and silently use dequantize + matmul.
         """
         if not IS_ROCM:
+            if _arch_is_ada(x.device):
+                # The Ada entry lives in the same tables; the shared precondition
+                # list above already covers it.
+                return True
             _log_fallback_once("rocm-not-rocm", "ROCm fused GPTQ kernel skipped: not a ROCm host.")
             return False
         arch = _rocm_arch_name(x.device)

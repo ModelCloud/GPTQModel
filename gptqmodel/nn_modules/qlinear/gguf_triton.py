@@ -252,6 +252,101 @@ if _TRITON_AVAILABLE:
         "num_stages": 4,
     }
 
+    # ------------------------------------------------------------------
+    # SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
+    # kernels.  Measured on one RTX 4090 (torch 2.15.0+cu132, Triton 3.9.0),
+    # FP16, 4-bit group 128 (KxN), as ``hot / 256 MiB L2-flushed`` medians with
+    # ``torch.cuda.synchronize`` around every launch, against the kernel's own
+    # autotuned ``best_config``:
+    #
+    #   Q4_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.10x-1.15x
+    #   Q4_K  (2048,1024)   blocks=8   rows 1/8/64 all faster
+    #   Q4_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+    #   Q4_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+    #   Q4_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+    #   Q5_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+    #   Q5_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+    #   Q5_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+    #   Q6_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.07x-1.13x
+    #   Q6_K  (2048,1024)   blocks=8   rows 1/8/64/127 all faster
+    #   Q6_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+    #   Q6_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+    #   Q6_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+    #
+    # Keys are the *padded* in_features the dispatcher sees (GGUF blocks are
+    # 256 wide, so a 896-wide projection is padded to 1024 before the kernel).
+    # The narrow entries were re-measured on the padded 1024-wide input after
+    # an unpadded 896-wide probe produced out-of-bounds reads: only the padded
+    # numbers are claimed (1.07x-1.15x, bit-identical to autotuned).
+    #
+    # Only those exact (in_features, out_features) shapes are wired: a fixed
+    # tile that was not measured on the exact shape could silently lose, and
+    # the autotuned path is always available.  Rows 2..7 and rows > 127 were
+    # not swept and stay autotuned.  Where the large-block decode tile lost in
+    # both hot and flushed medians (rows 1 with >= 16 K blocks: the autotuner
+    # picks a 2-stage tile that also survives the L2 flush, e.g. Q4_K
+    # 4096x4096 auto 50.2/65.5 us vs the best fixed 53.2/83.8 us) it is
+    # deliberately left on the autotuned generic kernel.
+    _GGUF_SM89_QK_SHAPES = {
+        "Q4_K": {
+            1: {
+                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            },
+            "mid": {
+                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            },
+            "large": {
+                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_warps": 8, "num_stages": 2},
+            },
+        },
+        "Q5_K": {
+            1: {
+                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            },
+            "mid": {
+                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            },
+            "large": {
+                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            },
+        },
+        "Q6_K": {
+            1: {
+                (1024, 128): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+                (2048, 1024): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+            },
+            "mid": {
+                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            },
+            "large": {
+                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 1024): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            },
+        },
+    }
+
     @triton.jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(
         x_ptr,
@@ -950,6 +1045,58 @@ def _use_q1_0_g128_k2048_decode_specialization(
 ) -> bool:
     return rows == 1 and in_features == 2048
 
+def _gguf_qk_row_band(rows: int) -> str | int | None:
+    """Measured row band for the fixed Q4_K/Q5_K/Q6_K configs on SM89.
+
+    ``1`` is decode, ``"mid"`` is the 8..63 band measured at M=8 and ``"large"``
+    is the 64..127 band measured at M=64/127.  Rows 2..7 and rows > 127 were
+    not swept and must stay on the autotuned generic kernel.
+    """
+
+    if rows == 1:
+        return 1
+    if 8 <= rows <= 63:
+        return "mid"
+    if 64 <= rows <= 127:
+        return "large"
+    return None
+
+
+def _select_gguf_qk_fixed_launch_config(
+    qtype: str,
+    *,
+    capability: tuple[int, int] | None,
+    rows: int,
+    in_features: int,
+    out_features: int,
+) -> dict[str, int] | None:
+    """Return a measured SM89 fixed config, or ``None`` for the autotuned path.
+
+    Exact shape match on purpose: the measured table above only backs these
+    (K, N) pairs, so an unmeasured projection keeps the kernel's own autotuner
+    instead of inheriting a tile that may lose.
+    """
+
+    if capability != (8, 9):
+        return None
+    band = _gguf_qk_row_band(rows)
+    if band is None:
+        return None
+    config = _GGUF_SM89_QK_SHAPES.get(qtype, {}).get(band, {}).get((in_features, out_features))
+    return None if config is None else dict(config)
+
+
+def _select_q4_k_fixed_launch_config(**kwargs) -> dict[str, int] | None:
+    return _select_gguf_qk_fixed_launch_config("Q4_K", **kwargs)
+
+
+def _select_q5_k_fixed_launch_config(**kwargs) -> dict[str, int] | None:
+    return _select_gguf_qk_fixed_launch_config("Q5_K", **kwargs)
+
+
+def _select_q6_k_fixed_launch_config(**kwargs) -> dict[str, int] | None:
+    return _select_gguf_qk_fixed_launch_config("Q6_K", **kwargs)
+
 
 def _cuda_device_capability(device: torch.device) -> tuple[int, int] | None:
     if device.type != "cuda":
@@ -1272,6 +1419,125 @@ def _launch_q1_0_g128_k2048_fixed_matmul(
         sign_bytes.stride(2),
         scale.stride(0),
         scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
+def _launch_q4_k_fixed_matmul(
+    x: torch.Tensor,
+    qs: torch.Tensor,
+    scale: torch.Tensor,
+    min_value: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q4_k_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        qs,
+        scale,
+        min_value,
+        output,
+        x.shape[0],
+        output.shape[1],
+        qs.shape[0],
+        x.stride(0),
+        x.stride(1),
+        qs.stride(0),
+        qs.stride(1),
+        qs.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
+        min_value.stride(0),
+        min_value.stride(1),
+        min_value.stride(2),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
+def _launch_q5_k_fixed_matmul(
+    x: torch.Tensor,
+    qs: torch.Tensor,
+    qh: torch.Tensor,
+    scale: torch.Tensor,
+    min_value: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q5_k_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        qs,
+        qh,
+        scale,
+        min_value,
+        output,
+        x.shape[0],
+        output.shape[1],
+        qs.shape[0],
+        x.stride(0),
+        x.stride(1),
+        qs.stride(0),
+        qs.stride(1),
+        qs.stride(2),
+        qh.stride(0),
+        qh.stride(1),
+        qh.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
+        min_value.stride(0),
+        min_value.stride(1),
+        min_value.stride(2),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
+def _launch_q6_k_fixed_matmul(
+    x: torch.Tensor,
+    ql: torch.Tensor,
+    qh: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q6_k_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        ql,
+        qh,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
+        ql.shape[0],
+        x.stride(0),
+        x.stride(1),
+        ql.stride(0),
+        ql.stride(1),
+        ql.stride(2),
+        qh.stride(0),
+        qh.stride(1),
+        qh.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
         output.stride(0),
         output.stride(1),
         **fixed_config,
@@ -1625,11 +1891,46 @@ class GGUFTritonKernel(GGUFTorchLinear):
             ):
                 return fused_q1_0_g128_k2048_matmul(x_work, cache["sign_bytes"], cache["scale"])
             return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
+        # SM89 (RTX 4090) exact-shape fixed tiles, measured against the
+        # autotuned generic kernel.  ``None`` keeps the autotuned path, which
+        # stays the fallback for every unmeasured shape and every other GPU.
+        capability = _cuda_device_capability(x_work.device)
         if self.gguf_tensor_qtype == "Q4_K":
+            fixed = _select_q4_k_fixed_launch_config(
+                capability=capability,
+                rows=x_work.shape[0],
+                in_features=self.padded_in_features,
+                out_features=cache["scale"].shape[2],
+            )
+            if fixed is not None:
+                return _launch_q4_k_fixed_matmul(
+                    x_work, cache["qs"], cache["scale"], cache["min"], fixed_config=fixed,
+                )
             return fused_q4_k_matmul(x_work, cache["qs"], cache["scale"], cache["min"])
         if self.gguf_tensor_qtype == "Q5_K":
+            fixed = _select_q5_k_fixed_launch_config(
+                capability=capability,
+                rows=x_work.shape[0],
+                in_features=self.padded_in_features,
+                out_features=cache["scale"].shape[2],
+            )
+            if fixed is not None:
+                return _launch_q5_k_fixed_matmul(
+                    x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"],
+                    fixed_config=fixed,
+                )
             return fused_q5_k_matmul(x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"])
         if self.gguf_tensor_qtype == "Q6_K":
+            fixed = _select_q6_k_fixed_launch_config(
+                capability=capability,
+                rows=x_work.shape[0],
+                in_features=self.padded_in_features,
+                out_features=cache["scale"].shape[2],
+            )
+            if fixed is not None:
+                return _launch_q6_k_fixed_matmul(
+                    x_work, cache["ql"], cache["qh"], cache["scale"], fixed_config=fixed,
+                )
             return fused_q6_k_matmul(x_work, cache["ql"], cache["qh"], cache["scale"])
 
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
@@ -1663,6 +1964,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
 __all__ = [
     "GGUFTritonKernel",
+    "_select_gguf_qk_fixed_launch_config",
+    "_select_q4_k_fixed_launch_config",
+    "_select_q5_k_fixed_launch_config",
+    "_select_q6_k_fixed_launch_config",
     "_select_q1_0_g128_fixed_launch_config",
     "_select_q1_0_g128_u32_fixed_launch_config",
     "_select_q1_0_g128_u32_layout",

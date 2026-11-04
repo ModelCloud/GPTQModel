@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
-from ...utils.arch import arch_class, normalize_arch, rocm_arch
+from ...utils.arch import arch_class, normalize_arch, tuning_family
 from ...utils.torch import HAS_XPU
 
 
@@ -41,6 +41,13 @@ _DEQUANT_LAUNCH_CONFIGS: dict[str, DequantLaunch] = {
     # bound, so the spread stays within a few percent, but this removes the
     # unmeasured CDNA inheritance.
     "rdna4": DequantLaunch(x_block=2048, num_warps=4, num_stages=1),
+    # Measured on RTX 4090 (SM 8.9), torch 2.15.0+cu132 / Triton 3.9.0, 4-bit
+    # gs=128 in FP16 and BF16, X_BLOCK in {256..4096} x warps {1,2,4} x stages
+    # {1,2}: (512, 1, 2) has the best mean against the per-shape best (hot
+    # 1.007x, L2-flushed 1.017x; max regret 1.018x hot / 1.048x flushed) versus
+    # the A100 default (1024, 1, 1) (mean 1.024x / max 1.087x).  It is
+    # 1.09x faster at 4096x4096 (35.3 vs 38.4 us hot).
+    "ada": DequantLaunch(x_block=512, num_warps=1, num_stages=2),
 }
 
 # Used for CUDA/MPS/XPU and any unregistered ROCm target.
@@ -53,15 +60,23 @@ DEQUANT_NUM_STAGES = _DEFAULT_DEQUANT_LAUNCH.num_stages
 
 
 def launch_config(arch=None) -> DequantLaunch:
-    """Return the dequant launch shape for an architecture string or device."""
+    """Return the dequant launch shape for an architecture string or device.
 
+    Routes through :func:`gptqmodel.utils.arch.tuning_family` so CUDA devices
+    and ``sm_*`` strings reach the ``ada`` entry, while ROCm ``gfx*`` strings
+    keep the ``cdna4``/``rdna4`` behaviour.  ``None`` keeps the A100-tested
+    default.
+    """
+
+    if arch is None:
+        return _DEFAULT_DEQUANT_LAUNCH
     if not isinstance(arch, str):
-        return _DEQUANT_LAUNCH_CONFIGS.get(arch_class(arch), _DEFAULT_DEQUANT_LAUNCH)
+        return _DEQUANT_LAUNCH_CONFIGS.get(tuning_family(arch), _DEFAULT_DEQUANT_LAUNCH)
 
     name = normalize_arch(arch)
-    if not name.startswith("gfx"):
+    if not name.startswith("gfx") and not name.startswith("sm_"):
         return _DEFAULT_DEQUANT_LAUNCH
-    return _DEQUANT_LAUNCH_CONFIGS.get(arch_class(name), _DEFAULT_DEQUANT_LAUNCH)
+    return _DEQUANT_LAUNCH_CONFIGS.get(tuning_family(name), _DEFAULT_DEQUANT_LAUNCH)
 
 
 @triton.jit
@@ -301,7 +316,7 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     out = torch.empty((in_features, out_features), device=qweight.device, dtype=dtype)
     out_dtype = dtype
 
-    cfg = launch_config(rocm_arch(qweight.device))
+    cfg = launch_config(qweight.device)
     numels = out.numel()
     grid = (triton.cdiv(numels, cfg.x_block),)
 

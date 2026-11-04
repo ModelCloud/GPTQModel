@@ -219,6 +219,17 @@ _PLAN_CACHE: OrderedDict[tuple[Any, ...], AwqTritonPlan] = OrderedDict()
 # Offline measurements on the exact device profile below.  These are exact
 # shapes on purpose: neighboring M values and dense crossovers were not stable
 # enough to justify buckets.  Unlisted devices and shapes retain legacy policy.
+# Exact-match guard.  Re-verified on the reference host (2x RTX 4090, torch
+# 2.15.0+cu132, Triton 3.9.0): per visible device ``device_identity`` reports
+# name "NVIDIA GeForce RTX 4090", capability (8, 9), 128 SMs and
+# total_memory 50_950_569_984, matching these four fields exactly, so no
+# constant needs adjustment.
+#
+# No BF16 rule set is installed: ``awq_gemm_triton`` rejects a non-FP16 input
+# or scale tensor outright ("AWQ Triton GEMM requires float16 input and
+# scales"), so a BF16 plan could not be executed, let alone measured.  The
+# rules below are FP16-only and ``_builtin_plan`` enforces that on the dtype
+# triple rather than silently inheriting an FP16 tile.
 _VERIFIED_4090_PROFILE = (
     "NVIDIA GeForce RTX 4090", (8, 9), 128, 50_950_569_984,
 )
