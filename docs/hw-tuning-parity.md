@@ -35,6 +35,19 @@ asserts that each tuned pipeline's launch table contains both `ada` and
 `rdna4`. Adding a tuned pipeline means adding it to `TUNED_PIPELINES` in that
 test at the same time as adding the table.
 
+Two pipelines do not fit that shape and have dedicated assertions instead:
+
+* **GGUF** (`gguf_triton`) is keyed by quant type and shape, not by family.
+  The SM 8.9 fixed tiles are asserted to fire only on capability `(8, 9)`; on
+  ROCm the kernel keeps its own autotuned generic launch.
+* **AWQ fused GEMM** (`awq/modules/triton/scheduler.py`) keys rules on an exact
+  device profile rather than a family token, because neighbouring shapes were
+  not stable enough to bucket. The contract builds a six-field CUDA identity
+  and a seven-field HIP identity from the shipped constants, asserts each
+  resolves to its own measured rule, and asserts that a wrong gfx arch, board
+  name, CU count, memory size, or non-FP16 dtype resolves to the generic
+  policy instead.
+
 ## Pipeline status
 
 Per-pipeline status is tracked in `docs/rocm-rdna4.md` (RDNA4 side) and in the
