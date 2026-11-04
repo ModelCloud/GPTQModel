@@ -334,6 +334,16 @@ void quantize_tiles
     if (mcg) cb = 1;
     if (mul1) cb = 2;
 
+    // Largest dynamic shared-memory request the current device can satisfy.
+    int max_shmem = 0;
+    cudaDeviceGetAttribute
+    (
+        &max_shmem,
+        cudaDevAttrMaxSharedMemoryPerBlockOptin,
+        device
+    );
+    TORCH_CHECK(max_shmem > 0, "EXL3 quantize_tiles could not query the device shared-memory limit.");
+
     int batch_i = 0;
     do
     {
@@ -348,6 +358,22 @@ void quantize_tiles
         int bsz = batch_j - batch_i;
         int kernel_idx = K - 1 + 8 * cb;
         int shmem = 2 * (65536 >> K) * sizeof(half) + 512 + 64 + 128;
+
+        // The 2-bit instantiations need 66240 B of dynamic shared memory, which
+        // exceeds the 64 KiB per-block opt-in limit on RDNA4 (gfx1200/gfx1201).
+        // Without this guard cudaFuncSetAttribute fails silently, the launch
+        // reports ``invalid argument``, and gpu_assert() calls exit(), killing
+        // the whole process instead of raising a catchable error.
+        if (shmem > max_shmem)
+        {
+            TORCH_CHECK
+            (
+                false,
+                "EXL3 quantize_tiles needs ", shmem, " B of dynamic shared memory "
+                "for K=", K, ", but this device allows at most ", max_shmem,
+                " B per block. Use bits >= 3 for this codebook on this GPU."
+            );
+        }
 
         cudaFuncSetAttribute
         (

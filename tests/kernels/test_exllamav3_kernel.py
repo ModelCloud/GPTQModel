@@ -22,6 +22,29 @@ def _get_quantize_exl3():
     return quantize_exl3
 
 
+def _require_exl3_quantize_shmem(bits: int) -> None:
+    """Skip when the device cannot satisfy the kernel's dynamic shared-memory request.
+
+    ``quantize_tiles`` asks for ``2 * (65536 >> K) * sizeof(half) + 704`` bytes.
+    At 2 bits that is 66240 B, above the 64 KiB per-block opt-in limit of RDNA4
+    (gfx1200/gfx1201), so those targets simply cannot run 2-bit codebooks.
+    The kernel now raises instead of aborting the process, but the combination
+    is still unsupported and should skip rather than fail.
+    """
+    if not torch.cuda.is_available():
+        return
+    required = 2 * (65536 >> bits) * 2 + 512 + 64 + 128
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    limit = getattr(props, "shared_memory_per_block_optin", None)
+    if limit is None:
+        limit = props.shared_memory_per_block
+    if required > limit:
+        pytest.skip(
+            f"{props.name} allows {limit} B of dynamic shared memory per block; "
+            f"EXL3 {bits}-bit codebooks need {required} B."
+        )
+
+
 def _get_block_trace():
     if not torch.cuda.is_available():
         pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
@@ -127,6 +150,7 @@ def _clone_tensors(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
 def _build_kernels(bits: int, codebook: str) -> tuple[torch.Tensor, ExllamaV3TorchLinear, ExllamaV3Linear]:
     quantize_exl3 = _get_quantize_exl3()
+    _require_exl3_quantize_shmem(bits)
 
     torch.manual_seed(17)
     in_features = {
