@@ -30,7 +30,7 @@
   * **Correctness:** Fixed packing/inference overflow, underflow, FP32 reductions, BF16 bias cancellation, 8-bit BitBLAS zero points, and stale fused Torch metadata after checkpoint loads or tensor changes.
   * **MoE:** Fixed skipped routed experts in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE; added warnings for unresolved module paths.
   * **Memory:** Removed retained FP8 weight expansion from the experimental NVFP4 path and dense-weight scratch from ExLlamaV2.
-  * **Kernels:** Added opt-in AllSpark W8A16 for compatible per-channel 8-bit GPTQ/AWQ on CUDA and RDNA4 (gfx1200/gfx1201). EXL3 2-bit quantization now fits RDNA4's 64 KiB shared memory.
+  * **Kernels:** Added measured RTX 4090 (Ada, SM 8.9) and RDNA4 (gfx1200/gfx1201/gfx1250) launch tables to every tuned Triton pipeline — GPTQ GEMV/GEMM/dequant, ParoQuant GEMM, AWQ GEMM/GEMV, GGUF Triton, and bitsandbytes 4-bit — enforced by a hardware-free parity contract; the fused bitsandbytes 4-bit GEMM measured 1.4x-6.3x faster than the vendor HIP kernel on RDNA4 for `M >= 16`, while Ada keeps the vendor kernels. Added opt-in AllSpark W8A16 for compatible per-channel 8-bit GPTQ/AWQ on CUDA and RDNA4 (gfx1200/gfx1201). EXL3 2-bit quantization now fits RDNA4's 64 KiB shared memory.
   * **MLX:** Accelerated GPTQ/RTN quantization, GPTQ/AWQ group-16 decode and short prefill, and GGUF K-quant/ternary packing.
   * **GSQ/RCO:** Added teacher-KL optimization, per-projection bit allocation, and native MLX search for dense Llama/Qwen3, with token-based batching and device/disk teacher caches.
   * **Models:** Added LFM3, LFM3-VL, and LFM3-Omni text-decoder quantization, OLMo/Helium support, and Qwen2 quantization resume.
@@ -347,7 +347,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
 | 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM, QQQ, FP8 Torch, Torch (fused GPTQ GEMV on gfx950 and gfx120*/gfx125*) |
+| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM/GEMV, ParoQuant Triton, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, FP8 Torch, Torch (fused GPTQ GEMV/GEMM on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, Torch |
@@ -379,6 +379,14 @@ FP16-only on RDNA4: BF16 measured 0.43x-1.42x of the split path there (median 0.
 falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
 matrix and known limitations.
+
+bitsandbytes 4-bit (NF4/FP4) inference on ROCm routes `M >= 16` through a fused
+Triton GEMM that dequantizes the packed codes inside the matmul, because the
+vendor HIP kernel switches to a much slower path at that row count. Measured on
+gfx1201 (R9700, FP16) it is 1.4x-6.3x faster than `bnb.matmul_4bit`; below
+`M = 16` bitsandbytes' own GEMV is faster and is kept. CUDA/Ada keeps the
+vendor kernels, which are faster there; set `GPTQMODEL_BNB_TRITON=1` to force
+the Triton path for A/B runs.
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.

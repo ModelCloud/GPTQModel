@@ -17,16 +17,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy
 from gptqmodel.nn_modules.qlinear import gguf_triton as gguf_triton_module
+from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy
 from gptqmodel.nn_modules.qlinear.gguf_triton import (
     _GGUF_SM89_QK_SHAPES,
-    fused_q4_k_matmul,
-    fused_q5_k_matmul,
-    fused_q6_k_matmul,
     _select_q4_k_fixed_launch_config,
     _select_q5_k_fixed_launch_config,
     _select_q6_k_fixed_launch_config,
+    fused_q4_k_matmul,
+    fused_q5_k_matmul,
+    fused_q6_k_matmul,
 )
 from gptqmodel.utils import arch
 

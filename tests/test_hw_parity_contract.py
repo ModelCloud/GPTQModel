@@ -176,7 +176,7 @@ def test_awq_gemm_scheduler_has_both_measured_device_profiles():
             fp32_accum=True,
         )
 
-    shape = dict(M=32, N=8192, K=2048, G=128)
+    shape = {"M": 32, "N": 8192, "K": 2048, "G": 128}
     assert plan(cuda_identity, **shape) == scheduler._VERIFIED_4090_FP16_RULES[(32, 8192, 2048, 128)]
     assert plan(rocm_identity, **shape) == scheduler._VERIFIED_RDNA4_FP16_RULES[(32, 8192, 2048, 128)]
 

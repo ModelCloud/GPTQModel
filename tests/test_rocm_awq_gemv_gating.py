@@ -122,8 +122,8 @@ def test_loader_cuda_host_keeps_native_awq_gemv(monkeypatch):
 def test_loader_allows_explicit_triton_gemv_on_rocm(monkeypatch):
     # The portable Triton GEMV reads the same GEMV packing without the CUDA
     # extension, so an explicit selection of it must not be refused.
-    from gptqmodel.utils.backend import BACKEND
     import gptqmodel.models.loader as loader_module
+    from gptqmodel.utils.backend import BACKEND
 
     monkeypatch.setattr(loader_module, "IS_ROCM", True)
     loader_module._reject_native_awq_gemv_on_rocm(

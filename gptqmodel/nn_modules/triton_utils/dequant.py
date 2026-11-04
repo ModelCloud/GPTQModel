@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
-from ...utils.arch import arch_class, normalize_arch, tuning_family
+from ...utils.arch import normalize_arch, tuning_family
 from ...utils.torch import HAS_XPU
 from ..qlinear._numerics import matmul_fp32_reduce
 

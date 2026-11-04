@@ -135,7 +135,6 @@ def test_gguf_triton_declares_rocm_and_validates(monkeypatch):
 def test_gguf_triton_rocm_forward_admits_hip_devices(monkeypatch):
     # HIP reuses the "cuda" device namespace; the forward guard must refuse only
     # genuinely non-GPU placements.
-    source = gguf_triton_module.GGUFTritonKernel._forward_triton.__doc__ or ""
     import inspect
 
     body = inspect.getsource(gguf_triton_module.GGUFTritonKernel._forward_triton)
@@ -356,7 +355,6 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
 
 def test_auto_on_rocm_never_selects_a_cuda_only_backend(monkeypatch):
     from gptqmodel.quantization import FORMAT, METHOD
-    from gptqmodel.utils.backend import BACKEND
     from gptqmodel.utils.importer import get_auto_backend_kernel_mapping
 
     denied = {
