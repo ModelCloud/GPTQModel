@@ -26,6 +26,16 @@
 
 ## Latest News 🗞️🚀
 
+* **7.9.0**:
+  * **Correctness:** Fixed packing/inference overflow, underflow, FP32 reductions, BF16 bias cancellation, 8-bit BitBLAS zero points, and stale fused Torch metadata after checkpoint loads or tensor changes.
+  * **MoE:** Fixed skipped routed experts in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE; added warnings for unresolved module paths.
+  * **Memory:** Removed retained FP8 weight expansion from the experimental NVFP4 path and dense-weight scratch from ExLlamaV2.
+  * **Kernels:** Added opt-in AllSpark W8A16 for compatible per-channel 8-bit GPTQ/AWQ on CUDA and RDNA4 (gfx1200/gfx1201). EXL3 2-bit quantization now fits RDNA4's 64 KiB shared memory.
+  * **MLX:** Accelerated GPTQ/RTN quantization, GPTQ/AWQ group-16 decode and short prefill, and GGUF K-quant/ternary packing.
+  * **GSQ/RCO:** Added teacher-KL optimization, per-projection bit allocation, and native MLX search for dense Llama/Qwen3, with token-based batching and device/disk teacher caches.
+  * **Models:** Added LFM3, LFM3-VL, and LFM3-Omni text-decoder quantization, OLMo/Helium support, and Qwen2 quantization resume.
+  * **Compat:** Added native Transformers/Optimum load hooks preserving dynamic settings, fused/MoE structure, rotation, and W4A policies. Replaced method-specific Marlin/Machete/Swordfish enums with `BACKEND.MARLIN`, `BACKEND.MACHETE`, and `BACKEND.SWORDFISH`; legacy string aliases remain supported by the `hf_` APIs.
+
 * **7.8.0**:
   * **GSQ:** Added staged GSQ training with public method adapters, distributed staged training that reuses captured activations, and per-block bit allocation driven by an RCO search verified bit-identical against the IST-DASLab reference (measured results on Llama 3.2 1B). Added a paper-reproduction harness, best-epoch restore, HIPRTC-compiled fused scalar relaxation on ROCm, and segment-sum scale gradients.
   * **ROCm:** Added RDNA4 (gfx1200/gfx1201/gfx1250) kernel and quantization support with per-architecture kernel tuning. MI350/gfx950 behavior is unchanged.
