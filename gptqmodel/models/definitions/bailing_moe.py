@@ -24,7 +24,23 @@ class BailingMoeQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "attention": ("query_key_value"),
+            # bailing_hybrid mixes delta/linear-attention, full-attention MoE and
+            # MLA layers, but every variant keeps its attention projections under
+            # `self_attn`. The legacy bailing_moe layout (attention.query_key_value)
+            # no longer exists in transformers 5.20.2, so it is intentionally not
+            # kept: with layer_modules_strict=False a stale entry would just be
+            # silently skipped.
+            "self_attn": (
+                "q_proj:0",
+                "k_proj:0",
+                "v_proj:0",
+                "o_proj:1",
+                "g_proj:0",
+                "kv_a_proj_with_mqa:0",
+                "kv_b_proj:1",
+                "forget_gate.f_proj:0",
+                "b_proj:0",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
@@ -33,5 +49,9 @@ class BailingMoeQModel(BaseQModel):
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
+            # delta/linear-attention layers have a dense MLP with no experts.
+            # These entries do not resolve on MoE layers, which is fine because
+            # layer_modules_strict=False.
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
