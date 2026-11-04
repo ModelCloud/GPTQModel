@@ -81,8 +81,10 @@ _PAROQUANT_GEMM_LAUNCH_CONFIGS: dict[str, dict[str, tuple[int, int, int, int, in
     # warps with a 64-wide N tile; ``BLOCK_N=128`` only wins at the 1024-row tail
     # of the largest (K=14336/5120/4096-wide) shapes and loses badly below it,
     # so the band keeps 64 for a single uniform tile.  The historical default
-    # (decode (4,128,32,4,2), prefill (32,128,32,8,4)) is 1.56x-3.40x slower
-    # across the swept matrix; these tiles are its per-band measured winner.
+    # (decode (4,128,32,4,2), prefill (32,128,32,8,4)) is 1.14x-3.29x slower
+    # across the swept matrix (hot; 1.11x-3.29x L2-flushed); these tiles are its
+    # per-band measured winner.  Worst reference-side oracle error over the same
+    # sweep is 4.7e-4 relative against an FP64 oracle.
     "ada": {
         # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)
         "decode": (16, 64, 64, 4, 4),

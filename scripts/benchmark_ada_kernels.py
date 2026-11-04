@@ -67,7 +67,7 @@ GGUF_CASES = (
     ("Q6_K", 4096, 11008),
 )
 GGUF_ROWS = (1, 8, 64)
-SECTIONS = ("gemv", "gemm", "dequant", "gguf")
+SECTIONS = ("gemv", "gemm", "dequant", "gguf", "paroquant", "awq_gemv")
 L2_FLUSH_BYTES = 256 * 1024 * 1024
 
 
@@ -592,6 +592,183 @@ def _gguf_row(qtype, in_features, out_features, rows, device, l2, args):
     }
 
 
+# --------------------------------------------------------------------------- #
+# ParoQuant / portable AWQ GEMV helpers
+# --------------------------------------------------------------------------- #
+
+PAROQUANT_SHAPES = ((2048, 2048), (4096, 4096), (5120, 8192), (14336, 4096), (4096, 11008))
+PAROQUANT_ROWS = (1, 8, 16, 64, 128, 1024)
+AWQ_GEMV_SHAPES = (
+    (2048, 2048), (4096, 4096), (5120, 8192), (14336, 4096), (4096, 11008), (896, 128),
+)
+
+
+def _awq_nibble_pack(codes: torch.Tensor) -> torch.Tensor:
+    """AWQ [0,2,4,6,1,3,5,7] fast-axis pack, for the ParoQuant buffers only."""
+
+    packed = torch.zeros((codes.shape[0], codes.shape[1] // 8), dtype=torch.int32, device=codes.device)
+    for i, order in enumerate([0, 2, 4, 6, 1, 3, 5, 7]):
+        packed |= codes[:, order::8].to(torch.int32) << (i * 4)
+    return packed
+
+
+def _awq_nibble_unpack(packed: torch.Tensor) -> torch.Tensor:
+    shifts = torch.arange(0, 32, 4, device=packed.device, dtype=torch.int64)
+    order = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7], device=packed.device)
+    codes = (packed.to(torch.int64).unsqueeze(-1) >> shifts) & 0xF
+    return codes.index_select(-1, order).flatten(-2)
+
+
+def _paroquant_buffers(k, n, group_size, device, seed=0):
+    torch.manual_seed(seed)
+    codes = torch.randint(0, 16, (k, n), dtype=torch.int32, device=device)
+    zeros = torch.randint(0, 16, (k // group_size, n), dtype=torch.int32, device=device)
+    scales = torch.rand((k // group_size, n), dtype=torch.float16, device=device) * 0.05 + 0.005
+    return codes, zeros, scales, _awq_nibble_pack(codes), _awq_nibble_pack(zeros)
+
+
+def _paroquant_launch(tile, x, qweight, scales, qzeros, group_size):
+    from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+
+    rows, k = x.shape
+    n = scales.shape[1]
+    bm, bn, bk, warps, stages = tile
+    out = torch.empty((rows, n), dtype=x.dtype, device=x.device)
+    grid = (((rows + bm - 1) // bm) * ((n + bn - 1) // bn),)
+    pg.paroquant_gemm_kernel[grid](
+        x, qweight, out, qzeros, scales, rows, n, k, group_size,
+        BLOCK_SIZE_M=bm, BLOCK_SIZE_N=bn, BLOCK_SIZE_K=min(bk, group_size),
+        USE_FP32_ACCUM=True, num_warps=warps, num_stages=stages,
+    )
+    return out
+
+
+def _paroquant_row(in_features, out_features, rows, device, l2, args):
+    from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+
+    codes, zeros, scales, qweight, qzeros = _paroquant_buffers(
+        in_features, out_features, args.group_size, device,
+    )
+    kind = "decode" if rows <= 8 else "prefill"
+    tuned = pg.paroquant_gemm_launch_config(kind, device, rows=rows)
+    reference = pg._PAROQUANT_GEMM_DEFAULT_CONFIGS[kind]
+    x = torch.randn(rows, in_features, device=device, dtype=torch.float16)
+    group = torch.arange(in_features, device=device) // args.group_size
+    dense = (
+        (codes - zeros[group]).to(torch.float16) * scales[group]
+    ).to(torch.float64)
+    truth = x.to(torch.float64) @ dense
+
+    tuned_fn = lambda: _paroquant_launch(tuned, x, qweight, scales, qzeros, args.group_size)
+    ref_fn = lambda: _paroquant_launch(reference, x, qweight, scales, qzeros, args.group_size)
+    tuned_hot, tuned_flushed = _timed_us(device, tuned_fn, warmup=args.warmup, iters=args.iters, l2=l2)
+    ref_hot, ref_flushed = _timed_us(device, ref_fn, warmup=args.warmup, iters=args.iters, l2=l2)
+    with torch.inference_mode():
+        out = tuned_fn()
+    err = (out.to(torch.float64) - truth).abs().max().item()
+    return {
+        "section": "paroquant", "in_features": in_features, "out_features": out_features,
+        "rows": rows, "band": pg.paroquant_gemm_launch_config(kind, device, rows=rows),
+        "tuned_cfg": list(tuned), "reference_cfg": list(reference),
+        "tuned_hot_us": tuned_hot, "tuned_flushed_us": tuned_flushed,
+        "reference_hot_us": ref_hot, "reference_flushed_us": ref_flushed,
+        "speedup_hot": _speedup(ref_hot, tuned_hot),
+        "speedup_flushed": _speedup(ref_flushed, tuned_flushed),
+        "oracle_max_abs": err, "oracle_max_rel": err / truth.abs().max().item(),
+        "dtype_preserved": out.dtype == torch.float16,
+    }
+
+
+def _awq_gemv_gemv_layout(out_features, in_features, group_size, device, seed=0):
+    torch.manual_seed(seed)
+    groups = in_features // group_size
+    pad = (groups + 7) // 8 * 8
+    qweight = torch.randint(-(2**31), 2**31 - 1, (out_features, in_features // 8),
+                            device=device, dtype=torch.int32)
+    qzeros = torch.randint(0, 15, (out_features, pad), device=device, dtype=torch.int32)
+    scales = (torch.rand(out_features, pad, device=device, dtype=torch.float16) * 0.1 + 0.01).contiguous()
+    return qweight, qzeros, scales
+
+
+def _awq_gemv_oracle(qweight, qzeros, scales, group_size):
+    out_features = qweight.shape[0]
+    in_features = qweight.shape[1] * 8
+    nibbles = torch.arange(0, 8, device=qweight.device, dtype=torch.int64)
+    codes = ((qweight.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        out_features, in_features)
+    zeros = ((qzeros.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        qzeros.shape[0], -1)
+    group = torch.arange(in_features, device=qweight.device) // group_size
+    return (codes.to(torch.float64) - zeros.to(torch.float64)[:, group]) * scales.to(
+        torch.float64)[:, group]
+
+
+def _awq_gemv_launch(config, x, qweight, scales, qzeros, group_size):
+    import triton
+
+    from gptqmodel.quantization.awq.modules.triton import gemv as gv
+
+    rows, k = x.shape
+    n = qweight.shape[0]
+    block_k = min(config.max_block_k, group_size)
+    out = torch.empty((rows, n), dtype=x.dtype, device=x.device)
+    gv._awq_gemv_kernel[(triton.cdiv(n, config.block_n), rows)](
+        x, qweight, scales, qzeros, out, rows, n, k, group_size,
+        qzeros.stride(0), scales.stride(0),
+        BLOCK_N=config.block_n, BLOCK_K=block_k,
+        num_warps=config.num_warps, num_stages=config.num_stages,
+    )
+    return out
+
+
+def _awq_gemv_row(in_features, out_features, device, l2, args):
+    from gptqmodel.quantization.awq.modules.triton import gemv as gv
+
+    qweight, qzeros, scales = _awq_gemv_gemv_layout(
+        out_features, in_features, args.group_size, device,
+    )
+    tuned = gv.launch_config(device)
+    reference = gv._DEFAULT_AWQ_GEMV_LAUNCH
+    x = torch.randn(1, in_features, device=device, dtype=torch.float16)
+    truth = x.to(torch.float64) @ _awq_gemv_oracle(
+        qweight, qzeros, scales, args.group_size).t()
+
+    tuned_fn = lambda: _awq_gemv_launch(tuned, x, qweight, scales, qzeros, args.group_size)
+    ref_fn = lambda: _awq_gemv_launch(reference, x, qweight, scales, qzeros, args.group_size)
+    tuned_hot, tuned_flushed = _timed_us(device, tuned_fn, warmup=args.warmup, iters=args.iters, l2=l2)
+    ref_hot, ref_flushed = _timed_us(device, ref_fn, warmup=args.warmup, iters=args.iters, l2=l2)
+    with torch.inference_mode():
+        out = tuned_fn()
+    err = (out.to(torch.float64) - truth).abs().max().item()
+    return {
+        "section": "awq_gemv", "in_features": in_features, "out_features": out_features,
+        "rows": 1, "tuned_cfg": list(tuned), "reference_cfg": list(reference),
+        "tuned_hot_us": tuned_hot, "tuned_flushed_us": tuned_flushed,
+        "reference_hot_us": ref_hot, "reference_flushed_us": ref_flushed,
+        "speedup_hot": _speedup(ref_hot, tuned_hot),
+        "speedup_flushed": _speedup(ref_flushed, tuned_flushed),
+        "oracle_max_abs": err, "oracle_max_rel": err / truth.abs().max().item(),
+        "dtype_preserved": out.dtype == torch.float16,
+    }
+
+
+    if "paroquant" in sections:
+        from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+
+        for in_features, out_features in PAROQUANT_SHAPES:
+            for n_rows in PAROQUANT_ROWS:
+                row = _paroquant_row(in_features, out_features, n_rows, device, l2, args)
+                rows.append(row)
+                _print_row(row)
+            torch.cuda.empty_cache()
+
+    if "awq_gemv" in sections:
+        for in_features, out_features in AWQ_GEMV_SHAPES:
+            row = _awq_gemv_row(in_features, out_features, device, l2, args)
+            rows.append(row)
+        torch.cuda.empty_cache()
+
+
 def run(args: argparse.Namespace) -> int:
     from gptqmodel.utils import arch
 
@@ -625,6 +802,21 @@ def run(args: argparse.Namespace) -> int:
                 _print_row(row)
             del module
             torch.cuda.empty_cache()
+
+    if "paroquant" in sections:
+        for in_features, out_features in PAROQUANT_SHAPES:
+            for n_rows in PAROQUANT_ROWS:
+                row = _paroquant_row(in_features, out_features, n_rows, device, l2, args)
+                rows.append(row)
+                _print_row(row)
+            torch.cuda.empty_cache()
+
+    if "awq_gemv" in sections:
+        for in_features, out_features in AWQ_GEMV_SHAPES:
+            row = _awq_gemv_row(in_features, out_features, device, l2, args)
+            rows.append(row)
+            _print_row(row)
+        torch.cuda.empty_cache()
 
     if "gguf" in sections:
         for qtype, in_features, out_features in GGUF_CASES:
@@ -677,6 +869,13 @@ def _print_row(row: dict[str, Any]) -> None:
               f"fused {row['fused_hot_us']:.1f}/{row['fused_flushed_us']:.1f} split "
               f"{row['split_hot_us']:.1f}/{row['split_flushed_us']:.1f} us -> "
               f"{row['speedup_hot']:.2f}x hot, dispatch={row['dispatch_gemm']}", flush=True)
+    elif kind in ("paroquant", "awq_gemv"):
+        print(f"  [{kind} K={row['in_features']} N={row['out_features']}"
+              f"{'' if kind == 'awq_gemv' else ' M=' + str(row['rows'])}] "
+              f"tuned {row['tuned_hot_us']:.1f}/{row['tuned_flushed_us']:.1f} ref "
+              f"{row['reference_hot_us']:.1f}/{row['reference_flushed_us']:.1f} us -> "
+              f"{row['speedup_hot']:.2f}x hot, {row['speedup_flushed']:.2f}x flushed, "
+              f"oracle rel={row['oracle_max_rel']:.2e}", flush=True)
     elif kind == "gemv":
         print(f"  [{kind} K={row['in_features']} N={row['out_features']}] ada {row['ada_hot_us']:.1f}/"
               f"{row['ada_flushed_us']:.1f} ref {row['reference_hot_us']:.1f}/"
