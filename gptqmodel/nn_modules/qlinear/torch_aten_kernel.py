@@ -170,6 +170,8 @@ class TorchAtenLinear(PackableQuantLinear):
         """
         self.ret_idx = None
         self._ret_idx_identity = None
+        self._ret_idx_key = None
+        self._fused_state_key = None
         self._refresh_fused_state()
 
     def _refresh_fused_state(self) -> None:
@@ -180,15 +182,19 @@ class TorchAtenLinear(PackableQuantLinear):
         qzeros = getattr(self, "qzeros", None)
         if scales is None or qzeros is None:
             return
+        key = (tensor_cache_key(scales), tensor_cache_key(qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
         current = getattr(self, "scales_and_zeros", None)
         if not isinstance(current, torch.Tensor):
             return
-        # The one-time transform already chose the compute dtype; reuse it so a
-        # later load or move cannot silently change fused numerics.
-        dtype = current.dtype
+        # Keep at least the original compute precision and the precision of
+        # replacement metadata; narrowing affine offsets can lose cancellation.
+        dtype = torch.promote_types(current.dtype, torch.promote_types(scales.dtype, qzeros.dtype))
         self.scales_and_zeros = pack_scales_and_zeros(
             scales.to(dtype), qzeros.to(dtype)
         )
+        self._fused_state_key = key
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)
@@ -356,6 +362,7 @@ class TorchAtenLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
+        self._refresh_fused_state()
         if not self._ret_idx_is_identity():
             x = x[:, self.ret_idx].contiguous()
         elif not x.is_contiguous():

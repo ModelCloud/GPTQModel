@@ -11,8 +11,11 @@ real load path and compare against an independent re-derivation of the index.
 
 from __future__ import annotations
 
+import weakref
+
 import pytest
 import torch
+from test_torch_weight_storage import state_tensors
 
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
@@ -209,12 +212,122 @@ def test_cache_clear_keeps_packed_storage_only(cls):
 
     assert module.qweight is packed
     assert module.qweight.dtype in (torch.uint8, torch.int32)
-    for tensor in module.list_buffers():
-        if tensor is None or not isinstance(tensor, torch.Tensor):
-            continue
-        if tensor.numel() < IN_FEATURES * OUT_FEATURES:
-            continue
-        assert tensor.dtype != torch.float32
+    # Include unregistered attributes and child modules, and reject expanded
+    # integer weights as well as every floating-point dense representation.
+    for tensor in state_tensors(module):
+        assert tensor.numel() < IN_FEATURES * OUT_FEATURES
     derived = getattr(module, "scales_and_zeros", None)
     if derived is not None:
         assert derived.numel() < IN_FEATURES * OUT_FEATURES
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize("name", ["qweight", "scales", "qzeros"])
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_forward_observes_buffer_changes(cls, name, replace, dtype):
+    checkpoint = _fused_checkpoint(seed=29, order=(3, 0, 2, 1))
+    checkpoint["scales"].fill_(1 / 128)
+    module = _fused_module(cls, checkpoint)
+    activation = torch.ones((2, IN_FEATURES), dtype=dtype)
+    with torch.no_grad():
+        module(activation)
+        if name == "qweight":
+            replacement_checkpoint = _fused_checkpoint(seed=47, order=(3, 0, 2, 1))
+            replacement_checkpoint["scales"].fill_(1 / 128)
+            other = _fused_module(cls, replacement_checkpoint)
+            other(activation)
+            value = other.qweight.clone()
+            expected = _dense_oracle(replacement_checkpoint, activation)
+        elif name == "scales":
+            value = module.scales * 2
+            checkpoint["scales"].mul_(2)
+            expected = _dense_oracle(checkpoint, activation)
+        else:
+            # After conversion qzeros contains affine offsets, not packed codes.
+            value = module.qzeros + 1 / 128
+            expected = _dense_oracle(checkpoint, activation) + activation.float().sum(-1, keepdim=True) / 128
+        if replace:
+            setattr(module, name, value)
+        else:
+            getattr(module, name).copy_(value)
+        for _ in range(2):
+            actual = module(activation)
+            assert actual.dtype == activation.dtype
+            torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize("operation", ["clear", "move", "load_assign"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_cache_lifecycle_with_inference_tensors(cls, operation, dtype):
+    with torch.inference_mode():
+        checkpoint = _fused_checkpoint(seed=19, order=(3, 0, 2, 1))
+        checkpoint["scales"].fill_(1 / 128)
+        module = _fused_module(cls, checkpoint)
+        activation = torch.ones((2, IN_FEATURES), dtype=dtype)
+        module(activation)
+        old_metadata = weakref.ref(module.scales_and_zeros)
+        if operation == "load_assign":
+            state = {name: value.clone() for name, value in module.state_dict().items()}
+            state["scales"].mul_(2)
+            module.load_state_dict(state, assign=True)
+        else:
+            module.scales.mul_(2)
+            if operation == "clear":
+                module.clear_weight_cache()
+            else:
+                module.to(dtype=torch.float32)
+        checkpoint["scales"].mul_(2)
+        assert old_metadata() is None
+        expected = _dense_oracle(checkpoint, activation)
+        for _ in range(2):
+            actual = module(activation)
+            assert actual.dtype == dtype
+            torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
+            assert all(t.numel() < IN_FEATURES * OUT_FEATURES for t in state_tensors(module))
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+def test_unchanged_fused_forward_reuses_metadata(cls):
+    module = _fused_module(cls, _fused_checkpoint(seed=5, order=(0, 1, 2, 3)))
+    activation = torch.ones((1, IN_FEATURES), dtype=torch.bfloat16)
+    with torch.no_grad():
+        module(activation)
+        metadata = module.scales_and_zeros
+        packed = module.qweight
+        for _ in range(2):
+            module(activation)
+            assert module.scales_and_zeros is metadata
+            assert module.qweight is packed
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("operation", ["forward", "clear", "load_assign"])
+def test_fused_refresh_preserves_wider_source_metadata(cls, dtype, operation):
+    checkpoint = _fused_checkpoint(seed=5, order=(0, 1, 2, 3))
+    checkpoint["qweight"].fill_(-2004318072)  # All codes 8.
+    checkpoint["qweight"][0].add_(1)  # Code 9 for the first input feature.
+    checkpoint["scales"].fill_(1)
+    module = _fused_module(cls, checkpoint)
+    activation = torch.zeros((2, IN_FEATURES), dtype=dtype)
+    activation[:, 0] = 1
+    with torch.no_grad():
+        module(activation)
+        if operation == "load_assign":
+            state = {name: value.clone() for name, value in module.state_dict().items()}
+            state["scales"] = state["scales"].float().fill_(2049)
+            state["qzeros"] = state["qzeros"].float().fill_(-2048)
+            module.load_state_dict(state, assign=True)
+        else:
+            module.scales = module.scales.float().fill_(2049)
+            module.qzeros = module.qzeros.float().fill_(-2048)
+            if operation == "clear":
+                module.clear_weight_cache()
+        # The transformed affine representation decodes this active row as
+        # (9 - 8) * 2049 - 2048 = 1, exactly in FP64 and both output dtypes.
+        expected = torch.ones((2, OUT_FEATURES), dtype=torch.float64)
+        actual = module(activation)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual.double(), expected, rtol=0, atol=0)

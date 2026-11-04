@@ -136,6 +136,8 @@ class TorchFusedLinear(PackableQuantLinear):
         dense weight is created.
         """
         self.ret_idx = None
+        self._ret_idx_key = None
+        self._fused_state_key = None
         self._refresh_fused_op()
 
     def _refresh_fused_op(self) -> None:
@@ -150,14 +152,19 @@ class TorchFusedLinear(PackableQuantLinear):
         if qweight.device.type != "cpu":
             # The xpu path reads ``scales``/``qzeros`` directly; nothing derived.
             return
-        # Keep the compute dtype chosen by the one-time transform so a later
-        # load or device/dtype move cannot silently change fused numerics.
+        key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
+        # Preserve the original compute precision, but do not narrow source
+        # metadata replaced by a load, move, or mutation at a wider dtype.
         current = getattr(self, "scales_and_zeros", None)
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
+        dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
+        self._fused_state_key = key
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)
@@ -291,9 +298,7 @@ class TorchFusedLinear(PackableQuantLinear):
             self.transform(x.dtype, x.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
-                self.torch_fused_op = Int4PackedOp(
-                    self.qweight, self.scales_and_zeros, self.group_size
-                ).eval()
+                self._refresh_fused_op()
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
@@ -321,6 +326,7 @@ class TorchFusedLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
+        self._refresh_fused_op()
         x = x[:, self._build_ret_idx().to(x.device)].contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
