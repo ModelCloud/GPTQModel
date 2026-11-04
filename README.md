@@ -249,6 +249,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | GPT-J | `gptj` |
 | Granite / Granite MoE / Granite MoE Hybrid | `granite`, `granitemoe`, `granitemoehybrid` |
 | GRIN-MoE | `grinmoe` |
+| Helium | `helium` |
 | HRM | `hrm_text` |
 | Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
 | HY-V3 | `hy_v3` |
@@ -286,7 +287,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Muse Glimmer | `muse_glimmer` |
 | Nanbeige 4.2 | `nanbeige` |
 | Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
-| OLMo 2 / 3 / OLMoE | `olmo2`, `olmo3`, `olmoe` |
+| OLMo / OLMo 2 / 3 / OLMoE | `olmo`, `olmo2`, `olmo3`, `olmoe` |
 | OpenVLA | `openvla` |
 | OPT | `opt` |
 | Ouro | `ouro` |

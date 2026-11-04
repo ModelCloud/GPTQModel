@@ -383,8 +383,10 @@ MODEL_MAP = {
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
+    "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
+    "helium": LlamaQModel, # 100% llama clone (HeliumModel == LlamaModel module layout)
     "olmoe": OlmoeQModel,
     "openvla": OpenVLAQModel,
     "ouro": OuroQModel,
