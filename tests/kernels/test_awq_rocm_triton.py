@@ -245,3 +245,94 @@ def test_awq_gemv_triton_launch_table_has_rdna4_and_default():
     # Unregistered and explicit-CUDA metadata keep the portable fallback.
     assert gemv_module.launch_config("gfx942") == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
     assert gemv_module.launch_config((8, 9)) == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
+
+
+def _gemv_pack_to_gemm(qweight, qzeros, scales, group_size):
+    """Re-pack GEMV buffers into the ``FORMAT.GEMM`` layout.
+
+    ``FORMAT.GEMM`` stores ``qweight [K, N/8]`` with the AWQ
+    ``[0,2,4,6,1,3,5,7]`` nibble interleave along the *output* axis,
+    ``qzeros [groups, N/8]`` and ``scales [groups, N]``.  This is an independent
+    transcode of the packed GEMV words (it never calls either kernel), used only
+    so the two kernels consume identical arithmetic.
+    """
+
+    device = qweight.device
+    nibbles = torch.arange(0, 8, device=device, dtype=torch.int64)
+    out_features, words_k = qweight.shape
+    in_features = words_k * 8
+    shifts = torch.arange(0, 32, 4, device=device, dtype=torch.int64)
+    order = torch.tensor([0, 2, 4, 6, 1, 3, 5, 7], device=device)
+
+    # [N, K] GEMV plain codes -> [K, N] -> per-8 word, GEMM nibble order.
+    codes = ((qweight.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        out_features, in_features
+    )
+    codes_g = codes.t().reshape(in_features, out_features // 8, 8).index_select(-1, order)
+    qweight_g = (codes_g << shifts).sum(-1).contiguous().to(torch.int32)  # [K, N/8]
+
+    groups = in_features // group_size
+    zcodes = ((qzeros.to(torch.int64)[:, :, None] >> (nibbles * 4)) & 0xF).reshape(
+        out_features, -1
+    )[:, :groups]
+    zcodes_g = zcodes.t().reshape(groups, out_features // 8, 8).index_select(-1, order)
+    qzeros_g = (zcodes_g << shifts).sum(-1).contiguous().to(torch.int32)  # [groups, N/8]
+
+    scales_g = scales[:, :groups].t().contiguous()  # [groups, N]
+    return qweight_g, qzeros_g, scales_g
+
+
+def test_awq_gemv_and_gemm_modules_agree_at_decode():
+    """At M==1 the GEMV and GEMM kernels must produce the same result.
+
+    docs/rocm-rdna4.md states they are at *parity* at decode (0.81-1.38x, i.e.
+    neither is a decode speedup over the other).  This pins the numerical side
+    of that claim so a divergence in either kernel is caught; the timings
+    themselves cannot be asserted on a shared GPU.
+    """
+
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVTritonLinear
+
+    torch.manual_seed(31337)
+    device = torch.device("cuda:0")
+    in_features, out_features, group_size = 1024, 512, 128
+    groups = in_features // group_size
+
+    dense_layer = torch.nn.Linear(in_features, out_features, bias=False).to(device)
+    gemv = AwqGEMVTritonLinear(
+        bits=4, group_size=group_size, sym=True, desc_act=False,
+        in_features=in_features, out_features=out_features, bias=False,
+        register_buffers=True,
+    ).to(device).eval()
+    gemv.pack(
+        dense_layer,
+        torch.rand(out_features, groups, device=device, dtype=torch.float16) * 0.1 + 0.01,
+        torch.randint(0, 15, (out_features, groups), device=device, dtype=torch.int32),
+    )
+    gemv.post_init()
+    del dense_layer
+
+    qweight_g, qzeros_g, scales_g = _gemv_pack_to_gemm(
+        gemv.qweight, gemv.qzeros, gemv.scales, group_size
+    )
+    gemm = AwqGEMMTritonLinear(
+        bits=4, group_size=group_size, sym=True, desc_act=False,
+        in_features=in_features, out_features=out_features, bias=False,
+        register_buffers=True,
+    ).to(device).eval()
+    gemm.post_init()
+    assert gemm.qweight.shape == qweight_g.shape
+    assert gemm.qzeros.shape == qzeros_g.shape
+    assert gemm.scales.shape == scales_g.shape
+    gemm.qweight.copy_(qweight_g)
+    gemm.qzeros.copy_(qzeros_g)
+    gemm.scales.copy_(scales_g)
+
+    inputs = torch.randn(1, in_features, device=device, dtype=torch.float16)
+    with torch.inference_mode():
+        out_gemv = gemv(inputs)
+        out_gemm = gemm(inputs)
+    torch.cuda.synchronize(device)
+
+    assert out_gemv.dtype == torch.float16 and out_gemm.dtype == torch.float16
+    torch.testing.assert_close(out_gemv, out_gemm, rtol=2e-3, atol=2e-3)

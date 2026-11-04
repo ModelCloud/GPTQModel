@@ -25,25 +25,29 @@ Numerics follow the rest of the repository: weights stay packed and are read
 once, the dot product accumulates in FP32 over bounded ``BLOCK_K`` tiles, and
 the result is stored in the input dtype.
 
-Measured on AMD Radeon AI PRO R9700 (gfx1201, wave32) with
-``scripts/benchmark_rdna4_inference.py`` methodology (median of 21 iterations
-after 5 warm-ups, 256 MiB L2 flush before each timed call,
-``torch.cuda.synchronize`` around every call), ``M == 1``, FP16, group 128:
+Measured on AMD Radeon AI PRO R9700 (gfx1201, wave32): ``M == 1``, FP16,
+group 128, median of 41 iterations after 20 warm-ups, a 256 MiB L2 flush before
+every timed call and ``torch.cuda.synchronize`` around every call.  Every column
+below is a real module forward (``AwqGEMVTritonLinear`` vs the shipped
+``AwqGEMMTritonLinear``), not a raw kernel launch, so the ~15 us of Python
+launch overhead each path pays is included:
 
-======  ======  ==========  =========  ========
-K       N       split us    gemv us    gain
-======  ======  ==========  =========  ========
-2048    2048    679.8       48.3       14.1x
-4096    4096    3164.1      93.2       33.9x
-5120    8192    7730.3      152.6      50.7x
-14336   4096    10771.2     229.3      47.0x
-4096    11008   8284.2      164.5      50.4x
-======  ======  ==========  =========  ========
+======  ======  =========  =========  =========  ========  =========
+K       N       gemv us    gemm us    split us   vs GEMM   vs split
+======  ======  =========  =========  =========  ========  =========
+2048    2048    68.0       93.5       448.6      1.38x     6.6x
+4096    4096    111.8      117.1      2134.0     1.05x     19.1x
+5120    8192    170.2      165.1      5222.8     0.97x     30.7x
+14336   4096    248.4      200.5      7286.3     0.81x     29.3x
+4096    11008   186.0      175.6      5593.1     0.94x     30.1x
+======  ======  =========  =========  =========  ========  =========
 
-``split`` is ``torch.matmul`` against a dense weight materialized from the same
-packed buffers -- the cost floor the fused kernel has to beat, not a shipped
-kernel.  The ``FORMAT.GEMM`` Triton GEMM at ``M == 1`` is the nearest shipped
-comparison and is 1.7x-2.4x slower than this kernel at the same shapes.
+``split`` is this package's own dequantize-to-dense + ``torch.matmul`` from the
+same packed buffers: the cost floor the fused kernel replaces, which is what the
+29-31x headline measures.  The ``FORMAT.GEMM`` Triton GEMM at ``M == 1`` is the
+nearest *shipped* comparison and is only at parity (0.81x-1.38x, i.e. the two
+kernels are within noise of each other on large shapes); this GEMV kernel is a
+correctness/portability path for ROCm, not a decode speedup over ``FORMAT.GEMM``.
 """
 
 from typing import NamedTuple
