@@ -102,10 +102,20 @@ def test_native_int8_codes_output_and_storage_oracle(group_size, dtype, monkeypa
         assert output.dtype == current_dtype
         # Visible error: what the low-precision output dtype can represent.
         torch.testing.assert_close(output, expected, rtol=2e-3, atol=2e-3)
-        # Arithmetic error: FP32 accumulate against the FP64 oracle, before the
-        # output dtype rounds. This must stay tiny, independent of dtype.
-        fp32_arithmetic = (activation.float() @ codes.float()) * channel_scale.float()
-        torch.testing.assert_close(fp32_arithmetic.double(), arithmetic, rtol=1e-6, atol=1e-6)
+        # Arithmetic error: the kernel performs one output rounding on top of an
+        # FP32 reduction, so it must stay inside half an output-dtype ulp plus
+        # the FP32 accumulation slack. This constrains the kernel itself -- an
+        # activation-dtype accumulation (or an FP32-scale pre-round) violates it.
+        bound = (
+            0.5 * torch.finfo(current_dtype).eps * arithmetic.abs()
+            + 8 * torch.finfo(torch.float32).eps
+            * ((activation.abs().double() @ codes.abs().double()) * channel_scale.double())
+        )
+        excess = (output.double() - arithmetic).abs() - bound
+        assert int((excess > 0).sum()) == 0, (
+            f"group_size={group_size} {current_dtype}: {(excess > 0).sum().item()}/{excess.numel()} "
+            f"outputs exceed the FP32-reduction bound; max excess={excess.max().item():.3e}"
+        )
         torch.testing.assert_close(candidate.int8_module.int8_channel_scale, channel_scale, rtol=0, atol=0)
         allowed = {candidate.int8_weight_nk.data_ptr(), candidate.int8_channel_scale.data_ptr()}
         assert all(tensor.untyped_storage().data_ptr() in allowed for tensor in state_tensors(candidate))
