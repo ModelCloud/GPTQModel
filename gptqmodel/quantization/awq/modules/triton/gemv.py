@@ -87,11 +87,17 @@ _AWQ_GEMV_LAUNCH_CONFIGS: dict[str, AwqGemvLaunch] = {
     # (5120,8192), (14336,4096), (4096,11008), (896,128)}.
     #
     # Findings: the portable 4-warp/block_n=64 tile is warp-starved on Ada -- a
-    # 32-wide N tile with eight warps is 1.01x-1.40x faster than it on every
-    # swept shape (1.15x/1.08x/1.06x/1.15x/1.01x/1.01x hot) and never loses,
-    # while block_n=128 always lost.  num_stages and max_block_k only move
-    # <=1.5% once block_k is clamped to the group, so the entry keeps the
-    # shallowest pipeline.
+    # 32-wide N tile with eight warps is 1.02x-1.40x faster hot and
+    # 1.00x-1.14x faster L2-flushed on the five real projections
+    # (2048x2048 1.10x/1.12x, 4096x4096 1.19x/1.08x, 5120x8192 1.05x/1.06x,
+    # 14336x4096 1.40x/1.14x, 4096x11008 1.02x/1.00x).  The one 896x128 case is
+    # a launch-bound ~2% loss (0.981x hot / 0.987x cold): N=128 is only four
+    # 32-wide blocks, so the tile choice is inside the launch-cost noise there
+    # and the shipped tile is kept uniform rather than special-cased.
+    # block_n=128 always lost.  num_stages and max_block_k only move <=1.5%
+    # once block_k is clamped to the group, so the entry keeps the shallowest
+    # pipeline.  Measured with 120 interleaved hot/flushed iterations after 20
+    # warm-ups on top of two independent sweeps.
     "ada": AwqGemvLaunch(block_n=32, max_block_k=512, num_warps=8, num_stages=1),
 }
 

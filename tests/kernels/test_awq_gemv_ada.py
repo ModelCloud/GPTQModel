@@ -100,6 +100,19 @@ def test_current_device_routes_to_ada_on_an_ada_host():
     assert gemv_mod.launch_config(None) == ADA_CFG
 
 
+def test_the_one_measured_small_shape_loss_is_documented():
+    # 896x128 (N=128 => four 32-wide blocks) is launch-bound and measures
+    # ~0.98x against the portable default.  The tile is kept uniform and the
+    # exception is documented in the table comment instead of hidden; if a
+    # future retune fixes or removes it, this test should be updated with the
+    # measurement rather than silently relaxed.
+    import inspect
+
+    source = inspect.getsource(gemv_mod)
+    assert "896x128" in source
+    assert "launch-bound" in source
+
+
 def test_ada_tile_block_k_is_clamped_to_the_group():
     # The launch helper clamps block_k to group_size; 512 therefore means 128
     # for the group-128 checkpoints this path is measured on.
