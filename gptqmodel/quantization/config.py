@@ -1930,6 +1930,23 @@ class ExpertsRoutingBypass(BaseMoERouting):
         metadata={"help": "Number of modules to process in a single batch during MoE quantization"}
     )
 
+    def __post_init__(self):
+        # The batching only happens behind a `batch_size > 0` guard in the staged
+        # executor, so a string, zero or a negative value silently degrades to
+        # "one chunk" - which is the VRAM pressure this option exists to avoid.
+        if self.batch_size is None:
+            return
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
+            raise ValueError(
+                f"ExpertsRoutingBypass.batch_size must be a positive int or None, "
+                f"got {type(self.batch_size).__name__}: {self.batch_size!r}"
+            )
+        if self.batch_size <= 0:
+            raise ValueError(
+                f"ExpertsRoutingBypass.batch_size must be a positive int or None, "
+                f"got {self.batch_size}"
+            )
+
 
 @dataclass
 class MoEConfig:
