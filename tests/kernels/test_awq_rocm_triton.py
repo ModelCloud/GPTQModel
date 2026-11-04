@@ -242,9 +242,12 @@ def test_awq_gemv_triton_launch_table_has_rdna4_and_default():
     assert "rdna4" in gemv_module._AWQ_GEMV_LAUNCH_CONFIGS
     cfg = gemv_module.launch_config("gfx1201")
     assert cfg == gemv_module._AWQ_GEMV_LAUNCH_CONFIGS["rdna4"]
-    # Unregistered and explicit-CUDA metadata keep the portable fallback.
+    # Unregistered families keep the portable fallback.
     assert gemv_module.launch_config("gfx942") == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
-    assert gemv_module.launch_config((8, 9)) == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
+    # Ada (SM 8.9) has its own measured entry now (see test_awq_gemv_ada.py);
+    # an unmeasured CUDA target still falls back.
+    assert gemv_module.launch_config((8, 9)) == gemv_module._AWQ_GEMV_LAUNCH_CONFIGS["ada"]
+    assert gemv_module.launch_config((8, 0)) == gemv_module._DEFAULT_AWQ_GEMV_LAUNCH
 
 
 def _gemv_pack_to_gemm(qweight, qzeros, scales, group_size):

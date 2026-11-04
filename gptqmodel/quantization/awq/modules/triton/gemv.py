@@ -56,7 +56,7 @@ import torch
 import triton
 import triton.language as tl
 
-from gptqmodel.utils.arch import arch_class, normalize_arch
+from gptqmodel.utils.arch import tuning_family
 
 
 class AwqGemvLaunch(NamedTuple):
@@ -77,6 +77,22 @@ _AWQ_GEMV_LAUNCH_CONFIGS: dict[str, AwqGemvLaunch] = {
     # 1% of the per-shape winner everywhere except (2048,2048), where block_n=32
     # was 0.5% faster, and (5120,8192), where block_n=128 was 0.4% faster.
     "rdna4": AwqGemvLaunch(block_n=64, max_block_k=512, num_warps=4, num_stages=1),
+    # Measured on an NVIDIA GeForce RTX 4090 (SM 8.9, torch 2.15.0+cu132,
+    # Triton 3.9.0), FORMAT.GEMV packing, group_size 128 (so ``block_k`` clamps
+    # to 128 and the max_block_k axis is a no-op for this group size), FP16,
+    # M == 1: median of 41 iterations after 15 warm-ups, a 256 MiB L2 flush
+    # before every timed call and ``torch.cuda.synchronize`` around each call.
+    # Swept block_n {32,64,128} x max_block_k {256,512,1024} x num_warps
+    # {2,4,8} x num_stages {1,2,3} on K,N in {(2048,2048), (4096,4096),
+    # (5120,8192), (14336,4096), (4096,11008), (896,128)}.
+    #
+    # Findings: the portable 4-warp/block_n=64 tile is warp-starved on Ada -- a
+    # 32-wide N tile with eight warps is 1.01x-1.40x faster than it on every
+    # swept shape (1.15x/1.08x/1.06x/1.15x/1.01x/1.01x hot) and never loses,
+    # while block_n=128 always lost.  num_stages and max_block_k only move
+    # <=1.5% once block_k is clamped to the group, so the entry keeps the
+    # shallowest pipeline.
+    "ada": AwqGemvLaunch(block_n=32, max_block_k=512, num_warps=8, num_stages=1),
 }
 
 # Portable fallback: the same measured tile.  Triton's own default of four warps
@@ -85,15 +101,20 @@ _AWQ_GEMV_LAUNCH_CONFIGS: dict[str, AwqGemvLaunch] = {
 _DEFAULT_AWQ_GEMV_LAUNCH = AwqGemvLaunch(block_n=64, max_block_k=512, num_warps=4, num_stages=1)
 
 
-def launch_config(arch=None) -> AwqGemvLaunch:
-    """Return the AWQ GEMV launch constants for an architecture string or device."""
+def launch_config(device_or_arch=None) -> AwqGemvLaunch:
+    """Return the AWQ GEMV launch constants for an architecture string or device.
 
-    if isinstance(arch, str):
-        name = normalize_arch(arch)
-        if not name.startswith("gfx"):
-            return _DEFAULT_AWQ_GEMV_LAUNCH
-        arch = name
-    return _AWQ_GEMV_LAUNCH_CONFIGS.get(arch_class(arch), _DEFAULT_AWQ_GEMV_LAUNCH)
+    The table is keyed by :func:`gptqmodel.utils.arch.tuning_family`, the same
+    vocabulary every other tuned Triton table uses, so a CUDA capability tuple
+    or an ``sm_89`` string resolves to the Ada entry instead of falling through
+    to the portable default.  ``None``/empty input asks the current device and
+    on a GPU host therefore resolves to that device's family; an unregistered
+    family still keeps :data:`_DEFAULT_AWQ_GEMV_LAUNCH`.
+    """
+
+    if isinstance(device_or_arch, str) and not device_or_arch.strip():
+        return _DEFAULT_AWQ_GEMV_LAUNCH
+    return _AWQ_GEMV_LAUNCH_CONFIGS.get(tuning_family(device_or_arch), _DEFAULT_AWQ_GEMV_LAUNCH)
 
 
 @triton.jit
