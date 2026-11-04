@@ -10,6 +10,8 @@ outright. The shared validator used to replace all of that with
 thing.
 """
 
+import sys
+
 import pytest
 import torch
 
@@ -80,6 +82,8 @@ def test_rocm_rejection_reason_survives(monkeypatch):
 
 def test_real_hopper_only_message_reaches_the_caller():
     """On a non-Hopper CUDA GPU the concrete reason has to be visible end to end."""
+    if sys.platform != "linux":
+        pytest.skip("Machete only supports Linux")
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
     if IS_ROCM:
