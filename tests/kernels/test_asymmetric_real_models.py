@@ -17,6 +17,8 @@ from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.utils.machete import machete_runtime_error
+from gptqmodel.utils.marlin import marlin_runtime_error
 from tests.models.model_test import ModelTest
 
 
@@ -102,6 +104,31 @@ _GPTQ_REAL_CASES = (
         rtol=1.5e-2,
     ),
 )
+
+
+_CANDIDATE_BACKEND_GATES = {
+    # Machete is Hopper-only (SM90, >=204800 bytes opt-in shared memory), so an
+    # Ada (SM89) or Blackwell host has CUDA but cannot run it. Marlin is
+    # CUDA-only, and ROCm reports `torch.cuda.is_available()` as True.
+    BACKEND.MACHETE: lambda: machete_runtime_error(_DEVICE),
+    BACKEND.MARLIN: lambda: marlin_runtime_error(_DTYPE),
+}
+
+
+def _require_candidate_backend(case: _RealModelCase) -> None:
+    """Skip candidates whose own runtime gate rejects this host.
+
+    ``torch.cuda.is_available()`` is not sufficient: it is true on ROCm, and
+    true on CUDA hosts whose compute capability the kernel does not target.
+    Ask the kernel's own gate instead of re-deriving those checks here.
+    """
+
+    gate = _CANDIDATE_BACKEND_GATES.get(case.candidate_backend)
+    if gate is None:
+        return
+    error = gate()
+    if error:
+        pytest.skip(error)
 
 
 def _module_device(module: torch.nn.Module) -> torch.device:
@@ -241,6 +268,7 @@ def _assert_generation_tracks_torch(candidate_text: str, baseline_text: str) -> 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _AWQ_REAL_CASES, ids=lambda case: case.name)
 def test_awq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:
@@ -265,6 +293,7 @@ def test_awq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _GPTQ_REAL_CASES, ids=lambda case: case.name)
 def test_gptq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:
@@ -289,6 +318,7 @@ def test_gptq_asymmetric_real_layer_outputs_match_torch(case: _RealModelCase) ->
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("case", _AWQ_REAL_CASES + _GPTQ_REAL_CASES, ids=lambda case: f"{case.name}_generation")
 def test_asymmetric_real_generation_matches_torch_and_is_sane(case: _RealModelCase) -> None:
+    _require_candidate_backend(case)
     baseline_model = None
     candidate_model = None
     try:
