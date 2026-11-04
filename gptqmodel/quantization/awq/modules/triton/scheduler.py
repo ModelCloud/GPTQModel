@@ -250,6 +250,63 @@ _VERIFIED_4090_FP16_RULES: dict[tuple[int, int, int, int], AwqTritonPlan] = {
     (128, 4096, 4096, 128): AwqTritonPlan("dense"),
     (128, 4104, 4096, 32): AwqTritonPlan("fused", 64, 64, 32, 2, 4, 2),
 }
+# ---------------------------------------------------------------------------
+# RDNA4 (gfx1200/gfx1201/gfx1250) measured rules.
+#
+# On a HIP host ``device_identity`` is a seven-tuple whose last field is the
+# normalized ``gcnArchName`` (``gfx1201``); ``capability`` (index 3) is ``None``
+# because ``torch.cuda.get_device_capability`` reports an unrelated numeric pair
+# on ROCm and must never be used for dispatch.  Re-verified on the reference
+# host (AMD Radeon AI PRO R9700, gfx1201, HIP 7.16.26385, torch
+# 2.16.0.dev20261025+rocm10.1): per visible device the tuple is
+#   ('cuda', 0, 'AMD Radeon AI PRO R9700', None, 32, 34208743424, 'gfx1201')
+# i.e. name "AMD Radeon AI PRO R9700", capability None, 32 compute units and
+# total_memory 34_208_743_424.  The guard below matches arch + name + CU + memory
+# exactly, so a different gfx arch, a different board name, or a different
+# CU/memory count cannot inherit these tiles.
+#
+# The rules are FP16-only for the same reason as the 4090 set: the kernel
+# rejects a non-FP16 input or scale tensor outright, and ``_builtin_plan``
+# enforces the dtype triple rather than inheriting a tile.
+#
+# Measured on that host, 4-bit AWQ ``FORMAT.GEMM``, group_size 128, FP16,
+# ``mode="auto"``, median of 41 iterations after 20 warm-ups, a 256 MiB L2
+# flush before every timed call and ``torch.cuda.synchronize`` around each
+# call.  The comparison is against the *generic* policy this replaces
+# (``legacy_plan``: the 32/32/32, split_k=8 tile for M <= 128):
+#
+#   (M, N, K, G)            tile (BM, BN, BK, split, warps, stages)   us      generic us   speedup
+#   (32, 8192, 2048, 128)   (32, 64, 64, 1, 4, 2)                     89.3    348.8        3.90x
+#   (64, 8192, 2048, 128)   (64, 64, 64, 1, 4, 2)                    107.9    654.7        6.07x
+#   (64, 4096, 4096, 128)   (32, 64, 64, 1, 4, 4)                    105.9    366.8        3.46x
+#   (64, 2048, 8192, 128)   (16, 64, 64, 1, 4, 2)                    141.1    235.2        1.67x
+#   (127, 8192, 2048, 128)  (64, 128, 64, 1, 4, 2)                   121.9   1220.7       10.01x
+#   (128, 2048, 2048, 128)  (32, 64, 64, 1, 4, 4)                     78.0    339.6        4.35x
+#   (128, 8192, 2048, 128)  (64, 128, 64, 1, 4, 2)                   123.4   1228.7        9.96x
+#   (128, 4096, 4096, 128)  (64, 128, 64, 1, 4, 4)                   139.8    679.6        4.86x
+#
+# Every swept shape won, so no shape is left to the generic policy.  Split-K=1
+# won everywhere (the generic split_k=8 is a wave64/CDNA shape and pays an
+# atomic-reduction pass here); ``num_warps=4`` is 128 lanes on wave32.
+# Independently checked against an FP64 Torch oracle that unpacks the packed
+# qweight/qzeros itself: max relative error 3.8e-04..4.6e-04, output dtype
+# preserved, repeated forwards bit-identical, no dense dequantized cache.
+_VERIFIED_RDNA4_PROFILE = (
+    "AMD Radeon AI PRO R9700", "gfx1201", 32, 34_208_743_424,
+)
+_VERIFIED_RDNA4_FP16_RULES: dict[tuple[int, int, int, int], AwqTritonPlan] = {
+    # (M, N, K, G): measured fused plan
+    (32, 8192, 2048, 128): AwqTritonPlan("fused", 32, 64, 64, 1, 4, 2),
+    (64, 8192, 2048, 128): AwqTritonPlan("fused", 64, 64, 64, 1, 4, 2),
+    (64, 4096, 4096, 128): AwqTritonPlan("fused", 32, 64, 64, 1, 4, 4),
+    (64, 2048, 8192, 128): AwqTritonPlan("fused", 16, 64, 64, 1, 4, 2),
+    (127, 8192, 2048, 128): AwqTritonPlan("fused", 64, 128, 64, 1, 4, 2),
+    (128, 2048, 2048, 128): AwqTritonPlan("fused", 32, 64, 64, 1, 4, 4),
+    (128, 8192, 2048, 128): AwqTritonPlan("fused", 64, 128, 64, 1, 4, 2),
+    (128, 4096, 4096, 128): AwqTritonPlan("fused", 64, 128, 64, 1, 4, 4),
+}
+
+
 # Applications and the offline benchmark may additionally install exact rules.
 _MEASURED_RULES: dict[tuple[Any, ...], AwqTritonPlan] = {}
 _WARMED_PLANS: OrderedDict[tuple[Any, ...], AwqTritonPlan] = OrderedDict()
@@ -305,10 +362,21 @@ def _builtin_plan(
     output_dtype: torch.dtype | None, fp32_accum: bool,
 ) -> AwqTritonPlan | None:
     # CUDA identities are six-tuples; ROCm identities append the HIP
-    # architecture as a seventh field.  A ROCm device can never match the
-    # measured NVIDIA profile because ``identity[6]`` is a ``gfx*`` string.
-    if len(identity) >= 7 and identity[6] is not None:
-        return None
+    # architecture as a seventh field.  Dispatch the two profiles separately so
+    # neither can ever match the other's device.
+    arch = identity[6] if len(identity) >= 7 else None
+    if arch is not None:
+        # ROCm: ``capability`` (identity[3]) is None, so match on
+        # (name, gfx arch, compute-unit count, total memory) instead.
+        if (
+            (identity[2], arch, identity[4], identity[5]) != _VERIFIED_RDNA4_PROFILE
+            or input_dtype != torch.float16
+            or compute_dtype != torch.float16
+            or output_dtype != torch.float16
+            or not fp32_accum
+        ):
+            return None
+        return _VERIFIED_RDNA4_FP16_RULES.get((M, N, K, G))
     profile = identity[2:6] if len(identity) >= 6 else ()
     if (
         profile != _VERIFIED_4090_PROFILE

@@ -48,7 +48,7 @@ table instead of a single module-level constant set.
 |---|---|---|---|---|
 | GPTQ Torch (fused GEMV / small-M GEMM / dequant) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 GEMV `block_n=16/num_warps=4`, GEMM `(32, 32)/num_warps=4`, gate `(16, 17408)`; `tl.dot` lowers to `v_wmma_f32_16x16x16_f16`; **fused small-M GEMM is FP16-only** (BF16 goes through dequantize + matmul), GEMV keeps both dtypes |
 | GPTQ Triton dequant (`triton_utils/dequant.py`) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 `x_block=2048/num_warps=4/num_stages=1` (74.5 us geomean vs the CDNA tile's 81.7 us on gfx1201). Output is bit-identical to the CDNA tile; the tile only changes the launch shape |
-| AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured | ✅ | portable Triton; capability-based dispatch removed for ROCm |
+| AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured (per-device plan table) | ✅ (family table) | portable Triton; capability-based dispatch removed for ROCm. A HIP host reports a seven-field `device_identity` (the HIP arch is appended, `capability` is `None`), and the scheduler now has an exact-match RDNA4 rule set instead of always falling back to the generic tile. Measured 1.67x-10.01x faster than that generic policy at the 4090 rule shapes (`(M,N,K,G)` in the M<=128 band), FP16 only. See *AWQ GEMM scheduler on RDNA4* below |
 | AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (explicit) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. Its `SUPPORTS_FORMATS` priority is `0`, so AUTO never picks it; select it explicitly. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path |
 | QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only and there is **no** Triton port (see *QQQ* below); AUTO selects `QQQTorchLinear` |
 | ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
@@ -350,6 +350,60 @@ Launch entry: `_AWQ_GEMV_LAUNCH_CONFIGS["rdna4"] = AwqGemvLaunch(block_n=64,
 max_block_k=512, num_warps=4, num_stages=1)`; other families use the same
 default. `SUPPORTS_FORMATS[FORMAT.GEMV] = 0` keeps it out of AUTO on every
 platform.
+
+### AWQ GEMM scheduler on RDNA4
+
+`quantization/awq/modules/triton/scheduler.py` had a measured rule table only
+for the RTX 4090. Its `_builtin_plan` also returned early whenever `identity[6]`
+was set - which is *always* on ROCm - so every RDNA4 shape fell through to the
+generic Triton tile (`BLOCK_M/N/K = 32/32/32`, `split_k_iters=8`), a wave64/CDNA
+shape that pays a split-K atomic-reduction pass on wave32.
+
+A HIP host reports a **seven**-field `device_identity`: the six CUDA fields plus
+the normalized `gcnArchName` appended last, with `capability = None`
+(`torch.cuda.get_device_capability` is unrelated to the GPU on ROCm). On the
+reference R9700 the tuple is
+
+```
+('cuda', 0, 'AMD Radeon AI PRO R9700', None, 32, 34208743424, 'gfx1201')
+```
+
+The new `_VERIFIED_RDNA4_PROFILE` therefore matches `(name, gfx arch, compute
+units, total_memory)` from indices 2/6/4/5 exactly - a different gfx arch, board
+name, CU count or memory size does not inherit the tiles. The CUDA 4090 branch is
+unchanged and is reached only by six-field CUDA identities, so neither profile
+can match the other's device.
+
+Measured on gfx1201, 4-bit AWQ `FORMAT.GEMM`, group_size 128, FP16,
+`mode="auto"`, median of 41 iterations after 20 warm-ups, 256 MiB L2 flush
+before every timed call and CUDA events around each launch. "generic" is the
+`legacy_plan` tile the device used before this table:
+
+| (M, N, K, G) | tile (BM, BN, BK, split, warps, stages) | us | generic us | speedup |
+|---|---|---|---|---|
+| (32, 8192, 2048, 128) | (32, 64, 64, 1, 4, 2) | 89.3 | 348.8 | 3.90x |
+| (64, 8192, 2048, 128) | (64, 64, 64, 1, 4, 2) | 107.9 | 654.7 | 6.07x |
+| (64, 4096, 4096, 128) | (32, 64, 64, 1, 4, 4) | 105.9 | 366.8 | 3.46x |
+| (64, 2048, 8192, 128) | (16, 64, 64, 1, 4, 2) | 141.1 | 235.2 | 1.67x |
+| (127, 8192, 2048, 128) | (64, 128, 64, 1, 4, 2) | 121.9 | 1220.7 | 10.01x |
+| (128, 2048, 2048, 128) | (32, 64, 64, 1, 4, 4) | 78.0 | 339.6 | 4.35x |
+| (128, 8192, 2048, 128) | (64, 128, 64, 1, 4, 2) | 123.4 | 1228.7 | 9.96x |
+| (128, 4096, 4096, 128) | (64, 128, 64, 1, 4, 4) | 139.8 | 679.6 | 4.86x |
+
+Every swept shape won, so no shape is left to the generic policy;
+`split_k_iters=1` won everywhere and `num_warps=4` is 128 lanes on wave32. The
+table is FP16-only because `awq_gemm_triton` rejects non-FP16 input and scales;
+`_builtin_plan` enforces the dtype triple, so a BF16 call keeps the generic
+tile. Independently checked against an FP64 Torch oracle that unpacks the packed
+`qweight`/`qzeros` itself: max relative error 3.8e-04..4.6e-04 (budget 2e-3),
+output dtype preserved, repeated forwards bit-identical, and no dense
+dequantized weight is materialized.
+
+`tests/kernels/test_awq_rdna4_plan.py` pins the guard without a GPU: the exact
+profile matches, a wrong arch/name/CU/memory does not, non-FP16 returns `None`,
+the CUDA 4090 profile still matches only a CUDA-shaped identity, and a
+cross-shaped lookalike matches neither.
+
 
 ### GGUF Triton on ROCm
 
