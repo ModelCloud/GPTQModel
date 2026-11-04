@@ -961,9 +961,9 @@ class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
     # `bits` alone cannot express this: 1-bit Q1_0/IQ1_S/IQ1_M and 2-bit
     # Q2_K/IQ2_* run through ggml CUDA, but TQ1_0 (1-bit) and TQ2_0 (2-bit)
-    # have no GPU convert kernel and abort the process. The explicit
-    # `_GGML_CUDA_MATMUL_UNSUPPORTED` guard in `quantized_matmul_cuda` rejects
-    # them, so AUTO/GGUF_TORCH must stay available as the fallback.
+    # have no GPU convert kernel and abort the process. `__init__` rejects them
+    # with NotImplementedError so AUTO can fall back to GGUF_TORCH, and
+    # `quantized_matmul_cuda` re-checks as defence in depth.
     SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -1015,6 +1015,15 @@ class GGUFCudaKernel(GGUFTorchLinear):
             **kwargs,
         )
         self._ggml_cuda_plans: Dict[tuple[int, int, torch.dtype, int], _GGMLMatmulPlan] = {}
+        # Reject at construction: `create_quant_layer` retries the next AUTO
+        # candidate only on a NotImplementedError raised here. A guard in
+        # `forward()` is too late to fall back and would surface as a runtime
+        # failure on an already-built layer.
+        if self.gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED:
+            raise NotImplementedError(
+                f"ggml CUDA matmul does not support `{self.gguf_tensor_qtype}` weights; "
+                "use BACKEND.GGUF_TORCH instead."
+            )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
