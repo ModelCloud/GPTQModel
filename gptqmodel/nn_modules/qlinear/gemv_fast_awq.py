@@ -198,7 +198,11 @@ class AwqGEMVFastLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
 
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # ``_ensure_runtime_buffers`` keeps the bias in the kernel's FP16
+            # dtype. Adding it to a BF16 result would promote the output to
+            # FP32, so match the result dtype here.
+            out = out + self.bias.to(dtype=out.dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

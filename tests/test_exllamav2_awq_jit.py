@@ -23,13 +23,12 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
     module = _build_module()
     calls = {}
 
-    def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx, temp_dq):
+    def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx):
         calls["make_q_matrix_awq"] = {
             "qweight_shape": tuple(qweight.shape),
             "qzeros_shape": tuple(qzeros.shape),
             "scales_dtype": scales.dtype,
             "g_idx_is_none": g_idx is None,
-            "temp_dq_shape": tuple(temp_dq.shape),
         }
         return 123
 
@@ -39,7 +38,6 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
         module.qweight,
         module.qzeros,
         module.scales.to(dtype=torch.float32),
-        torch.zeros(module.temp_dq_size() // 2, dtype=torch.float16),
     )
 
     assert handle == 123
@@ -48,7 +46,6 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
         "qzeros_shape": tuple(module.qzeros.shape),
         "scales_dtype": torch.float16,
         "g_idx_is_none": True,
-        "temp_dq_shape": (module.temp_dq_size() // 2,),
     }
 
 

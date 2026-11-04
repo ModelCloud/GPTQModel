@@ -15,8 +15,7 @@ int64_t make_q_matrix(
     std::optional<torch::Tensor> q_groups_opt,
     std::optional<torch::Tensor> gptq_qzeros_opt,
     std::optional<torch::Tensor> gptq_scales_opt,
-    std::optional<torch::Tensor> gptq_g_idx_opt,
-    torch::Tensor temp_dq
+    std::optional<torch::Tensor> gptq_g_idx_opt
 )
 {
     torch::Tensor q_perm = q_perm_opt.value_or(torch::Tensor());
@@ -69,7 +68,9 @@ int64_t make_q_matrix(
         height = q_weight.size(0) * 8;
     }
 
-    // Reconstruction scratch is allocated per forward, never retained.
+    // No dense reconstruction buffer is attached: the quantized kernel above
+    // decodes inside its launch, and the dense fallback allocates a transient
+    // tensor per call in gemm_half_q_half().
 
     QMatrix* m = new QMatrix(
         device,
@@ -84,8 +85,7 @@ int64_t make_q_matrix(
         (!q_groups.defined() || q_groups.device().is_meta()) ? NULL : (uint16_t*) q_groups.data_ptr(),
         (!gptq_qzeros.defined() || gptq_qzeros.device().is_meta()) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
         (!gptq_scales.defined() || gptq_scales.device().is_meta()) ? NULL : (half*) gptq_scales.data_ptr(),
-        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
-        nullptr
+        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr()
     );
 
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
@@ -136,15 +136,13 @@ void gemm_half_q_half(
         c.size(0),
         c.size(1),
         a.size(1),
-        true,
-        NULL,
-        force_cuda
+        true
     );
 }
 
 TORCH_LIBRARY(gptqmodel_exllamav2_awq, m)
 {
-    m.def("make_q_matrix_awq(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx, Tensor temp_dq) -> int");
+    m.def("make_q_matrix_awq(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx) -> int");
     m.def("gemm_half_q_half_awq(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");
 }
 

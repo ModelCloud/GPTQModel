@@ -110,3 +110,57 @@ def test_awq_prefill_fused_store(rows, columns):
     source = torch.randn((rows, k), generator=generator, dtype=torch.float16)
     expected = source.double() @ weights.t()
     check(module, source.cuda(), expected.cuda())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or bool(torch.version.hip), reason="Native AWQ requires CUDA")
+@pytest.mark.parametrize("cls_name", ["gemv", "gemv_fast"])
+@pytest.mark.parametrize("rows", [1, 2, 9])
+def test_awq_bias_add_preserves_bf16_output_dtype(cls_name, rows):
+    """A packed FP16 bias must not promote a BF16 result to FP32.
+
+    Both native AWQ GEMV paths keep ``bias`` in FP16 because the kernel is FP16
+    only. Adding it to the result *after* the result is cast back to BF16
+    promotes that sum to FP32 (BF16 + FP16 -> FP32), so the epilogue has to
+    match the result dtype.
+
+    The fixture keeps every value an exact multiple of 2**-7 with magnitude
+    below 16, which BF16 represents exactly. The oracle is independent FP64
+    arithmetic over the same quantized weights, so the comparison is exact and
+    isolates the dtype regression from output rounding.
+    """
+    if cls_name == "gemv":
+        from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear as cls
+    else:
+        from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear as cls
+
+    k, n = 2048, 256
+    generator = torch.Generator().manual_seed(17)
+    codes = torch.full((n, k), 8, dtype=torch.int64)
+    choices = torch.tensor([7, 8, 9], dtype=torch.int64)
+    codes.copy_(choices[torch.randint(0, 3, (n, k), generator=generator)])
+    weights = (codes.double() - 8) / 128
+    bias = torch.randint(-2, 13, (n,), generator=generator).double() / 128
+
+    linear = torch.nn.Linear(k, n, bias=True, dtype=torch.float16)
+    linear.weight.data.copy_(weights)
+    linear.bias.data.copy_(bias)
+
+    kwargs = {"pack_dtype": torch.int16} if cls_name == "gemv_fast" else {}
+    module = cls(bits=4, group_size=128, sym=True, desc_act=False, in_features=k,
+                 out_features=n, bias=True, register_buffers=True, **kwargs)
+    module.pack(linear, torch.full((n, k // 128), 1 / 128, dtype=torch.float16),
+                torch.full((n, k // 128), 8, dtype=torch.float16))
+    module = module.cuda().eval()
+    module.post_init()
+
+    assert module.bias.dtype == torch.float16
+    values = torch.tensor([-1.0, 0.0, 1.0])
+    source = values[torch.randint(0, 3, (rows, k), generator=generator)]
+    source = source.to(torch.bfloat16)
+    expected = source.double() @ weights.t() + bias
+    with torch.inference_mode():
+        actual = module(source.cuda())
+
+    assert actual.dtype == torch.bfloat16
+    # Every value above is exact in BF16, so this is not a rounding tolerance.
+    torch.testing.assert_close(actual.cpu(), expected.to(torch.bfloat16), rtol=0, atol=0)

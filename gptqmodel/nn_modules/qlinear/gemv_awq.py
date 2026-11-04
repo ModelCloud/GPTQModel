@@ -218,7 +218,11 @@ class AwqGEMVLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
 
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # The packed bias is FP16 to match the native kernel. Adding it
+            # after the result is cast back would promote a BF16 output to
+            # FP32 (BF16 + FP16 promotes), so match the result dtype first.
+            out = out + self.bias.to(dtype=out.dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

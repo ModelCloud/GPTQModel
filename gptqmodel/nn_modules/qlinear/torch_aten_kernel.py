@@ -16,6 +16,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ._runtime_cache import tensor_cache_key
 from .torch_fused import pack_scales_and_zeros
 
 
@@ -156,10 +157,25 @@ class TorchAtenLinear(PackableQuantLinear):
             return x.dtype == self._cpu_transform_dtype
         return True
 
+    def clear_weight_cache(self) -> None:
+        """Drop the activation-reorder index derived from ``g_idx``.
+
+        See ``TorchFusedLinear.clear_weight_cache``: ``ret_idx`` and the cached
+        identity flag stay valid only for the ``g_idx`` they were built from,
+        and ``load_state_dict`` may copy that tensor in place.
+        """
+        self.ret_idx = None
+        self._ret_idx_identity = None
+
     def _build_ret_idx(self) -> torch.Tensor:
+        key = tensor_cache_key(self.g_idx)
         existing = getattr(self, "ret_idx", None)
         total = self.g_idx.shape[0]
-        if isinstance(existing, torch.Tensor) and existing.numel() == total:
+        if (
+            isinstance(existing, torch.Tensor)
+            and existing.numel() == total
+            and getattr(self, "_ret_idx_key", None) == key
+        ):
             return existing
 
         device = self.g_idx.device
@@ -170,6 +186,7 @@ class TorchAtenLinear(PackableQuantLinear):
             ret_idx = torch.arange(total, dtype=torch.int32, device=device)
             self.ret_idx = ret_idx
             self._ret_idx_identity = True
+            self._ret_idx_key = key
             return ret_idx
 
         ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
@@ -194,11 +211,12 @@ class TorchAtenLinear(PackableQuantLinear):
         ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
         self.ret_idx = ret_idx
         self._ret_idx_identity = None
+        self._ret_idx_key = key
         return ret_idx
 
     def _ret_idx_is_identity(self) -> bool:
         cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None:
+        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
             return cached
         ret_idx = self._build_ret_idx()
         identity = torch.equal(

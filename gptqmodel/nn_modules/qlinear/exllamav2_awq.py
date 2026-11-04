@@ -86,7 +86,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             return False, ImportError(exllamav2_awq_runtime_error())
         return True, None
 
-    def ext_make_q_matrix_awq(self, qweight, qzeros, scales, temp_dq) -> int:
+    def ext_make_q_matrix_awq(self, qweight, qzeros, scales) -> int:
         runtime_scales = scales if scales.dtype == torch.float16 else scales.to(dtype=torch.float16)
         return exllamav2_awq_make_q_matrix(
             qweight,
@@ -98,7 +98,6 @@ class AwqExllamaV2Linear(AWQuantLinear):
             qzeros,
             runtime_scales,
             None,
-            temp_dq,
         )
 
     def post_init(self, scratch_space: ScratchSpace):
@@ -125,8 +124,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             self.qweight, self.qzeros, self.bits
         )
 
-        temp_dq = torch.empty(0, dtype=torch.float16, device=self.qweight.device)
-        self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales, temp_dq)
+        self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales)
 
         super().post_init()
 
@@ -163,10 +161,13 @@ class AwqExllamaV2Linear(AWQuantLinear):
         return out.view(out_shape)
 
     def temp_dq_size(self):
+        """Bytes of retained dense-weight scratch: zero by design.
+
+        The quantized kernel decodes inside its launch and the row-count
+        fallback allocates a transient tensor per call, so no dense weight
+        buffer is attached to the handle or the model.
         """
-        Returns the size of the temporary buffer required for the dq kernel.
-        """
-        return self.in_features * self.out_features * 2 + 128
+        return 0
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
         """

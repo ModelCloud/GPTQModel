@@ -16,6 +16,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -118,10 +119,26 @@ class TorchFusedLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def clear_weight_cache(self) -> None:
+        """Drop the activation-reorder index derived from ``g_idx``.
+
+        ``ret_idx`` is indexing metadata, not a packed weight, but it is only
+        valid for the ``g_idx`` it was built from. ``load_state_dict`` copies
+        into the existing buffers, so neither the object identity nor the
+        version of ``g_idx`` is guaranteed to change; the base class calls this
+        hook on load and on device/dtype moves instead.
+        """
+        self.ret_idx = None
+
     def _build_ret_idx(self) -> torch.Tensor:
+        key = tensor_cache_key(self.g_idx)
         existing = getattr(self, "ret_idx", None)
         total = self.g_idx.shape[0]
-        if isinstance(existing, torch.Tensor) and existing.numel() == total:
+        if (
+            isinstance(existing, torch.Tensor)
+            and existing.numel() == total
+            and getattr(self, "_ret_idx_key", None) == key
+        ):
             return existing
 
         device = self.g_idx.device
@@ -148,6 +165,7 @@ class TorchFusedLinear(PackableQuantLinear):
 
         ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
         self.ret_idx = ret_idx
+        self._ret_idx_key = key
         return ret_idx
 
     def train(self, mode: bool = True):
@@ -274,7 +292,7 @@ class TorchFusedLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        x = x[:, self.ret_idx.to(x.device)].contiguous()
+        x = x[:, self._build_ret_idx().to(x.device)].contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":

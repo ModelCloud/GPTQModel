@@ -133,8 +133,10 @@ class ExllamaV2Linear(GPTQQuantLinear):
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        temp_dq = torch.empty(0, dtype=torch.float16, device=self.qweight.device)
-        self.q_handle = self.ext_make_q_matrix(self.q_tensors, temp_dq)
+        # No dense reconstruction buffer is attached to the handle: the
+        # quantized kernel decodes inside its launch, and the row-count
+        # fallback in the extension allocates a transient tensor per call.
+        self.q_handle = self.ext_make_q_matrix(self.q_tensors)
 
         super().post_init()
 
@@ -168,7 +170,13 @@ class ExllamaV2Linear(GPTQQuantLinear):
         return out.to(dtype=x_dtype)
 
     def temp_dq_size(self):
-        return self.in_features * self.out_features * 2 + 128
+        """Bytes of retained dense-weight scratch: zero by design.
+
+        The kernel never keeps a reconstructed FP16 weight. The row-count
+        fallback in the extension allocates a transient tensor per call, so no
+        dense buffer is attached to the handle or the model.
+        """
+        return 0
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
         return self.out_features * max_input_len * max_batch_size * 4 + 128
@@ -184,7 +192,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 
-    def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):
+    def ext_make_q_matrix(self, w: dict, key: str = None):
         """
         Create Q matrix
         """
@@ -204,7 +212,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     None,
                     None,
                     None,
-                    temp_dq,
                 )
         # GPTQ
         elif "qweight" in w:
@@ -230,7 +237,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     w["qzeros"],
                     w["scales"],
                     w["g_idx"].cpu(),
-                    temp_dq,
                 )
             # GPTQ without g_idx
             else:
@@ -244,7 +250,6 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     w["qzeros"],
                     w["scales"],
                     None,
-                    temp_dq,
                 )
         else:
             raise ValueError("q_weight not found in exllama v2 quantized weights")
