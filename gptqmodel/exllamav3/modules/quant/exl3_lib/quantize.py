@@ -72,7 +72,30 @@ def tile_core_permute_i(tiles: torch.Tensor, tiles_n: int, size_n: int) -> torch
     return tiles.reshape(tiles_n, 8, 4, 2, 2, 2).permute(4, 2, 5, 0, 3, 1).reshape(16, size_n)
 
 
-def _allocate_temp_buffers(device, K: int):
+_DEFAULT_TILE_BATCH = 256
+
+
+def _tile_batch_size() -> int:
+    """Tile slots per quantization launch.
+
+    The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
+    at the default batch of 256. That is allocated once per CUDA stream, and the
+    quantization pool runs one stream per worker thread, so a wide run can hold
+    several GiB of pure scratch per device. ``GPTQMODEL_EXL3_TILE_BATCH`` lowers
+    the slot count for memory-constrained hosts; tiles are quantized
+    independently, so a smaller batch only means more launches.
+    """
+
+    import os
+
+    try:
+        batch = int(os.environ.get("GPTQMODEL_EXL3_TILE_BATCH", _DEFAULT_TILE_BATCH))
+    except ValueError:
+        batch = _DEFAULT_TILE_BATCH
+    return max(1, min(_DEFAULT_TILE_BATCH, batch))
+
+
+def _allocate_temp_buffers(device, K: int, batch: int):
     """Allocate one stream's worth of writable tile scratch.
 
     Both buffers are pure scratch that ``quantize_tiles_kernel`` fills before it
@@ -82,7 +105,7 @@ def _allocate_temp_buffers(device, K: int):
     stream (measured 43.1 ms against 0.3 ms for the uninitialized allocation).
     """
 
-    max_batch_size = 256
+    max_batch_size = batch
     temp_costs = torch.empty((max_batch_size, 2, 65536 >> K), dtype = torch.half, device = device)
     temp_edges = torch.empty((max_batch_size, 256, 65536 >> K), dtype = torch.short, device = device)
     return temp_costs, temp_edges
@@ -103,19 +126,35 @@ def _stream_temp_buffers(device, K: int, stream):
     stream stay ordered by the stream itself, so no event handshake is needed.
     """
 
-    key = (torch.device(device), int(K), stream)
+    batch = _tile_batch_size()
+    key = (torch.device(device), int(K), stream, batch)
     with _workspace_registry_lock:
         buffers = _workspace_buffers.get(key)
         if buffers is None:
-            buffers = _allocate_temp_buffers(key[0], K)
+            buffers = _allocate_temp_buffers(key[0], K, batch)
             _workspace_buffers[key] = buffers
         return buffers
 
 
 def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
+    """Quantize every tile, splitting the launch to fit the scratch buffer.
+
+    Tiles are independent (each carries its own trellis and writes all 256 of
+    its entries), so processing them in batches is exactly equivalent to one
+    launch over the whole set.
+    """
+
     stream = torch.cuda.current_stream(tiles.device)
     temp_costs, temp_edges = _stream_temp_buffers(tiles.device, K, stream)
-    ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+    batch = _tile_batch_size()
+    rows = tiles.shape[0]
+    if rows <= batch:
+        ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+        return
+    for start in range(0, rows, batch):
+        stop = min(start + batch, rows)
+        ext.quantize_tiles(tiles[start:stop], output[start:stop], indices[start:stop],
+                           temp_costs, temp_edges, K, mcg, mul1)
 
 
 def quantize_tiles(tiles, quant_args: dict):
