@@ -357,3 +357,92 @@ def test_tiny_ricursive_gptq_quantization_smoke(tmp_path: Path):
     diff = (native_logits - quantized_logits).abs().mean().item()
     scale = native_logits.abs().mean().item()
     assert diff < 0.5 * scale, (diff, scale)
+
+
+def test_generate_patch_keeps_input_shape_on_empty_cache():
+    """The upstream bug: an empty cache plus `cache_position=None` added a bogus axis."""
+
+    from transformers.cache_utils import DynamicCache
+
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    class _Dummy:
+        device = torch.device("cpu")
+
+    input_ids = torch.arange(6).unsqueeze(0)
+    assert input_ids.shape == (1, 6)
+
+    out = _prepare_inputs_for_generation(
+        _Dummy(),
+        input_ids,
+        past_key_values=DynamicCache(),
+        cache_position=None,
+        use_cache=True,
+    )
+
+    # Prefill must stay 2-D; the buggy code produced (1, 1, 6).
+    assert out["input_ids"].shape == (1, 6)
+    assert out["position_ids"].shape == (1, 6)
+    assert out["cache_position"].tolist() == [0, 1, 2, 3, 4, 5]
+
+
+def test_generate_patch_keeps_single_token_decode_shape():
+    from transformers.cache_utils import DynamicCache
+
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    class _Dummy:
+        device = torch.device("cpu")
+
+    # Decode step: a single new token against a warm cache is already the right shape.
+    out = _prepare_inputs_for_generation(
+        _Dummy(),
+        torch.tensor([[7]]),
+        past_key_values=DynamicCache(),
+        cache_position=None,
+        use_cache=True,
+    )
+    assert out["input_ids"].shape == (1, 1)
+
+
+def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import _PATCH_FLAG, apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    # The class may already carry the patch if an earlier test loaded through GPTQModel.
+    apply_ricursive_generate_patch(model)
+    assert getattr(type(model), _PATCH_FLAG, False) is True
+    # Idempotent.
+    assert not apply_ricursive_generate_patch(model)
+
+    input_ids = torch.randint(0, 256, (1, 6))
+    cached = model.generate(input_ids, max_new_tokens=8, do_sample=False, use_cache=True)
+    uncached = model.generate(input_ids, max_new_tokens=8, do_sample=False, use_cache=False)
+
+    assert cached.shape == (1, 14)
+    assert torch.equal(cached, uncached)
+
+
+def test_ricursive_definition_installs_generate_patch():
+    from gptqmodel.utils.ricursive_patch import _PATCH_FLAG
+
+    class _FakeRemote:
+        device = torch.device("cpu")
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):  # pragma: no cover - replaced
+            raise AssertionError("original must not be used")
+
+    qmodel = object.__new__(RicursiveQModel)
+    model = _FakeRemote()
+    assert qmodel.after_model_load(model) is model
+    assert getattr(type(model), _PATCH_FLAG, False) is True

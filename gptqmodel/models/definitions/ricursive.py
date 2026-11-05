@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from ...utils.ricursive_patch import apply_ricursive_generate_patch
 from ..base import BaseQModel
 
 
@@ -55,6 +56,12 @@ class RicursiveQModel(BaseQModel):
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!:norm",),
         },
     ]
+
+    def after_model_load(self, model, load_quantized_model=False):
+        # Ripple's shipped `prepare_inputs_for_generation` injects a spurious axis under
+        # transformers >= 5 and breaks `generate()` on the very first prefill.
+        apply_ricursive_generate_patch(model)
+        return model
 
 
 __all__ = ["RicursiveQModel"]
