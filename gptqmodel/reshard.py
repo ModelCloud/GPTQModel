@@ -58,6 +58,10 @@ _STREAM_CHUNK_SIZE = 8 * 1024 * 1024
 _LAYER_CONTAINER_NAMES = frozenset({"layers", "layer", "blocks", "block", "h"})
 _SKIP_AUX_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__"})
 
+# Byte width of fixed-width safetensors dtypes. Sub-byte dtypes (``F4``,
+# ``F6_E2M3``, ``F6_E3M2``) are intentionally absent: their header ``shape``
+# counts values, not bytes, so payload validation is skipped for them instead
+# of risking a false rejection.
 _SAFETENSORS_DTYPE_BYTES = {
     "BOOL": 1,
     "U8": 1,
@@ -67,8 +71,6 @@ _SAFETENSORS_DTYPE_BYTES = {
     "F8_E5M2": 1,
     "F8_E5M2FNUZ": 1,
     "F8_E8M0": 1,
-    "F4_E2M1": 1,
-    "F4_E2M1FN_X2": 1,
     "U16": 2,
     "I16": 2,
     "F16": 2,

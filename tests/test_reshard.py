@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import mmap
+import os
 from pathlib import Path
 
 import pytest
@@ -296,11 +298,82 @@ def test_reshard_does_not_mmap_source_weights(tmp_path, monkeypatch):
     def _fail_safe_open(*args, **kwargs):
         raise AssertionError("reshard must not open source weights with safetensors.safe_open")
 
+    def _fail_mmap(*args, **kwargs):
+        raise AssertionError("reshard must not mmap source weights")
+
     monkeypatch.setattr(safetensors, "safe_open", _fail_safe_open)
+    monkeypatch.setattr(mmap, "mmap", _fail_mmap)
     target = tmp_path / "target"
     reshard(source, target)
 
     assert (target / "model.safetensors").is_file()
+
+
+def test_reshard_keeps_at_most_one_source_shard_open(tmp_path, monkeypatch):
+    import builtins
+
+    source = tmp_path / "source"
+    _build_source(source)
+    target = tmp_path / "target"
+    source_prefix = f"{source}{os.sep}"
+
+    real_open = builtins.open
+    open_source_shards = set()
+    peak_open = 0
+
+    class _TrackedHandle:
+        def __init__(self, handle, key):
+            self._handle = handle
+            self._key = key
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            try:
+                return self._handle.__exit__(*exc_info)
+            finally:
+                self._release()
+
+        def close(self):
+            try:
+                self._handle.close()
+            finally:
+                self._release()
+
+        def _release(self):
+            open_source_shards.discard(self._key)
+
+    def _tracked_open(file, mode="r", *args, **kwargs):
+        nonlocal peak_open
+        handle = real_open(file, mode, *args, **kwargs)
+        try:
+            path = os.fspath(file)
+        except TypeError:
+            path = ""
+        if (
+            isinstance(path, str)
+            and path.startswith(source_prefix)
+            and path.endswith(".safetensors")
+            and "r" in mode
+            and "+" not in mode
+        ):
+            key = object()
+            open_source_shards.add(key)
+            peak_open = max(peak_open, len(open_source_shards))
+            return _TrackedHandle(handle, key)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", _tracked_open)
+    reshard(source, target)
+    monkeypatch.undo()
+
+    assert peak_open == 1
+    assert not open_source_shards
 
 
 def test_reshard_copies_nested_auxiliary_files(tmp_path):
