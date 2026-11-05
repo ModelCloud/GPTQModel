@@ -14,7 +14,6 @@ import torch
 from safetensors.torch import save_file
 
 import gptqmodel.utils.structure as structure
-from gptqmodel.utils.structure import LazyTurtle
 
 
 LLAMA_MODULE_TREE = [
@@ -52,7 +51,12 @@ def warnings(monkeypatch):
     return messages
 
 
-def _write_checkpoint(model_dir: Path, shards: dict[str, list[str]]) -> Path:
+def _write_checkpoint(
+    model_dir: Path,
+    shards: dict[str, list[str]],
+    *,
+    write_index: bool = True,
+) -> Path:
     """Write a sharded safetensors checkpoint from shard name -> tensor names."""
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -62,15 +66,16 @@ def _write_checkpoint(model_dir: Path, shards: dict[str, list[str]]) -> Path:
         save_file(tensors, str(model_dir / shard_name))
         for name in tensor_names:
             weight_map[name] = shard_name
-    (model_dir / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {}, "weight_map": weight_map}),
-        encoding="utf-8",
-    )
+    if write_index:
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {}, "weight_map": weight_map}),
+            encoding="utf-8",
+        )
     return model_dir
 
 
-def _build_turtle(model_dir: Path, *, module_tree=LLAMA_MODULE_TREE) -> LazyTurtle:
-    turtle = LazyTurtle.maybe_create(
+def _build_turtle(model_dir: Path, *, module_tree=LLAMA_MODULE_TREE) -> structure.LazyTurtle:
+    turtle = structure.LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         module_tree=module_tree,
@@ -91,19 +96,22 @@ def test_monolithic_shard_warns_once(tmp_path, warnings):
                 "lm_head.weight",
             ]
         },
+        write_index=False,
     )
+
+    assert not (checkpoint / "model.safetensors.index.json").exists()
 
     turtle = _build_turtle(checkpoint)
     turtle.warn_if_checkpoint_shards_are_not_layerwise()
 
     assert len(warnings) == 1
-    # The message must state the quantization-only context, the pinned-mmap cause,
+    # The message must state the quantization-only context, the repeated-I/O cause,
     # and the remedy.
     assert "for quantization" in warnings[0]
     assert "shards are not layer-wise" in warnings[0]
     assert "`model.safetensors` holds 3 decoder layers" in warnings[0]
-    assert "pinned mmap cannot be released until the last layer it holds is quantized" in warnings[0]
-    assert "wasting CPU RAM" in warnings[0]
+    assert "opened and re-read once per decoder layer" in warnings[0]
+    assert "avoidable I/O" in warnings[0]
     assert "re-shard so each decoder layer has its own file" in warnings[0]
     # A single-file checkpoint should not report an awkward "1 of 1" count.
     assert "of 1 safetensors" not in warnings[0]

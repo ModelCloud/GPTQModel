@@ -798,9 +798,9 @@ class _LazyCheckpointAssembly:
     concat_dim: Optional[int]
 
 
-# A shard holding several decoder layers is re-read once per layer, and its
-# pinned/host-registered mapping survives until the last of them is quantized.
-# The layout is fixed per checkpoint, so a process only needs to hear it once.
+# A shard holding several decoder layers is re-opened and re-read once per layer
+# it contains. The layout is fixed per checkpoint, so a process only needs to
+# hear it once.
 _NON_LAYERWISE_SHARD_WARNING_LOCK = threading.Lock()
 _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
 
@@ -1607,8 +1607,8 @@ class LazyTurtle:
 
         log.warning(
             "LazyTurtle: loading this checkpoint for quantization, but its shards are not layer-wise: "
-            "%s. A shard's pinned mmap cannot be released until the last layer it holds is quantized, "
-            "wasting CPU RAM; re-shard so each decoder layer has its own file.",
+            "%s. The same shard is opened and re-read once per decoder layer it holds, adding "
+            "avoidable I/O during quantization; re-shard so each decoder layer has its own file.",
             self._format_shard_layout_detail(
                 shard_groups=shard_groups,
                 multi_layer_shards=multi_layer_shards,
