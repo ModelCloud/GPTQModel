@@ -65,7 +65,7 @@ from ..utils.model import (
     untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
-from ..utils.p2p import enable_for_devices
+from ..utils.p2p import enable_for_devices, safe_module_to, safe_move_to
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
@@ -1202,7 +1202,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         quantizer = getattr(task, "quantizer", None)
         if quantizer is not None and hasattr(quantizer, "to"):
             try:
-                quantizer.to(target_device)
+                safe_module_to(quantizer, target_device)
             except Exception:
                 pass
 
@@ -1210,7 +1210,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):
-                setattr(task, attr_name, tensor_value.to(device=target_device, non_blocking=True))
+                setattr(
+                    task,
+                    attr_name,
+                    safe_move_to(tensor_value, target_device, non_blocking=True),
+                )
 
         if hasattr(task, "dev"):
             task.dev = target_device

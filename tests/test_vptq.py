@@ -1694,6 +1694,39 @@ def test_vptq_quantizer_accumulates_calibration_hessian(shape):
         quantizer.add_batch(torch.randn(5))
 
 
+def test_vptq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
+    """The per-device partial merge must not issue a raw cross-device copy.
+
+    Partials are keyed by the device that captured them, so the merge can move
+    a tensor between accelerators. On an asymmetric ROCm peer topology that
+    direct copy segfaults inside ``hipMemcpyPeerAsync``, so the merge goes
+    through ``safe_move_to`` even for a plain dtype cast.
+    """
+
+    qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
+
+    # A float32 partial forces the cast branch; the real device move is covered
+    # by the P2P tests.
+    partial = torch.full((6, 6), 8.0, dtype=torch.float32)
+    quantizer._device_hessian_partials[torch.device("cpu")] = partial
+    quantizer._device_sample_counts[torch.device("cpu")] = 4
+    quantizer.nsamples = 4
+
+    calls = []
+
+    def fake_move(tensor, device, *, dtype=None, **kwargs):
+        calls.append((tensor.dtype, torch.device(device), dtype))
+        return tensor.to(dtype=dtype)
+
+    monkeypatch.setattr(vptq_module, "safe_move_to", fake_move)
+
+    hessian = quantizer.materialize_hessian(torch.device("cpu"))
+
+    assert calls == [(torch.float32, torch.device("cpu"), torch.float64)]
+    assert torch.allclose(hessian, torch.full((6, 6), 2.0, dtype=torch.float64))
+
+
 def test_vptq_percdamp_is_applied_exactly_once():
     """`percdamp` must be the only damping: `U^T U == (H + percdamp * I)^-1`."""
 

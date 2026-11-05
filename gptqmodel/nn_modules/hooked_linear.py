@@ -13,6 +13,7 @@ from torch import nn
 from ..quantization.rotation.hadamard_utils import apply_online_hadamard
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 
 
 log = setup_logger()
@@ -32,7 +33,10 @@ def _restore_output_device(output: torch.Tensor, original_device: torch.device) 
         # Meta tensors are placeholders with no backing storage; never move real
         # outputs back to meta during hook replay.
         return output
-    return output.to(device=original_device)
+    # On an asymmetric ROCm peer topology a direct cross-device copy can
+    # segfault inside hipMemcpyPeerAsync, so route it through the direction-aware
+    # helper.
+    return safe_move_to(output, original_device)
 
 
 def _materialize_if_meta_weight(module: nn.Module, *, input_device: torch.device) -> None:
@@ -70,7 +74,7 @@ class HookedConv1D(transformers.Conv1D):
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
+            input = safe_move_to(input, target_device)
         output = super().forward(input)
 
         if self.forward_hook:
@@ -133,7 +137,7 @@ class HookedConv1d(torch.nn.Conv1d):
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
+            input = safe_move_to(input, target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -195,7 +199,7 @@ class HookedConv2d(torch.nn.Conv2d):
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
+            input = safe_move_to(input, target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -225,7 +229,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
+            input = safe_move_to(input, target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -292,7 +296,7 @@ class HookedLinear(torch.nn.Linear):
             input_device=original_device,
         )
         if original_device != target_device:
-            input = input.to(device=target_device)
+            input = safe_move_to(input, target_device)
         replay_mode = (None if getattr(self, "_w4a_replay_disabled", False)
                        else getattr(self, "_w4a_stream_replay_mode", None))
         replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)

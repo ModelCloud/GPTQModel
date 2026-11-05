@@ -35,6 +35,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import VPTQConfig
 from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from ..utils.vptq import (
     vptq_group_for_column,
     vptq_group_setting,
@@ -301,7 +302,13 @@ class VPTQ:
             if partial.device == target_device and partial.dtype == _HESSIAN_DTYPE:
                 merged.add_(partial)
             else:
-                merged.add_(partial.to(device=target_device, dtype=_HESSIAN_DTYPE))
+                # Partials are keyed by the device that captured them, so this
+                # is a cross-device move. On an asymmetric ROCm peer topology a
+                # direct copy segfaults, so route it through the helper; it is
+                # an ordinary dtype cast when the devices already match.
+                merged.add_(
+                    safe_move_to(partial, target_device, dtype=_HESSIAN_DTYPE)
+                )
             del partial
 
         merged.div_(float(total_samples))
