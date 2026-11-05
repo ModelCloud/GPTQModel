@@ -763,6 +763,61 @@ def test_decode_patches_install_and_stay_idempotent(tmp_path: Path):
     assert norm_cls.forward is patched_norm
 
 
+def test_chunked_mlp_is_bit_identical_and_idempotent(monkeypatch):
+    """Splitting the MLP over rows must only bound the peak, never change the result.
+
+    Ripple's MLP expands 5120 -> 40960, so a long-prompt prefill materialises three
+    ``tokens x 40960`` tensors at once. Chunking the row dimension is what keeps a
+    33 GiB 4-bit model inside a 48 GiB card at eval batch sizes, so it has to be
+    exactly equivalent to the unchunked forward.
+    """
+    import types
+
+    from gptqmodel.utils.ricursive_patch import _MLP_CHUNK_PATCH_FLAG, _patch_chunked_mlp
+
+    class _MLP(torch.nn.Module):
+        def __init__(self, hidden: int = 128, intermediate: int = 512, clamp: float = 10.0):
+            super().__init__()
+            self.clamp_threshold = clamp
+            self.gate_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+            self.up_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+            self.down_proj = torch.nn.Linear(intermediate, hidden, bias=False)
+
+        def forward(self, x):
+            gate = self.gate_proj(x)
+            up = self.up_proj(x)
+            if self.clamp_threshold:
+                gate = gate.clamp(min=None, max=self.clamp_threshold)
+                up = up.clamp(min=-self.clamp_threshold, max=self.clamp_threshold)
+            return self.down_proj(torch.nn.functional.silu(gate) * up)
+
+    monkeypatch.setenv("GPTQMODEL_RIPPLE_MLP_CHUNK", "64")
+    torch.manual_seed(0)
+    mlp = _MLP().to(torch.bfloat16)
+    holder = types.SimpleNamespace(
+        model=types.SimpleNamespace(layers=[types.SimpleNamespace(mlp=mlp)])
+    )
+
+    x = torch.randn(3, 200, 128, dtype=torch.bfloat16)
+    reference = mlp(x).clone()
+
+    assert _patch_chunked_mlp(holder) is True
+    assert getattr(type(mlp), _MLP_CHUNK_PATCH_FLAG, False) is True
+
+    chunked = mlp(x)
+    assert chunked.dtype == x.dtype
+    assert torch.equal(chunked, reference), "chunked MLP diverged from the row-wise reference"
+
+    # 2-D inputs (already flattened by some callers) take the same path.
+    assert torch.equal(mlp(x.reshape(-1, 128)), reference.reshape(-1, 128))
+    # A prefill shorter than the chunk budget must not be split at all.
+    assert torch.equal(mlp(x[:, :10]), reference[:, :10])
+    # Installing twice must not wrap the wrapper.
+    patched = type(mlp).forward
+    assert _patch_chunked_mlp(holder) is False
+    assert type(mlp).forward is patched
+
+
 def test_gqa_attention_is_bit_identical_to_repeat_kv(tmp_path: Path):
     """``enable_gqa`` must reproduce the expanded-KV path exactly."""
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
