@@ -305,6 +305,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Qwen2-Audio | `qwen2_audio` |
 | Qwen-Drive 1.0 | `qwen_drive` |
 | RefinedWeb | `refinedWeb`, `refinedWebModel` |
+| [Ricursive Ripple](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) | `ricursive` |
 | Seed-OSS | `seed_oss` |
 | SmolLM3 | `smollm3` |
 | SmolVLM | `smolvlm` |
