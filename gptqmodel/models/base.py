@@ -14,7 +14,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -346,7 +346,7 @@ class BaseQModel(nn.Module):
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
     layer_modules_strict = True
 
-    pre_lm_head_norm_module: str = None
+    pre_lm_head_norm_module: Union[str, List[str], None] = None
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
@@ -942,6 +942,77 @@ class BaseQModel(nn.Module):
         _, flags = cls._parse_module_flags(module_spec)
         return NORM_FLAG.lstrip(":") in flags
 
+    def _pre_lm_head_norm_candidates(self) -> List[str]:
+        """Return the declared pre-lm-head norm paths as a flat candidate list.
+
+        A definition may declare one path or an ordered list of alternatives for
+        model layouts that differ across transformers releases. Callers must
+        never wrap the field again: a list is already the candidate list.
+        """
+        declared = self.pre_lm_head_norm_module
+        if declared is None:
+            return []
+        if isinstance(declared, str):
+            candidates = [declared]
+        elif isinstance(declared, (list, tuple)):
+            candidates = list(declared)
+        else:
+            raise TypeError(
+                f"{type(self).__name__}.pre_lm_head_norm_module must be a string or a "
+                f"list/tuple of strings, got {type(declared).__name__}."
+            )
+
+        normalized = []
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate:
+                raise TypeError(
+                    f"{type(self).__name__}.pre_lm_head_norm_module contains "
+                    f"{candidate!r}; expected non-empty module path strings."
+                )
+            if candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    def _resolved_pre_lm_head_norm_candidates(self) -> List[Tuple[nn.Module, str]]:
+        """Resolve the declared pre-lm-head norm candidates against ``self.model``.
+
+        Exact submodule paths win over prefix matches, and candidates keep their
+        declaration order. A non-empty declaration that resolves to nothing is
+        an error: silently skipping the pre-lm-head norm corrupts calibration.
+        """
+        candidates = self._pre_lm_head_norm_candidates()
+        if not candidates:
+            return []
+
+        resolved = []
+        seen = set()
+        for name in candidates:
+            try:
+                module = self.model.get_submodule(name)
+            except AttributeError:
+                continue
+            if id(module) not in seen:
+                seen.add(id(module))
+                resolved.append((module, name))
+        if resolved:
+            return resolved
+
+        # Some definitions intentionally name a module prefix (for example
+        # ``lm_head``); preserve that compatibility only when no exact path
+        # matched, so a stale candidate cannot win over a valid one.
+        for name in candidates:
+            module, matched_name = get_module_by_name_prefix(self.model, name)
+            if module is not None and id(module) not in seen:
+                seen.add(id(module))
+                resolved.append((module, matched_name))
+        if resolved:
+            return resolved
+
+        raise ValueError(
+            f"{type(self).__name__}: cannot resolve `pre_lm_head_norm_module` "
+            f"candidate(s) {candidates!r} in {type(self.model).__name__}."
+        )
+
     def norm_module_names(self, types=None, skip=()) -> List[str]:
         """Full paths of every tagged norm module matching `types`, plus the pre-lm_head norm.
 
@@ -973,22 +1044,18 @@ class BaseQModel(nn.Module):
                         )
                     if family in requested:
                         names.append(full_name)
-        if self.pre_lm_head_norm_module and not any(
-            self.pre_lm_head_norm_module.endswith(suffix) for suffix in skip
-        ):
-            try:
-                module = self.model.get_submodule(self.pre_lm_head_norm_module)
-            except AttributeError:
-                module = None
-            if module is not None:
-                family = norm_type_of(module)
-                if family in requested:
-                    names.append(self.pre_lm_head_norm_module)
-                elif family is None:
-                    log.warn.once(
-                        f"{type(self).__name__}: `{self.pre_lm_head_norm_module}` is not a supported "
-                        "normalization module and is skipped."
-                    )
+        for module, name in self._resolved_pre_lm_head_norm_candidates():
+            if any(name.endswith(suffix) for suffix in skip):
+                continue
+            family = norm_type_of(module)
+            if family in requested:
+                names.append(name)
+            elif family is None:
+                log.warn.once(
+                    f"{type(self).__name__}: `{name}` is not a supported "
+                    "normalization module and is skipped."
+                )
+            break
         return names
 
     @classmethod
@@ -2830,8 +2897,9 @@ class BaseQModel(nn.Module):
         return layer_input_kwargs
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
-        if self.pre_lm_head_norm_module:
-            norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])
+        resolved = self._resolved_pre_lm_head_norm_candidates()
+        if resolved:
+            norm, _ = resolved[0]
             norm = self.pre_quantize(norm)
 
             for element in inputs:

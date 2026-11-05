@@ -19,7 +19,7 @@ from ..base import BaseQModel
 class Ovis2QModel(BaseQModel):
     loader = AutoModelForImageTextToText
 
-    pre_lm_head_norm_module = "model.language_model.model.norm"
+    pre_lm_head_norm_module = ["model.language_model.norm", "model.language_model.model.norm"]
 
     module_tree = [
         "model",
