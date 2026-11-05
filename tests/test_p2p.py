@@ -256,6 +256,22 @@ def test_forced_unverified_pair_is_never_probed(monkeypatch):
     assert status.state(0, 1) == p2p.STATE_UNVERIFIED
 
 
+def test_forced_unverified_pair_counts_as_asymmetric(monkeypatch):
+    """A forced-on but capability-denied direction is still unusable.
+
+    ``clone_module_for_devices`` skips NCCL replicate on ``asymmetric_pairs()``;
+    the forced state must therefore be reported there too, otherwise a rig that
+    denies ``0 -> 1`` would still attempt the collective path.
+    """
+    _fake_topology(monkeypatch, {(1, 0): True})
+    monkeypatch.setenv("GPTQMODEL_P2P", "1")
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert status.state(0, 1) == p2p.STATE_UNVERIFIED
+    assert status.asymmetric_pairs() == [(0, 1)]
+
+
 def test_can_transfer_directly_falls_back_to_capability(monkeypatch):
     p2p.clear_p2p_cache()
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -357,12 +373,13 @@ def test_hooked_linear_routes_cross_device_input_through_safe_move(monkeypatch):
     assert output.device == torch.device("cpu")
 
 
-def test_clone_skips_nccl_replicate_on_asymmetric_topology(monkeypatch):
+@pytest.mark.parametrize("broken_state", [p2p.STATE_UNSUPPORTED, p2p.STATE_UNVERIFIED])
+def test_clone_skips_nccl_replicate_on_asymmetric_topology(monkeypatch, broken_state):
     from gptqmodel.utils import looper_helpers
 
     status = p2p.PeerStatus(
         devices=(0, 1),
-        pairs={(0, 1): p2p.STATE_UNSUPPORTED, (1, 0): p2p.STATE_ENABLED},
+        pairs={(0, 1): broken_state, (1, 0): p2p.STATE_ENABLED},
     )
     monkeypatch.setattr(looper_helpers, "enable_for_devices", lambda devices: status)
     monkeypatch.setattr(looper_helpers, "USE_TORCH_REPLICATE", True)

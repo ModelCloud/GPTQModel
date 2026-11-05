@@ -4062,7 +4062,7 @@ class BaseQModel(nn.Module):
 
             if turtle_model is None:
                 if get_device(target_submodule) != device:
-                    target_submodule.to(device)
+                    safe_module_to(target_submodule, device)
                 module = target_submodule
             else:
                 module = alias_from_turtle_for_submodule(

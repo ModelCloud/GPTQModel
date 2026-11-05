@@ -452,7 +452,7 @@ def clone_module_for_devices(
         # another accelerator. On an asymmetric ROCm link that call segfaults
         # inside ``hipMemcpyPeerAsync`` instead of raising, so use the helper
         # that stages unsupported directions through host memory.
-        safe_module_to(module, target_device)
+        safe_module_to(module, target_device, status=peer_status)
         module.eval()
         rehome_module_to_device(
             module,

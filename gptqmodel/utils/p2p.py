@@ -137,16 +137,19 @@ class PeerStatus:
         return self.state(src, dst) == STATE_ENABLED
 
     def asymmetric_pairs(self) -> list[tuple[int, int]]:
-        """Directed pairs that are unsupported while the reverse is enabled.
+        """Directed pairs that are not usable while the reverse is enabled.
 
+        Both ``unsupported`` and ``unverified`` mean GPT-QModel must not issue a
+        direct copy in that direction, while the reverse can still be usable.
         Such a topology is the one that crashes PyTorch's direct peer copy on
         ROCm; callers use this to avoid collective/replicate paths that assume
         a symmetric link as well as to log one actionable warning.
         """
+        unusable = (STATE_UNSUPPORTED, STATE_UNVERIFIED)
         return [
             (src, dst)
             for (src, dst), state in sorted(self.pairs.items())
-            if state == STATE_UNSUPPORTED and self.pairs.get((dst, src)) == STATE_ENABLED
+            if state in unusable and self.pairs.get((dst, src)) == STATE_ENABLED
         ]
 
     def unverified_pairs(self) -> list[tuple[int, int]]:
