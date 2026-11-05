@@ -347,6 +347,7 @@ from .quantization import (
     TelemetryConfig,
     WeightOnlyConfig,
 )
+from .reshard import ShardConfig, ShardLayout, reshard
 from .utils import BACKEND, PROFILE
 from .version import __version__
 

@@ -103,6 +103,31 @@ not the number of examples. Too-short samples may be filtered out. Keep a
 separate evaluation set, and record the dataset revision, sample selection,
 model revision, dtype, and configuration for reproducibility.
 
+## Reshard a checkpoint
+
+`gptqmodel.reshard()` rewrites an existing safetensors checkpoint into a new
+shard layout without loading or dequantizing any weights. The default
+`ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL` writes one directory per transformer
+layer and exactly one root `model.safetensors` for embeddings, lm-head, norms,
+and every other non-layer module.
+
+```python
+from gptqmodel import ShardConfig, ShardLayout, reshard
+
+reshard(
+    "Qwen3-0.6B-GPTQ-W4A16",
+    "Qwen3-0.6B-GPTQ-W4A16-per-layer",
+    ShardConfig(layout=ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL),
+)
+```
+
+The output uses `model.layers.0/layer.safetensors`, `model.layers.1/layer.safetensors`,
+and so on, plus a root `model.safetensors` and `model.safetensors.index.json`.
+`max_shard_size` splits oversized layer directories but never the single global
+shard. Set `ShardConfig(layer_prefixes=["model.layers"])` when the checkpoint
+has no `config.json` or uses a custom architecture. Pass `overwrite=True` to
+replace an existing non-empty destination.
+
 ## Recipe substitutions
 
 Each block below replaces the configuration and backend in the complete example.
@@ -296,6 +321,7 @@ and keep an engine's pinned dependencies in a separate environment.
 | Tune normalization after quantization | [Norm tuning](../README.md#norm-tuning) |
 | Quantize on Apple silicon | [Native MLX workflow](../README.md#native-mlx-quantization-on-apple-silicon) |
 | Select, pack, or repack individual layer kernels | [HF packing API](hf_packing_api.md) |
+| Change the on-disk shard layout | [Reshard a checkpoint](#reshard-a-checkpoint) |
 
 If quantization runs out of memory, start with `batch_size=1`, shorter calibration
 sequences, and the memory controls in the multi-GPU guide. If no kernel accepts a
