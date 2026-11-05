@@ -1331,8 +1331,8 @@ def ModelLoader(cls):
                         model_local_path,
                     )
                     # LazyTurtle is only created by this quantization offload path,
-                    # so a checkpoint layout that cannot be released layer by layer
-                    # forces repeated shard I/O worth surfacing once.
+                    # so a shard shared by several layers forces repeated shard I/O
+                    # worth surfacing once.
                     turtle_model.warn_if_checkpoint_shards_are_not_layerwise()
             else:
                 log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")

@@ -798,7 +798,7 @@ class _LazyCheckpointAssembly:
     concat_dim: Optional[int]
 
 
-# A shard holding several decoder layers is re-opened and re-read once per layer
+# A shard holding several model layers is re-opened and re-read once per layer
 # it contains. The layout is fixed per checkpoint, so a process only needs to
 # hear it once.
 _NON_LAYERWISE_SHARD_WARNING_LOCK = threading.Lock()
@@ -1538,7 +1538,7 @@ class LazyTurtle:
 
     @staticmethod
     def _fallback_layer_key(name: str) -> Optional[str]:
-        """Infer a decoder-layer key from a checkpoint path without `module_tree` prefixes."""
+        """Infer a layer key from a checkpoint path without `module_tree` prefixes."""
 
         parts = tuple(part for part in name.split(".") if part)
         for index in range(1, len(parts)):
@@ -1547,9 +1547,9 @@ class LazyTurtle:
         return None
 
     def checkpoint_layer_key(self, name: str) -> Optional[str]:
-        """Return the decoder layer that owns checkpoint tensor `name`, if any.
+        """Return the layer that owns checkpoint tensor `name`, if any.
 
-        Tensors that are not owned by a decoder layer (embeddings, the language
+        Tensors that are not owned by a layer (embeddings, the language
         model head, model-level norms, ...) return `None` and are ignored by the
         shard-layout check.
         """
@@ -1560,7 +1560,7 @@ class LazyTurtle:
         return self._fallback_layer_key(name)
 
     def checkpoint_shard_layer_groups(self) -> Dict[str, frozenset[str]]:
-        """Map every checkpoint shard to the decoder layers whose tensors it stores."""
+        """Map every checkpoint shard to the layers whose tensors it stores."""
 
         groups: Dict[str, set[str]] = {}
         for tensor_name, shard_name in self._weight_map.items():
@@ -1571,7 +1571,7 @@ class LazyTurtle:
         return {shard_name: frozenset(layer_keys) for shard_name, layer_keys in groups.items()}
 
     def warn_if_checkpoint_shards_are_not_layerwise(self) -> None:
-        """Warn once per process when a shard stores tensors from several decoder layers.
+        """Warn once per process when a shard stores tensors from several layers.
 
         LazyTurtle is only used by the quantization offload path, so this check
         intentionally stays out of the inference load path. The warning is
@@ -1607,8 +1607,8 @@ class LazyTurtle:
 
         log.warning(
             "LazyTurtle: loading this checkpoint for quantization, but its shards are not layer-wise: "
-            "%s. The same shard is opened and re-read once per decoder layer it holds, adding "
-            "avoidable I/O during quantization; re-shard so each decoder layer has its own file.",
+            "%s. The same shard is opened and re-read once per layer it holds, adding "
+            "avoidable I/O during quantization; re-shard so each layer has its own file.",
             self._format_shard_layout_detail(
                 shard_groups=shard_groups,
                 multi_layer_shards=multi_layer_shards,
@@ -1628,11 +1628,11 @@ class LazyTurtle:
         """Describe the offending shards, keeping the count grammar-correct."""
 
         if len(shard_groups) == 1:
-            return f"`{example_shard}` holds {example_layer_count} decoder layers"
+            return f"`{example_shard}` holds {example_layer_count} model layers"
         verb = "holds" if len(multi_layer_shards) == 1 else "hold"
         return (
             f"{len(multi_layer_shards)} of {len(shard_groups)} safetensors files {verb} multiple "
-            f"decoder layers (e.g. `{example_shard}` holds {example_layer_count})"
+            f"model layers (e.g. `{example_shard}` holds {example_layer_count})"
         )
 
     def _module_tree_name_aliases(self, name: str) -> list[str]:

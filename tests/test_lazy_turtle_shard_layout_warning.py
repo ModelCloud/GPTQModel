@@ -109,10 +109,10 @@ def test_monolithic_shard_warns_once(tmp_path, warnings):
     # and the remedy.
     assert "for quantization" in warnings[0]
     assert "shards are not layer-wise" in warnings[0]
-    assert "`model.safetensors` holds 3 decoder layers" in warnings[0]
-    assert "opened and re-read once per decoder layer" in warnings[0]
+    assert "`model.safetensors` holds 3 model layers" in warnings[0]
+    assert "opened and re-read once per layer" in warnings[0]
     assert "avoidable I/O" in warnings[0]
-    assert "re-shard so each decoder layer has its own file" in warnings[0]
+    assert "re-shard so each layer has its own file" in warnings[0]
     # A single-file checkpoint should not report an awkward "1 of 1" count.
     assert "of 1 safetensors" not in warnings[0]
 
@@ -151,7 +151,7 @@ def test_shard_spanning_two_layers_warns(tmp_path, warnings):
     turtle.warn_if_checkpoint_shards_are_not_layerwise()
 
     assert len(warnings) == 1
-    assert "2 of 2 safetensors files hold multiple decoder layers" in warnings[0]
+    assert "2 of 2 safetensors files hold multiple model layers" in warnings[0]
 
 
 def test_single_offending_shard_uses_singular_verb(tmp_path, warnings):
@@ -168,7 +168,7 @@ def test_single_offending_shard_uses_singular_verb(tmp_path, warnings):
     turtle.warn_if_checkpoint_shards_are_not_layerwise()
 
     assert len(warnings) == 1
-    assert "1 of 3 safetensors files holds multiple decoder layers" in warnings[0]
+    assert "1 of 3 safetensors files holds multiple model layers" in warnings[0]
 
 
 def test_shared_tensors_in_a_layer_shard_do_not_count_as_a_second_layer(tmp_path, warnings):
@@ -208,6 +208,28 @@ def test_fallback_detects_common_layer_containers_without_module_tree(tmp_path, 
 
     turtle.warn_if_checkpoint_shards_are_not_layerwise()
     assert len(warnings) == 1
+
+
+def test_encoder_layers_use_model_layer_wording(tmp_path, warnings):
+    checkpoint = _write_checkpoint(
+        tmp_path / "ckpt",
+        {
+            "model.safetensors": [
+                "transformer.encoder.layers.0.self_attention.query_key_value.weight",
+                "transformer.encoder.layers.1.self_attention.query_key_value.weight",
+            ]
+        },
+    )
+
+    turtle = _build_turtle(
+        checkpoint,
+        module_tree=["transformer", "encoder", "layers", "#", {}],
+    )
+    turtle.warn_if_checkpoint_shards_are_not_layerwise()
+
+    assert len(warnings) == 1
+    assert "holds 2 model layers" in warnings[0]
+    assert "decoder layers" not in warnings[0]
 
 
 def test_moe_expert_indices_are_not_treated_as_layers(tmp_path):
