@@ -710,3 +710,116 @@ def test_prepare_inputs_moves_position_ids_to_model_device():
     assert out["input_ids"].device.type == "cuda"
     assert out["position_ids"].device.type == "cuda", "position_ids must follow the inputs"
     assert out["cache_position"].device.type == "cuda"
+
+
+def _load_tiny_with_originals(tmp_path: Path):
+    """Load the tiny fixture and return the *reference* forwards.
+
+    The custom-code class is shared across a pytest session, so an earlier test may
+    already have installed the decode patches. ``_gptqmodel_original`` keeps the
+    upstream implementation reachable, which is what the A/B assertions need.
+    """
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+
+    attn = model.model.layers[0].self_attn
+    norm = model.model.layers[0].input_layernorm
+    attn_cls, norm_cls = type(attn), type(norm)
+    orig_attn = getattr(attn_cls.forward, "_gptqmodel_original", attn_cls.forward)
+    orig_norm = getattr(norm_cls.forward, "_gptqmodel_original", norm_cls.forward)
+    return model, attn, norm, orig_attn, orig_norm
+
+
+def test_decode_patches_install_and_stay_idempotent(tmp_path: Path):
+    from gptqmodel.utils.ricursive_patch import (
+        _GQA_PATCH_FLAG,
+        _NORM_PATCH_FLAG,
+        apply_ricursive_generate_patch,
+    )
+
+    model, _attn, _norm, _orig_attn, _orig_norm = _load_tiny_with_originals(tmp_path)
+    attn_cls, norm_cls = type(model.model.layers[0].self_attn), type(model.model.layers[0].input_layernorm)
+
+    apply_ricursive_generate_patch(model)
+    assert getattr(attn_cls, _GQA_PATCH_FLAG, False) is True
+    assert getattr(norm_cls, _NORM_PATCH_FLAG, False) is True
+    # The reference implementations stay reachable for A/B tests.
+    assert callable(attn_cls.forward._gptqmodel_original)
+    assert callable(norm_cls.forward._gptqmodel_original)
+    assert attn_cls.forward._gptqmodel_original is not attn_cls.forward
+    assert norm_cls.forward._gptqmodel_original is not norm_cls.forward
+
+    patched_attn, patched_norm = attn_cls.forward, norm_cls.forward
+    apply_ricursive_generate_patch(model)
+    assert attn_cls.forward is patched_attn
+    assert norm_cls.forward is patched_norm
+
+
+def test_gqa_attention_is_bit_identical_to_repeat_kv(tmp_path: Path):
+    """``enable_gqa`` must reproduce the expanded-KV path exactly."""
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, attn, _norm, orig_attn, _orig_norm = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    assert attn.num_kv_groups > 1, "fixture must exercise GQA"
+    for q_len in (1, 4):
+        torch.manual_seed(1234 + q_len)
+        hidden = torch.randn(2, q_len, model.config.hidden_size) * 0.05
+        pos = torch.arange(q_len).unsqueeze(0)
+        with torch.no_grad():
+            ref = orig_attn(attn, hidden, None, pos, None, False, False, pos)[0]
+            got = attn(hidden, None, pos, None, False, False, pos)[0]
+        assert got.dtype == hidden.dtype
+        assert torch.equal(ref, got), f"q_len={q_len} diverged from the reference path"
+
+
+def test_gqa_patch_never_materialises_kv(tmp_path: Path, monkeypatch):
+    """The patched forward must not call ``repeat_kv`` at all."""
+    import sys
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, attn, _norm, _orig_attn, _orig_norm = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    module = sys.modules[type(attn).__module__]
+    calls = []
+
+    def _spy(hidden_states, n_rep):
+        calls.append(n_rep)
+        raise AssertionError("repeat_kv must not be used by the patched attention")
+
+    monkeypatch.setattr(module, "repeat_kv", _spy)
+    hidden = torch.randn(2, 3, model.config.hidden_size) * 0.05
+    pos = torch.arange(3).unsqueeze(0)
+    with torch.no_grad():
+        out = attn(hidden, None, pos, None, False, False, pos)[0]
+
+    assert calls == []
+    assert out.shape == (2, 3, model.config.hidden_size)
+
+
+def test_fused_rms_norm_matches_reference(tmp_path: Path):
+    """The fused norm must agree with the reference within float tolerance."""
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, _attn, norm, _orig_attn, orig_norm = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(7)
+    hidden = torch.randn(2, 5, model.config.hidden_size) * 0.5
+    with torch.no_grad():
+        ref = orig_norm(norm, hidden)
+        got = norm(hidden)
+
+    assert got.dtype == hidden.dtype
+    assert torch.allclose(ref, got, atol=1e-6, rtol=1e-5), (ref - got).abs().max()
