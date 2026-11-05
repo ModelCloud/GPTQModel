@@ -230,7 +230,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
-        self._primary_quant_device = quant_devices[0]
 
         # Apply compute device filter if provided to determine which devices to use for quantization
         compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
@@ -257,6 +256,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             )
             quant_devices = restricted_quant_devices
 
+        # `_primary_quant_device` drives forward/activation placement, so it must
+        # follow the filtered pool. Taking it before the filter pinned every
+        # forward to the family default (cuda:0) even when the caller had asked
+        # for a different subset.
+        self._primary_quant_device = quant_devices[0]
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
