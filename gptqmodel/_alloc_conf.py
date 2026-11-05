@@ -64,6 +64,12 @@ def _apply_runtime_alloc_conf() -> None:
 
         if not torch.cuda.is_available() or not torch.cuda.is_initialized():
             return
+        # ``expandable_segments`` is a native-caching-allocator knob. Torch
+        # rejects an allocator-settings change once a different backend is
+        # already parsed, so leave an explicit ``backend:cudaMallocAsync``
+        # choice alone instead of tripping the internal assert.
+        if torch.cuda.get_allocator_backend() != "native":
+            return
         setter = getattr(getattr(torch.cuda, "memory", None), "_set_allocator_settings", None)
         if setter is None:
             return
