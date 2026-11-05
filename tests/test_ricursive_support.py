@@ -823,3 +823,49 @@ def test_fused_rms_norm_matches_reference(tmp_path: Path):
 
     assert got.dtype == hidden.dtype
     assert torch.allclose(ref, got, atol=1e-6, rtol=1e-5), (ref - got).abs().max()
+
+
+def test_multi_token_block_on_warm_cache_matches_full_forward(tmp_path: Path):
+    """A multi-token verify block on a warm cache must match the full forward.
+
+    SDPA's implicit causal mask is aligned top-left, so it is only correct when the
+    query block is the whole sequence. Speculative decoders verify a block that sits
+    at the *end* of a warm cache; using the implicit mask there hides every earlier
+    key and corrupts the block. The patch must build the end-anchored mask instead.
+    """
+    from transformers import DynamicCache
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(11)
+    ids = torch.randint(0, model.config.vocab_size, (1, 24))
+    split = 12
+    with torch.no_grad():
+        full = model(input_ids=ids, use_cache=False).logits
+        cache = DynamicCache(config=model.config)
+        cache.activate_past_recording()
+        model(input_ids=ids[:, :split], past_key_values=cache, use_cache=True)
+        block = model(input_ids=ids[:, split:], past_key_values=cache, use_cache=True).logits
+
+    assert block.shape[1] == ids.shape[1] - split
+    torch.testing.assert_close(block[0], full[0, split:], atol=1e-5, rtol=1e-4)
+
+
+def test_logits_to_keep_projects_only_the_kept_positions(tmp_path: Path):
+    """``logits_to_keep`` must return the trailing row(s) and match the full logits."""
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(13)
+    ids = torch.randint(0, model.config.vocab_size, (2, 16))
+    with torch.no_grad():
+        full = model(input_ids=ids).logits
+        kept = model(input_ids=ids, logits_to_keep=1).logits
+
+    assert kept.shape == (2, 1, model.config.vocab_size)
+    torch.testing.assert_close(kept[:, -1], full[:, -1], atol=1e-6, rtol=1e-5)

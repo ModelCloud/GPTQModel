@@ -152,6 +152,11 @@ def _prepare_inputs_for_generation(
             "cache_position": cache_position,
         }
     )
+    if use_cache is not False:
+        # Greedy/sampling generation only ever reads the last position. Keeping
+        # just that row avoids projecting the whole prompt through the 100k-way
+        # LM head, which is several GiB of transient memory at eval batch sizes.
+        model_inputs["logits_to_keep"] = 1
     return model_inputs
 
 
@@ -280,9 +285,14 @@ def _patch_sliding_window_mask(model) -> bool:
         if window is not None and kv_len <= window:
             # The window cannot bind, so the tensor would come out all-True.
             if attention_mask is None:
-                # q_len > 1: SDPA's is_causal path builds the same causal mask.
-                # q_len == 1: every key is visible by definition.
-                return None
+                # SDPA's implicit causal mask is aligned top-left, which only
+                # matches this query block when it is the whole sequence
+                # (prefill) or a single position (decode). A multi-token block
+                # verified against a warm cache sits at the *end* of the key
+                # span, so the implicit mask would hide valid context; fall
+                # through to the explicit offset-aware mask.
+                if q_len == 1 or q_len == kv_len:
+                    return None
             if q_len == 1:
                 return attention_mask
         return original(self, attention_mask, q_len, kv_len, dtype, device, cache_position)
@@ -450,6 +460,18 @@ def _patch_gqa_attention(model) -> bool:
             cache_position=cache_position,
         )
 
+        if attention_mask is None and q.shape[2] > 1 and k.shape[2] > q.shape[2]:
+            # Multi-token block verified against a warm cache. SDPA's implicit
+            # causal mask is aligned to the top-left corner, which would hide
+            # every key before the block; build the end-anchored mask instead.
+            query_positions = torch.arange(
+                k.shape[2] - q.shape[2], k.shape[2], device=q.device
+            )
+            key_positions = torch.arange(k.shape[2], device=q.device)
+            attention_mask = (
+                key_positions[None, :] <= query_positions[:, None]
+            )[None, None]
+
         is_causal = bool(attention_mask is None and q.shape[2] > 1)
         attn_output = F.scaled_dot_product_attention(
             q,
@@ -480,6 +502,65 @@ def _patch_gqa_attention(model) -> bool:
     return True
 
 
+_LOGITS_TO_KEEP_PATCH_FLAG = "_gptqmodel_logits_to_keep_patch"
+
+
+def _patch_logits_to_keep(model) -> bool:
+    """Honour the ``logits_to_keep`` forward argument that speculative decoders pass.
+
+    DFlash-style drafters call the target with ``logits_to_keep=1`` and expect a
+    single position back.  The reference Ripple implementation accepts the
+    argument through ``**kwargs`` and silently ignores it, so the caller receives
+    one row per prompt token and the speculation loop breaks.  Slicing after the
+    LM head keeps the output identical while restoring the documented contract.
+    """
+
+    if model is None:
+        return False
+    cls = type(model)
+    if getattr(cls, _LOGITS_TO_KEEP_PATCH_FLAG, False):
+        return False
+    if not callable(getattr(cls, "forward", None)):
+        return False
+
+    original = cls.forward
+
+    def forward(self, *args, **kwargs):
+        keep = kwargs.pop("logits_to_keep", None)
+        head = getattr(self, "lm_head", None)
+        if keep and head is not None:
+            # Slice the LM head's *input* so the full [batch, seq, vocab]
+            # projection never materialises: prefill on a long prompt otherwise
+            # costs several GiB that a single position needs.
+            head._gptqmodel_keep_last = int(keep)
+        try:
+            outputs = original(self, *args, **kwargs)
+        finally:
+            if head is not None:
+                head._gptqmodel_keep_last = None
+        if keep and getattr(outputs, "logits", None) is not None:
+            outputs.logits = outputs.logits[..., -int(keep):, :]
+        return outputs
+
+    forward._gptqmodel_original = original
+    cls.forward = forward
+    setattr(cls, _LOGITS_TO_KEEP_PATCH_FLAG, True)
+
+    head = getattr(model, "lm_head", None)
+    if head is not None and not getattr(head, "_gptqmodel_keep_wrapped", False):
+        base = head.forward
+
+        def head_forward(hidden_states, *args, **kwargs):
+            keep = getattr(head, "_gptqmodel_keep_last", None)
+            if keep and hidden_states.dim() == 3 and hidden_states.shape[1] > keep:
+                hidden_states = hidden_states[:, -keep:, :]
+            return base(hidden_states, *args, **kwargs)
+
+        head.forward = head_forward
+        head._gptqmodel_keep_wrapped = True
+    return True
+
+
 def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     """Install the ``prepare_inputs_for_generation`` fix. Returns True if it was applied.
 
@@ -495,6 +576,7 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     # two concerns are independent.
     _patch_fused_rms_norm(model)
     _patch_gqa_attention(model)
+    _patch_logits_to_keep(model)
 
     # A checkpoint that already ships the native transformers-5 fixes needs nothing
     # from us. `modeling_ricursive.py` sets `_ricursive_tf5_native_fix` on the class.
