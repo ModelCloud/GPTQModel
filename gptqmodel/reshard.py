@@ -222,14 +222,17 @@ def _resolve_source_dir(from_model) -> str:
 
 
 def _resolve_shard_path(source_dir: str, shard: str) -> str:
-    path = shard if os.path.isabs(shard) else os.path.join(source_dir, shard)
-    path = os.path.realpath(path)
-    source_real = os.path.realpath(source_dir)
+    # Validate the lexical path instead of the symlink target: Hugging Face
+    # cache snapshots contain shard symlinks that point into the sibling blob
+    # store, and resolving them would reject a valid cached checkpoint.
+    source_abs = os.path.abspath(source_dir)
+    path = shard if os.path.isabs(shard) else os.path.join(source_abs, shard)
+    path = os.path.normpath(path)
     try:
-        common = os.path.commonpath([source_real, path])
+        common = os.path.commonpath([source_abs, path])
     except ValueError:
         common = None
-    if common != source_real:
+    if common != source_abs:
         raise ValueError(f"Checkpoint shard escapes the source directory: {shard!r}")
     return path
 

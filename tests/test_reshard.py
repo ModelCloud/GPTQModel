@@ -469,5 +469,45 @@ def test_reshard_discovers_unindexed_multi_shard_checkpoint(tmp_path):
     assert set(load_file(str(target / "global.safetensors"))) == {"lm_head.weight"}
 
 
+def test_reshard_accepts_hf_cache_symlink_shards(tmp_path):
+    # Hugging Face cache snapshots store shards as symlinks into ../../blobs.
+    # Resharding a cached checkpoint must accept those links.
+    hub = tmp_path / "hub"
+    blobs = hub / "blobs"
+    snapshot = hub / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+
+    state = _make_state()
+    shard = blobs / "blob.safetensors"
+    save_file({name: tensor.contiguous() for name, tensor in state.items()}, str(shard), metadata={"format": "pt"})
+    shard_name = "model-00001-of-00001.safetensors"
+    os.symlink(os.path.join("..", "..", "blobs", "blob.safetensors"), snapshot / shard_name)
+    index = {
+        "metadata": {"total_size": shard.stat().st_size},
+        "weight_map": dict.fromkeys(state, shard_name),
+    }
+    (snapshot / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    target = tmp_path / "target"
+    reshard(snapshot, target)
+
+    assert (target / "model.layers.0" / "layer.safetensors").is_file()
+    assert (target / "global.safetensors").is_file()
+
+
+def test_reshard_rejects_index_shard_outside_source(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    index = {
+        "metadata": {"total_size": 0},
+        "weight_map": {"model.layers.0.qweight": "../outside.safetensors"},
+    }
+    (source / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="escapes the source directory"):
+        reshard(source, tmp_path / "target")
+
+
 def test_shard_config_accepts_layout_aliases():
     assert ShardConfig(layout="per-layer-with-single-global").layout is ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL
