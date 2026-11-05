@@ -1330,6 +1330,10 @@ def ModelLoader(cls):
                         "Loader: using checkpoint-backed lazy turtle source for `%s`",
                         model_local_path,
                     )
+                    # LazyTurtle is only created by this quantization offload path,
+                    # so a checkpoint layout that cannot be released layer by layer
+                    # is a quantization-time host-memory hazard worth surfacing once.
+                    turtle_model.warn_if_checkpoint_shards_are_not_layerwise()
             else:
                 log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
                 model = _hf_loader_from_pretrained_with_dynamic_module_retry(
