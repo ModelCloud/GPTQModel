@@ -16,7 +16,7 @@ import weakref
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -374,8 +374,46 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
 
 
+def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
+    """Return the concrete accelerators when the caller named specific devices.
+
+    `device=("cuda:1", "cuda:2")` is a request for exactly those two GPUs.
+    Before this helper both the layer-wise placement map and the quantization
+    device pool ignored the sequence and expanded to *every* visible
+    accelerator, so asking for two GPUs silently used all four. Only fully
+    qualified ordinals qualify: an abstract family selector, a bare `cuda`, or
+    a single device keep the historical "span every visible device" behaviour.
+    """
+    if not isinstance(device, (tuple, list)) or len(device) < 2:
+        return None
+
+    resolved: List[torch.device] = []
+    for item in device:
+        if isinstance(item, DEVICE):
+            return None
+        try:
+            target = item if isinstance(item, torch.device) else torch.device(str(item))
+        except (RuntimeError, ValueError, TypeError):
+            return None
+        if target.type == "cpu" or target.index is None:
+            return None
+        if target not in resolved:
+            resolved.append(target)
+    return resolved if len(resolved) > 1 else None
+
+
+def _explicit_layerwise_devices(device) -> Optional[List[str]]:
+    """String form of :func:`_explicit_requested_devices` for map rendering."""
+    requested = _explicit_requested_devices(device)
+    return [str(target) for target in requested] if requested is not None else None
+
+
 def _layerwise_device_count(device) -> int:
     """Return the visible device count for layer-wise checkpoint placement."""
+    explicit = _explicit_layerwise_devices(device)
+    if explicit is not None:
+        return len(explicit)
+
     family = selector_device_family(device) or DEVICE.CPU
     if family in (DEVICE.CUDA, DEVICE.ROCM):
         return torch.cuda.device_count()
@@ -388,6 +426,10 @@ def _layerwise_device_count(device) -> int:
 
 def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
     """Render layer-wise placement targets using the selected accelerator."""
+    explicit = _explicit_layerwise_devices(device)
+    if explicit is not None:
+        return explicit[:num_gpus]
+
     family = selector_device_family(device) or DEVICE.CPU
     if family in (DEVICE.CUDA, DEVICE.ROCM):
         if torch.cuda.is_available():
@@ -1042,7 +1084,7 @@ def ModelLoader(cls):
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-            device: Optional[Union[str, int]] = None,
+            device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             **model_init_kwargs,
     ):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
@@ -1241,7 +1283,18 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             # normalize and auto select quantization device is not passed
             if quantize_config.device is None:
+                requested_devices = _explicit_requested_devices(device)
+                # `quantize_config.device` only carries an accelerator family
+                # (`DEVICE(self.quantize_config.device)` rejects ordinals), so an
+                # explicit device list is expressed through the compute filter.
                 quantize_config.device = auto_select_device(None, None)
+                if requested_devices is not None and quantize_config.compute_device_filter is None:
+                    wanted = {str(target) for target in requested_devices}
+                    quantize_config.compute_device_filter = (
+                        lambda devices, _wanted=wanted: [
+                            target for target in devices if str(target) in _wanted
+                        ]
+                    )
             else:
                 quantize_config.device = normalize_device(quantize_config.device)
 
