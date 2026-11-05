@@ -109,7 +109,9 @@ model revision, dtype, and configuration for reproducibility.
 shard layout without loading or dequantizing any weights. The default
 `ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL` writes one directory per transformer
 layer and exactly one root `model.safetensors` for embeddings, lm-head, norms,
-and every other non-layer module.
+and every other non-layer module. Every layer stack found in the checkpoint is
+sharded separately, including vision transformer blocks; numerically indexed
+non-layer modules such as `mlp1.0` stay in the global shard.
 
 ```python
 from gptqmodel import ShardConfig, ShardLayout, reshard
@@ -127,6 +129,12 @@ and so on, plus a root `model.safetensors` and `model.safetensors.index.json`.
 shard. Set `ShardConfig(layer_prefixes=["model.layers"])` when the checkpoint
 has no `config.json` or uses a custom architecture. Pass `overwrite=True` to
 replace an existing non-empty destination.
+
+Resharding reads only safetensors headers, copies payloads byte-for-byte through
+an 8 MiB buffer, and keeps at most one source shard open at a time. It does not
+mmap source weights, so peak host RAM stays bounded even for multi-hundred-GB
+checkpoints. Config, tokenizer, processor, and nested auxiliary files are copied
+to the destination; the destination must be outside the source checkpoint.
 
 ## Recipe substitutions
 

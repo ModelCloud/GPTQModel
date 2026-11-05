@@ -6,6 +6,10 @@
 into a new shard layout. Quantized payloads (``qweight``/``qzeros``/``scales``/
 ``g_idx`` and packed formats) are never dequantized, expanded, or materialized
 in memory, so the operation is safe for very large and quantized checkpoints.
+
+The implementation only reads safetensors headers to learn tensor offsets, then
+streams payload bytes through one reusable buffer. It never mmaps source
+weights and never keeps more than one source shard open at a time.
 """
 
 from __future__ import annotations
@@ -20,8 +24,6 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-
-from safetensors import safe_open
 
 from .models._const import DEFAULT_MAX_SHARD_SIZE
 from .utils.logger import setup_logger
@@ -44,8 +46,41 @@ _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 _INDEX_SUFFIXES = (".safetensors.index.json", ".bin.index.json")
 _SOURCE_INDEX_NAMES = ("model.safetensors.index.json", "pytorch_model.safetensors.index.json")
 _MAX_SHARD_SIZE_RE = re.compile(r"\s*(\d+)([KMGTP]?B?)\s*", re.IGNORECASE)
-_INDEXED_TENSOR_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<index>\d+)\.")
-_STREAM_CHUNK_SIZE = 32 * 1024 * 1024
+_INDEXED_TENSOR_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<index>\d+)(?:\.|$)")
+
+# Small enough to keep peak host RAM bounded on very large checkpoints, large
+# enough to keep sequential I/O efficient.
+_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
+
+# Layer stacks in Hugging Face checkpoints use one of these container names.
+# Filtering on them keeps numeric non-layer modules (for example ``mlp1.0``)
+# in the single global shard instead of creating fake per-layer directories.
+_LAYER_CONTAINER_NAMES = frozenset({"layers", "layer", "blocks", "block", "h"})
+_SKIP_AUX_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__"})
+
+_SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "F8_E4M3": 1,
+    "F8_E4M3FNUZ": 1,
+    "F8_E5M2": 1,
+    "F8_E5M2FNUZ": 1,
+    "F8_E8M0": 1,
+    "F4_E2M1": 1,
+    "F4_E2M1FN_X2": 1,
+    "U16": 2,
+    "I16": 2,
+    "F16": 2,
+    "BF16": 2,
+    "U32": 4,
+    "I32": 4,
+    "F32": 4,
+    "U64": 8,
+    "I64": 8,
+    "F64": 8,
+    "C64": 8,
+}
 
 
 class ShardLayout(str, Enum):
@@ -115,7 +150,7 @@ class ShardConfig:
     layout: Union[ShardLayout, str] = ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL
     max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE
     #: Optional explicit layer prefixes such as ``["model.layers"]``. When omitted,
-    #: GPT-QModel derives them from the checkpoint config or detects them from names.
+    #: GPT-QModel derives them from the checkpoint config and tensor names.
     layer_prefixes: Optional[Sequence[str]] = None
 
     def __post_init__(self):
@@ -128,7 +163,7 @@ class ShardConfig:
             self.layer_prefixes = prefixes or None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TensorRef:
     name: str
     dtype: str
@@ -139,11 +174,14 @@ class _TensorRef:
 
 
 def _read_safetensors_header(path: str) -> Tuple[Dict[str, object], int]:
+    file_size = os.path.getsize(path)
     with open(path, "rb") as handle:
         raw_size = handle.read(8)
         if len(raw_size) != 8:
             raise ValueError(f"Invalid safetensors file (truncated header): {path}")
         header_size = struct.unpack("<Q", raw_size)[0]
+        if header_size == 0 or header_size > file_size - 8:
+            raise ValueError(f"Invalid safetensors file (bad header size {header_size}): {path}")
         header_bytes = handle.read(header_size)
         if len(header_bytes) != header_size:
             raise ValueError(f"Invalid safetensors file (truncated header): {path}")
@@ -174,107 +212,168 @@ def _resolve_source_dir(from_model) -> str:
     )
 
 
-def _load_weight_map(source_dir: str) -> Dict[str, str]:
-    for index_name in _SOURCE_INDEX_NAMES:
-        index_path = os.path.join(source_dir, index_name)
-        if not os.path.isfile(index_path):
-            continue
-        with open(index_path, encoding="utf-8") as handle:
-            index = json.load(handle)
-        weight_map = index.get("weight_map")
-        if not isinstance(weight_map, dict) or not weight_map:
-            raise ValueError(f"Invalid safetensors index: {index_path}")
-        return {str(name): str(filename) for name, filename in weight_map.items()}
+def _resolve_shard_path(source_dir: str, shard: str) -> str:
+    path = shard if os.path.isabs(shard) else os.path.join(source_dir, shard)
+    path = os.path.realpath(path)
+    source_real = os.path.realpath(source_dir)
+    try:
+        common = os.path.commonpath([source_real, path])
+    except ValueError:
+        common = None
+    if common != source_real:
+        raise ValueError(f"Checkpoint shard escapes the source directory: {shard!r}")
+    return path
 
-    candidates = sorted(name for name in os.listdir(source_dir) if name.endswith(".safetensors"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No safetensors checkpoint found in {source_dir!r}. "
-            "Resharding requires safetensors input; convert pickle weights first."
-        )
-    if len(candidates) > 1:
+
+def _expected_tensor_bytes(dtype: str, shape: Sequence[int]) -> Optional[int]:
+    item_size = _SAFETENSORS_DTYPE_BYTES.get(dtype.upper())
+    if item_size is None:
+        return None
+    count = 1
+    for dim in shape:
+        if dim < 0:
+            raise ValueError(f"Negative tensor dimension in safetensors header: {dim}")
+        count *= dim
+    return item_size * count
+
+
+def _make_tensor_ref(name: str, info: object, source_path: str, data_start: int) -> _TensorRef:
+    try:
+        dtype = str(info["dtype"])
+        shape = tuple(int(dim) for dim in info["shape"])
+        start, end = (int(info["data_offsets"][0]), int(info["data_offsets"][1]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid safetensors metadata for `{name}` in `{source_path}`") from exc
+    if start < 0 or end < start:
+        raise ValueError(f"Invalid safetensors data offsets for `{name}` in `{source_path}`: {start}, {end}")
+    expected = _expected_tensor_bytes(dtype, shape)
+    if expected is not None and expected != end - start:
         raise ValueError(
-            f"Multiple safetensors files without an index in {source_dir!r}: {candidates}. "
-            "Provide a `model.safetensors.index.json`."
+            f"Safetensors payload size mismatch for `{name}` in `{source_path}`: "
+            f"header says {end - start} bytes, dtype/shape require {expected}"
         )
-    shard_name = candidates[0]
-    with safe_open(os.path.join(source_dir, shard_name), framework="pt", device="cpu") as handle:
-        keys = list(handle.keys())
-    if not keys:
-        raise ValueError(f"No tensors found in safetensors file: {shard_name}")
-    return {str(name): shard_name for name in keys}
+    return _TensorRef(
+        name=name,
+        dtype=dtype,
+        shape=shape,
+        source_path=source_path,
+        data_offset=data_start + start,
+        num_bytes=end - start,
+    )
 
 
-def _load_tensor_refs(
-    source_dir: str,
-    weight_map: Dict[str, str],
-) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+def _merge_metadata(metadata: Dict[str, str], shard_metadata: object, source_path: str) -> None:
+    if not isinstance(shard_metadata, dict):
+        return
+    for key, value in shard_metadata.items():
+        key = str(key)
+        value = str(value)
+        if key in metadata and metadata[key] != value:
+            log.warning(
+                "reshard: conflicting safetensors metadata for `%s` in `%s`; keeping %r",
+                key,
+                source_path,
+                metadata[key],
+            )
+            continue
+        metadata[key] = value
+
+
+def _scan_indexed_checkpoint(source_dir: str, index_path: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    with open(index_path, encoding="utf-8") as handle:
+        index = json.load(handle)
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"Invalid safetensors index: {index_path}")
+
+    shard_to_names: Dict[str, List[str]] = defaultdict(list)
+    for name, shard in weight_map.items():
+        shard_to_names[_resolve_shard_path(source_dir, str(shard))].append(str(name))
+
     refs: Dict[str, _TensorRef] = {}
-    header_cache: Dict[str, Tuple[Dict[str, object], int]] = {}
-
-    for name in sorted(weight_map):
-        shard = weight_map[name]
-        source_path = os.path.join(source_dir, shard)
+    metadata: Dict[str, str] = {}
+    for source_path in sorted(shard_to_names):
         if not os.path.isfile(source_path):
             raise FileNotFoundError(f"Checkpoint shard listed in the index is missing: {source_path}")
-        if source_path not in header_cache:
-            header_cache[source_path] = _read_safetensors_header(source_path)
-        header, data_start = header_cache[source_path]
-        info = header.get(name)
-        if info is None:
-            raise ValueError(f"Tensor `{name}` listed in the index is missing from `{source_path}`")
-        try:
-            dtype = str(info["dtype"])
-            shape = tuple(int(dim) for dim in info["shape"])
-            start, end = (int(info["data_offsets"][0]), int(info["data_offsets"][1]))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid safetensors metadata for `{name}` in `{source_path}`") from exc
-        refs[name] = _TensorRef(
-            name=name,
-            dtype=dtype,
-            shape=shape,
-            source_path=source_path,
-            data_offset=data_start + start,
-            num_bytes=end - start,
-        )
-
-    known = set(weight_map)
-    metadata: Dict[str, str] = {}
-    for source_path in sorted(header_cache):
-        header, _ = header_cache[source_path]
-        extra = sorted(key for key in header if key != "__metadata__" and key not in known)
+        header, data_start = _read_safetensors_header(source_path)
+        shard_metadata = header.pop("__metadata__", None)
+        header_tensors = header
+        expected_names = set(shard_to_names[source_path])
+        extra = sorted(set(header_tensors) - expected_names)
         if extra:
             raise ValueError(
                 f"`{source_path}` contains tensors missing from the index, e.g. {extra[:3]}. "
                 "Refusing to drop them during reshard."
             )
-        shard_metadata = header.get("__metadata__") or {}
-        if not isinstance(shard_metadata, dict):
-            continue
-        for key, value in shard_metadata.items():
-            key = str(key)
-            value = str(value)
-            if key in metadata and metadata[key] != value:
-                log.warning(
-                    "reshard: conflicting safetensors metadata for `%s`; keeping %r",
-                    key,
-                    metadata[key],
-                )
-                continue
-            metadata[key] = value
+        missing = sorted(expected_names - set(header_tensors))
+        if missing:
+            raise ValueError(f"Tensors listed in the index are missing from `{source_path}`: {missing[:3]}")
+        for name in sorted(expected_names):
+            refs[name] = _make_tensor_ref(name, header_tensors[name], source_path, data_start)
+        _merge_metadata(metadata, shard_metadata, source_path)
+    return refs, metadata
 
+
+def _discover_safetensors(source_dir: str) -> List[str]:
+    paths: List[str] = []
+    for root, dirs, files in os.walk(source_dir):
+        dirs[:] = sorted(name for name in dirs if name not in _SKIP_AUX_DIRS)
+        for filename in sorted(files):
+            if filename.lower().endswith(".safetensors"):
+                paths.append(os.path.join(root, filename))
+    return sorted(paths)
+
+
+def _scan_unindexed_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    paths = _discover_safetensors(source_dir)
+    if not paths:
+        raise FileNotFoundError(
+            f"No safetensors checkpoint found in {source_dir!r}. "
+            "Resharding requires safetensors input; convert pickle weights first."
+        )
+
+    refs: Dict[str, _TensorRef] = {}
+    metadata: Dict[str, str] = {}
+    for source_path in paths:
+        header, data_start = _read_safetensors_header(source_path)
+        for name, info in header.items():
+            if name == "__metadata__":
+                continue
+            if name in refs:
+                raise ValueError(
+                    f"Duplicate tensor `{name}` in `{source_path}` and `{refs[name].source_path}`; "
+                    "provide a `model.safetensors.index.json`."
+                )
+            refs[name] = _make_tensor_ref(name, info, source_path, data_start)
+        _merge_metadata(metadata, header.get("__metadata__"), source_path)
+    return refs, metadata
+
+
+def _scan_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    for index_name in _SOURCE_INDEX_NAMES:
+        index_path = os.path.join(source_dir, index_name)
+        if os.path.isfile(index_path):
+            refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+            break
+    else:
+        refs, metadata = _scan_unindexed_checkpoint(source_dir)
+
+    if not refs:
+        raise ValueError(f"No tensors found in checkpoint: {source_dir}")
     metadata.setdefault("format", "pt")
     return refs, metadata
 
 
 def _detect_layer_prefixes(names: Sequence[str]) -> List[str]:
-    counts = Counter()
-    indexes = defaultdict(set)
+    counts: Counter[str] = Counter()
+    indexes: Dict[str, set] = defaultdict(set)
     for name in names:
         match = _INDEXED_TENSOR_RE.match(name)
         if match is None:
             continue
         prefix = match.group("prefix")
+        if prefix.rsplit(".", 1)[-1] not in _LAYER_CONTAINER_NAMES:
+            continue
         counts[prefix] += 1
         indexes[prefix].add(int(match.group("index")))
 
@@ -286,6 +385,27 @@ def _detect_layer_prefixes(names: Sequence[str]) -> List[str]:
     return []
 
 
+def _dedupe_prefixes(prefixes: Sequence[object]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for prefix in prefixes:
+        prefix = str(prefix).strip(".")
+        if not prefix or prefix in seen:
+            continue
+        seen.add(prefix)
+        result.append(prefix)
+    return result
+
+
+def _extend_prefixes(prefixes: List[str], value: object) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        prefixes.append(value)
+        return
+    prefixes.extend(value)
+
+
 def _resolve_layer_prefixes(
     from_model,
     source_dir: str,
@@ -294,28 +414,34 @@ def _resolve_layer_prefixes(
     names: Sequence[str],
 ) -> List[str]:
     if config.layer_prefixes:
-        return list(config.layer_prefixes)
+        return _dedupe_prefixes(config.layer_prefixes)
 
+    prefixes: List[str] = []
     extractor = getattr(from_model, "extract_layers_node", None)
     if callable(extractor):
         try:
-            prefixes = [str(prefix) for prefix in extractor() if prefix]
+            _extend_prefixes(prefixes, extractor())
         except Exception:
-            prefixes = []
-        if prefixes:
-            return prefixes
+            log.debug("reshard: could not derive layer prefixes from the loaded model", exc_info=True)
 
-    try:
-        from .models.auto import check_and_get_model_definition
+    if not prefixes:
+        try:
+            from .models.auto import check_and_get_model_definition
 
-        model_class = check_and_get_model_definition(source_dir, trust_remote_code=trust_remote_code)
-        prefixes = [str(prefix) for prefix in model_class.extract_layers_node() if prefix]
-        if prefixes:
-            return prefixes
-    except Exception:
-        log.debug("reshard: could not derive layer prefixes from the checkpoint config", exc_info=True)
+            model_class = check_and_get_model_definition(source_dir, trust_remote_code=trust_remote_code)
+            _extend_prefixes(prefixes, model_class.extract_layers_node())
+        except Exception:
+            log.debug("reshard: could not derive layer prefixes from the checkpoint config", exc_info=True)
 
-    return _detect_layer_prefixes(names)
+    prefixes = _dedupe_prefixes(prefixes)
+    # A model definition may only describe the text decoder (for example
+    # SmolVLM). Add every layer stack found in the tensor names so vision
+    # transformer blocks are also sharded per layer, while numeric non-layer
+    # modules such as `mlp1.0` remain in the global shard.
+    for prefix in _detect_layer_prefixes(names):
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
 
 
 def _resolve_layer_group(name: str, prefixes: Sequence[str]) -> Optional[str]:
@@ -323,8 +449,8 @@ def _resolve_layer_group(name: str, prefixes: Sequence[str]) -> Optional[str]:
         marker = f"{prefix}."
         if not name.startswith(marker):
             continue
-        index, dot, _ = name[len(marker) :].partition(".")
-        if dot and index.isdigit():
+        index, _, _ = name[len(marker) :].partition(".")
+        if index.isdigit():
             return f"{prefix}.{index}"
     return None
 
@@ -382,19 +508,23 @@ def _plan_shards(entries: List[_TensorRef], max_shard_size: Optional[int]) -> Li
     return shards
 
 
-def _copy_range(source_path: str, target_handle, offset: int, length: int) -> None:
+def _copy_exact(source, target, length: int, buffer: bytearray) -> None:
     remaining = length
-    with open(source_path, "rb", buffering=0) as source:
-        source.seek(offset)
-        while remaining > 0:
-            chunk = source.read(min(_STREAM_CHUNK_SIZE, remaining))
-            if not chunk:
-                raise OSError(f"Unexpected EOF while copying from {source_path}")
-            target_handle.write(chunk)
-            remaining -= len(chunk)
+    while remaining > 0:
+        chunk_size = min(len(buffer), remaining)
+        view = memoryview(buffer)[:chunk_size]
+        read = source.readinto(view)
+        if not read:
+            raise OSError(f"Unexpected EOF while copying from {source.name}")
+        target.write(view[:read])
+        remaining -= read
 
 
-def _write_safetensors(path: str, entries: List[_TensorRef], metadata: Dict[str, str]) -> int:
+def _write_safetensors(path: str, entries: List[_TensorRef], metadata: Dict[str, str], buffer: bytearray) -> int:
+    # Copy in source-file order so each source shard is opened at most once per
+    # output file. Header order is independent from payload order.
+    entries = sorted(entries, key=lambda entry: (entry.source_path, entry.data_offset, entry.name))
+
     header: Dict[str, object] = {}
     if metadata:
         header["__metadata__"] = metadata
@@ -415,8 +545,21 @@ def _write_safetensors(path: str, entries: List[_TensorRef], metadata: Dict[str,
     with open(path, "wb") as target:
         target.write(struct.pack("<Q", len(header_bytes)))
         target.write(header_bytes)
-        for entry in entries:
-            _copy_range(entry.source_path, target, entry.data_offset, entry.num_bytes)
+
+        current_path = None
+        source = None
+        try:
+            for entry in entries:
+                if entry.source_path != current_path:
+                    if source is not None:
+                        source.close()
+                    source = open(entry.source_path, "rb", buffering=0)
+                    current_path = entry.source_path
+                source.seek(entry.data_offset)
+                _copy_exact(source, target, entry.num_bytes, buffer)
+        finally:
+            if source is not None:
+                source.close()
 
     return os.path.getsize(path)
 
@@ -428,6 +571,7 @@ def _write_group(
     single_file_name: str,
     metadata: Dict[str, str],
     max_shard_size: Optional[int],
+    buffer: bytearray,
 ) -> Tuple[List[str], Dict[str, str], int]:
     os.makedirs(directory, exist_ok=True)
     shards = _plan_shards(entries, max_shard_size)
@@ -442,7 +586,7 @@ def _write_group(
             filename = single_file_name
         else:
             filename = f"{base_name}-{index:05d}-of-{num_shards:05d}.safetensors"
-        total_size += _write_safetensors(os.path.join(directory, filename), shard, metadata)
+        total_size += _write_safetensors(os.path.join(directory, filename), shard, metadata, buffer)
         filenames.append(filename)
         for entry in shard:
             tensor_to_filename[entry.name] = filename
@@ -451,33 +595,54 @@ def _write_group(
 
 
 def _copy_auxiliary_files(source_dir: str, staging_dir: str) -> None:
-    skipped_dirs: List[str] = []
-    for entry in sorted(os.listdir(source_dir)):
-        source_path = os.path.join(source_dir, entry)
-        if os.path.isdir(source_path):
-            skipped_dirs.append(entry)
-            continue
-        lower = entry.lower()
-        if lower.endswith(_WEIGHT_SUFFIXES) or lower.endswith(_INDEX_SUFFIXES):
-            continue
-        shutil.copy2(source_path, os.path.join(staging_dir, entry))
+    copied = 0
+    for root, dirs, files in os.walk(source_dir):
+        dirs[:] = sorted(name for name in dirs if name not in _SKIP_AUX_DIRS)
+        relative_root = os.path.relpath(root, source_dir)
+        target_root = staging_dir if relative_root == "." else os.path.join(staging_dir, relative_root)
+        for filename in sorted(files):
+            lower = filename.lower()
+            if lower.endswith(_WEIGHT_SUFFIXES) or lower.endswith(_INDEX_SUFFIXES):
+                continue
+            os.makedirs(target_root, exist_ok=True)
+            shutil.copy2(os.path.join(root, filename), os.path.join(target_root, filename))
+            copied += 1
+    log.debug("reshard: copied %d auxiliary files", copied)
 
-    if skipped_dirs:
-        log.warning(
-            "reshard: skipped source subdirectories (weight shards are rewritten): %s",
-            ", ".join(sorted(skipped_dirs)),
-        )
+
+def _validate_paths(source_dir: str, target_dir: str) -> None:
+    source_real = os.path.realpath(source_dir)
+    target_real = os.path.realpath(target_dir)
+    if source_real == target_real:
+        raise ValueError("`to_model_path` must differ from the source checkpoint directory.")
+    try:
+        common = os.path.commonpath([source_real, target_real])
+    except ValueError:
+        return
+    if common == source_real:
+        raise ValueError("`to_model_path` must not be inside the source checkpoint directory.")
+    if common == target_real:
+        raise ValueError("The source checkpoint must not be inside `to_model_path`.")
 
 
 def _validate_destination(target_dir: str, overwrite: bool) -> None:
-    if not os.path.exists(target_dir):
+    if not os.path.lexists(target_dir):
         return
+    if os.path.islink(target_dir):
+        raise ValueError(f"`to_model_path` must not be a symbolic link: {target_dir}")
     if not os.path.isdir(target_dir):
         raise NotADirectoryError(f"`to_model_path` exists and is not a directory: {target_dir}")
     if os.listdir(target_dir) and not overwrite:
         raise FileExistsError(
             f"`to_model_path` already exists and is not empty: {target_dir}. Pass overwrite=True to replace it."
         )
+
+
+def _remove_path(path: str) -> None:
+    if os.path.islink(path) or not os.path.isdir(path):
+        os.unlink(path)
+    else:
+        shutil.rmtree(path)
 
 
 def reshard(
@@ -526,15 +691,10 @@ def reshard(
 
     source_dir = _resolve_source_dir(from_model)
     target_dir = os.fspath(to_model_path)
-    if os.path.abspath(source_dir) == os.path.abspath(target_dir):
-        raise ValueError("`to_model_path` must differ from the source checkpoint directory.")
+    _validate_paths(source_dir, target_dir)
     _validate_destination(target_dir, overwrite)
 
-    weight_map = _load_weight_map(source_dir)
-    refs, metadata = _load_tensor_refs(source_dir, weight_map)
-    if not refs:
-        raise ValueError(f"No tensors found in checkpoint: {source_dir}")
-
+    refs, metadata = _scan_checkpoint(source_dir)
     prefixes = _resolve_layer_prefixes(
         from_model,
         source_dir,
@@ -554,6 +714,8 @@ def reshard(
     os.makedirs(parent_dir, exist_ok=True)
     staging_dir = tempfile.mkdtemp(prefix=".gptqmodel-reshard-", dir=parent_dir)
     backup_dir: Optional[str] = None
+    committed = False
+    buffer = bytearray(_STREAM_CHUNK_SIZE)
 
     try:
         _copy_auxiliary_files(source_dir, staging_dir)
@@ -580,6 +742,7 @@ def reshard(
                 single_file_name,
                 metadata,
                 max_shard_size,
+                buffer,
             )
             total_size += group_size
             relative_prefix = f"{group_name}/" if group_name else ""
@@ -601,24 +764,31 @@ def reshard(
                 json.dump(index, handle, indent=2, sort_keys=True)
                 handle.write("\n")
 
-        if os.path.exists(target_dir):
+        if os.path.lexists(target_dir):
             backup_dir = f"{os.path.abspath(target_dir)}.bak-{os.getpid()}"
-            if os.path.exists(backup_dir):
-                shutil.rmtree(backup_dir)
+            if os.path.lexists(backup_dir):
+                _remove_path(backup_dir)
             os.replace(target_dir, backup_dir)
         try:
             os.replace(staging_dir, target_dir)
         except BaseException:
-            if backup_dir is not None and not os.path.exists(target_dir):
-                os.replace(backup_dir, target_dir)
-                backup_dir = None
+            if backup_dir is not None:
+                try:
+                    os.replace(backup_dir, target_dir)
+                    backup_dir = None
+                except BaseException:
+                    log.error("reshard: failed to restore destination; backup retained at `%s`", backup_dir)
             raise
         staging_dir = None
+        committed = True
     finally:
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        if backup_dir is not None:
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        if committed and backup_dir is not None:
+            try:
+                _remove_path(backup_dir)
+            except OSError:
+                log.warning("reshard: could not remove backup `%s`", backup_dir, exc_info=True)
 
     log.info(
         "Resharded `%s` -> `%s` (layout=%s, tensors=%d, size=%.2f MiB)",

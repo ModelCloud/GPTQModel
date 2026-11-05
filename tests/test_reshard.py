@@ -25,8 +25,8 @@ def _make_state():
     }
 
 
-def _build_source(root: Path, *, with_config: bool = True):
-    state = _make_state()
+def _build_source(root: Path, *, with_config: bool = True, state=None):
+    state = _make_state() if state is None else state
     root.mkdir(parents=True)
 
     names = sorted(state)
@@ -248,3 +248,125 @@ def test_reshard_is_repeatable_on_nested_layout(tmp_path):
 def test_shard_config_rejects_unknown_layout():
     with pytest.raises(ValueError):
         ShardConfig(layout="not-a-layout")
+
+
+def test_reshard_groups_all_layer_stacks_and_keeps_numeric_non_layer_global(tmp_path):
+    # A model definition may only describe the text decoder. Reshard must still
+    # give the vision transformer blocks their own layer directories, while a
+    # numerically indexed projector such as `mlp1.0` stays in the global shard.
+    state = {
+        "model.text_model.layers.0.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4),
+        "model.text_model.layers.1.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4),
+        "model.vision_model.encoder.layers.0.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4),
+        "model.vision_model.encoder.layers.1.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4),
+        "mlp1.0.weight": torch.ones(4, 4, dtype=torch.float16),
+        "mlp1.1.weight": torch.ones(4, 4, dtype=torch.float16),
+        "lm_head.weight": torch.arange(32, dtype=torch.float16).reshape(8, 4),
+    }
+    source = tmp_path / "source"
+    _build_source(source, state=state)
+
+    class _TextOnlyModelLike:
+        def __init__(self, path):
+            self.model_local_path = str(path)
+
+        @classmethod
+        def extract_layers_node(cls):
+            return ["model.text_model.layers"]
+
+    target = tmp_path / "target"
+    reshard(_TextOnlyModelLike(source), target)
+
+    assert (target / "model.text_model.layers.0" / "layer.safetensors").is_file()
+    assert (target / "model.text_model.layers.1" / "layer.safetensors").is_file()
+    assert (target / "model.vision_model.encoder.layers.0" / "layer.safetensors").is_file()
+    assert (target / "model.vision_model.encoder.layers.1" / "layer.safetensors").is_file()
+    assert not (target / "mlp1.0").exists()
+
+    global_state = load_file(str(target / "model.safetensors"))
+    assert set(global_state) == {"mlp1.0.weight", "mlp1.1.weight", "lm_head.weight"}
+
+
+def test_reshard_does_not_mmap_source_weights(tmp_path, monkeypatch):
+    import safetensors
+
+    source = tmp_path / "source"
+    _build_source(source)
+
+    def _fail_safe_open(*args, **kwargs):
+        raise AssertionError("reshard must not open source weights with safetensors.safe_open")
+
+    monkeypatch.setattr(safetensors, "safe_open", _fail_safe_open)
+    target = tmp_path / "target"
+    reshard(source, target)
+
+    assert (target / "model.safetensors").is_file()
+
+
+def test_reshard_copies_nested_auxiliary_files(tmp_path):
+    source = tmp_path / "source"
+    _build_source(source)
+    nested = source / "assets"
+    nested.mkdir()
+    (nested / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+
+    target = tmp_path / "target"
+    reshard(source, target)
+
+    assert (target / "assets" / "chat_template.jinja").read_text(encoding="utf-8") == "{{ messages }}"
+
+
+def test_reshard_rejects_destination_inside_source(tmp_path):
+    source = tmp_path / "source"
+    _build_source(source)
+
+    with pytest.raises(ValueError, match="inside the source"):
+        reshard(source, source / "nested-target")
+
+
+def test_reshard_restores_destination_when_publish_fails(tmp_path, monkeypatch):
+    import importlib
+
+    reshard_module = importlib.import_module("gptqmodel.reshard")
+
+    source = tmp_path / "source"
+    _build_source(source)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "stale.txt").write_text("stale", encoding="utf-8")
+
+    real_replace = reshard_module.os.replace
+
+    def _fail_staging_publish(src, dst):
+        if ".gptqmodel-reshard-" in str(src):
+            raise OSError("simulated publish failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(reshard_module.os, "replace", _fail_staging_publish)
+    with pytest.raises(OSError, match="simulated publish failure"):
+        reshard(source, target, overwrite=True)
+
+    assert (target / "stale.txt").read_text(encoding="utf-8") == "stale"
+
+
+def test_reshard_discovers_unindexed_multi_shard_checkpoint(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    first = {"model.layers.0.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4)}
+    second = {
+        "model.layers.1.self_attn.qweight": torch.arange(16, dtype=torch.int32).reshape(4, 4),
+        "lm_head.weight": torch.arange(32, dtype=torch.float16).reshape(8, 4),
+    }
+    save_file(first, str(source / "part-a.safetensors"), metadata={"format": "pt"})
+    save_file(second, str(source / "part-b.safetensors"), metadata={"format": "pt"})
+
+    target = tmp_path / "target"
+    reshard(source, target)
+
+    assert (target / "model.layers.0" / "layer.safetensors").is_file()
+    assert (target / "model.layers.1" / "layer.safetensors").is_file()
+    assert set(load_file(str(target / "model.safetensors"))) == {"lm_head.weight"}
+
+
+def test_shard_config_accepts_layout_aliases():
+    assert ShardConfig(layout="per-layer-with-single-global").layout is ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL
