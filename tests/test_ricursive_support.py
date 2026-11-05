@@ -654,3 +654,37 @@ def test_sliding_window_mask_trims_evicted_keys(tmp_path: Path):
     out_wide = patched(attn, wide, 1, kv_len, torch.float32, cpu, cache_position)
     assert out_wide is not None and out_wide.shape[-1] == kv_len
     assert torch.equal(out_wide, original(attn, wide, 1, kv_len, torch.float32, cpu, cache_position))
+
+
+def test_prepare_inputs_moves_position_ids_to_model_device():
+    """A CPU prompt must not leave `position_ids` on CPU.
+
+    transformers derives `position_ids` from the caller's tensors before the hook
+    runs, so a CPU `input_ids` yields CPU positions. RoPE then multiplies them
+    against CUDA frequencies and fails with a "mat2 is on cpu" bmm error.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA to exercise the device move")
+
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    class _Dummy:
+        device = torch.device("cuda:0")
+
+    input_ids = torch.arange(6).unsqueeze(0)  # CPU on purpose
+    position_ids = torch.arange(6).unsqueeze(0)  # CPU, as transformers would supply
+
+    out = _prepare_inputs_for_generation(
+        _Dummy(),
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        position_ids=position_ids,
+        cache_position=None,
+        use_cache=True,
+    )
+
+    assert out["input_ids"].device.type == "cuda"
+    assert out["position_ids"].device.type == "cuda", "position_ids must follow the inputs"
+    assert out["cache_position"].device.type == "cuda"

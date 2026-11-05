@@ -96,6 +96,11 @@ def _prepare_inputs_for_generation(
             attention_mask = attention_mask.to(device)
         if inputs_embeds is not None and inputs_embeds.device != device:
             inputs_embeds = inputs_embeds.to(device)
+        # transformers derives `position_ids` from the *caller's* tensors before this
+        # hook runs, so a CPU prompt yields CPU positions even after the move above.
+        # RoPE then multiplies them against CUDA frequencies and fails.
+        if position_ids is not None and position_ids.device != device:
+            position_ids = position_ids.to(device)
 
     past_length = _cache_seq_length(past_key_values)
 
