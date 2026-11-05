@@ -448,6 +448,28 @@ def test_ricursive_definition_installs_generate_patch():
     assert getattr(type(model), _PATCH_FLAG, False) is True
 
 
+def test_generate_patch_stands_down_for_native_fix():
+    """A checkpoint that already ships the transformers-5 fixes must not be patched.
+
+    ``modeling_ricursive.py`` sets ``_ricursive_tf5_native_fix`` once the generate,
+    causal-mask and sliding-window fixes are inline. Re-applying the runtime
+    monkeypatch on top would be redundant and would replace the shipped methods.
+    """
+
+    from gptqmodel.utils.ricursive_patch import _PATCH_FLAG, apply_ricursive_generate_patch
+
+    class _NativeFixed:
+        device = torch.device("cpu")
+        _ricursive_tf5_native_fix = "2026-11-05"
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):  # pragma: no cover - untouched
+            return {"input_ids": None}
+
+    model = _NativeFixed()
+    assert not apply_ricursive_generate_patch(model)
+    assert not getattr(_NativeFixed, _PATCH_FLAG, False)
+
+
 def test_cache_compat_shim_provides_max_cache_shape():
     """transformers 5 dropped ``get_max_cache_shape``; the shim reports "unknown"."""
 

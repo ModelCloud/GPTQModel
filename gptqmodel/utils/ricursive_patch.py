@@ -300,6 +300,12 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     if cls is None:
         return False
 
+    # A checkpoint that already ships the native transformers-5 fixes needs nothing
+    # from us. `modeling_ricursive.py` sets `_ricursive_tf5_native_fix` on the class.
+    if getattr(cls, "_ricursive_tf5_native_fix", None):
+        _ensure_generation_config(model)
+        return False
+
     # Always attempted: a class can be generate-patched while a fresh instance still
     # needs the mask shim, and vice versa.
     _patch_causal_mask(model)
