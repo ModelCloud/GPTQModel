@@ -8,6 +8,14 @@ import sys
 
 
 # isort: off
+# Must run before any submodule import: importing `.utils` initialises the CUDA
+# caching allocator, and Torch only reads the allocator configuration once. A
+# late assignment is silently ignored, which leaves large quantization runs
+# fragmenting a device until a single multi-GiB request can no longer be served.
+from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
+
+_installed_alloc_conf = apply_default_alloc_conf()
+
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
@@ -18,6 +26,12 @@ from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 
 log = setup_logger()
+
+if _installed_alloc_conf is not None:
+    log.info(
+        "ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.",
+        _installed_alloc_conf,
+    )
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()

@@ -19,6 +19,7 @@ import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
+from .._alloc_conf import large_hessian_alloc_hint
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..quantization.config import FallbackStrategy, SmoothMSE
@@ -456,6 +457,13 @@ class GPTQ:
             stage,
             source_device,
         )
+        # A wide projection (e.g. a 40960-wide `down_proj`) needs three
+        # `columns ** 2 * 4` buffers at once: the Hessian, the Cholesky factor
+        # and the cuSOLVER workspace. The native caching allocator fails that
+        # request on a busy multi-device run even with plenty of free memory.
+        hint = large_hessian_alloc_hint()
+        if hint is not None:
+            log.warn("Quantization: Module `%s` -> %s", self.name, hint)
 
     def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
         """Bypass zero scales and report the unstable module once per pass."""

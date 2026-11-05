@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
+from .._alloc_conf import apply_default_alloc_conf
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -23,9 +24,11 @@ ASCII_LOGO = r"""
 #     os.environ["PYTHON_GIL"] = '0'
 #     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
 
-if not os.environ.get("PYTORCH_ALLOC_CONF", None):
-    os.environ["PYTORCH_ALLOC_CONF"] = 'expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7'
-    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7' for memory saving.")
+# Normally already installed by `gptqmodel/__init__.py` before Torch touched
+# CUDA; repeated here so importing this module directly still gets the default.
+_installed_alloc_conf = apply_default_alloc_conf()
+if _installed_alloc_conf is not None:
+    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.", _installed_alloc_conf)
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
