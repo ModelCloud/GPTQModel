@@ -91,6 +91,40 @@ def test_importing_gptqmodel_installs_the_default():
         assert payload[name] == DEFAULT_ALLOC_CONF
 
 
+def test_runtime_hook_applies_the_default_on_the_native_backend(clean_alloc_env, monkeypatch):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_allocator_backend", lambda: "native")
+    monkeypatch.setattr(
+        torch.cuda.memory, "_set_allocator_settings", lambda value: calls.append(value)
+    )
+
+    assert apply_default_alloc_conf() == DEFAULT_ALLOC_CONF
+    assert calls == [DEFAULT_ALLOC_CONF]
+
+
+def test_runtime_hook_leaves_a_non_native_backend_alone(clean_alloc_env, monkeypatch):
+    """Torch rejects an allocator-settings change after the backend is parsed."""
+
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_allocator_backend", lambda: "cudaMallocAsync")
+    monkeypatch.setattr(
+        torch.cuda.memory, "_set_allocator_settings", lambda value: calls.append(value)
+    )
+
+    assert apply_default_alloc_conf() == DEFAULT_ALLOC_CONF
+    assert calls == []
+
+
 def test_expandable_segments_are_active_on_cuda():
     """End-to-end guard: the allocator really is configured, not just the env."""
 

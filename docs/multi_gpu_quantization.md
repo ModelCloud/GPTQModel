@@ -114,3 +114,48 @@ P2P and NCCL are different mechanisms. The `gloo`/`nccl` distributed path used b
 GSQ (`gptqmodel/quantization/gsq_distributed.py`) is independent; verify it with
 `tests/test_gsq_distributed.py` (gated on `is_nccl_available()`) in addition to
 the P2P tests in `tests/test_p2p.py`.
+
+## Allocator backend for very wide layers
+
+GPTQ builds a dense `columns x columns` fp32 Hessian per projection, and inverts
+it with a Cholesky factor plus a cuSOLVER workspace. A 40960-wide projection
+(`mlp.down_proj` on a 65B model) therefore needs roughly **three 6.25 GiB
+buffers at once**. Data-parallel accumulation makes it worse: each participating
+device holds a full partial Hessian, and `materialize_global_hessian` allocates a
+separate accumulator on the target device.
+
+The native CUDA caching allocator can fail that single multi-GiB request even
+when the driver reports >13 GiB free, because it cannot assemble one contiguous
+block next to the resident partials. The failure surfaces either as a plain OOM
+or, with `expandable_segments`, as `CUDA driver error: out of memory ...
+from cuMemSetAccess`. GPTQModel logs a hint when it falls back to CPU for this
+reason.
+
+Use the async allocator for these runs:
+
+```bash
+PYTORCH_ALLOC_CONF=backend:cudaMallocAsync python quantize.py
+```
+
+Measured on 4x RTX 4090 with a 65B model, `offload_to_disk=True` and
+`auto_forward_data_parallel=True`:
+
+| allocator | result |
+| --- | --- |
+| `native` (default) | OOM on the first wide `mlp.down_proj` |
+| `native` + `expandable_segments` | still fails, now in `cuMemSetAccess` |
+| `backend:cudaMallocAsync` | 80/80 layers, no OOM, `reserved` flat across layers |
+
+`cudaMallocAsync` does not change numerics: quantizing the same checkpoint on
+four devices produced **237/237 bit-identical tensors** compared with the native
+backend.
+
+Caveats:
+
+* The backend is chosen when the process first touches CUDA. Set the variable in
+  the environment, before Python starts; it cannot be switched at runtime.
+* `torch.cuda.memory_snapshot()` and `torch.cuda.memory._record_memory_history()`
+  are unsupported on this backend and raise. `memory_allocated`,
+  `memory_reserved`, `memory_stats`, `memory_summary`, `mem_get_info` and
+  `empty_cache()` all keep working.
+* `expandable_segments` is a native-allocator feature and is ignored here.
