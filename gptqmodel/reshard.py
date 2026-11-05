@@ -93,14 +93,75 @@ _SAFETENSORS_DTYPE_BYTES = {
 
 
 class ShardLayout(str, Enum):
-    """Output shard layout for :func:`reshard`."""
+    """Output shard layout for :func:`reshard`.
+
+    All three layouts copy tensor payloads byte-for-byte and never dequantize.
+    They differ in exactly two ways:
+
+    1. whether transformer layers get a directory each, and
+    2. whether the root group of non-layer tensors is split by
+       ``ShardConfig.max_shard_size``.
+
+    ``max_shard_size`` always bounds the files *inside* a layer directory; the
+    layouts below only differ in what happens to the root non-layer group.
+    A single tensor is never split across files, so an oversized tensor simply
+    occupies a shard of its own.
+    """
 
     #: One safetensors file for the entire checkpoint.
+    #:
+    #: Layer and non-layer tensors are merged into a single root
+    #: ``model.safetensors`` and no ``model.safetensors.index.json`` is written.
+    #: ``max_shard_size`` is ignored, so the output is always exactly one file::
+    #:
+    #:     out/
+    #:     └── model.safetensors
+    #:
+    #: This is the format most third-party tools accept, and the way to collapse
+    #: a per-layer or multi-shard checkpoint back into a single file.
     SINGLE = "single"
+
     #: One directory per transformer layer; non-layer tensors are sharded at the root.
+    #:
+    #: Every layer stack found in the checkpoint (for example ``model.layers.0``)
+    #: gets its own directory containing ``layer.safetensors``. All remaining
+    #: tensors -- embeddings, lm-head, norms, and other global modules -- form
+    #: the root group, which is *also* split by ``max_shard_size`` into
+    #: ``model-00001-of-0000N.safetensors`` files::
+    #:
+    #:     out/
+    #:     ├── model-00001-of-00003.safetensors   # non-layer tensors
+    #:     ├── model-00002-of-00003.safetensors
+    #:     ├── model-00003-of-00003.safetensors
+    #:     ├── model.safetensors.index.json
+    #:     ├── model.layers.0/layer.safetensors
+    #:     └── model.layers.1/layer.safetensors
+    #:
+    #: Use this when the non-layer part (a large embedding table or lm-head) must
+    #: also be spread across size-bounded files. When ``max_shard_size`` is large
+    #: enough that the root group fits in one file, the output looks identical to
+    #: :attr:`PER_LAYER_WITH_SINGLE_GLOBAL`.
     PER_LAYER = "per_layer"
+
     #: One directory per transformer layer plus exactly one root file holding every
     #: non-layer tensor (embeddings, lm-head, norms, and other global modules).
+    #:
+    #: Per-layer directories are the same as :attr:`PER_LAYER`, but the root group
+    #: ignores ``max_shard_size`` and is always written as a single
+    #: ``global.safetensors``. ``max_shard_size`` therefore only bounds the files
+    #: inside each layer directory::
+    #:
+    #:     out/
+    #:     ├── global.safetensors                  # exactly one, never split
+    #:     ├── model.safetensors.index.json
+    #:     ├── model.layers.0/layer.safetensors
+    #:     └── model.layers.1/layer.safetensors
+    #:
+    #: The root file is deliberately not named ``model.safetensors``:
+    #: ``transformers.from_pretrained`` prefers that single-file name over
+    #: ``model.safetensors.index.json`` and would otherwise load only the global
+    #: shard, silently leaving every transformer layer randomly initialized.
+    #: This is the default layout.
     PER_LAYER_WITH_SINGLE_GLOBAL = "per_layer_with_single_global"
 
     @classmethod
@@ -151,9 +212,20 @@ def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
 class ShardConfig:
     """Shard layout and per-group size limits for :func:`reshard`.
 
-    ``max_shard_size`` is applied inside each layer directory. In
-    :attr:`ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL` the root global file is
-    always written as exactly one shard, regardless of this limit.
+    ``max_shard_size`` always bounds the files written inside each layer
+    directory. Its effect on the root group of non-layer tensors depends on the
+    layout:
+
+    =================================  ==========================================
+    Layout                             Root non-layer group
+    =================================  ==========================================
+    ``SINGLE``                         ignored; one ``model.safetensors``
+    ``PER_LAYER``                      split into size-bounded root shards
+    ``PER_LAYER_WITH_SINGLE_GLOBAL``   ignored; one ``global.safetensors``
+    =================================  ==========================================
+
+    A single tensor is never split across files; an oversized tensor gets a
+    shard of its own. ``None`` disables splitting everywhere.
     """
 
     layout: Union[ShardLayout, str] = ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL
@@ -480,12 +552,16 @@ def _group_tensors(
     layout: ShardLayout,
 ) -> List[Tuple[str, List[_TensorRef]]]:
     if layout is ShardLayout.SINGLE:
+        # No per-layer directories: every tensor is one group written to a
+        # single root model.safetensors.
         return [("", [refs[name] for name in sorted(refs)])]
 
     groups: Dict[str, List[_TensorRef]] = defaultdict(list)
     for name in sorted(refs):
         groups[_resolve_layer_group(name, prefixes) or ""].append(refs[name])
 
+    # Layer groups first (numerically ordered within each stack), then the ""
+    # group holding every non-layer tensor.
     ordered = [(group, groups[group]) for group in sorted((g for g in groups if g), key=_layer_group_sort_key)]
     if "" in groups:
         ordered.append(("", groups[""]))
@@ -752,11 +828,18 @@ def reshard(
 
         for group_name, entries in groups:
             if not group_name:
+                # Root group: every non-layer tensor (embeddings, lm-head, norms,
+                # and other global modules) lands here.
                 directory = staging_dir
                 base_name = "model"
                 single_file_name = global_shard_name
+                # PER_LAYER also bounds the root group by max_shard_size, so the
+                # non-layer tensors can span several model-0000N-of-0000M files.
+                # PER_LAYER_WITH_SINGLE_GLOBAL keeps them in exactly one file.
                 max_shard_size = config.max_shard_size if config.layout is ShardLayout.PER_LAYER else None
             else:
+                # One directory per layer stack, e.g. model.layers.0/. Both
+                # per-layer layouts apply max_shard_size inside each directory.
                 directory = os.path.join(staging_dir, group_name)
                 base_name = "layer"
                 single_file_name = "layer.safetensors"
@@ -781,6 +864,9 @@ def reshard(
             raise RuntimeError(f"Internal reshard error: tensors were not written: {missing}")
 
         unique_files = set(tensor_to_filename.values())
+        # SINGLE writes one root file, so it needs no index. Any layout that
+        # produces several files -- or files in subdirectories, as every
+        # per-layer layout does -- needs model.safetensors.index.json.
         if len(unique_files) > 1 or any("/" in filename for filename in unique_files):
             index = {
                 "metadata": {"total_size": total_size},
