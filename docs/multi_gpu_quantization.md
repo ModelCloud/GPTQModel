@@ -63,8 +63,9 @@ looper, and for multi-device `device_map` loads. Enablement goes through
 has no enable wrapper of its own.
 
 Peer links are **directed**. GPT-QModel checks `src -> dst` for every
-cross-device move; when that direction is unsupported (or measured `degraded`),
-the move is staged through pinned host memory instead of calling the peer copy.
+cross-device move it issues itself; when that direction is unsupported (or
+measured `degraded`), the move is staged through pinned host memory instead of
+calling the peer copy.
 On some ROCm topologies the matrix is asymmetric (for example `0 -> 1`
 unsupported while `1 -> 0` works), and a direct `tensor.to("cuda:1")` segfaults
 inside `hipMemcpyPeerAsync` rather than raising. That case is logged, and
@@ -76,6 +77,16 @@ query denies is reported as `unverified` and is never used for a direct copy or
 measured by the probe (the probe itself performs a direct copy). Enablement is
 still kept for PyTorch's own paths; GPT-QModel moves in that direction are
 staged through host memory.
+
+Inference is **not** covered by this routing. Loading the quantized model with
+`device_map="auto"` installs accelerate's `AlignDevicesHook`, whose
+`send_to_device` moves activations with a plain `Tensor.to`; on an asymmetric
+ROCm topology that still segfaults (exit 139) inside `hipMemcpyPeerAsync`.
+Measured on 2x R9700 (`gfx1201`, ROCm 7.16.26385): quantization completes, then
+`generate()` on the same two devices crashes from
+`accelerate.hooks.AlignDevicesHook.pre_forward -> send_to_device`. Until that
+move is routed through `safe_move_to`, run inference on a single device on such
+a topology.
 
 Configuration:
 

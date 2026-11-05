@@ -2276,7 +2276,12 @@ class GPTQ:
                 result_device,
             )
 
-        Q = Q.to(device=result_device, non_blocking=False)
+        # ``result_device`` is the module's device, which can differ from the
+        # Hessian/compute device when a follower adopted a leader's Hessian.
+        # That makes this a cross-device move, so route it through the
+        # direction-aware helper; it returns ``Q`` unchanged when the devices
+        # already match.
+        Q = safe_move_to(Q, result_device)
 
         duration = time.time() - start
 
