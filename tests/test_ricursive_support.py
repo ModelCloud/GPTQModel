@@ -513,3 +513,95 @@ def test_ricursive_generate_with_padding_matches_unpadded(tmp_path: Path):
     right_mask[1, 4:] = 0
     right = model.generate(right_ids, attention_mask=right_mask, max_new_tokens=6, do_sample=False)
     assert torch.equal(right[0], single[0])
+
+
+def test_sliding_window_mask_fast_path_matches_upstream(tmp_path: Path):
+    """The decode fast path must be a no-op relative to the upstream mask.
+
+    When ``kv_len <= sliding_window`` the window admits every key, so upstream either
+    returns an all-True mask or leaves the padding mask untouched. The fast path skips
+    building that tensor entirely, so the two must agree.
+    """
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import (
+        _WINDOW_PATCH_FLAG,
+        apply_ricursive_generate_patch,
+    )
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+
+    attn = model.model.layers[0].self_attn
+    cls = type(attn)
+    assert getattr(cls, _WINDOW_PATCH_FLAG, False) is True
+
+    patched = cls._apply_sliding_window_mask
+    original = patched._gptqmodel_original
+    window = attn.config.sliding_window
+
+    # Decode step well inside the window, unpadded: upstream builds an all-True mask,
+    # the fast path returns None so SDPA keeps its no-mask path.
+    cache_position = torch.tensor([7])
+    upstream = original(attn, None, 1, 8, torch.float32, torch.device("cpu"), cache_position)
+    assert upstream.dtype == torch.bool
+    assert bool(upstream.all()), "precondition: window must admit every key here"
+    assert patched(attn, None, 1, 8, torch.float32, torch.device("cpu"), cache_position) is None
+
+    # Padded decode: upstream leaves the float mask untouched, the fast path returns it.
+    padding = torch.zeros(2, 1, 1, 8, dtype=torch.float32)
+    upstream_pad = original(attn, padding, 1, 8, torch.float32, torch.device("cpu"), cache_position)
+    assert torch.equal(upstream_pad, padding)
+    assert patched(attn, padding, 1, 8, torch.float32, torch.device("cpu"), cache_position) is padding
+
+    # Past the window the real mask is needed again: both paths must agree exactly.
+    cache_position = torch.tensor([window + 5])
+    kv_len = window + 6
+    upstream_win = original(attn, None, 1, kv_len, torch.float32, torch.device("cpu"), cache_position)
+    patched_win = patched(attn, None, 1, kv_len, torch.float32, torch.device("cpu"), cache_position)
+    assert patched_win is not None, "window must still be applied past sliding_window"
+    assert torch.equal(upstream_win, patched_win)
+
+
+def test_sliding_window_fast_path_preserves_generation(tmp_path: Path):
+    """Generation must be unchanged with the fast path enabled."""
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+    model.generation_config.pad_token_id = 0
+
+    cls = type(model.model.layers[0].self_attn)
+    patched = cls._apply_sliding_window_mask
+    original = patched._gptqmodel_original
+
+    a = torch.tensor([[5, 6, 7, 8, 9, 10]])
+    fast = model.generate(a, max_new_tokens=8, do_sample=False)
+
+    cls._apply_sliding_window_mask = original
+    try:
+        slow = model.generate(a, max_new_tokens=8, do_sample=False)
+    finally:
+        cls._apply_sliding_window_mask = patched
+
+    assert torch.equal(fast, slow)

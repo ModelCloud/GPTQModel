@@ -29,6 +29,9 @@ _PATCH_FLAG = "_gptqmodel_ricursive_generate_patched"
 # set on the inner `RicursiveModel` class once `_update_causal_mask` is wrapped
 _MASK_PATCH_FLAG = "_gptqmodel_ricursive_mask_patched"
 
+# set on the attention class once `_apply_sliding_window_mask` is wrapped
+_WINDOW_PATCH_FLAG = "_gptqmodel_ricursive_window_patched"
+
 # original class -> class that actually carries the patch (may be a GenerationMixin subclass)
 _PATCHED_CLASSES: dict = {}
 
@@ -234,6 +237,47 @@ def _patch_causal_mask(model) -> bool:
     return True
 
 
+def _patch_sliding_window_mask(model) -> bool:
+    """Skip the per-step sliding-window mask when it cannot exclude any key.
+
+    ``_apply_sliding_window_mask`` materialises an ``arange``, a broadcast comparison
+    and a ``[1, 1, q, kv]`` boolean tensor on **every** decode step for each of the
+    sliding layers (64 of 80 in Ripple-65B). When ``kv_len <= sliding_window`` the
+    window admits every key, so the result is either an all-True mask or an unchanged
+    padding mask -- and for an unpadded batch SDPA's ``is_causal`` path already
+    applies exactly the causal mask this function would build.
+    """
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if not layers:
+        return False
+
+    cls = type(layers[0].self_attn)
+    if getattr(cls, _WINDOW_PATCH_FLAG, False):
+        return False
+
+    original = getattr(cls, "_apply_sliding_window_mask", None)
+    if not callable(original):
+        return False
+
+    def _apply_sliding_window_mask(self, attention_mask, q_len, kv_len, dtype, device, cache_position):
+        window = getattr(self.config, "sliding_window", None)
+        if window is not None and kv_len <= window:
+            # The window cannot bind, so the tensor would come out all-True.
+            if attention_mask is None:
+                # q_len > 1: SDPA's is_causal path builds the same causal mask.
+                # q_len == 1: every key is visible by definition.
+                return None
+            if q_len == 1:
+                return attention_mask
+        return original(self, attention_mask, q_len, kv_len, dtype, device, cache_position)
+
+    cls._apply_sliding_window_mask = _apply_sliding_window_mask
+    # Keep the upstream implementation reachable so tests can compare the two paths.
+    _apply_sliding_window_mask._gptqmodel_original = original
+    setattr(cls, _WINDOW_PATCH_FLAG, True)
+    return True
+
+
 def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     """Install the ``prepare_inputs_for_generation`` fix. Returns True if it was applied.
 
@@ -246,6 +290,7 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     # Always attempted: a class can be generate-patched while a fresh instance still
     # needs the mask shim, and vice versa.
     _patch_causal_mask(model)
+    _patch_sliding_window_mask(model)
 
     if getattr(cls, _PATCH_FLAG, False):
         # Class already patched; a freshly loaded instance may still be missing the
