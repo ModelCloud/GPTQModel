@@ -446,3 +446,70 @@ def test_ricursive_definition_installs_generate_patch():
     model = _FakeRemote()
     assert qmodel.after_model_load(model) is model
     assert getattr(type(model), _PATCH_FLAG, False) is True
+
+
+def test_cache_compat_shim_provides_max_cache_shape():
+    """transformers 5 dropped ``get_max_cache_shape``; the shim reports "unknown"."""
+
+    from transformers.cache_utils import DynamicCache
+
+    from gptqmodel.utils.ricursive_patch import _ensure_cache_compat
+
+    cache = DynamicCache()
+    assert not hasattr(cache, "get_max_cache_shape")
+    assert _ensure_cache_compat(cache) is cache
+    # An empty cache has no layers, so 5.x `get_max_length()` raises; treat as unknown.
+    assert cache.get_max_cache_shape() is None
+
+    class _Native:
+        def get_max_cache_shape(self):
+            return 42
+
+    native = _Native()
+    assert _ensure_cache_compat(native) is native
+    assert native.get_max_cache_shape() == 42
+
+
+def test_ricursive_generate_with_padding_matches_unpadded(tmp_path: Path):
+    """A padded batch must decode identically to the same row run alone.
+
+    Padding is the only path that builds an explicit causal mask. The published
+    mask builder seeds every entry with ``finfo.min`` and skips the triangular fill
+    when ``sequence_length == 1``, so each decode step came out fully masked and a
+    batched row collapsed to a constant token.
+    """
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import _MASK_PATCH_FLAG, apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+    assert getattr(type(model.model), _MASK_PATCH_FLAG, False) is True
+    assert not apply_ricursive_generate_patch(model)
+
+    model.generation_config.pad_token_id = 0
+    a = torch.tensor([[5, 6, 7, 8, 9, 10]])
+    single = model.generate(a, max_new_tokens=6, do_sample=False)
+
+    # Left padding: the short row's real tokens start at a higher index.
+    left_ids = torch.cat([a, torch.tensor([[0, 0, 11, 12, 13, 14]])], 0)
+    left_mask = torch.tensor([[1, 1, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1]])
+    left = model.generate(left_ids, attention_mask=left_mask, max_new_tokens=6, do_sample=False)
+    assert left.shape == (2, 12)
+    assert torch.equal(left[0], single[0])
+
+    # Right padding: the short row's tokens are trailing-padded instead.
+    right_ids = torch.cat([a, torch.tensor([[11, 12, 13, 14, 0, 0]])], 0)
+    right_mask = torch.ones(2, 6, dtype=torch.long)
+    right_mask[1, 4:] = 0
+    right = model.generate(right_ids, attention_mask=right_mask, max_new_tokens=6, do_sample=False)
+    assert torch.equal(right[0], single[0])

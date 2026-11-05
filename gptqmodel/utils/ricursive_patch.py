@@ -26,8 +26,37 @@ import torch
 
 _PATCH_FLAG = "_gptqmodel_ricursive_generate_patched"
 
+# set on the inner `RicursiveModel` class once `_update_causal_mask` is wrapped
+_MASK_PATCH_FLAG = "_gptqmodel_ricursive_mask_patched"
+
 # original class -> class that actually carries the patch (may be a GenerationMixin subclass)
 _PATCHED_CLASSES: dict = {}
+
+
+def _max_cache_shape(_cache):
+    """Stand-in for the removed transformers 4.x ``get_max_cache_shape()``.
+
+    It must report **unknown** (``None``), not the cache capacity. The caller sizes
+    the causal mask from this value and the attention layer sizes it from the live
+    key tensor, so returning the capacity (transformers 5's ``get_max_length()``
+    reports the configured maximum, e.g. ``sliding_window``) makes the two disagree
+    whenever the cache is not full.
+
+    ``None`` selects the caller's own fallback, ``cache_position[-1] + 1``, which is
+    exactly the number of keys the attention layer holds.
+    """
+    return None
+
+
+def _ensure_cache_compat(past_key_values):
+    """Give a transformers-5 cache the ``get_max_cache_shape`` the model calls."""
+    if past_key_values is None or hasattr(past_key_values, "get_max_cache_shape"):
+        return past_key_values
+    try:
+        past_key_values.get_max_cache_shape = lambda: _max_cache_shape(past_key_values)
+    except Exception:  # pragma: no cover - caches with __slots__ simply stay unpatched
+        pass
+    return past_key_values
 
 
 def _cache_seq_length(past_key_values) -> int:
@@ -50,6 +79,7 @@ def _prepare_inputs_for_generation(
     inputs_embeds=None,
     cache_position=None,
     use_cache=None,
+    position_ids=None,
     **kwargs,
 ):
     # transformers 5.x no longer moves remote-code inputs onto the model device for this
@@ -78,7 +108,8 @@ def _prepare_inputs_for_generation(
     # Only slice when the cache is warm and `input_ids` still carries cached tokens.
     # The upstream code sliced unconditionally, which turned a ``None`` cache position
     # into ``input_ids[:, None]`` and added a bogus axis.
-    if past_length > 0 and input_ids.shape[1] > cache_position.numel():
+    sliced = past_length > 0 and input_ids.shape[1] > cache_position.numel()
+    if sliced:
         input_ids = input_ids[:, cache_position]
 
     if inputs_embeds is not None and cache_position.numel() and int(cache_position[0]) == 0:
@@ -86,9 +117,24 @@ def _prepare_inputs_for_generation(
     else:
         model_inputs = {"input_ids": input_ids}
 
+    # Derive per-row positions from the padding mask. Using `cache_position` for every
+    # row is only correct when nothing is padded: with left padding the real tokens of
+    # a short row sit at higher indices, so a shared position vector shifts its RoPE
+    # phases and the row decodes to garbage.
+    if position_ids is not None:
+        # A caller-supplied vector still covers the pre-slice sequence.
+        if sliced:
+            position_ids = position_ids[:, cache_position]
+    elif attention_mask is not None and attention_mask.dim() == 2:
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+        position_ids = position_ids[:, -input_ids.shape[1]:]
+    else:
+        position_ids = cache_position.unsqueeze(0)
+
     model_inputs.update(
         {
-            "position_ids": cache_position.unsqueeze(0),
+            "position_ids": position_ids,
             "past_key_values": past_key_values,
             "use_cache": use_cache,
             "attention_mask": attention_mask,
@@ -117,6 +163,77 @@ def _ensure_generation_config(model) -> None:
         model.generation_config = GenerationConfig()
 
 
+def _update_causal_mask(
+    self,
+    attention_mask,
+    input_tensor,
+    cache_position,
+    past_key_values,
+):
+    """Corrected ``RicursiveModel._update_causal_mask``.
+
+    The published version has two defects that only show up when an explicit mask is
+    built (i.e. for padded batches):
+
+    * it seeds the mask with ``finfo.min`` and only writes the allowed diagonal via
+      ``triu`` when ``sequence_length != 1``. Every decode step therefore comes out
+      fully masked, so a padded batch decodes to a constant token;
+    * it uses ``1.0`` (not ``0.0``) for allowed positions, so SDPA adds a constant
+      bias to every score.
+
+    It also calls ``past_key_values.get_max_cache_shape()``, which transformers 5
+    removed. This implementation derives the key span from ``cache_position`` -- the
+    same value the attention layer sizes its key tensor from -- and returns a mask
+    that is ``0.0`` where a key is visible and ``finfo.min`` elsewhere.
+    """
+    if attention_mask is None:
+        return None
+    if torch.all(attention_mask == 1):
+        return None
+
+    dtype, device = input_tensor.dtype, input_tensor.device
+    sequence_length = input_tensor.shape[1]
+
+    if cache_position is None:
+        query_positions = torch.arange(sequence_length, device=device)
+        target_length = sequence_length
+    else:
+        query_positions = cache_position.to(device=device).reshape(-1)
+        target_length = int(query_positions[-1].item()) + 1
+
+    # Padding can outrun the position span when the caller keeps a longer mask.
+    target_length = max(target_length, attention_mask.shape[-1])
+
+    key_positions = torch.arange(target_length, device=device)
+    allowed = key_positions[None, :] <= query_positions[:, None]
+    allowed = allowed[None, None, :, :] & attention_mask[:, None, None, :].to(torch.bool)
+
+    causal_mask = torch.zeros(
+        (attention_mask.shape[0], 1, sequence_length, target_length),
+        dtype=dtype,
+        device=device,
+    )
+    return causal_mask.masked_fill(~allowed, torch.finfo(dtype).min)
+
+
+def _patch_causal_mask(model) -> bool:
+    """Install the corrected mask builder on the inner ``RicursiveModel`` class."""
+    inner = getattr(model, "model", None)
+    if inner is None:
+        return False
+
+    cls = type(inner)
+    if getattr(cls, _MASK_PATCH_FLAG, False):
+        return False
+
+    if not callable(getattr(cls, "_update_causal_mask", None)):
+        return False
+
+    cls._update_causal_mask = _update_causal_mask
+    setattr(cls, _MASK_PATCH_FLAG, True)
+    return True
+
+
 def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     """Install the ``prepare_inputs_for_generation`` fix. Returns True if it was applied.
 
@@ -125,6 +242,10 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     cls = model_cls if model_cls is not None else type(model)
     if cls is None:
         return False
+
+    # Always attempted: a class can be generate-patched while a fresh instance still
+    # needs the mask shim, and vice versa.
+    _patch_causal_mask(model)
 
     if getattr(cls, _PATCH_FLAG, False):
         # Class already patched; a freshly loaded instance may still be missing the
