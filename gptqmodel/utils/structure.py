@@ -45,6 +45,7 @@ from safetensors import safe_open
 from torch import nn
 
 from ..utils.logger import setup_logger
+from .p2p import safe_move_to
 
 
 # =========================
@@ -554,7 +555,9 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     if param.device == device:
         return param
     # CPU or wrong GPU -> rebind data storage on target device
-    param.data = param.data.to(device, copy=True)  # alloc new storage on device; keeps Parameter identity
+    # Allocate new storage on the target device; a direct peer copy on an
+    # asymmetric ROCm link can segfault, so use the direction-aware helper.
+    param.data = safe_move_to(param.data, device, copy=True)  # keeps Parameter identity
     return param
 
 
@@ -2844,7 +2847,7 @@ class LazyTurtle:
                         persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
                         source = tensor.detach()
                         if target_buffer is None:
-                            new_buffer = source.to(device=device)
+                            new_buffer = safe_move_to(source, device)
                             t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
                             t_bufs[rel_name] = new_buffer
                         elif getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
@@ -2957,7 +2960,7 @@ class LazyTurtle:
 
                                 source = tensor.detach()
                                 if target_buffer is None:
-                                    new_buffer = source.to(device=device)
+                                    new_buffer = safe_move_to(source, device)
                                     t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
                                     t_bufs[rel_name] = new_buffer
                                 else:
@@ -3123,7 +3126,7 @@ class LazyTurtle:
                 source_buffer = source_buffer.detach()
 
             target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
-            materialized = source_buffer.to(device=device, dtype=target_dtype)
+            materialized = safe_move_to(source_buffer, device, dtype=target_dtype)
             owner_module.register_buffer(leaf, materialized, persistent=False)
             t_bufs[rel_name] = materialized
 

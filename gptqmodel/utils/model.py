@@ -71,6 +71,7 @@ from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
+from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .torch import HAS_CUDA, torch_empty_cache
 
@@ -266,7 +267,12 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
         return undo_offload_to_disk(obj, device=device, dtype=dtype)
 
     if get_device(obj) != device or dtype is not None:
-        obj = obj.to(device=device, dtype=dtype, non_blocking=False)
+        # Cross-device moves must be direction-aware: on an asymmetric ROCm
+        # topology a direct peer copy segfaults instead of raising.
+        if isinstance(obj, nn.Module):
+            obj = safe_module_to(obj, device, dtype=dtype)
+        else:
+            obj = safe_move_to(obj, device, dtype=dtype)
 
     return obj
 

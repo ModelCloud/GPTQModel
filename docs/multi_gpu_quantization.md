@@ -62,25 +62,37 @@ looper, and for multi-device `device_map` loads. Enablement goes through
 `hipDeviceEnablePeerAccess` on ROCm and `cuCtxEnablePeerAccess` on CUDA; PyTorch
 has no enable wrapper of its own.
 
-Enablement never inserts a host relay: the transfer path is always a single
-`dst.copy_(src)`, and PyTorch/the driver chooses peer or internal staging.
+Peer links are **directed**. GPT-QModel checks `src -> dst` for every
+cross-device move; when that direction is unsupported (or measured `degraded`),
+the move is staged through pinned host memory instead of calling the peer copy.
+On some ROCm topologies the matrix is asymmetric (for example `0 -> 1`
+unsupported while `1 -> 0` works), and a direct `tensor.to("cuda:1")` segfaults
+inside `hipMemcpyPeerAsync` rather than raising. That case is logged, and
+NCCL/torch replicate is skipped in favor of deepcopy plus host staging. A
+healthy symmetric link still uses the direct device-to-device path.
+
+An enablement call that reports success for a direction the runtime capability
+query denies is reported as `unverified` and is never used for a direct copy or
+measured by the probe (the probe itself performs a direct copy). Enablement is
+still kept for PyTorch's own paths; GPT-QModel moves in that direction are
+staged through host memory.
 
 Configuration:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GPTQMODEL_P2P` | `auto` | `0` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `1` also attempts pairs the capability bit denies |
-| `GPTQMODEL_P2P_PROBE` | unset | `1` runs the bandwidth diagnostic and records `enabled`/`degraded` |
-| `GPTQMODEL_P2P_MIN_GBPS` | `5.0` | diagnostic floor; below it a link is reported `degraded` |
-| `GPTQMODEL_P2P_MIN_RATIO` | `1.0` | diagnostic: direct copy must reach this fraction of ordered pinned-host staging |
+| `GPTQMODEL_P2P` | `auto` | `0` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `1` also attempts pairs the capability bit denies, but a denied direction stays host-staged (`unverified`) even if enablement reports success |
+| `GPTQMODEL_P2P_PROBE` | unset | `1` measures every directed pair; `degraded` directions are host-staged |
+| `GPTQMODEL_P2P_MIN_GBPS` | `5.0` | absolute floor; below it a direction is `degraded` (host-staged) |
+| `GPTQMODEL_P2P_MIN_RATIO` | `1.0` | direct copy must reach this fraction of ordered pinned-host staging, else `degraded` |
 | `GPTQMODEL_P2P_PROBE_MIB` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
 
 ### Bandwidth diagnostics (`GPTQMODEL_P2P_PROBE=1`)
 
 Probing moves real payload across every directed pair and synchronizes each
 sample, so it is **opt-in** and never runs during normal quantization. Its
-verdict is diagnostic: peer access cannot be revoked once enabled, and no
-production caller routes on it.
+verdict selects the transfer path: a `degraded` direction is staged through
+pinned host memory, exactly like an unsupported one.
 
 The reference is an explicit, correctly ordered `src -> pinned CPU -> dst`
 pipeline. It pays for two transfers (D2H then H2D), so it is strictly slower

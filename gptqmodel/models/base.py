@@ -87,6 +87,7 @@ from ..utils.model import (
     warn_fused_unit_dynamic_conflicts,
 )
 from ..utils.model_dequant import infer_block_shape
+from ..utils.p2p import safe_module_to
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -4033,7 +4034,7 @@ class BaseQModel(nn.Module):
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
                 if get_device(module) != device:
-                    module.to(device)
+                    safe_module_to(module, device)
                 return module
 
             turtle_model = self.turtle_model

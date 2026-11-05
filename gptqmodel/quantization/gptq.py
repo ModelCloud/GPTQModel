@@ -26,6 +26,7 @@ from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -483,7 +484,9 @@ class GPTQ:
         if not device:
             device = self.module.weight.data.device
 
-        clone = self.module.weight.data.to(copy=copy, device=device)
+        # A cross-device clone is a peer copy; on an asymmetric ROCm link the
+        # direct path segfaults, so go through the direction-aware helper.
+        clone = safe_move_to(self.module.weight.data, device, copy=copy)
 
         if isinstance(self.module, nn.Embedding):
             clone = clone.t()
@@ -898,7 +901,7 @@ class GPTQ:
                     self._wait_hessian_ready(device)
                     if self._H_diag.device != device:
                         source_diag = self._H_diag
-                        self._H_diag = self._H_diag.to(device=device)
+                        self._H_diag = safe_move_to(self._H_diag, device)
                         self._record_hessian_ready(device)
                         self._defer_hessian_sources([source_diag], self._hessian_ready_event)
                     self.H = None
@@ -918,7 +921,7 @@ class GPTQ:
                 else:
                     existing_diag = self._H_diag
                     self._wait_hessian_ready(device)
-                    diag = existing_diag.to(device=device, dtype=torch.float32)
+                    diag = safe_move_to(existing_diag, device, dtype=torch.float32)
                     if diag is not existing_diag:
                         source_diag = existing_diag
 
@@ -937,7 +940,10 @@ class GPTQ:
                                 torch.cuda.current_stream(device).wait_event(partial_event)
                             else:
                                 partial_event.synchronize()
-                        diag.add_(counts.to(device=device, dtype=torch.float32), alpha=2.0 / float(total_samples))
+                        diag.add_(
+                            safe_move_to(counts, device, dtype=torch.float32),
+                            alpha=2.0 / float(total_samples),
+                        )
 
                 self._H_diag = diag
                 self.H = None
@@ -958,7 +964,7 @@ class GPTQ:
                 self._wait_hessian_ready(device)
                 if self.H.device != device:
                     source_hessian = self.H
-                    self.H = self.H.to(device=device)
+                    self.H = safe_move_to(self.H, device)
                     self._record_hessian_ready(device)
                     self._defer_hessian_sources([source_hessian], self._hessian_ready_event)
                 return
@@ -1009,7 +1015,9 @@ class GPTQ:
                     else:
                         partial_event.synchronize()
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    result_accum.add_(
+                        safe_move_to(partial, result_accum.device, dtype=torch.float32)
+                    )
                 else:
                     result_accum.add_(partial)
 
@@ -1054,7 +1062,12 @@ class GPTQ:
             # the leader readiness dependency there before an asynchronous
             # cross-device copy, rather than waiting on the leader stream.
             leader._wait_hessian_ready(target_device)
-            copy = source.detach().to(device=target_device, dtype=torch.float32, copy=True)
+            copy = safe_move_to(
+                source.detach(),
+                target_device,
+                dtype=torch.float32,
+                copy=True,
+            )
 
         with self.lock:
             self.H = copy
@@ -1281,7 +1294,7 @@ class GPTQ:
         else:
             Q = Q.to(self.module.weight.dtype)
 
-        Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+        Q = safe_move_to(Q, self.module.weight.data.device)
         mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
         duration = time.time() - start_time
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
@@ -1649,7 +1662,7 @@ class GPTQ:
             g_idx = g_idx[:self._original_columns]
 
         quantized = quantized.t().reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        quantized = quantized.to(device=self.module.weight.device, non_blocking=False)
+        quantized = safe_move_to(quantized, self.module.weight.device)
 
         self.H = None
         self._device_hessian_partials.clear()
@@ -1798,7 +1811,7 @@ class GPTQ:
             # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
-            W = self.module_copy.to(device=self.H.device)
+            W = safe_move_to(self.module_copy, self.H.device)
             del self.module_copy
 
         self.quantizer.find_params(W, weight=True)
