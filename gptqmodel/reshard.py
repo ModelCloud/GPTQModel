@@ -52,6 +52,13 @@ _INDEXED_TENSOR_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<index>\d+)(?:\.|$)")
 # enough to keep sequential I/O efficient.
 _STREAM_CHUNK_SIZE = 8 * 1024 * 1024
 
+# Name of the single root shard that holds every non-layer tensor. It must not
+# be ``model.safetensors``: ``transformers.from_pretrained`` prefers a root
+# ``model.safetensors`` over ``model.safetensors.index.json``, so that name
+# would make loaders read only the global shard and silently ignore the
+# per-layer directories.
+_GLOBAL_SHARD_NAME = "global.safetensors"
+
 # Layer stacks in Hugging Face checkpoints use one of these container names.
 # Filtering on them keeps numeric non-layer modules (for example ``mlp1.0``)
 # in the single global shard instead of creating fake per-layer directories.
@@ -676,8 +683,11 @@ def reshard(
 
     The default layout writes one directory per transformer layer
     (``model.layers.0/layer.safetensors``) and exactly one root
-    ``model.safetensors`` containing embeddings, lm-head, norms, and every other
-    non-layer tensor.
+    ``global.safetensors`` containing embeddings, lm-head, norms, and every other
+    non-layer tensor. The global shard is deliberately not named
+    ``model.safetensors``: loaders such as ``transformers.from_pretrained``
+    prefer that single-file name over ``model.safetensors.index.json`` and would
+    otherwise ignore every layer shard.
     """
     if shard_config is not None:
         if config is not None:
@@ -711,10 +721,20 @@ def reshard(
         )
 
     groups = _group_tensors(refs, prefixes, config.layout)
+    has_layer_groups = any(group_name for group_name, _ in groups)
+    # A per-layer layout always writes an index, so the global shard must not
+    # shadow it with the single-file checkpoint name.
+    global_shard_name = _GLOBAL_SHARD_NAME if has_layer_groups else "model.safetensors"
 
     parent_dir = os.path.dirname(os.path.abspath(target_dir))
     os.makedirs(parent_dir, exist_ok=True)
     staging_dir = tempfile.mkdtemp(prefix=".gptqmodel-reshard-", dir=parent_dir)
+    try:
+        # mkdtemp creates a 0700 directory; mirror the source checkpoint so the
+        # result is readable wherever the source was readable.
+        os.chmod(staging_dir, os.stat(source_dir).st_mode & 0o777)
+    except OSError:
+        pass
     backup_dir: Optional[str] = None
     committed = False
     buffer = bytearray(_STREAM_CHUNK_SIZE)
@@ -729,7 +749,7 @@ def reshard(
             if not group_name:
                 directory = staging_dir
                 base_name = "model"
-                single_file_name = "model.safetensors"
+                single_file_name = global_shard_name
                 max_shard_size = config.max_shard_size if config.layout is ShardLayout.PER_LAYER else None
             else:
                 directory = os.path.join(staging_dir, group_name)

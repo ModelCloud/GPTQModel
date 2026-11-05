@@ -108,7 +108,7 @@ model revision, dtype, and configuration for reproducibility.
 `gptqmodel.reshard()` rewrites an existing safetensors checkpoint into a new
 shard layout without loading or dequantizing any weights. The default
 `ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL` writes one directory per transformer
-layer and exactly one root `model.safetensors` for embeddings, lm-head, norms,
+layer and exactly one root `global.safetensors` for embeddings, lm-head, norms,
 and every other non-layer module. Every layer stack found in the checkpoint is
 sharded separately, including vision transformer blocks; numerically indexed
 non-layer modules such as `mlp1.0` stay in the global shard.
@@ -124,11 +124,14 @@ reshard(
 ```
 
 The output uses `model.layers.0/layer.safetensors`, `model.layers.1/layer.safetensors`,
-and so on, plus a root `model.safetensors` and `model.safetensors.index.json`.
-`max_shard_size` splits oversized layer directories but never the single global
-shard. Set `ShardConfig(layer_prefixes=["model.layers"])` when the checkpoint
-has no `config.json` or uses a custom architecture. Pass `overwrite=True` to
-replace an existing non-empty destination.
+and so on, plus a root `global.safetensors` and `model.safetensors.index.json`.
+The global shard is not named `model.safetensors` because
+`transformers.from_pretrained` prefers that single-file name over the index and
+would load only the global shard. `max_shard_size` splits oversized layer
+directories but never the single global shard. Set
+`ShardConfig(layer_prefixes=["model.layers"])` when the checkpoint has no
+`config.json` or uses a custom architecture. Pass `overwrite=True` to replace an
+existing non-empty destination.
 
 Resharding reads only safetensors headers, copies payloads byte-for-byte through
 an 8 MiB buffer, and keeps at most one source shard open at a time. It does not

@@ -79,7 +79,7 @@ def test_reshard_per_layer_with_single_global(tmp_path):
     assert result == str(target)
     assert (target / "model.layers.0" / "layer.safetensors").is_file()
     assert (target / "model.layers.1" / "layer.safetensors").is_file()
-    assert (target / "model.safetensors").is_file()
+    assert (target / "global.safetensors").is_file()
 
     # Every non-layer tensor lives in the single global shard, not in per-module files.
     assert not (target / "model.embed_tokens.safetensors").exists()
@@ -95,12 +95,12 @@ def test_reshard_per_layer_with_single_global(tmp_path):
     assert weight_map["model.layers.0.self_attn.qweight"] == "model.layers.0/layer.safetensors"
     assert weight_map["model.layers.0.self_attn.scales"] == "model.layers.0/layer.safetensors"
     assert weight_map["model.layers.1.mlp.down_proj.qweight"] == "model.layers.1/layer.safetensors"
-    assert weight_map["model.embed_tokens.weight"] == "model.safetensors"
-    assert weight_map["model.norm.weight"] == "model.safetensors"
-    assert weight_map["lm_head.weight"] == "model.safetensors"
-    assert weight_map["model.rotary_emb.inv_freq"] == "model.safetensors"
+    assert weight_map["model.embed_tokens.weight"] == "global.safetensors"
+    assert weight_map["model.norm.weight"] == "global.safetensors"
+    assert weight_map["lm_head.weight"] == "global.safetensors"
+    assert weight_map["model.rotary_emb.inv_freq"] == "global.safetensors"
 
-    global_state = load_file(str(target / "model.safetensors"))
+    global_state = load_file(str(target / "global.safetensors"))
     assert set(global_state) == {
         "model.embed_tokens.weight",
         "model.norm.weight",
@@ -123,7 +123,7 @@ def test_reshard_preserves_safetensors_metadata(tmp_path):
 
     reshard(source, target)
 
-    with safe_open(str(target / "model.safetensors"), framework="pt") as handle:
+    with safe_open(str(target / "global.safetensors"), framework="pt") as handle:
         metadata = handle.metadata()
     assert metadata["gptq_bits"] == "4"
     assert metadata["format"] == "pt"
@@ -144,6 +144,34 @@ def test_reshard_keeps_source_untouched(tmp_path):
     assert after == before
 
 
+def test_reshard_does_not_shadow_index_with_single_file_name(tmp_path):
+    # `transformers.from_pretrained` prefers a root `model.safetensors` over
+    # `model.safetensors.index.json`. A per-layer layout must keep the global
+    # shard under a different name or loaders silently skip every layer shard.
+    source = tmp_path / "source"
+    _build_source(source)
+    target = tmp_path / "target"
+
+    reshard(source, target)
+
+    assert (target / "model.safetensors.index.json").is_file()
+    assert not (target / "model.safetensors").exists()
+    assert (target / "global.safetensors").is_file()
+    assert _read_index(target)["weight_map"]["lm_head.weight"] == "global.safetensors"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_reshard_mirrors_source_directory_permissions(tmp_path):
+    source = tmp_path / "source"
+    _build_source(source)
+    os.chmod(source, 0o750)
+    target = tmp_path / "target"
+
+    reshard(source, target)
+
+    assert (target.stat().st_mode & 0o777) == 0o750
+
+
 def test_reshard_splits_large_layer_but_not_global_shard(tmp_path):
     source = tmp_path / "source"
     _build_source(source)
@@ -156,11 +184,11 @@ def test_reshard_splits_large_layer_but_not_global_shard(tmp_path):
     assert all(name.startswith("layer-") for name in layer_shards)
 
     root_shards = sorted(path.name for path in target.glob("*.safetensors"))
-    assert root_shards == ["model.safetensors"]
+    assert root_shards == ["global.safetensors"]
 
     weight_map = _read_index(target)["weight_map"]
-    assert weight_map["model.embed_tokens.weight"] == "model.safetensors"
-    assert weight_map["model.norm.weight"] == "model.safetensors"
+    assert weight_map["model.embed_tokens.weight"] == "global.safetensors"
+    assert weight_map["model.norm.weight"] == "global.safetensors"
     assert weight_map["model.layers.0.self_attn.qweight"].startswith("model.layers.0/layer-")
 
 
@@ -191,7 +219,7 @@ def test_reshard_requires_overwrite_for_non_empty_destination(tmp_path):
 
     reshard(source, target, overwrite=True)
     assert not (target / "stale.txt").exists()
-    assert (target / "model.safetensors").is_file()
+    assert (target / "global.safetensors").is_file()
 
 
 def test_reshard_accepts_loaded_model_like_object(tmp_path):
@@ -230,7 +258,7 @@ def test_reshard_detects_layers_without_config(tmp_path):
     reshard(source, target)
 
     assert (target / "model.layers.0" / "layer.safetensors").is_file()
-    assert (target / "model.safetensors").is_file()
+    assert (target / "global.safetensors").is_file()
 
 
 def test_reshard_is_repeatable_on_nested_layout(tmp_path):
@@ -244,7 +272,7 @@ def test_reshard_is_repeatable_on_nested_layout(tmp_path):
 
     assert (second / "model.layers.0" / "layer.safetensors").is_file()
     assert _read_index(second)["weight_map"] == _read_index(first)["weight_map"]
-    assert (second / "model.safetensors").is_file()
+    assert (second / "global.safetensors").is_file()
 
 
 def test_shard_config_rejects_unknown_layout():
@@ -285,7 +313,7 @@ def test_reshard_groups_all_layer_stacks_and_keeps_numeric_non_layer_global(tmp_
     assert (target / "model.vision_model.encoder.layers.1" / "layer.safetensors").is_file()
     assert not (target / "mlp1.0").exists()
 
-    global_state = load_file(str(target / "model.safetensors"))
+    global_state = load_file(str(target / "global.safetensors"))
     assert set(global_state) == {"mlp1.0.weight", "mlp1.1.weight", "lm_head.weight"}
 
 
@@ -306,7 +334,7 @@ def test_reshard_does_not_mmap_source_weights(tmp_path, monkeypatch):
     target = tmp_path / "target"
     reshard(source, target)
 
-    assert (target / "model.safetensors").is_file()
+    assert (target / "global.safetensors").is_file()
 
 
 def test_reshard_keeps_at_most_one_source_shard_open(tmp_path, monkeypatch):
@@ -438,7 +466,7 @@ def test_reshard_discovers_unindexed_multi_shard_checkpoint(tmp_path):
 
     assert (target / "model.layers.0" / "layer.safetensors").is_file()
     assert (target / "model.layers.1" / "layer.safetensors").is_file()
-    assert set(load_file(str(target / "model.safetensors"))) == {"lm_head.weight"}
+    assert set(load_file(str(target / "global.safetensors"))) == {"lm_head.weight"}
 
 
 def test_shard_config_accepts_layout_aliases():
