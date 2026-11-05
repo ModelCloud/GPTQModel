@@ -605,3 +605,52 @@ def test_sliding_window_fast_path_preserves_generation(tmp_path: Path):
         cls._apply_sliding_window_mask = patched
 
     assert torch.equal(fast, slow)
+
+
+def test_sliding_window_mask_trims_evicted_keys(tmp_path: Path):
+    """Sliding layers evict keys, so the shared mask can be wider than the layer's KV.
+
+    transformers 5 builds a hybrid cache: sliding layers keep only ``sliding_window``
+    keys while full layers keep growing. One mask is built per forward, so a sliding
+    layer must trim it to the keys it actually holds -- otherwise SDPA rejects the
+    shape once decoding passes the window.
+    """
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+
+    attn = model.model.layers[0].self_attn
+    cls = type(attn)
+    patched = cls._apply_sliding_window_mask
+    original = patched._gptqmodel_original
+    window = attn.config.sliding_window
+    cpu = torch.device("cpu")
+
+    # One key more than the window: the layer holds `window` keys while the mask
+    # covers the full span. Every surviving key is inside the window, so the result
+    # is the trimmed mask unchanged.
+    mask = torch.zeros(2, 1, 1, window + 1, dtype=torch.float32)
+    out = patched(attn, mask, 1, window, torch.float32, cpu, torch.tensor([window]))
+    assert out is not None
+    assert out.shape[-1] == window, "mask must be trimmed to the live key count"
+    assert torch.equal(out, mask[..., -window:])
+
+    # Past the window the mask really binds: no trim, and the upstream result stands.
+    kv_len = window + 6
+    wide = torch.zeros(2, 1, 1, kv_len, dtype=torch.float32)
+    cache_position = torch.tensor([kv_len - 1])
+    out_wide = patched(attn, wide, 1, kv_len, torch.float32, cpu, cache_position)
+    assert out_wide is not None and out_wide.shape[-1] == kv_len
+    assert torch.equal(out_wide, original(attn, wide, 1, kv_len, torch.float32, cpu, cache_position))

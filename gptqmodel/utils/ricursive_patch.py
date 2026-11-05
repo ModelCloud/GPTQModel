@@ -260,6 +260,14 @@ def _patch_sliding_window_mask(model) -> bool:
         return False
 
     def _apply_sliding_window_mask(self, attention_mask, q_len, kv_len, dtype, device, cache_position):
+        if attention_mask is not None and attention_mask.shape[-1] > kv_len:
+            # transformers 5 builds a hybrid cache: sliding layers get a
+            # DynamicSlidingWindowLayer that evicts from the left, so they hold only
+            # the most recent `sliding_window` keys while full layers keep growing.
+            # The causal mask is built once per forward from the full span, so trim it
+            # to the keys this layer actually holds.
+            attention_mask = attention_mask[..., -kv_len:]
+
         window = getattr(self.config, "sliding_window", None)
         if window is not None and kv_len <= window:
             # The window cannot bind, so the tensor would come out all-True.
