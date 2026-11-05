@@ -737,7 +737,9 @@ def reshard(
         # result is readable wherever the source was readable.
         os.chmod(staging_dir, os.stat(source_dir).st_mode & 0o777)
     except OSError:
-        pass
+        # Best-effort only: some filesystems reject chmod on a fresh directory,
+        # and a wrong mode must not abort an otherwise valid reshard.
+        log.debug("reshard: could not mirror source directory mode", exc_info=True)
     backup_dir: Optional[str] = None
     committed = False
     buffer = bytearray(_STREAM_CHUNK_SIZE)
@@ -800,7 +802,6 @@ def reshard(
             if backup_dir is not None:
                 try:
                     os.replace(backup_dir, target_dir)
-                    backup_dir = None
                 except BaseException:
                     log.error("reshard: failed to restore destination; backup retained at `%s`", backup_dir)
             raise

@@ -172,6 +172,32 @@ def test_reshard_mirrors_source_directory_permissions(tmp_path):
     assert (target.stat().st_mode & 0o777) == 0o750
 
 
+def test_reshard_survives_directory_mode_failure(tmp_path, monkeypatch):
+    # Mirroring the source mode is best-effort; a filesystem that rejects the
+    # chmod must not abort an otherwise valid reshard.
+    import importlib
+
+    reshard_module = importlib.import_module("gptqmodel.reshard")
+
+    source = tmp_path / "source"
+    _build_source(source)
+    real_chmod = os.chmod
+
+    def _fail_staging_chmod(path, mode, *args, **kwargs):
+        # Only the staging root, not files copied into it.
+        if os.path.basename(str(path)).startswith(".gptqmodel-reshard-"):
+            raise OSError("simulated chmod failure")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(reshard_module.os, "chmod", _fail_staging_chmod)
+    target = tmp_path / "target"
+
+    reshard(source, target)
+
+    assert (target / "global.safetensors").is_file()
+    assert (target / "model.layers.0" / "layer.safetensors").is_file()
+
+
 def test_reshard_splits_large_layer_but_not_global_shard(tmp_path):
     source = tmp_path / "source"
     _build_source(source)
