@@ -56,6 +56,7 @@ from ..quantization.config import (
     _normalize_fp8_scale_semantics,
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
+    _normalize_gguf_config_spec,
     _normalize_quant_bits,
     dynamic_get,
     dynamic_matching_pattern,
@@ -663,6 +664,15 @@ def create_quant_module(
                     tmp_init_kwargs["compress_statistics"] = bool(
                         overrides.get("compress_statistics", overrides.get("bnb_compress_statistics"))
                     )
+            elif format == FORMAT.GGUF:
+                # Resolve width and subtype independently, matching the config
+                # used to quantize this module. Width-only overrides inherit the
+                # base subtype; format-only overrides inherit only its width.
+                base_width, base_format, _ = _normalize_gguf_config_spec(bits, None)
+                _, _, tmp_bits = _normalize_gguf_config_spec(
+                    overrides.get("bits", base_width),
+                    overrides.get(FORMAT_FIELD_CODE, base_format),
+                )
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
