@@ -370,13 +370,13 @@ def _patch_chunked_mlp(model) -> bool:
     Every operation in the MLP is row-wise, so splitting the token dimension is
     exact: each row is still projected by the same kernels with the same
     reduction order, and the pieces are concatenated back. Only the peak is
-    reduced. ``GPTQMODEL_RIPPLE_MLP_CHUNK`` overrides the row budget; set it to
+    reduced. ``RIPPLE_MLP_CHUNK`` overrides the row budget; set it to
     ``0`` to disable.
     """
     import os
 
     try:
-        chunk = int(os.environ.get("GPTQMODEL_RIPPLE_MLP_CHUNK", "2048"))
+        chunk = int(os.environ.get("RIPPLE_MLP_CHUNK", "2048"))
     except ValueError:
         chunk = 2048
     if chunk <= 0:

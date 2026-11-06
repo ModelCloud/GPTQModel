@@ -791,7 +791,7 @@ def test_chunked_mlp_is_bit_identical_and_idempotent(monkeypatch):
                 up = up.clamp(min=-self.clamp_threshold, max=self.clamp_threshold)
             return self.down_proj(torch.nn.functional.silu(gate) * up)
 
-    monkeypatch.setenv("GPTQMODEL_RIPPLE_MLP_CHUNK", "64")
+    monkeypatch.setenv("RIPPLE_MLP_CHUNK", "64")
     torch.manual_seed(0)
     mlp = _MLP().to(torch.bfloat16)
     holder = types.SimpleNamespace(
