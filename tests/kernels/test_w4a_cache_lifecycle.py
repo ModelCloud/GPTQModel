@@ -12,7 +12,11 @@ weights and prove the operand is collectable afterwards. Numeric checks use a
 Torch oracle that decodes the packed INT4 words itself.
 
 The GPU kernels (Triton FP8 MMA) are not exercised here; see
-``test_w4afp8_gb10.py``.
+``test_w4afp8_gb10.py``. The few cases that do launch a kernel are gated on
+``w4a_kernels_available()`` rather than ``torch.cuda.is_available()``: HIP
+reuses the CUDA device namespace, so the torch check is true on ROCm even
+though the kernels (``ttg.nvidia_mma`` operands and PTX rounding) cannot be
+compiled there.
 """
 
 from __future__ import annotations
@@ -25,13 +29,20 @@ import weakref
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear, unpack_int4_codes
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+from tests.w4a_hardware_marks import w4a_kernels_available
 
 
 K, N = 256, 128
+
+_W4A_GPU_REASON = (
+    "the W4A Triton kernels require an NVIDIA CUDA device "
+    "(they lower to `ttg.nvidia_mma` and emit PTX, which HIP cannot compile)"
+)
 
 # Comment on storage: a packed 4-bit weight uses half a byte per weight, so any
 # floating tensor of at least ``K * N`` bytes is an expansion, not a layout.
@@ -568,8 +579,8 @@ def test_transient_staging_peak_is_measured_not_assumed():
     module = _module(W4AFP8Linear)
     operand_bytes = K * N
     floor = K * N
-    if not torch.cuda.is_available():
-        pytest.skip("allocator sampling requires CUDA")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     module.to("cuda")
     torch.cuda.synchronize()
@@ -601,8 +612,8 @@ def test_device_round_trip_forward_restages_from_native_weights(dtype):
     inverse: the move stages nothing, and the first forward on the new device
     still produces the operand from the native INT4 weights.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
     module = _module(W4AFP8Linear)
 
     def unexpected_post_init(*args, **kwargs):
@@ -722,6 +733,57 @@ def test_observable_layout_is_reported_for_normal_construction():
 
 
 # --------------------------------------------------------------------------
+# ROCm gating: HIP reuses the CUDA namespace but cannot lower these kernels.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cls", [W4AFP8Linear, W4ANVFP4Linear])
+def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
+    """A ROCm target must be refused at validation, not at Triton compile time.
+
+    ``torch.cuda.is_available()`` is true on ROCm and gfx1201 reports a
+    synthetic ``(12, 0)`` capability that clears the FP8 floor, so the torch
+    checks cannot gate this backend. Without the family gate the first forward
+    aborts inside Triton with "Unsupported DotOp found when converting
+    TritonGPU to LLVM".
+    """
+    w4a_floatx = sys.modules[W4AFP8Linear.__module__]
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
+    error = cls._rocm_unsupported_error()
+    assert isinstance(error, NotImplementedError)
+    assert "ROCm" in str(error) and "ttg.nvidia_mma" in str(error)
+
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.CUDA)
+    assert cls._rocm_unsupported_error() is None
+
+
+def test_rocm_kernels_refuse_before_lowering(monkeypatch):
+    """Direct kernel calls must report the platform, not a PassManager crash."""
+    from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as nvfp4_triton
+    from gptqmodel.nn_modules.qlinear import w4a_triton
+
+    monkeypatch.setattr(w4a_triton, "IS_ROCM", True)
+    monkeypatch.setattr(nvfp4_triton, "IS_ROCM", True)
+
+    error = w4a_triton.native_fp8_gemm_error()
+    assert isinstance(error, RuntimeError)
+    assert "ttg.nvidia_mma" in str(error)
+
+    # Device/argument checks must not run first: a HIP host has no usable path
+    # for any of these, whatever the operand happens to be.
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        w4a_triton.unpack_int4_to_e4m3(
+            torch.zeros((32, 64), dtype=torch.int32),
+            torch.empty((256, 64), dtype=torch.float8_e4m3fn),
+        )
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        w4a_triton.fp8_pack(torch.zeros((4, K), dtype=torch.float16))
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        nvfp4_triton.nvfp4_pack_and_swizzle(
+            torch.zeros((4, K), dtype=torch.float16), torch.ones(())
+        )
+
+
+# --------------------------------------------------------------------------
 # Fused INT4 -> E4M3 unpacking must stay byte-identical to the Torch decode.
 # --------------------------------------------------------------------------
 
@@ -744,8 +806,8 @@ def test_fused_unpack_matches_torch_decode(rows, out):
     difference shows up as a byte mismatch. Random words exercise every nibble
     position instead of a ramp that could agree by accident.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     generator = torch.Generator().manual_seed(rows * 17 + out)
     packed = torch.randint(
@@ -765,8 +827,8 @@ def test_fused_unpack_matches_torch_decode(rows, out):
 
 def test_fused_unpack_rejects_bad_arguments():
     """Wrong dtype/shape/device must be refused instead of silently decoded."""
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     packed = torch.zeros((32, 64), dtype=torch.int32, device="cuda")
     good = torch.empty((256, 64), dtype=torch.float8_e4m3fn, device="cuda")
@@ -781,8 +843,8 @@ def test_fused_unpack_rejects_bad_arguments():
 
 def test_fused_unpack_all_zero_and_all_fifteen_words():
     """The extreme word values pin the ends of the centered INT4 range."""
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     out = torch.empty((64, 32), device="cuda", dtype=torch.float8_e4m3fn)
     zero_words = torch.zeros((8, 32), dtype=torch.int32, device="cuda")
