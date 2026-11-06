@@ -5,6 +5,23 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 This file governs the whole repository in addition to any parent agent instructions.
 
+## Explicit accelerator families
+
+For device selection, model loading/placement, accelerator checks, or kernel
+`SUPPORTS_*` declarations, read and follow
+`.agents/skills/gptqmodel-device-families/SKILL.md` before editing.
+
+GPTQModel uses `DEVICE.CUDA` for NVIDIA and `DEVICE.ROCM` for AMD in kernel
+support declarations. PyTorch's HIP runtime also calls its AMD devices `cuda`;
+that runtime spelling is not a hardware-support declaration. Keep ROCm explicit
+in GPTQModel configuration and support-family decisions, resolving to PyTorch's
+namespace only at execution/placement boundaries. Centralize HIP detection in
+the family resolver instead of scattering `cuda` plus HIP checks across callers.
+Kernels must self-declare supported hardware, including `DEVICE.ROCM` when
+supported; never add ROCm implicitly because CUDA or Triton is available.
+Preserve concrete ordinals separately and validate every selected GPU, including
+on mixed-vendor or mixed-architecture hosts.
+
 ## Quantized inference weight storage
 
 All inference kernels must keep weights in their quantized representation
