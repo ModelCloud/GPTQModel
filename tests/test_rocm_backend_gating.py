@@ -15,10 +15,14 @@ import torch
 
 import gptqmodel.quantization.awq.modules.triton.scheduler as awq_scheduler
 from gptqmodel.models._const import DEVICE
+from gptqmodel.nn_modules.qlinear import exllamav2 as exllamav2_module
+from gptqmodel.nn_modules.qlinear import exllamav2_awq as exllamav2_awq_module
 from gptqmodel.nn_modules.qlinear import fp8 as fp8_module
 from gptqmodel.nn_modules.qlinear import gguf_triton as gguf_triton_module
 from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.utils import arch as arch_utils
@@ -59,6 +63,8 @@ def teardown_function(_function):
     qqq_module.QQQLinear.cached_validate_once.cache_clear()
     VPTQCudaLinear.cached_validate_once.cache_clear()
     gguf_triton_module.GGUFTritonKernel.cached_validate_once.cache_clear()
+    ExllamaV2Linear.cached_validate_once.cache_clear()
+    AwqExllamaV2Linear.cached_validate_once.cache_clear()
 
 
 
@@ -357,6 +363,68 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
         message = str(error)
         assert needle in message, f"{cls.__name__}: unhelpful message {message!r}"
         assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES
+
+
+def test_exllamav2_kernels_reject_rocm_without_jit_build(monkeypatch):
+    """ExLlamaV2 GPTQ/AWQ must fail fast on ROCm, never start the JIT build.
+
+    hipcc cannot compile the native extension and both kernels had accuracy
+    regressions on ROCm. An explicit selection used to wait ~15 s for a doomed
+    build and then report a build failure. The refusal must be an actionable
+    ``NotImplementedError`` pointing at the portable backend.
+    """
+
+    import gptqmodel.utils.exllamav2 as exllamav2_utils
+
+    monkeypatch.setattr(exllamav2_utils, "IS_ROCM", True)
+    monkeypatch.setattr(exllamav2_module, "IS_ROCM", True)
+    monkeypatch.setattr(exllamav2_awq_module, "IS_ROCM", True)
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("ROCm must not probe or build the ExLlamaV2 JIT extension")
+
+    monkeypatch.setattr(exllamav2_utils, "_extension_api", _forbidden)
+
+    ExllamaV2Linear.cached_validate_once.cache_clear()
+    AwqExllamaV2Linear.cached_validate_once.cache_clear()
+
+    ok, error = ExllamaV2Linear.validate_once()
+    assert ok is False
+    assert isinstance(error, NotImplementedError)
+    assert "ROCm" in str(error)
+    assert "BACKEND.TORCH" in str(error)
+
+    ok, error = AwqExllamaV2Linear.validate_once()
+    assert ok is False
+    assert isinstance(error, NotImplementedError)
+    assert "ROCm" in str(error)
+    assert "BACKEND.AWQ_TORCH" in str(error)
+
+    # Every runtime probe must short-circuit before touching the JIT loader.
+    assert exllamav2_utils.exllamav2_gptq_runtime_available() is False
+    assert exllamav2_utils.exllamav2_awq_runtime_available() is False
+    assert "BACKEND.TORCH" in exllamav2_utils.exllamav2_gptq_runtime_error()
+    assert "BACKEND.AWQ_TORCH" in exllamav2_utils.exllamav2_awq_runtime_error()
+
+    # The AUTO/explicit selector path consults validate().
+    ok_validate, error_validate = ExllamaV2Linear.validate(
+        bits=4, group_size=128, desc_act=False, sym=True, device=DEVICE.ROCM
+    )
+    assert ok_validate is False
+    assert isinstance(error_validate, NotImplementedError)
+
+    # The public extension API must refuse too, or `extension.load("all")` would
+    # still start the doomed build for every caller that prewarms extensions.
+    from gptqmodel import extension as extension_api
+
+    assert "exllamav2" not in extension_api._resolve_requested_extensions("all")
+    assert "exllamav2_awq" not in extension_api._resolve_requested_extensions("all")
+    assert extension_api.is_available("exllamav2") is False
+    assert extension_api.is_available("exllamav2_awq") is False
+    with pytest.raises(RuntimeError, match="BACKEND.TORCH"):
+        extension_api.load(name="exllamav2")
+    with pytest.raises(RuntimeError, match="BACKEND.AWQ_TORCH"):
+        extension_api.load(name="exllamav2_awq")
 
 
 def test_auto_on_rocm_never_selects_a_cuda_only_backend(monkeypatch):

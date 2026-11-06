@@ -18,6 +18,22 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
+from .rocm import IS_ROCM
+
+
+EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED = (
+    "ExLlamaV2 GPTQ is CUDA-only: ROCm support is disabled because of known "
+    "accuracy regressions, and the native extension cannot be built with hipcc. "
+    "Use the portable GPTQ Torch kernel instead "
+    "(`backend=AUTO` or `BACKEND.TORCH`)."
+)
+
+EXLLAMAV2_AWQ_ROCM_UNSUPPORTED = (
+    "ExLlamaV2 AWQ is CUDA-only: ROCm support is disabled because of known "
+    "accuracy regressions, and the native extension cannot be built with hipcc. "
+    "Use the portable AWQ Torch kernel instead "
+    "(`backend=AUTO` or `BACKEND.AWQ_TORCH`)."
+)
 
 
 class ScratchSpace:
@@ -173,11 +189,27 @@ def clear_exllamav2_gptq_extension_cache() -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
+def exllamav2_gptq_supported() -> bool:
+    """Whether the native ExLlamaV2 GPTQ extension can run on this host.
+
+    The extension is CUDA-only: hipcc cannot compile the CUDA sources, and the
+    kernel had accuracy regressions on ROCm.
+    """
+
+    return not IS_ROCM
+
+
 def exllamav2_gptq_runtime_available() -> bool:
+    # ROCm cannot build the native extension (hipcc rejects the CUDA sources),
+    # so report it as unavailable instead of triggering a doomed JIT build.
+    if not exllamav2_gptq_supported():
+        return False
     return _extension_api().is_available("exllamav2")
 
 
 def exllamav2_gptq_runtime_error() -> str:
+    if IS_ROCM:
+        return EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED
     extension_api = _extension_api()
     if extension_api.is_available("exllamav2"):
         return ""
@@ -225,11 +257,25 @@ def clear_exllamav2_awq_extension_cache() -> None:
     _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
+def exllamav2_awq_supported() -> bool:
+    """Whether the native ExLlamaV2 AWQ extension can run on this host.
+
+    See ``exllamav2_gptq_supported``: the extension is CUDA-only.
+    """
+
+    return not IS_ROCM
+
+
 def exllamav2_awq_runtime_available() -> bool:
+    # See exllamav2_gptq_runtime_available: never attempt the ROCm JIT build.
+    if not exllamav2_awq_supported():
+        return False
     return _extension_api().is_available("exllamav2_awq")
 
 
 def exllamav2_awq_runtime_error() -> str:
+    if IS_ROCM:
+        return EXLLAMAV2_AWQ_ROCM_UNSUPPORTED
     extension_api = _extension_api()
     if extension_api.is_available("exllamav2_awq"):
         return ""

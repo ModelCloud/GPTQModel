@@ -16,7 +16,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.machete as machete_module
-from gptqmodel.models._const import PLATFORM
+from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.utils.rocm import IS_ROCM
@@ -98,9 +98,13 @@ def test_rocm_rejection_reason_survives(monkeypatch):
     """The ROCm refusal is the same code path with a different reason.
 
     Patched rather than detected so this covers the branch on any platform,
-    including the CUDA machines that never enter it.
+    including the CUDA machines that never enter it.  The support-family gate
+    has to accept both families too: on a HIP host ``cuda:0`` normalizes to
+    ``DEVICE.ROCM`` and the CUDA-only family declaration rejects before
+    ``MacheteLinear.validate_device`` can raise its own reason.
     """
     monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
+    monkeypatch.setattr(MacheteLinear, "SUPPORTS_DEVICES", [DEVICE.CUDA, DEVICE.ROCM])
     monkeypatch.setattr(machete_module, "IS_ROCM", True)
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False

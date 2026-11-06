@@ -15,6 +15,7 @@ from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
+    EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED,
     ScratchSpace,
     exllamav2_gemm_half_q_half,
     exllamav2_gptq_runtime_available,
@@ -22,6 +23,7 @@ from ...utils.exllamav2 import (
     exllamav2_make_q_matrix,
 )
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -107,6 +109,12 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # The native ExLlamaV2 extension is CUDA-only: hipcc cannot build it and
+        # the kernel had accuracy regressions on ROCm. Fail fast with an
+        # actionable error instead of attempting the JIT build (~15 s of hipcc
+        # errors) and surfacing a build failure.
+        if IS_ROCM:
+            return False, NotImplementedError(EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED)
         if not exllamav2_gptq_runtime_available():
             return False, ImportError(exllamav2_gptq_runtime_error())
         return True, None
