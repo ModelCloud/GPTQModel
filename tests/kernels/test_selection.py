@@ -77,7 +77,7 @@ def _pick_device(cls):
         return DEVICE.CPU
     if DEVICE.CPU in devices:
         return DEVICE.CPU
-    if DEVICE.CUDA in devices and HAS_CUDA:
+    if DEVICE.CUDA in devices and HAS_CUDA and not IS_ROCM:
         minimum_capability = getattr(cls, "MIN_COMPUTE_CAPABILITY", None)
         if minimum_capability is not None:
             capability = torch.cuda.get_device_capability(0)
@@ -99,9 +99,26 @@ def test_pick_device_skips_cuda_below_kernel_minimum_capability(monkeypatch):
         MIN_COMPUTE_CAPABILITY = (12, 1)
 
     monkeypatch.setattr("tests.kernels.test_selection.HAS_CUDA", True)
+    monkeypatch.setattr("tests.kernels.test_selection.IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
 
     assert _pick_device(CudaKernel) is None
+
+
+@pytest.mark.parametrize("supports_rocm", [False, True])
+def test_pick_device_on_rocm_does_not_probe_nvidia_capability(monkeypatch, supports_rocm):
+    class Kernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM] if supports_rocm else [DEVICE.CUDA]
+        MIN_COMPUTE_CAPABILITY = (8, 0)
+
+    monkeypatch.setattr("tests.kernels.test_selection.HAS_CUDA", True)
+    monkeypatch.setattr("tests.kernels.test_selection.IS_ROCM", True)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability",
+        lambda *a, **k: pytest.fail("NVIDIA capability must not be queried on ROCm"),
+    )
+
+    assert _pick_device(Kernel) is (DEVICE.ROCM if supports_rocm else None)
 
 
 def _pick_group_size(cls):
@@ -224,7 +241,7 @@ def test_rocm_family_resolves_at_the_torch_boundary(monkeypatch):
     monkeypatch.setattr(model_const, "IS_ROCM", True)
     monkeypatch.setattr(model_const, "HAS_CUDA", True)
 
-    assert as_torch_device(DEVICE.ROCM) == torch.device("cuda:0")
+    assert as_torch_device(DEVICE.ROCM) == torch.device("cuda")
     # Kernel validation maps HIP's ``cuda`` namespace to the ROCm family too,
     # so a concrete ``cuda:N`` target cannot pass a CUDA-only family gate.
     from gptqmodel.nn_modules.qlinear import _device_family as kernel_device_family
@@ -233,6 +250,21 @@ def test_rocm_family_resolves_at_the_torch_boundary(monkeypatch):
     # The thread pool keeps the family spelling so family-wide locks still
     # cover every visible ROCm device rather than only ordinal 0.
     assert _coerce_device(DEVICE.ROCM) == torch.device("cuda")
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", DEVICE.CUDA, torch.device("cuda:3")])
+def test_rocm_direct_kernel_validation_rejects_cuda_only_kernel(monkeypatch, selector):
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+
+    with pytest.raises(NotImplementedError, match="only supports"):
+        TritonV2Linear.validate_device(selector)
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", DEVICE.CUDA, torch.device("cuda:3")])
+def test_cuda_direct_kernel_validation_accepts_cuda_selectors(monkeypatch, selector):
+    monkeypatch.setattr(model_const, "IS_ROCM", False)
+
+    TritonV2Linear.validate_device(selector)
 
 
 @pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])

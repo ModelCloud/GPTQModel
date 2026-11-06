@@ -40,19 +40,21 @@ META = torch.device("meta")
 
 
 def as_torch_device(device_like) -> torch.device:
-    """Resolve a device-like value to a concrete ``torch.device``.
+    """Resolve a device-like value without assigning an implicit ordinal.
 
     GPT-QModel's ``DEVICE`` enum names a kernel support family, and its
     ``DEVICE.ROCM`` member intentionally has the value ``"rocm"`` even though
     PyTorch exposes ROCm through the ``cuda`` namespace.  ``torch.device``
-    therefore rejects it, so anything that needs a concrete device must go
-    through the enum's ``to_torch_device()`` mapping.
+    therefore rejects it. Resolve enums through their runtime ``type`` while
+    keeping families indexless, just like ``torch.device("cuda")``. Calling
+    ``to_torch_device()`` here would pin family selectors to device 0 instead
+    of honoring the caller's current CUDA/XPU/NPU device.
     """
     if isinstance(device_like, torch.device):
         return device_like
     resolver = getattr(device_like, "to_torch_device", None)
     if callable(resolver):
-        return resolver()
+        return torch.device(device_like.type)
     return torch.device(device_like)
 
 

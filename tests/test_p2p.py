@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.utils import p2p
 
 
@@ -211,6 +212,49 @@ def test_safe_move_to_uses_direct_path_when_supported(monkeypatch):
     moved = p2p.safe_move_to(src, torch.device("cpu"), copy=True)
     assert torch.equal(moved, src)
     assert moved is not src
+
+
+@pytest.mark.parametrize("device", [DEVICE.CUDA, DEVICE.ROCM])
+def test_safe_moves_with_family_enum_use_current_device(monkeypatch, device):
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *a, **k: False)
+    staged = []
+
+    def fake_stage(tensor, target, **kwargs):
+        staged.append(target)
+        return tensor.clone()
+
+    monkeypatch.setattr(p2p, "_stage_through_host", fake_stage)
+    src = torch.arange(8)
+    assert torch.equal(p2p.safe_move_to(src, device), src)
+    assert staged == [torch.device("cuda:1")]
+
+    module = torch.nn.Linear(2, 2)
+    targets = []
+    monkeypatch.setattr(module, "to", lambda **kwargs: targets.append(kwargs["device"]) or module)
+    assert p2p.safe_module_to(module, device) is module
+    assert targets[-1] == torch.device("cuda:1")
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA/HIP devices")
+@pytest.mark.parametrize("device", [DEVICE.CUDA, DEVICE.ROCM])
+def test_family_enum_moves_on_nonzero_current_device(device):
+    src = torch.arange(8)
+    module = torch.nn.Linear(8, 2)
+    with torch.no_grad():
+        module.weight.copy_(torch.arange(16).reshape(2, 8) / 16)
+        module.bias.copy_(torch.arange(2) / 8)
+    expected = module(src.float()).detach()
+
+    with torch.cuda.device(1):
+        moved = p2p.safe_move_to(src, device)
+        p2p.safe_module_to(module, device)
+        assert moved.device == torch.device("cuda:1")
+        assert module.weight.device == torch.device("cuda:1")
+        assert torch.equal(moved.cpu(), src)
+        torch.testing.assert_close(module(moved.float()).cpu(), expected)
+        # Explicit ordinals must still override the current-device context.
+        assert p2p.safe_move_to(src, "cuda:0").device == torch.device("cuda:0")
 
 
 def test_asymmetric_pairs_lists_only_the_broken_direction(monkeypatch):
