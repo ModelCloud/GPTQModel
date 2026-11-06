@@ -150,6 +150,31 @@ class METHOD(str, Enum):
     VPTQ = "vptq"
 
 
+# Integer bit widths each method's packer and kernels can actually realize.
+# Fractional widths are never valid: every layout stores an integer number of
+# bits per weight, so accepting a fractional request would silently floor it
+# while the saved config still advertises the original value.
+METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
+    # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
+    METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
+    # AWQ is 4-bit everywhere, with 8-bit available on Marlin/Machete.
+    METHOD.AWQ: (4, 8),
+    # QQQ and ParoQuant kernels are 4-bit only.
+    METHOD.QQQ: (4,),
+    METHOD.PARO: (4,),
+    # FP8 is a fixed 8-bit storage format.
+    METHOD.FP8: (8,),
+    METHOD.BITSANDBYTES: (4, 8),
+    # EXL3 stores one integer trellis depth per module.
+    METHOD.EXL3: (1, 2, 3, 4, 5, 6, 7, 8),
+    # GGUF subtypes cover q1/q2/q3/q4/q5/q6/q8 in the C++ and torch kernels.
+    METHOD.GGUF: (1, 2, 3, 4, 5, 6, 8),
+    # VPTQ's nominal bpw label is derived from codebook sizes and clamped to
+    # 1-8; the vector codebooks can realize any integer width in that range.
+    METHOD.VPTQ: (1, 2, 3, 4, 5, 6, 7, 8),
+}
+
+
 class VramStrategy(str, Enum):
     """Placement strategies shared by dense and MoE device pools."""
 
@@ -571,7 +596,7 @@ class GGUFBits(BaseComplexBits):
     def __post_init__(self):
         """Validate the GGUF bit-spec components after construction."""
 
-        if self.bits <= 0:
+        if isinstance(self.bits, bool) or not isinstance(self.bits, int) or self.bits <= 0:
             raise ValueError("GGUFBits: `bits` must be a positive integer.")
         if self.version not in {"q", "iq", "tq", "mxfp", "nvfp"}:
             raise ValueError("GGUFBits: `version` must be one of `[q, iq, tq, mxfp, nvfp]`.")
@@ -724,19 +749,51 @@ def _normalize_gguf_config_spec(
     if isinstance(bits, GGUFBits):
         bits_spec_from_bits = bits
         normalized_bits = bits.bits
+    elif isinstance(bits, bool):
+        raise ValueError(f"GGUFConfig: `bits` must be an integer bit width, not `{bits}`.")
+    elif isinstance(bits, float):
+        if not math.isfinite(bits):
+            raise ValueError("GGUFConfig: `bits` must be finite.")
+        if not bits.is_integer():
+            raise ValueError(
+                _fractional_bits_error(bits, field="bits", format_value=FORMAT.GGUF)
+            )
+        normalized_bits = int(bits)
     elif isinstance(bits, str):
         raw_bits = bits.strip().lower().replace("-", "_")
-        if raw_bits.isdigit():
-            normalized_bits = int(raw_bits)
+        try:
+            numeric_bits = float(raw_bits)
+        except ValueError:
+            numeric_bits = None
+
+        if numeric_bits is not None:
+            if not math.isfinite(numeric_bits):
+                raise ValueError("GGUFConfig: `bits` must be finite.")
+            if not numeric_bits.is_integer():
+                raise ValueError(
+                    _fractional_bits_error(
+                        numeric_bits, field="bits", format_value=FORMAT.GGUF
+                    )
+                )
+            normalized_bits = int(numeric_bits)
         else:
             bits_spec_from_bits = GGUFBits.from_alias(raw_bits)
             normalized_bits = bits_spec_from_bits.bits
     elif not isinstance(bits, int):
-        raise ValueError(f"GGUFConfig: unsupported bits specification `{bits}`.")
+        raise ValueError(
+            f"GGUFConfig: `bits` must be an integer bit width, got `{bits!r}`."
+        )
 
     normalized_bits = int(normalized_bits)
-    if normalized_bits not in [1, 2, 3, 4, 5, 6, 8]:
-        raise ValueError("GGUFConfig: `bits` must resolve to one of `[1, 2, 3, 4, 5, 6, 8]`.")
+    valid_bit_widths = METHOD_SUPPORTED_BITS[METHOD.GGUF]
+    if normalized_bits not in valid_bit_widths:
+        raise ValueError(
+            _unsupported_bits_error(
+                normalized_bits,
+                valid_bit_widths,
+                method=METHOD.GGUF,
+            )
+        )
 
     normalized_format = _normalize_gguf_public_format(format_value)
     if normalized_format is None:
@@ -756,33 +813,120 @@ def _normalize_gguf_config_spec(
     return normalized_bits, normalized_format, bits_spec
 
 
-def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
-    """Normalize generic bit fields into ints or structured GGUF specs."""
+def _fractional_bits_error(
+    bits: float,
+    *,
+    field: str,
+    format_value: Optional[FORMAT] = None,
+) -> str:
+    """Build the rejection message for a fractional bit width."""
+
+    floored_width = max(1, int(math.floor(bits)))
+    if format_value == FORMAT.EXL3:
+        return (
+            f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. EXL3 "
+            "packs one integer trellis depth (`K`) per module, so a fractional width "
+            f"cannot be realised and would silently quantize at {floored_width} bpw. "
+            "Pass an integer `bits` and express a fractional average with per-module "
+            "widths, e.g. `dynamic={'model.layers.0.mlp.down_proj': {'bits': 3}}`."
+        )
+    return (
+        f"QuantizeConfig: `{field}={bits:g}` is not an integer bit width. "
+        "Quantization packs an integer number of bits per weight, so a fractional "
+        f"width cannot be realised and would silently quantize at {floored_width} bits. "
+        "Pass an integer `bits` and express a fractional average with per-module "
+        "`dynamic` widths."
+    )
+
+
+def _unsupported_bits_error(
+    bits: int,
+    valid_bit_widths: Tuple[int, ...],
+    *,
+    field: str = "bits",
+    method: Optional[METHOD] = None,
+) -> str:
+    """Build the rejection message for an out-of-range bit width."""
+
+    scope = f" for method `{method.value}`" if method is not None else ""
+    return (
+        f"QuantizeConfig: `{field}={bits}` is not supported{scope}; "
+        f"supported bit widths are `{list(valid_bit_widths)}`."
+    )
+
+
+def _normalize_quant_bits(
+    bits: Union[int, float, str, GGUFBits],
+    format_value: Optional[Union[str, FORMAT]] = None,
+    *,
+    field: str = "bits",
+    valid_bit_widths: Optional[Tuple[int, ...]] = None,
+    method: Optional[METHOD] = None,
+) -> Union[int, GGUFBits]:
+    """Normalize and validate a generic quant bit field.
+
+    Bit widths are integers: every packed layout stores an integer number of
+    bits per weight, so a fractional request cannot be realised. ``method``
+    narrows the accepted widths to what that method's packer and kernels
+    support; without it the generic 1-8 range is used.
+    """
 
     if isinstance(format_value, str):
         format_value = _normalize_format(format_value)
 
+    if valid_bit_widths is None:
+        valid_bit_widths = tuple(range(1, 9))
+    valid_bit_widths = tuple(int(width) for width in valid_bit_widths)
+
+    if isinstance(bits, bool):
+        raise ValueError(
+            f"QuantizeConfig: `{field}` must be an integer bit width, not `{bits}`."
+        )
+
     if isinstance(bits, GGUFBits):
         normalized = bits
     elif isinstance(bits, float):
-        if format_value == FORMAT.EXL3:
-            normalized = bits
-        elif bits.is_integer():
-            normalized = int(bits)
-        else:
-            raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
+        if not math.isfinite(bits):
+            raise ValueError(f"QuantizeConfig: `{field}` must be finite.")
+        if not bits.is_integer():
+            raise ValueError(
+                _fractional_bits_error(bits, field=field, format_value=format_value)
+            )
+        normalized = int(bits)
     elif isinstance(bits, int):
         normalized = bits
     elif isinstance(bits, str):
         raw = bits.strip().lower().replace("-", "_")
-        normalized = int(raw) if raw.isdigit() else GGUFBits.from_alias(raw)
+        try:
+            numeric = float(raw)
+        except ValueError:
+            numeric = None
+
+        if numeric is not None:
+            if not math.isfinite(numeric):
+                raise ValueError(f"QuantizeConfig: `{field}` must be finite.")
+            if not numeric.is_integer():
+                raise ValueError(
+                    _fractional_bits_error(numeric, field=field, format_value=format_value)
+                )
+            normalized = int(numeric)
+        else:
+            normalized = GGUFBits.from_alias(raw)
     else:
-        raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
+        raise ValueError(
+            f"QuantizeConfig: `{field}` must be an integer bit width, got `{bits!r}`."
+        )
 
     normalized_width = normalized.bits if isinstance(normalized, GGUFBits) else normalized
-    valid_bit_widths = [1, 2, 3, 4, 5, 6, 7, 8]
     if normalized_width not in valid_bit_widths:
-        raise ValueError(f"QuantizeConfig: `bits` must resolve to one of `{valid_bit_widths}`.")
+        raise ValueError(
+            _unsupported_bits_error(
+                normalized_width,
+                valid_bit_widths,
+                field=field,
+                method=method,
+            )
+        )
 
     if format_value == FORMAT.GGUF and not isinstance(normalized, GGUFBits):
         default_alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(normalized_width)
@@ -885,6 +1029,10 @@ def _normalize_exl3_bits(bits: Union[int, float, str], *, field: str = "bits") -
     ``dynamic`` widths, each of which is an integer.
     """
 
+    if isinstance(bits, bool):
+        raise ValueError(
+            f"EXL3Config: `{field}` must be an integer trellis width, not `{bits}`."
+        )
     if isinstance(bits, str):
         bits = float(bits.strip())
     elif isinstance(bits, int):
@@ -3489,9 +3637,16 @@ def _normalize_bitsandbytes_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     legacy_block_size = normalized.pop("bnb_block_size", None)
     legacy_compress_statistics = normalized.pop("bnb_compress_statistics", None)
 
+    bits = _normalize_quant_bits(
+        normalized.get(BITS_FIELD_CODE, 4),
+        field="bits",
+        valid_bit_widths=METHOD_SUPPORTED_BITS[METHOD.BITSANDBYTES],
+        method=METHOD.BITSANDBYTES,
+    )
+    normalized[BITS_FIELD_CODE] = bits
     normalized[FORMAT_FIELD_CODE] = _normalize_bitsandbytes_format(
         normalized.get(FORMAT_FIELD_CODE, legacy_format),
-        bits=int(normalized.get(BITS_FIELD_CODE, 4)),
+        bits=bits,
     )
     normalized["block_size"] = _normalize_bitsandbytes_block_size(
         normalized.get("block_size", legacy_block_size)
@@ -3883,8 +4038,25 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.format = _normalize_format(self.format)
         return self.format
 
-    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
-        return _normalize_quant_bits(bits_value, format_value=checkpoint_format)
+    def supported_bit_widths(self) -> Tuple[int, ...]:
+        """Return the integer bit widths this quantization method can realize."""
+
+        return METHOD_SUPPORTED_BITS.get(self.method, tuple(range(1, 9)))
+
+    def _normalize_bits_field(
+        self,
+        bits_value,
+        checkpoint_format: FORMAT,
+        *,
+        field: str = "bits",
+    ):
+        return _normalize_quant_bits(
+            bits_value,
+            format_value=checkpoint_format,
+            field=field,
+            valid_bit_widths=self.supported_bit_widths(),
+            method=self.method,
+        )
 
     def _normalize_dynamic_layer_config(
         self,
@@ -3896,7 +4068,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     ) -> None:
         for key, value in layer_dict.items():
             if key == "bits":
-                normalized_bits = self._normalize_bits_field(value, checkpoint_format=checkpoint_format)
+                normalized_bits = self._normalize_bits_field(
+                    value,
+                    checkpoint_format=checkpoint_format,
+                    field=f"dynamic['{layer_name}'].bits",
+                )
                 layer_dict[key] = normalized_bits
                 if quant_bits_width(normalized_bits) not in valid_bit_widths:
                     raise ValueError(
@@ -3927,8 +4103,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
     def __post_init__(self):
-        fields_info = fields(self)
-
         self.method = _normalize_quant_method(self.method)
         format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -3954,9 +4128,15 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         self.fallback = _normalize_fallback(self.fallback)
 
-        valid_bit_widths = fields_info[0].metadata["choices"]
+        valid_bit_widths = self.supported_bit_widths()
         if quant_bits_width(self.bits) not in valid_bit_widths:
-            raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
+            raise ValueError(
+                _unsupported_bits_error(
+                    quant_bits_width(self.bits),
+                    valid_bit_widths,
+                    method=self.method,
+                )
+            )
 
         # 5/6/7-bit GPTQ only exists in the planar (split-plane) layout, which is
         # a distinct checkpoint format from the continuous gptq/gptq_v2 layouts.
@@ -4316,6 +4496,25 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             for normalized_key, meta_key in meta_field_map.items():
                 if normalized_key not in normalized and meta_key in meta_payload:
                     normalized[normalized_key] = meta_payload.get(meta_key)
+
+        # `format` defaults to GPTQ above for legacy payloads. Weight-only
+        # methods have their own defaults, and forcing FORMAT.GPTQ would make
+        # e.g. a `method="gguf"` payload fail format validation instead of
+        # being normalized to its natural subtype.
+        effective_method = normalized.get(METHOD_FIELD_CODE)
+        weight_only_method = _peek_weight_only_method(normalized.get("weight_only"))
+        if weight_only_method == WeightOnlyMethod.GGUF:
+            effective_method = METHOD.GGUF
+        elif weight_only_method == WeightOnlyMethod.FP8:
+            effective_method = METHOD.FP8
+        elif weight_only_method == WeightOnlyMethod.BITSANDBYTES:
+            effective_method = METHOD.BITSANDBYTES
+        if format_auto_inferred and effective_method in {
+            METHOD.GGUF,
+            METHOD.FP8,
+            METHOD.BITSANDBYTES,
+        }:
+            normalized[FORMAT_FIELD_CODE] = None
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
@@ -5141,14 +5340,27 @@ class VPTQConfig(GPTQConfig):
             index_bits += math.log2(num_res_centroids)
         return max(VPTQ_VALID_BITS[0], min(VPTQ_VALID_BITS[-1], math.ceil(index_bits / vector_len)))
 
-    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
+    def _normalize_bits_field(
+        self,
+        bits_value,
+        checkpoint_format: FORMAT,
+        *,
+        field: str = "bits",
+    ):
         del checkpoint_format
         derived = self._derive_bits()
-        if bits_value is not None and int(bits_value) != derived:
-            log.info(
-                f"VPTQConfig: `bits` is derived from the codebook configuration; "
-                f"ignoring `bits={bits_value}` and using `bits={derived}`."
+        if bits_value is not None:
+            normalized = _normalize_quant_bits(
+                bits_value,
+                field=field,
+                valid_bit_widths=self.supported_bit_widths(),
+                method=self.method,
             )
+            if quant_bits_width(normalized) != derived:
+                log.info(
+                    f"VPTQConfig: `bits` is derived from the codebook configuration; "
+                    f"ignoring `bits={bits_value}` and using `bits={derived}`."
+                )
         return derived
 
     def _normalize_dynamic_layer_config(
@@ -5346,8 +5558,14 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        if "bits" in layer_dict and int(layer_dict["bits"]) != 8:
-            raise ValueError(f"FP8Config: layer `{layer_name}` only supports 8-bit FP8 weights.")
+        if "bits" in layer_dict:
+            layer_dict["bits"] = _normalize_quant_bits(
+                layer_dict["bits"],
+                format_value=FORMAT.FP8,
+                field=f"dynamic['{layer_name}'].bits",
+                valid_bit_widths=METHOD_SUPPORTED_BITS[METHOD.FP8],
+                method=METHOD.FP8,
+            )
         if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
             raise ValueError("FP8Config: `group_size` is not used; keep it at `-1`.")
 
@@ -5406,7 +5624,13 @@ class BitsAndBytesConfig(PreProcessorConfig):
     compress_statistics: bool = field(default=True)
 
     def _resolve_checkpoint_format(self) -> FORMAT:
-        self.format = _normalize_bitsandbytes_format(self.format, bits=int(self.bits))
+        bits = _normalize_quant_bits(
+            self.bits,
+            field="bits",
+            valid_bit_widths=METHOD_SUPPORTED_BITS[METHOD.BITSANDBYTES],
+            method=METHOD.BITSANDBYTES,
+        )
+        self.format = _normalize_bitsandbytes_format(self.format, bits=bits)
         return FORMAT.BITSANDBYTES
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -5457,15 +5681,27 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        if "bits" in layer_dict and int(layer_dict["bits"]) not in {4, 8}:
-            raise ValueError(f"BitsAndBytesConfig: layer `{layer_name}` only supports 4-bit or 8-bit weights.")
+        if "bits" in layer_dict:
+            layer_dict["bits"] = _normalize_quant_bits(
+                layer_dict["bits"],
+                format_value=FORMAT.BITSANDBYTES,
+                field=f"dynamic['{layer_name}'].bits",
+                valid_bit_widths=METHOD_SUPPORTED_BITS[METHOD.BITSANDBYTES],
+                method=METHOD.BITSANDBYTES,
+            )
         if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
             raise ValueError("BitsAndBytesConfig: `group_size` is not used; keep it at `-1`.")
         if "desc_act" in layer_dict and bool(layer_dict["desc_act"]):
             raise ValueError("BitsAndBytesConfig: `desc_act` is not supported.")
         if "sym" in layer_dict and layer_dict["sym"] is not True:
             raise ValueError("BitsAndBytesConfig: `sym` must stay `True`.")
-        dynamic_bits = int(layer_dict.get("bits", self.bits))
+        dynamic_bits = _normalize_quant_bits(
+            layer_dict.get("bits", self.bits),
+            format_value=FORMAT.BITSANDBYTES,
+            field=f"dynamic['{layer_name}'].bits",
+            valid_bit_widths=METHOD_SUPPORTED_BITS[METHOD.BITSANDBYTES],
+            method=METHOD.BITSANDBYTES,
+        )
         raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("bnb_quant_type"))
         if raw_format is not None:
             layer_dict[FORMAT_FIELD_CODE] = _normalize_bitsandbytes_format(raw_format, bits=dynamic_bits)
@@ -5546,8 +5782,14 @@ class EXL3Config(BaseQuantizeConfig):
     def default_desc_act(self) -> bool:
         return False
 
-    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
-        return _normalize_exl3_bits(bits_value, field="bits")
+    def _normalize_bits_field(
+        self,
+        bits_value,
+        checkpoint_format: FORMAT,
+        *,
+        field: str = "bits",
+    ):
+        return _normalize_exl3_bits(bits_value, field=field)
 
     def _normalize_dynamic_layer_config(
         self,
@@ -5576,7 +5818,7 @@ class EXL3Config(BaseQuantizeConfig):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
-        self.bits = _normalize_exl3_bits(self.bits)
+        self.bits = _normalize_exl3_bits(self.bits, field="bits")
         self.head_bits = (
             None
             if self.head_bits is None
@@ -5752,8 +5994,20 @@ class GGUFConfig(PreProcessorConfig):
         self.bits, self.format, self._gguf_bits = _normalize_gguf_config_spec(self.bits, self.format)
         return FORMAT.GGUF
 
-    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
-        normalized = _normalize_quant_bits(bits_value, format_value=FORMAT.GGUF)
+    def _normalize_bits_field(
+        self,
+        bits_value,
+        checkpoint_format: FORMAT,
+        *,
+        field: str = "bits",
+    ):
+        normalized = _normalize_quant_bits(
+            bits_value,
+            format_value=FORMAT.GGUF,
+            field=field,
+            valid_bit_widths=self.supported_bit_widths(),
+            method=self.method,
+        )
         return normalized.bits if isinstance(normalized, GGUFBits) else normalized
 
     def _normalize_dynamic_layer_config(
@@ -5774,10 +6028,12 @@ class GGUFConfig(PreProcessorConfig):
 
             layer_dict["bits"] = normalized_bits
 
-            bits_implied_format = (
-                isinstance(raw_bits, GGUFBits)
-                or (isinstance(raw_bits, str) and not raw_bits.strip().isdigit())
-            )
+            bits_implied_format = isinstance(raw_bits, GGUFBits)
+            if isinstance(raw_bits, str):
+                try:
+                    float(raw_bits.strip().lower().replace("-", "_"))
+                except ValueError:
+                    bits_implied_format = True
             if format_override_present or bits_implied_format:
                 layer_dict[FORMAT_FIELD_CODE] = normalized_format
 
@@ -5996,6 +6252,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         )
     if (
         format_value == FORMAT.GGUF
+        or method == METHOD.GGUF
         or weight_only_method == WeightOnlyMethod.GGUF
         or _looks_like_gguf_bits(bits)
         or gguf_format_detected
