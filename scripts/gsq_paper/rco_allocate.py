@@ -21,6 +21,11 @@ from tempfile import TemporaryDirectory
 import torch
 
 
+#: Fallback projections for the packed-block rebuild. The GSQ paper stages the
+#: seven Llama names, but an architecture may add its own (Ripple-65B has a gated
+#: attention ``self_attn.g_proj``), and a hardcoded tuple silently drops those
+#: tensors. ``load_block`` discovers the real set from the live block and only
+#: falls back to this tuple when discovery yields nothing.
 PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
                'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
 
@@ -127,6 +132,7 @@ def load_block(model, checkpoint, width, *, index, group_size):
     the width database entry for that block: no re-quantization is required.
     """
     from gptqmodel.looper.gsq_training_model import _restore_packed_layer
+    from gptqmodel.quantization.rco import discover_projections
 
     saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
     if saved.get('layer_index') != index or group_size_of(saved) != group_size:
@@ -135,7 +141,17 @@ def load_block(model, checkpoint, width, *, index, group_size):
     if bits != width:
         raise ValueError(f'{checkpoint} holds W{bits}, expected W{width}')
     layer = model.model.layers[saved['layer_index']]
-    return _restore_packed_layer(layer, saved['state_dict'], names=PROJECTIONS, bits=width,
+    # Discover from the live block so a model-level projection the paper's Llama
+    # tuple does not know about is still rebuilt. ``state_dict`` only contains
+    # the tensors this arm actually wrote, so intersecting with it keeps a
+    # partial arm from asking for a missing tensor.
+    names = tuple(
+        name for name in discover_projections(layer, suffixes=None)
+        if f'{name}.weight' in saved['state_dict']
+    ) or PROJECTIONS
+    relative = [name.split('.', 1)[-1] if name.startswith('model.layers.') else name
+                for name in names]
+    return _restore_packed_layer(layer, saved['state_dict'], names=tuple(relative), bits=width,
                                  group_size=group_size_of(saved), device='cpu')
 
 
@@ -171,6 +187,7 @@ def main():
         LlamaTeacherKL,
         achieved_bits,
         budget_constrained_argmax,
+        discover_projections,
         projected_gumbel_search,
     )
     from gptqmodel.quantization.rco_mlx import (
@@ -197,6 +214,21 @@ def main():
 
     calib_docs = documents(args.corpus, 'validation', args.calib_seqs)
 
+    # Discover the projections from the live model instead of trusting the
+    # paper's Llama tuple: a model that adds one (Ripple-65B's gated
+    # `self_attn.g_proj`) would otherwise be allocated against a budget that
+    # omits those tensors entirely.
+    block_projections = tuple(
+        name.split('model.layers.0.', 1)[-1]
+        for name in discover_projections(wrapper.model.model.layers[0])
+    )
+    if not block_projections:
+        block_projections = PROJECTIONS
+    if set(block_projections) != set(PROJECTIONS):
+        print(f'  discovering {len(block_projections)} projections per block: '
+              f'{len(set(block_projections) - set(PROJECTIONS))} beyond the Llama default',
+              flush=True)
+
     database, param_counts = {}, {}
     started = time.monotonic()
     for index in range(args.layers):
@@ -205,7 +237,7 @@ def main():
             if not checkpoint.exists():
                 raise SystemExit(f'Width database is missing block {index} at W{width}: {checkpoint}')
             packed = load_block(wrapper.model, checkpoint, width, index=index, group_size=args.group_size)
-            for name in PROJECTIONS:
+            for name in block_projections:
                 key = f'model.layers.{index}.{name}'
                 # ``dequantize_weight`` returns [in, out]; nn.Linear holds
                 # [out, in]. Square projections hide the difference, so this
@@ -343,7 +375,8 @@ def main():
     projection_bits = {name: options[option] for group, option in zip(groups, assignment.tolist())
                        for name in group}
     blocks = sorted({int(name.split('.')[2]) for name in names})
-    layer_bits = ({block: projection_bits[f'model.layers.{block}.{PROJECTIONS[0]}'] for block in blocks}
+    first_projection = block_projections[0]
+    layer_bits = ({block: projection_bits[f'model.layers.{block}.{first_projection}'] for block in blocks}
                   if args.grouping == 'block' else None)
 
     result = {
