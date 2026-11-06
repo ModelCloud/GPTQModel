@@ -5619,6 +5619,19 @@ class EXL3Config(BaseQuantizeConfig):
 
         self.adapter = normalize_adapter(self.adapter)
 
+        # EXL3 stores one integer trellis depth (`K`) per module, so a fractional
+        # `bits` cannot be realised uniformly: `quant_bits_width` floors it and the
+        # checkpoint silently ends up narrower than requested (2.5 -> 2). A
+        # fractional average has to be expressed as per-module `dynamic` widths.
+        uniform_width = quant_bits_width(self.bits)
+        if uniform_width != self.bits and not self.dynamic:
+            log.warn(
+                f"EXL3Config: `bits={self.bits:g}` is not an integer trellis width; "
+                f"modules without a `dynamic` override quantize at {uniform_width} bpw, "
+                "not at the requested width. Express a fractional average with "
+                "`dynamic={'<module>': {'bits': N}}`."
+            )
+
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
         if self.rotation and self.offload_to_disk:
