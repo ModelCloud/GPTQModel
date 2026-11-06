@@ -18,6 +18,7 @@ from parameterized import parameterized
 from safetensors.torch import safe_open
 
 from gptqmodel import BACKEND
+from gptqmodel.models import _const as model_const
 from gptqmodel.nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
@@ -76,6 +77,31 @@ def _xpu_available() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
+def _kernel_supports_device(kernel_cls: type, device: torch.device) -> bool:
+    """Whether the kernel's own declaration admits the runtime device family."""
+
+    family = model_const.normalize_device(device)
+    return (
+        family in kernel_cls.SUPPORTS_DEVICES
+        or model_const.DEVICE.ALL in kernel_cls.SUPPORTS_DEVICES
+    )
+
+
+# Accelerator backends whose kernels declare their supported device families.
+# HIP exposes AMD devices through torch's ``cuda`` namespace, so the runtime
+# check alone cannot tell whether a CUDA-only kernel can run.
+_BACKEND_KERNELS = {
+    BACKEND.GEMM: (AwqGEMMLinear, "AWQ GEMM"),
+    BACKEND.BITBLAS_AWQ: (AWQBitBlasKernel, "AWQ BitBLAS"),
+    BACKEND.MACHETE: (AwqMacheteLinear, "AWQ Machete"),
+    BACKEND.MARLIN: (AwqMarlinLinear, "AWQ Marlin"),
+    BACKEND.SWORDFISH: (AwqSwordfishLinear, "AWQ Swordfish"),
+    BACKEND.EXLLAMA_V2: (AwqExllamaV2Linear, "ExLlama v2 AWQ"),
+}
+if AwqGEMMTritonLinear is not None:
+    _BACKEND_KERNELS[BACKEND.TRITON] = (AwqGEMMTritonLinear, "AWQ Triton")
+
+
 class TestAwqKernelOutput(unittest.TestCase):
     MODEL_PATH = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
     TARGET = "model.layers.20.self_attn.v_proj"
@@ -103,6 +129,7 @@ class TestAwqKernelOutput(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.cuda_available = torch.cuda.is_available()
         cls.device = DEVICE if cls.cuda_available else CPU_DEVICE
+        cls.device_family = model_const.normalize_device(cls.device)
         cls.log = log
         cls._weight_map = cls._load_weight_map()
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
@@ -114,19 +141,40 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
             cls.backend_skip_reason[BACKEND.SWORDFISH] = "CUDA is required for AWQ Swordfish kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
-        elif not _validate_machete_device_support():
-            cls.backend_skip_reason[BACKEND.MACHETE] = machete_runtime_error()
-        elif os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = "BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)."
-        elif not BITBLAS_AVAILABLE:
-            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = BITBLAS_INSTALL_HINT
+        else:
+            # Skip CUDA-only kernels on ROCm instead of aborting setUpClass.
+            for backend, (kernel_cls, label) in _BACKEND_KERNELS.items():
+                if not _kernel_supports_device(kernel_cls, cls.device):
+                    cls.backend_skip_reason.setdefault(
+                        backend,
+                        f"{label} kernel does not support {cls.device_family.value} devices.",
+                    )
+
+            if (
+                BACKEND.MACHETE not in cls.backend_skip_reason
+                and not _validate_machete_device_support()
+            ):
+                cls.backend_skip_reason.setdefault(BACKEND.MACHETE, machete_runtime_error())
+
+            if BACKEND.BITBLAS_AWQ not in cls.backend_skip_reason:
+                if os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+                    cls.backend_skip_reason.setdefault(
+                        BACKEND.BITBLAS_AWQ,
+                        "BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable).",
+                    )
+                elif not BITBLAS_AVAILABLE:
+                    cls.backend_skip_reason.setdefault(BACKEND.BITBLAS_AWQ, BITBLAS_INSTALL_HINT)
+
+            if (
+                BACKEND.SWORDFISH not in cls.backend_skip_reason
+                and not _validate_swordfish_device_support()
+            ):
+                cls.backend_skip_reason.setdefault(BACKEND.SWORDFISH, swordfish_runtime_error())
+
         if awq_triton_import_exception is not None:
             cls.backend_skip_reason[BACKEND.TRITON] = (
                 f"AWQ Triton kernel unavailable: {awq_triton_import_exception}"
             )
-
-        if cls.cuda_available and not _validate_swordfish_device_support():
-            cls.backend_skip_reason[BACKEND.SWORDFISH] = swordfish_runtime_error()
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -155,7 +203,7 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         cls.modules[BACKEND.GEMM] = (
             cls._build_gemm_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available
+            if cls.cuda_available and BACKEND.GEMM not in cls.backend_skip_reason
             else None
         )
 
@@ -182,7 +230,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         try:
             cls.modules[BACKEND.TRITON] = (
                 cls._build_gemm_triton_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-                if cls.cuda_available
+                if cls.cuda_available and BACKEND.TRITON not in cls.backend_skip_reason
                 else None
             )
         except Exception as exc:
@@ -191,13 +239,13 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         cls.modules[BACKEND.MARLIN] = (
             cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available
+            if cls.cuda_available and BACKEND.MARLIN not in cls.backend_skip_reason
             else None
         )
 
         cls.modules[BACKEND.EXLLAMA_V2] = (
             cls._build_exllama_v2_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available
+            if cls.cuda_available and BACKEND.EXLLAMA_V2 not in cls.backend_skip_reason
             else None
         )
 

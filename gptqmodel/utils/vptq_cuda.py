@@ -69,6 +69,27 @@ def _extension_api():
     return extension_api
 
 
+def _validate_vptq_build_support() -> bool:
+    """Return whether this host can build the CUDA-only VPTQ extension.
+
+    The extension sources are CUDA and ``VPTQCudaLinear`` declares only
+    ``DEVICE.CUDA``. HIP exposes AMD devices through torch's ``cuda``
+    namespace, so ``torch.cuda.is_available()`` alone would start a doomed
+    hipcc build on ROCm; the NVIDIA-only check must be explicit.
+    """
+
+    from .rocm import IS_ROCM
+
+    return torch.cuda.is_available() and not IS_ROCM
+
+
+def vptq_cuda_build_error() -> str:
+    return (
+        "VPTQ CUDA requires an NVIDIA CUDA device: its torch.ops extension is "
+        "built from CUDA sources and is not supported on ROCm or CPU-only hosts."
+    )
+
+
 def clear_vptq_extension_cache() -> None:
     _VPTQ_TORCH_OPS_EXTENSION.clear_cache()
 

@@ -73,6 +73,8 @@ _EXTENSION_SPECS = (
         name="vptq",
         aliases=("vptq_cuda",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.vptq_cuda", "_VPTQ_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.vptq_cuda", "_validate_vptq_build_support")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.vptq_cuda", "vptq_cuda_build_error")(),
     ),
     _ExtensionSpec(
         name="exllamav2",
