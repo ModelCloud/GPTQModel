@@ -182,7 +182,7 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     assert qlinear_cls is CudaKernel
 
 
-@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0"), DEVICE.CUDA])
 def test_rocm_normalizes_cuda_selectors_to_rocm(monkeypatch, selector):
     """HIP reuses the CUDA namespace, so ``cuda`` means the AMD accelerator."""
 
@@ -192,11 +192,35 @@ def test_rocm_normalizes_cuda_selectors_to_rocm(monkeypatch, selector):
     assert model_const.normalize_device(selector) is DEVICE.ROCM
 
 
-def test_rocm_auto_select_device_returns_rocm(monkeypatch):
+def test_rocm_support_family_is_stored_as_a_torch_device(monkeypatch):
+    """A stored quantize device must also work as a concrete torch device."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    for selector in ("cuda", DEVICE.ROCM):
+        stored = model_const.torch_compatible_device(selector)
+        assert stored is DEVICE.CUDA
+        torch.device(stored)  # must not raise
+        assert model_const.normalize_device(stored) is DEVICE.ROCM
+
+
+def test_rocm_auto_select_device_stays_a_valid_torch_device(monkeypatch):
+    """The auto-selected default doubles as a concrete torch device.
+
+    ``DEVICE.ROCM`` is a kernel support family only: its value ``"rocm"`` is not
+    a torch device type, so storing it in ``quantize_config.device`` broke the
+    ROCm quantize path (device thread pool keys and ``torch.device``).  The
+    default therefore stays torch-compatible and the family is resolved
+    separately at kernel-selection time.
+    """
+
     monkeypatch.setattr(importer, "IS_ROCM", True)
     monkeypatch.setattr(importer, "HAS_CUDA", True)
 
-    assert auto_select_device(None, BACKEND.AUTO) is DEVICE.ROCM
+    device = auto_select_device(None, BACKEND.AUTO)
+    torch.device(device)  # must not raise
+    assert importer.selector_device_family(device) is DEVICE.ROCM
 
 
 @pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])
@@ -392,6 +416,8 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
 
 
 def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
@@ -547,6 +573,8 @@ def test_cpu_auto_multi_select_lists_trainable_kernels_first(monkeypatch):
 
 
 def test_cuda_auto_keeps_priority_order_for_inference_only_kernels(monkeypatch):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     # Accelerator AUTO must keep selecting Marlin/ExLlama-class kernels; the
     # trainable preference is a CPU-only safeguard.
     class CudaInferenceOnlyKernel(_InferenceOnlyAutoKernel):
@@ -596,6 +624,8 @@ def test_inference_only_kernel_train_error_names_trainable_backend():
 
 
 def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
@@ -1184,6 +1214,8 @@ def test_iter_dynamic_contracts_yields_base_and_distinct_overrides():
 def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch):
     """A 4-bit dynamic override must be visible to kernels that only support 4-bit weights,
     even when the base quantize config is 3-bit."""
+    # Assert the NVIDIA-family kernel set; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, FORMAT.GPTQ)
     # Marlin validates device compute capability before accepting the contract.
     monkeypatch.setattr(MarlinLinear, "validate_device", classmethod(lambda cls, _device: None))

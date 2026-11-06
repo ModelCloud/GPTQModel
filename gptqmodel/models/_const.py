@@ -113,7 +113,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
     and every ``cuda`` spelling name the AMD accelerator.  They must map to
     ``DEVICE.ROCM``; keeping them as ``DEVICE.CUDA`` lets CUDA-only kernels
     (Triton V2, W4A-FP8/NVFP4, ...) pass the support-family gate on ROCm.
-    An explicit ``DEVICE.CUDA`` is preserved as the caller's declared family.
+    ``DEVICE.CUDA`` is the CUDA support family, which cannot exist on a ROCm
+    host, so it maps to ``DEVICE.ROCM`` there as well.
     """
     if isinstance(type_value, int):
         if HAS_CUDA:
@@ -136,6 +137,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
         type_value = split_results[0]
 
     if isinstance(type_value, DEVICE):
+        if type_value == DEVICE.CUDA and IS_ROCM:
+            return DEVICE.ROCM
         return type_value
 
     if not isinstance(type_value, str):
@@ -146,6 +149,20 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
         # HIP exposes AMD devices through the ``cuda`` namespace.
         return DEVICE.ROCM
     return device
+
+
+def torch_compatible_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
+    """Return a support family whose value is also a valid torch device type.
+
+    ``quantize_config.device`` is consumed both as a kernel support family and
+    as a concrete device (device thread pool, ``torch.device``, module moves).
+    ``DEVICE.ROCM`` only names the support family -- ``"rocm"`` is not a torch
+    device type -- so it is stored as HIP's ``cuda`` spelling and kernel
+    selection resolves it back to ``DEVICE.ROCM`` through
+    :func:`normalize_device`.
+    """
+    family = normalize_device(type_value)
+    return DEVICE.CUDA if family == DEVICE.ROCM else family
 
 
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:

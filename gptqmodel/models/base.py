@@ -104,6 +104,7 @@ from ._const import (
     EXPERT_INDEX_PLACEHOLDER,
     META,
     normalize_device,
+    torch_compatible_device,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -1940,7 +1941,9 @@ class BaseQModel(nn.Module):
             endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
             if endpoint_device.type == "meta":
                 endpoint_device = CPU
-            quantize_config.device = normalize_device(endpoint_device)
+            # Keep the stored value torch-compatible (``"cuda"`` also names the
+            # AMD device on HIP); kernel selection maps it to the ROCm family.
+            quantize_config.device = torch_compatible_device(endpoint_device)
 
         result = self.quantize(
             calibration=calibration,
