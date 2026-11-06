@@ -23,6 +23,11 @@ from pathlib import Path
 import torch
 
 
+#: Fallback projection list. An architecture may add its own projection
+#: (Ripple-65B has a gated attention ``self_attn.g_proj``); a hardcoded tuple
+#: both drops it from the merge and makes the completeness check below reject a
+#: perfectly valid per-projection assignment. ``main`` discovers the real set
+#: from the live block.
 PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
                'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
 
@@ -38,14 +43,19 @@ def parse_args():
     return parser.parse_args()
 
 
-def assignment_projection_bits(payload, layer_count):
-    """Expand legacy blocks or validate a complete per-projection assignment."""
-    expected = {f'model.layers.{index}.{name}' for index in range(layer_count) for name in PROJECTIONS}
+def assignment_projection_bits(payload, layer_count, projections=PROJECTIONS):
+    """Expand legacy blocks or validate a complete per-projection assignment.
+
+    ``projections`` is the per-block list the target model actually has. It
+    defaults to the paper's Llama tuple so an existing block-level assignment
+    keeps expanding the same way.
+    """
+    expected = {f'model.layers.{index}.{name}' for index in range(layer_count) for name in projections}
     if 'projection_bits' in payload:
         result = dict(payload['projection_bits'])
     else:
         result = {f'model.layers.{int(index)}.{name}': width
-                  for index, width in payload['layer_bits'].items() for name in PROJECTIONS}
+                  for index, width in payload['layer_bits'].items() for name in projections}
     if set(result) != expected:
         raise ValueError('RCO materialization requires every projection of every decoder block')
     if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
@@ -54,7 +64,8 @@ def assignment_projection_bits(payload, layer_count):
     return result
 
 
-def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
+def restore_assignment_block(layer, block, widths, arms, *, group_size, device,
+                             projections=PROJECTIONS):
     """Merge selected packed tensors, checking the shared non-projection state."""
     from gptqmodel.looper.gsq_training_model import _restore_packed_layer
 
@@ -68,7 +79,7 @@ def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
         states[width] = saved['state_dict']
 
     def shared(key):
-        return not any(key.startswith(name + '.') for name in PROJECTIONS)
+        return not any(key.startswith(name + '.') for name in projections)
 
     first = states[min(states)]
     merged = {key: value for key, value in first.items() if shared(key)}
@@ -78,7 +89,7 @@ def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
             raise ValueError('RCO width arms disagree on shared block state')
     for name, width in widths.items():
         merged.update({key: value for key, value in states[width].items() if key.startswith(name + '.')})
-    return _restore_packed_layer(layer, merged, names=PROJECTIONS, bits=widths,
+    return _restore_packed_layer(layer, merged, names=tuple(projections), bits=widths,
                                  group_size=group_size, device=device)
 
 
@@ -105,11 +116,22 @@ def main():
                              attn_implementation='sdpa')
     model = wrapper.model.to(device)
 
-    projection_bits = assignment_projection_bits(payload, len(model.model.layers))
-    for block in range(len(model.model.layers)):
-        widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in PROJECTIONS}
+    # The assignment names every allocated projection, so it is the authority on
+    # what this model has: deriving the list here keeps an architecture-specific
+    # projection (Ripple-65B's `self_attn.g_proj`) from being silently dropped.
+    layer_count = len(model.model.layers)
+    projections = tuple(sorted({
+        name.split(f'model.layers.{block}.', 1)[-1]
+        for block in range(layer_count)
+        for name in (payload.get('projection_bits') or {})
+        if name.startswith(f'model.layers.{block}.')
+    })) or PROJECTIONS
+    projection_bits = assignment_projection_bits(payload, layer_count, projections)
+    for block in range(layer_count):
+        widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in projections}
         model.model.layers[block] = restore_assignment_block(
-            model.model.layers[block], block, widths, args.arms, group_size=group_size, device=device)
+            model.model.layers[block], block, widths, args.arms, group_size=group_size,
+            device=device, projections=projections)
         print(f'  block {block:02d} <- {widths}', flush=True)
 
     run = {

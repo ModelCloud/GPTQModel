@@ -30,6 +30,7 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 """
 
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -516,3 +517,75 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                   f'loss={history[-1]["loss"]:.6f} bits={achieved:.6f} '
                   f'drift={history[-1]["drift"]:.2e}', flush=True)
     return torch.softmax(interpolated.alpha, dim=-1).detach(), history
+
+#: Projection suffixes the GSQ paper's Llama configuration stages. These are the
+#: names a packed block is rebuilt from, so a model that adds a projection must
+#: extend this list -- or, better, be discovered from the live module tree with
+#: :func:`discover_projections`. Kept as the default so existing staged arms
+#: keep rebuilding exactly the tensors they were written with.
+DEFAULT_PROJECTIONS = (
+    'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+    'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj',
+)
+
+#: Modules that are never bit-allocated: the vocabulary projections are stored at
+#: a higher precision on purpose.
+_NON_ALLOCATABLE_NAME_PARTS = frozenset(
+    {'lm_head', 'embed_tokens', 'wte', 'wpe', 'embed', 'embeddings'}
+)
+
+_INDEXED_BLOCK = re.compile(r'\.(\d+)\.')
+
+
+def discover_projections(model, *, suffixes=None, exclude=()):
+    """Return the bit-allocatable projections of a dense decoder, arch-generic.
+
+    Walking the live module tree instead of matching an architecture's names
+    keeps additional projections visible. Ripple-65B, for example, adds a gated
+    attention projection ``self_attn.g_proj``; with a hardcoded tuple the
+    allocator silently skips 80 of its 640 quantised modules, and the ones it
+    does allocate are chosen against a budget computed from the wrong
+    denominator.
+
+    Only ``torch.nn.Linear`` modules under an indexed block qualify, so fused
+    ``qkv_proj``-style layers (which the packer handles as one module) and MoE
+    expert projections are covered without a per-architecture list. Pass
+    ``suffixes`` to restrict the result to known projections, and ``exclude`` to
+    drop names the quantizer already skips.
+
+    Returns a tuple sorted by decoder block, then by name.
+    """
+    excluded = {str(name) for name in exclude}
+    allowed = None if suffixes is None else {str(s).strip('.') for s in suffixes}
+    found = []
+    for name, module in model.named_modules():
+        if name in excluded or not _is_allocatable(name, module):
+            continue
+        if allowed is not None and name.rsplit('.', 1)[-1] not in allowed:
+            continue
+        found.append(name)
+    return tuple(sorted(found, key=_allocation_order))
+
+
+def _is_allocatable(name, module):
+    """Whether ``module`` is a decoder projection that may be bit-allocated."""
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if any(part in _NON_ALLOCATABLE_NAME_PARTS for part in name.split('.')):
+        return False
+    # Every decoder projection lives under an indexed block, e.g.
+    # `model.layers.7.self_attn.g_proj`. Requiring an integer segment excludes
+    # the embedding and the LM head without hardcoding a block attribute name.
+    return _INDEXED_BLOCK.search(f'.{name}.') is not None
+
+
+def _allocation_order(name):
+    """Sort by decoder block, then by name, so plans read layer by layer."""
+    match = _INDEXED_BLOCK.search(f'.{name}.')
+    return (int(match.group(1)) if match else -1), name
+
+
+def block_of(name):
+    """Decoder block index of an allocated module, or ``None``."""
+    match = _INDEXED_BLOCK.search(f'.{name}.')
+    return int(match.group(1)) if match else None
