@@ -678,6 +678,112 @@ def test_sliding_window_mask_trims_evicted_keys(tmp_path: Path):
     assert torch.equal(out_wide, original(attn, wide, 1, kv_len, torch.float32, cpu, cache_position))
 
 
+def test_sliding_window_mask_aligns_to_written_positions(tmp_path: Path):
+    """A capacity-sized mask must align to ``[total_kv - kv_len, total_kv)``.
+
+    ``[-kv_len:]`` is only correct when the mask length equals the number of
+    written keys. With a preallocated cache the shared mask covers the whole
+    capacity, so the tail slice selects slots that were never written and the
+    layer attends to the wrong positions.
+    """
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+
+    attn = model.model.layers[0].self_attn
+    cls = type(attn)
+    patched = cls._apply_sliding_window_mask
+    window = attn.config.sliding_window
+    capacity = window * 4
+    total_kv = capacity - 2  # written tokens, fewer than the allocated capacity
+    cpu = torch.device("cpu")
+
+    # Distinct value per position so a wrong slice cannot compare equal by luck.
+    mask = (
+        torch.arange(capacity, dtype=torch.float32)
+        .view(1, 1, 1, capacity)
+        .expand(2, 1, 1, capacity)
+        .clone()
+    )
+    out = patched(
+        attn,
+        mask,
+        1,
+        window,
+        torch.float32,
+        cpu,
+        torch.tensor([total_kv - 1]),
+        total_kv=total_kv,
+    )
+
+    assert out is not None and out.shape[-1] == window
+    expected = mask[..., total_kv - window : total_kv]
+    assert torch.equal(out, expected), "mask must align to the written key span"
+    assert not torch.equal(out, mask[..., -window:]), "the unwritten tail must not be used"
+
+
+def test_static_cache_decode_matches_full_forward(tmp_path: Path):
+    """A preallocated cache must append, not overwrite, when decoding.
+
+    ``past_key_value.update()`` needs ``cache_position``; a transformers 4.x
+    ``StaticCache`` otherwise falls back to ``arange(q_len)`` and the first
+    decode step rewrites the prompt slots.
+    """
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+
+    from transformers import AutoModelForCausalLM
+    from transformers.cache_utils import StaticCache
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    torch.manual_seed(0)
+    model_dir = tmp_path / "native"
+    _build_tiny_fixture(ref_dir, model_dir)
+
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    apply_ricursive_generate_patch(model)
+
+    total = 10
+    ids = torch.randint(0, model.config.vocab_size, (1, total))
+    with torch.no_grad():
+        full = model(input_ids=ids).logits
+
+    cache = StaticCache(config=model.config, max_cache_len=16)
+    with torch.no_grad():
+        model(
+            input_ids=ids[:, :6],
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=torch.arange(6),
+        )
+        errors = []
+        for pos in range(6, total):
+            out = model(
+                input_ids=ids[:, pos : pos + 1],
+                past_key_values=cache,
+                use_cache=True,
+                cache_position=torch.tensor([pos]),
+            )
+            errors.append((out.logits[:, -1] - full[:, pos]).abs().max().item())
+
+    assert max(errors) < 2e-4, f"decode diverged from a full forward: {max(errors):.3e}"
+
+
 def test_prepare_inputs_moves_position_ids_to_model_device():
     """A CPU prompt must not leave `position_ids` on CPU.
 

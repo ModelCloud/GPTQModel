@@ -297,14 +297,26 @@ def _patch_sliding_window_mask(model) -> bool:
     if not callable(original):
         return False
 
-    def _apply_sliding_window_mask(self, attention_mask, q_len, kv_len, dtype, device, cache_position):
+    def _apply_sliding_window_mask(
+        self, attention_mask, q_len, kv_len, dtype, device, cache_position, total_kv=None
+    ):
         if attention_mask is not None and attention_mask.shape[-1] > kv_len:
             # transformers 5 builds a hybrid cache: sliding layers get a
             # DynamicSlidingWindowLayer that evicts from the left, so they hold only
             # the most recent `sliding_window` keys while full layers keep growing.
             # The causal mask is built once per forward from the full span, so trim it
             # to the keys this layer actually holds.
-            attention_mask = attention_mask[..., -kv_len:]
+            #
+            # The retained keys sit at the absolute positions
+            # `[total_kv - kv_len, total_kv)`. Slicing `[-kv_len:]` is only correct
+            # when the mask length equals `total_kv`; with a mask sized to the
+            # allocated cache capacity it selects the unwritten tail instead.
+            mask_len = attention_mask.shape[-1]
+            if total_kv is not None:
+                start = max(0, min(total_kv - kv_len, mask_len - kv_len))
+                attention_mask = attention_mask[..., start : start + kv_len]
+            else:
+                attention_mask = attention_mask[..., -kv_len:]
 
         window = getattr(self.config, "sliding_window", None)
         if window is not None and kv_len <= window:
@@ -537,7 +549,19 @@ def _patch_gqa_attention(model) -> bool:
 
         total_kv = None
         if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
+            # Forward the absolute positions being written: a transformers 4.x
+            # StaticCache falls back to `arange(q_len)` without them and the
+            # first decode step overwrites the prompt instead of appending.
+            cache_kwargs = (
+                {"cache_position": cache_position} if cache_position is not None else None
+            )
+            if cache_kwargs is not None:
+                try:
+                    k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+                except TypeError:
+                    k, v = past_key_value.update(k, v, self.layer_idx)
+            else:
+                k, v = past_key_value.update(k, v, self.layer_idx)
             # Number of keys this layer has actually written. A preallocated
             # (StaticCache) layer returns its full capacity from `update()`,
             # including slots that have not been filled yet; an evicting
@@ -556,23 +580,36 @@ def _patch_gqa_attention(model) -> bool:
         # Align an incoming mask that is longer than the keys this layer holds.
         # The shared mask is built over absolute key positions
         # `0..target_length-1`; keep the slice that matches the keys present.
+        #
+        # The keys returned by `update()` occupy the absolute positions
+        # `[total_kv - kv_len, total_kv)`. Anchoring on the tensor tail is only
+        # correct when the mask length equals `total_kv`; with a mask sized to
+        # the *allocated cache capacity* it selects the unwritten tail instead
+        # and silently produces wrong attention.
         if attention_mask is not None and attention_mask.shape[-1] > k.shape[2]:
-            if total_kv is not None and total_kv > k.shape[2]:
-                # Evicting cache: the keys are the trailing window.
-                attention_mask = attention_mask[..., -k.shape[2] :]
+            kv_len_now = k.shape[2]
+            mask_len = attention_mask.shape[-1]
+            if total_kv is not None:
+                start = max(0, min(total_kv - kv_len_now, mask_len - kv_len_now))
+                attention_mask = attention_mask[..., start : start + kv_len_now]
             else:
-                # Keys occupy positions `0..kv_len-1`.
-                attention_mask = attention_mask[..., : k.shape[2]]
+                # Unknown cache: the keys are the trailing window.
+                attention_mask = attention_mask[..., -kv_len_now:]
 
         # No repeat_kv: SDPA broadcasts the grouped heads itself.
-        attention_mask = self._apply_sliding_window_mask(
-            attention_mask=attention_mask,
-            q_len=q.shape[2],
-            kv_len=k.shape[2],
-            dtype=q.dtype,
-            device=q.device,
-            cache_position=cache_position,
-        )
+        mask_kwargs = {
+            "attention_mask": attention_mask,
+            "q_len": q.shape[2],
+            "kv_len": k.shape[2],
+            "dtype": q.dtype,
+            "device": q.device,
+            "cache_position": cache_position,
+        }
+        try:
+            attention_mask = self._apply_sliding_window_mask(total_kv=total_kv, **mask_kwargs)
+        except TypeError:
+            # Class without the window patch: the mask is already aligned above.
+            attention_mask = self._apply_sliding_window_mask(**mask_kwargs)
 
         if attention_mask is None and q.shape[2] > 1 and k.shape[2] > q.shape[2]:
             # Multi-token block verified against a warm cache. SDPA's implicit
