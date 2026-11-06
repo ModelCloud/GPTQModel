@@ -350,6 +350,11 @@ def test_w4a_modules_import_without_gluon_mma_v2():
 
         from gptqmodel.nn_modules.qlinear import w4a_triton
 
+        # This test is about a missing Gluon entry point, not about the host
+        # platform: pin the flag so a HIP build reports the `mma_v2` reason
+        # instead of its (correct, but different) ROCm reason.
+        w4a_triton.IS_ROCM = False
+
         assert w4a_triton.mma_v2 is None
         error = w4a_triton.native_fp8_gemm_error()
         assert error is not None
@@ -364,3 +369,34 @@ def test_w4a_modules_import_without_gluon_mma_v2():
                             env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
+
+
+@pytest.mark.parametrize("cls_name", ["W4AFP8Linear", "W4ANVFP4Linear"])
+def test_w4a_validate_rejects_a_rocm_target(monkeypatch, cls_name):
+    """A ROCm target must be refused before Triton compiles the W4A kernel.
+
+    ``torch.cuda.is_available()`` is true under HIP and gfx1201 reports a
+    synthetic ``(12, 0)`` capability that clears the FP8 floor, so neither can
+    gate this backend. ``device=None`` (the AUTO path) also skips the base
+    ``validate_device`` family check, so ``validate`` itself has to resolve the
+    family; without that the first forward aborts inside Triton with
+    "Unsupported DotOp ... #ttg.nvidia_mma".
+    """
+    import torch
+
+    import gptqmodel.nn_modules.qlinear.w4a_floatx as w4a_floatx
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+
+    cls = {"W4AFP8Linear": W4AFP8Linear, "W4ANVFP4Linear": W4ANVFP4Linear}[cls_name]
+    # ``W4ANVFP4Linear`` inherits the gate from ``w4a_floatx``.
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
+
+    ok, error = cls.validate(
+        bits=4, group_size=128, desc_act=False, sym=True, pack_dtype=torch.int32
+    )
+
+    assert ok is False
+    assert isinstance(error, NotImplementedError)
+    assert "ttg.nvidia_mma" in str(error)

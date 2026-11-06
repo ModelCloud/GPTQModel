@@ -52,6 +52,23 @@ propagated through calibration replay, `HookedLinear` Hessian capture, runtime
 carriers, and fused packing so a saved checkpoint cannot silently switch
 scale selection.
 
+## Platform support
+
+Both policies are CUDA-only. The FP8 GEMM is a Triton Gluon `mma_v2` kernel
+whose operands carry `NVMMADistributedLayout`, so it lowers to
+`ttg.nvidia_mma`; the INT4-to-E4M3 packers additionally round through PTX
+(`cvt.rn.satfinite.e4m3x2.f32`). HIP supports neither: on gfx1201 Triton
+aborts with `Unsupported DotOp found when converting TritonGPU to LLVM`, and
+the unpacker that does compile returns wrong codes. `torch.cuda.is_available()`
+is true on ROCm and `get_device_capability` reports a synthetic SM version, so
+neither can gate this backend. The kernels are declared NVIDIA-only through
+`SUPPORTS_DEVICES`, and validation resolves the requested target with
+`normalize_device()`, so `W4AFP8Linear` and `W4ANVFP4Linear` reject a ROCm
+target even when the caller leaves the device at `AUTO`. A saved activation
+policy pins the W4A kernel, so the checkpoint is refused rather than silently
+reloaded with another kernel; re-export the weights without a W4A activation
+policy to load them with `backend=BACKEND.TORCH`.
+
 ## Activation stream boundaries
 
 Within a selected Llama decoder layer, `W4AActivation` carries codes, scales,

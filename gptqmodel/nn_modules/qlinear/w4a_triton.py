@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ...utils.rocm import IS_ROCM
+
 
 # The grouped FP8 GEMM is written in Gluon and needs ``mma_v2``, which not every
 # Triton build ships. The token quantizer above uses plain ``tl.jit`` and does
@@ -44,9 +46,22 @@ def _gluon_jit(fn):
 
 NATIVE_FP8_GEMM_MIN_TRITON = "3.6.0"
 
+# HIP builds cannot lower any kernel in this module: the GEMM operands carry an
+# ``NVMMADistributedLayout`` (``ttg.nvidia_mma``) and every E4M3 rounding step is
+# a PTX instruction. Both are rejected by the AMD backend at compile time, so
+# report the platform up front instead of surfacing a raw PassManager failure.
+_ROCM_UNSUPPORTED = (
+    "W4A Triton kernels are CUDA-only: the FP8 GEMM is a Gluon `mma_v2` kernel "
+    "that lowers to `ttg.nvidia_mma`, and the E4M3 rounding uses PTX "
+    "(`cvt.rn.satfinite.e4m3x2.f32`). HIP supports neither (`Unsupported DotOp` "
+    "on gfx1201). Use the portable Torch GPTQ kernel on ROCm."
+)
+
 
 def native_fp8_gemm_error() -> RuntimeError | None:
     """Return why the Gluon FP8 GEMM cannot run here, or ``None`` when it can."""
+    if IS_ROCM:
+        return RuntimeError(_ROCM_UNSUPPORTED)
     if mma_v2 is not None:
         return None
     return RuntimeError(
@@ -193,6 +208,8 @@ def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor
     The buffer is supplied by the caller so that this stays a bounded staging
     step owned by one forward: the module never keeps the result.
     """
+    if IS_ROCM:
+        raise NotImplementedError(_ROCM_UNSUPPORTED)
     if packed.device.type != "cuda":
         raise ValueError("Fused INT4 unpacking requires a CUDA tensor.")
     if out.dtype != torch.float8_e4m3fn:
@@ -214,6 +231,8 @@ def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor
 
 def fp8_pack(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode CUDA [rows, K] with one E4M3 scale per row."""
+    if IS_ROCM:
+        raise NotImplementedError(_ROCM_UNSUPPORTED)
     if x.ndim != 2 or x.device.type != "cuda":
         raise ValueError("FP8 packing expects a CUDA [rows, K] tensor.")
     rows, k = x.shape
