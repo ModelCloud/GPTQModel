@@ -39,6 +39,24 @@ from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU, memory_stats_for_dev
 
 log = setup_logger()
 
+def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
+    """Delete a processor log file unless ``keep`` asks for it to stay.
+
+    Returns True when a file was removed.
+    """
+
+    if not log_path or keep:
+        return False
+    try:
+        path = Path(log_path)
+        if not path.is_file():
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        log.debug("Failed to remove processor log file %s", log_path, exc_info=True)
+        return False
+
 _PROJECT_LOG_DIR = Path("logs")
 
 # Device-SMI handles are process-scoped diagnostic helpers. Once the vendor tool
@@ -1033,10 +1051,11 @@ class LoopProcessor:
         del self.inputs_cache
         del self._results
 
-        # TODO make this file delete based on user toggle
-        # cleanup temp log file
-        # if os.path.exists(self.log_tmp_log_file_name):
-        #     os.remove(file_path)
+        # Keep the log when the run failed: ``finalize`` only runs after the
+        # loop completed, and a failed run is exactly when the log is useful.
+        config = getattr(model, "quantize_config", None)
+        keep = bool(getattr(config, "keep_processor_logs", True))
+        remove_processor_log(getattr(self, "log_tmp_log_file_name", None), keep=keep)
 
     def release_calibration_dataset(self):
         """Drops the retained calibration dataset to free host memory."""
