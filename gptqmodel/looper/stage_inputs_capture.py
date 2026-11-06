@@ -20,7 +20,7 @@ from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.linalg_warmup import await_torch_linear_prewarm
 from ..utils.logger import setup_logger
-from ..utils.looper_helpers import device_ctx, select_forward_devices
+from ..utils.looper_helpers import device_ctx, normalize_device_like, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.torch import CPU, META
 
@@ -361,6 +361,7 @@ class StageInputsCapture:
                         else cur_layer_device
                     )
                 forward_device = self._resolve_forward_device(example, forward_device)
+                forward_device = normalize_device_like(forward_device) or CPU
                 if (
                     embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
                     and "input_ids" in example

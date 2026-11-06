@@ -34,10 +34,11 @@ from ...utils.allspark import (
     prewarm_allspark_extension,
 )
 from ...utils.allspark_hip import (
+    allspark_hip_available,
     allspark_hip_gemm,
     allspark_hip_repack,
-    allspark_hip_supported,
     prewarm_allspark_hip_extension,
+    validate_allspark_hip_device,
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -77,9 +78,15 @@ class AllSparkLinear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     @classmethod
+    def validate_device(cls, device):
+        super().validate_device(device)
+        if IS_ROCM:
+            validate_allspark_hip_device(device)
+
+    @classmethod
     def validate_once(cls):
         """Reject devices outside the compiled kernel's architecture contract."""
-        if IS_ROCM and not allspark_hip_supported():
+        if IS_ROCM and not allspark_hip_available():
             return False, NotImplementedError(
                 "AllSpark on ROCm requires an RDNA4 device (gfx1200/gfx1201)"
             )
@@ -129,10 +136,6 @@ class AllSparkLinear(GPTQQuantLinear):
         # Pick the kernel family once: the packed layouts are not interchangeable
         # and a wrong pairing produces garbage rather than an error.
         self._hip = IS_ROCM
-        if self._hip and not allspark_hip_supported():
-            raise NotImplementedError(
-                "AllSpark on ROCm requires an RDNA4 device (gfx1200/gfx1201)"
-            )
         # GPTQ layout: 4 codes per int32 along the input dimension.
         self.register_parameter(
             "qweight",
@@ -162,6 +165,7 @@ class AllSparkLinear(GPTQQuantLinear):
         if self._repacked:
             return
         qweight = self.qweight.data
+        self.validate_device(qweight.device)
         k4, n = qweight.shape
         k = k4 * self.pack_factor
         shifts = (torch.arange(self.pack_factor, device=qweight.device, dtype=torch.int32)
@@ -170,11 +174,12 @@ class AllSparkLinear(GPTQQuantLinear):
 
         scales = self.scales.data.reshape(-1).contiguous()
         if self._hip:
-            if not prewarm_allspark_hip_extension():
-                raise RuntimeError("AllSpark HIP extension failed to build")
-            packed, packed_scales, _ = allspark_hip_repack(
-                codes.contiguous(), scales, self.out_features, self.in_features
-            )
+            with torch.cuda.device(qweight.device):
+                if not prewarm_allspark_hip_extension():
+                    raise RuntimeError("AllSpark HIP extension failed to build")
+                packed, packed_scales, _ = allspark_hip_repack(
+                    codes.contiguous(), scales, self.out_features, self.in_features
+                )
         else:
             if not prewarm_allspark_extension():
                 raise RuntimeError("AllSpark extension failed to build")

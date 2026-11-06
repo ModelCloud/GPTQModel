@@ -242,6 +242,19 @@ def test_device_lock_blocks_only_that_device(pool, devices_two):
     assert fut1.result(timeout=0.5) == 50
 
 
+def test_read_lock_accepts_support_family_enum(pool):
+    # ``quantize_config.device`` stores ``DEVICE.ROCM`` on ROCm. The support
+    # family enum must resolve to torch's ``cuda`` namespace instead of raising
+    # "Unknown device for pool: DEVICE.ROCM" during quantization.
+    from gptqmodel.models._const import DEVICE
+
+    with pool.read_lock(DEVICE.CUDA):
+        pass
+    with pool.read_lock(DEVICE.ROCM):
+        pass
+    assert pool._normalize_scope_to_keys([DEVICE.ROCM]) == pool._ordered_keys
+
+
 def test_global_lock_blocks_all_devices(pool, devices_two):
     d0, d1 = devices_two
 

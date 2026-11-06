@@ -38,6 +38,26 @@ HAS_NPU = False
 CPU = torch.device("cpu")
 META = torch.device("meta")
 
+
+def as_torch_device(device_like) -> torch.device:
+    """Resolve a device-like value without assigning an implicit ordinal.
+
+    GPT-QModel's ``DEVICE`` enum names a kernel support family, and its
+    ``DEVICE.ROCM`` member intentionally has the value ``"rocm"`` even though
+    PyTorch exposes ROCm through the ``cuda`` namespace.  ``torch.device``
+    therefore rejects it. Resolve enums through their runtime ``type`` while
+    keeping families indexless, just like ``torch.device("cuda")``. Calling
+    ``to_torch_device()`` here would pin family selectors to device 0 instead
+    of honoring the caller's current CUDA/XPU/NPU device.
+    """
+    if isinstance(device_like, torch.device):
+        return device_like
+    resolver = getattr(device_like, "to_torch_device", None)
+    if callable(resolver):
+        return torch.device(device_like.type)
+    return torch.device(device_like)
+
+
 class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
     GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization

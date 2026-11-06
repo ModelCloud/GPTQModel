@@ -71,7 +71,7 @@ from ..utils.linalg_warmup import (  # noqa: E402
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
-from ._const import DEVICE  # noqa: E402
+from ._const import normalize_device  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .loader import native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
@@ -605,7 +605,7 @@ def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
 def _config_prewarm_dtype(model_cfg, target: torch.device) -> Optional[torch.dtype]:
     """Mirror the loader's own dtype resolution so the prewarm warms the dtype the model will use."""
     try:
-        family = DEVICE(target.type)
+        family = normalize_device(target)
         return auto_dtype(config=model_cfg, device=family, quant_inference=False)
     except Exception as exc:
         log.debug(f"linear prewarm dtype unresolved for {model_cfg}: {exc}")

@@ -54,6 +54,10 @@ _VALIDATION_CACHE_GENERATION = 0
 
 def _device_family(device: SelectorDevice) -> DEVICE:
     if isinstance(device, DEVICE):
+        if IS_ROCM and device == DEVICE.CUDA:
+            # HIP exposes AMD devices through the ``cuda`` namespace, so the
+            # CUDA family cannot exist on a ROCm host.
+            return DEVICE.ROCM
         return device
     device = torch.device(device)
     if IS_ROCM and device.type == "cuda":
@@ -144,12 +148,18 @@ def _selector_devices(device: Optional[SelectorDevices]) -> Optional[tuple[Selec
 def _device_capability(device: SelectorDevice):
     """Return one device's capability, if its runtime exposes one."""
     if isinstance(device, DEVICE):
-        if device not in (DEVICE.CUDA, DEVICE.ROCM):
+        # An explicit AMD-family inspection must not probe an unrelated
+        # NVIDIA device, even when performed by a CUDA-build process.
+        if device != DEVICE.CUDA:
             return None
         target = device.to_torch_device()
     else:
         target = torch.device(device)
     if target.type == "cuda":
+        # HIP's capability tuple is not an NVIDIA SM version. Do not include
+        # it in selector validation/cache keys for AMD devices.
+        if IS_ROCM:
+            return None
         try:
             return tuple(torch.cuda.get_device_capability(target))
         except Exception:
@@ -1112,7 +1122,11 @@ def auto_select_device(
         if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
-            device = DEVICE.CUDA
+            # HIP reuses torch's ``cuda`` namespace, so the default accelerator
+            # on a ROCm host is the AMD family, not NVIDIA CUDA.  Keep the
+            # family explicit: consumers that need a concrete torch device
+            # resolve it through ``DEVICE.to_torch_device()``.
+            device = DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
         elif HAS_NPU:

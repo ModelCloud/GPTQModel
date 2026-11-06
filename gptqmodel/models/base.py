@@ -96,13 +96,14 @@ from ..utils.structure import (
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
 )
-from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
+from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
 from ._const import (
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
     DEVICE,
     EXPERT_INDEX_PLACEHOLDER,
     META,
+    normalize_device,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -1590,7 +1591,7 @@ class BaseQModel(nn.Module):
                 backend=preferred_backend,
                 format=format_code,
                 quant_method=export_quant_method,
-                device=DEVICE(self.quantize_config.device),
+                device=normalize_device(self.quantize_config.device),
                 pack=True,
                 pack_dtype=self.quantize_config.pack_dtype,
             )
@@ -1629,7 +1630,7 @@ class BaseQModel(nn.Module):
                     sym=self.quantize_config.sym,
                     pack=True,
                     dynamic=self.quantize_config.dynamic,
-                    device=DEVICE(self.quantize_config.device),
+                    device=normalize_device(self.quantize_config.device),
                     pack_dtype=self.quantize_config.pack_dtype,
                     multi_select=False,
                     backend=preferred_backend,
@@ -1660,7 +1661,13 @@ class BaseQModel(nn.Module):
                                             **module_name_args)
 
             # MPS does not support float64.
-            rotation_device = self.quantize_config.device if self.quantize_config.device != DEVICE.MPS else DEVICE.CPU
+            rotation_device = (
+                as_torch_device(self.quantize_config.device)
+                if self.quantize_config.device is not None
+                else None
+            )
+            if rotation_device is not None and rotation_device.type == "mps":
+                rotation_device = CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
                                             device=rotation_device, **module_name_args)
 
@@ -1939,7 +1946,7 @@ class BaseQModel(nn.Module):
             endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
             if endpoint_device.type == "meta":
                 endpoint_device = CPU
-            quantize_config.device = DEVICE(endpoint_device.type)
+            quantize_config.device = normalize_device(endpoint_device)
 
         result = self.quantize(
             calibration=calibration,
@@ -2937,6 +2944,8 @@ class BaseQModel(nn.Module):
         decoder_cfg = self._active_auto_module_decoder_config()
         if decoder_cfg is None or not isinstance(self.turtle_model, LazyTurtle):
             return False
+
+        device = as_torch_device(device)
 
         decoded_any = False
         # Traverse leaves first, because replacement invalidates the old
@@ -3997,6 +4006,7 @@ class BaseQModel(nn.Module):
             named_module: Optional["NamedModule"] = None,
             module_path: Optional[str] = None,
     ) -> torch.nn.Module:
+        device = as_torch_device(device)
         with self._turtle_lock:
             if role == "quant_source" and named_module is not None:
                 quant_source = named_module.state.get("quant_source_module")
@@ -4087,6 +4097,8 @@ class BaseQModel(nn.Module):
             target_submodule: torch.nn.Module,
             device: Optional[torch.device] = None,
     ):
+        if device is not None:
+            device = as_torch_device(device)
         with self._turtle_lock:
             if self.turtle_model is None:
                 return None

@@ -44,7 +44,19 @@ from gptqmodel.utils.importer import (
     validate_quant_linear,
 )
 from gptqmodel.utils.rocm import IS_ROCM
-from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from gptqmodel.utils.threadx import _coerce_device
+from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU, as_torch_device
+
+
+@pytest.fixture
+def nvidia_runtime(monkeypatch):
+    """NVIDIA-specific selector tests must be deterministic on HIP hosts too."""
+    monkeypatch.setattr(model_const, "IS_ROCM", False)
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+    monkeypatch.setattr(torch.version, "hip", None)
+    clear_validation_cache()
+    yield
+    clear_validation_cache()
 
 
 def _iter_kernel_classes():
@@ -76,7 +88,7 @@ def _pick_device(cls):
         return DEVICE.CPU
     if DEVICE.CPU in devices:
         return DEVICE.CPU
-    if DEVICE.CUDA in devices and HAS_CUDA:
+    if DEVICE.CUDA in devices and HAS_CUDA and not IS_ROCM:
         minimum_capability = getattr(cls, "MIN_COMPUTE_CAPABILITY", None)
         if minimum_capability is not None:
             capability = torch.cuda.get_device_capability(0)
@@ -98,9 +110,26 @@ def test_pick_device_skips_cuda_below_kernel_minimum_capability(monkeypatch):
         MIN_COMPUTE_CAPABILITY = (12, 1)
 
     monkeypatch.setattr("tests.kernels.test_selection.HAS_CUDA", True)
+    monkeypatch.setattr("tests.kernels.test_selection.IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
 
     assert _pick_device(CudaKernel) is None
+
+
+@pytest.mark.parametrize("supports_rocm", [False, True])
+def test_pick_device_on_rocm_does_not_probe_nvidia_capability(monkeypatch, supports_rocm):
+    class Kernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM] if supports_rocm else [DEVICE.CUDA]
+        MIN_COMPUTE_CAPABILITY = (8, 0)
+
+    monkeypatch.setattr("tests.kernels.test_selection.HAS_CUDA", True)
+    monkeypatch.setattr("tests.kernels.test_selection.IS_ROCM", True)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability",
+        lambda *a, **k: pytest.fail("NVIDIA capability must not be queried on ROCm"),
+    )
+
+    assert _pick_device(Kernel) is (DEVICE.ROCM if supports_rocm else None)
 
 
 def _pick_group_size(cls):
@@ -139,6 +168,9 @@ def _force_auto_candidates_valid(monkeypatch, method, fmt):
 
 
 def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch):
+    # Assert the NVIDIA-family mapping; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
     class CudaKernel:
         SUPPORTS_DEVICES = [DEVICE.CUDA]
 
@@ -177,6 +209,145 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     )
 
     assert qlinear_cls is CudaKernel
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0"), DEVICE.CUDA])
+def test_rocm_normalizes_cuda_selectors_to_rocm(monkeypatch, selector):
+    """HIP reuses the CUDA namespace, so ``cuda`` means the AMD accelerator."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    assert model_const.normalize_device(selector) is DEVICE.ROCM
+
+
+def test_rocm_support_family_stays_explicit(monkeypatch):
+    """ROCm must stay ``DEVICE.ROCM``; never be rewritten back to ``DEVICE.CUDA``."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    for selector in ("cuda", DEVICE.ROCM):
+        family = model_const.normalize_device(selector)
+        assert family is DEVICE.ROCM
+        # The concrete device is resolved through the enum's own mapping.
+        assert family.to_torch_device() == torch.device("cuda:0")
+
+
+def test_rocm_auto_select_device_is_the_explicit_rocm_family(monkeypatch):
+    """The auto-selected default must be the AMD family, not NVIDIA CUDA."""
+
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+
+    device = auto_select_device(None, BACKEND.AUTO)
+    assert device is DEVICE.ROCM
+    assert importer.selector_device_family(device) is DEVICE.ROCM
+    assert device.to_torch_device() == torch.device("cuda:0")
+
+
+def test_rocm_family_resolves_at_the_torch_boundary(monkeypatch):
+    """``DEVICE.ROCM`` must be usable wherever a concrete device is required."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    assert as_torch_device(DEVICE.ROCM) == torch.device("cuda")
+    # Kernel validation maps HIP's ``cuda`` namespace to the ROCm family too,
+    # so a concrete ``cuda:N`` target cannot pass a CUDA-only family gate.
+    from gptqmodel.nn_modules.qlinear import _device_family as kernel_device_family
+    assert kernel_device_family(torch.device("cuda:0")) is DEVICE.ROCM
+    assert kernel_device_family(DEVICE.CUDA) is DEVICE.ROCM
+    # The thread pool keeps the family spelling so family-wide locks still
+    # cover every visible ROCm device rather than only ordinal 0.
+    assert _coerce_device(DEVICE.ROCM) == torch.device("cuda")
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", DEVICE.CUDA, torch.device("cuda:3")])
+def test_rocm_direct_kernel_validation_rejects_cuda_only_kernel(monkeypatch, selector):
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+
+    with pytest.raises(NotImplementedError, match="only supports"):
+        TritonV2Linear.validate_device(selector)
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", DEVICE.CUDA, torch.device("cuda:3")])
+def test_cuda_direct_kernel_validation_accepts_cuda_selectors(monkeypatch, selector):
+    monkeypatch.setattr(model_const, "IS_ROCM", False)
+
+    TritonV2Linear.validate_device(selector)
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])
+def test_rocm_cuda_selector_never_picks_cuda_only_kernel(monkeypatch, selector):
+    """A CUDA-only kernel must not pass the family gate for a ROCm selector."""
+
+    class CudaOnlyKernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    class PortableKernel:
+        SUPPORTS_DEVICES = [DEVICE.ALL]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+
+    device = model_const.normalize_device(selector)
+    assert device is DEVICE.ROCM
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict(
+            [
+                (BACKEND.QQQ, CudaOnlyKernel),
+                (BACKEND.QQQ_TORCH, PortableKernel),
+            ]
+        ),
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=device,
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is PortableKernel
+    assert selected is not CudaOnlyKernel
+
+
+def test_rocm_device_never_selects_triton_v2_linear():
+    """The ROCm family must not resolve to the CUDA-only Triton V2 kernel."""
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.ROCM,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is not TritonV2Linear
 
 
 def test_role_only_kernel_is_excluded_from_backend_discovery():
@@ -299,7 +470,9 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
     assert GGUFTorchLinear in candidates
 
 
-def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
+def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch, nvidia_runtime):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
@@ -455,6 +628,8 @@ def test_cpu_auto_multi_select_lists_trainable_kernels_first(monkeypatch):
 
 
 def test_cuda_auto_keeps_priority_order_for_inference_only_kernels(monkeypatch):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     # Accelerator AUTO must keep selecting Marlin/ExLlama-class kernels; the
     # trainable preference is a CPU-only safeguard.
     class CudaInferenceOnlyKernel(_InferenceOnlyAutoKernel):
@@ -503,7 +678,9 @@ def test_inference_only_kernel_train_error_names_trainable_backend():
         layer.train(True)
 
 
-def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch):
+def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch, nvidia_runtime):
+    # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
@@ -591,7 +768,7 @@ def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
     assert qlinear_cls is GGUFCppKernel
 
 
-def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch):
+def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(
         GGUFCudaKernel,
         "cached_validate_once",
@@ -1089,9 +1266,11 @@ def test_iter_dynamic_contracts_yields_base_and_distinct_overrides():
     assert {"bits": 2, "group_size": 32, "desc_act": True, "sym": False, "pack_dtype": torch.int32} in contracts
 
 
-def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch):
+def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch, nvidia_runtime):
     """A 4-bit dynamic override must be visible to kernels that only support 4-bit weights,
     even when the base quantize config is 3-bit."""
+    # Assert the NVIDIA-family kernel set; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, FORMAT.GPTQ)
     # Marlin validates device compute capability before accepting the contract.
     monkeypatch.setattr(MarlinLinear, "validate_device", classmethod(lambda cls, _device: None))
@@ -1182,6 +1361,9 @@ def test_sharded_select_tolerates_kernel_without_shard_attrs(monkeypatch):
 
 
 def test_select_quant_linear_validates_each_exact_multi_gpu_target(monkeypatch):
+    # Assert CUDA ordinals; a ROCm host maps ``cuda:N`` to the ROCM family.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
     calls = []
 
     class IndexedKernel:
@@ -1214,7 +1396,7 @@ def test_select_quant_linear_validates_each_exact_multi_gpu_target(monkeypatch):
     assert calls == [torch.device("cuda:0"), torch.device("cuda:1")]
 
 
-def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatch):
+def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(
         importer.torch.cuda,
         "get_device_capability",
@@ -1231,7 +1413,7 @@ def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatc
     )
 
 
-def test_auto_device_map_rejects_mixed_visible_capabilities(monkeypatch):
+def test_auto_device_map_rejects_mixed_visible_capabilities(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(importer.torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
     monkeypatch.setattr(importer.torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(
@@ -1382,7 +1564,7 @@ def test_public_integer_device_uses_active_accelerator(monkeypatch, has_cuda, ha
     ) is ActiveAcceleratorKernel
 
 
-def test_validation_cache_partitions_capability_and_index(monkeypatch):
+def test_validation_cache_partitions_capability_and_index(monkeypatch, nvidia_runtime):
     clear_validation_cache()
     capability = {0: (8, 0), 1: (8, 0)}
     monkeypatch.setattr(

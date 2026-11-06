@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..models._const import DEVICE
 from ..utils.cpu_features import has_avx512_bf16
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
@@ -285,6 +286,7 @@ def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
 class ExllamaV3TorchLinear(nn.Module):
     QUANT_TYPE = "exl3"
     SUPPORTS_SHARDS = True
+    SUPPORTS_DEVICES = [DEVICE.ALL]
 
     def __init__(
         self,

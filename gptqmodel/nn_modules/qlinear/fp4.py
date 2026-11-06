@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...models._const import DEVICE
 from ...quantization.dtype import dequantize_f4_e2m1
 
 
@@ -20,6 +21,10 @@ except Exception:
 
 class TorchFP4Linear(nn.Module):
     """Execute one linear layer directly from NVFP4-packed checkpoint weights."""
+
+    # CPU uses the portable decode; accelerator execution uses torchao NVFP4,
+    # whose NVIDIA path has no validated HIP implementation.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA]
 
     def __init__(
         self,

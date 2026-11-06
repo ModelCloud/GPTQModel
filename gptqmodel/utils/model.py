@@ -73,7 +73,7 @@ from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
-from .torch import HAS_CUDA, torch_empty_cache
+from .torch import HAS_CUDA, as_torch_device, torch_empty_cache
 
 
 log = setup_logger()
@@ -253,6 +253,7 @@ def _module_has_meta_tensors(module: nn.Module) -> bool:
 
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None):
+    device = as_torch_device(device)
     if isinstance(obj, nn.Module) and _module_has_meta_tensors(obj):
         if not accelerate.utils.has_offloaded_params(obj):
             raise NotImplementedError(

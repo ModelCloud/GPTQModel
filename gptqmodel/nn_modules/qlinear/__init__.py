@@ -18,7 +18,7 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -37,18 +37,20 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
-def _device_family(device: DEVICE | t.device):
-    """Map a concrete torch device onto its declared support family.
+def _device_family(device: DEVICE | t.device | str):
+    """Map a device selector onto its declared support family.
 
-    DEVICE declarations describe families, so a `torch.device("cuda:1")`
-    selector is checked as `DEVICE.CUDA`. Unknown device types fall back to
-    their raw string so the caller reports a mismatch instead of raising.
+    DEVICE declarations describe families, so both a ``torch.device("cuda:1")``
+    and explicit ``DEVICE.CUDA`` / ``"cuda"`` selectors are checked through
+    ``normalize_device`` (HIP's ``cuda`` namespace maps to ``DEVICE.ROCM``).
+    Unknown device types fall back to their raw string so the caller reports a
+    mismatch instead of raising.
     """
-    if isinstance(device, t.device):
+    if isinstance(device, (str, t.device)):
         try:
-            return DEVICE(device.type)
+            return normalize_device(device)
         except ValueError:
-            return device.type
+            return device.type if isinstance(device, t.device) else device
     return device
 
 
@@ -590,7 +592,7 @@ class BaseQuantLinear(nn.Module):
         )
 
     @classmethod
-    def validate_device(cls, device: DEVICE | t.device):
+    def validate_device(cls, device: DEVICE | t.device | str):
         if _device_family(device) not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 

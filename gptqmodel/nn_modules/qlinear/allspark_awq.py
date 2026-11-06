@@ -40,10 +40,11 @@ from ...utils.allspark import (
     prewarm_allspark_extension,
 )
 from ...utils.allspark_hip import (
+    allspark_hip_available,
     allspark_hip_gemm,
     allspark_hip_repack_awq,
-    allspark_hip_supported,
     prewarm_allspark_hip_extension,
+    validate_allspark_hip_device,
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -51,10 +52,6 @@ from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
-
-
-def _device_type(device) -> str:
-    return getattr(device, "type", device)
 
 
 class AllSparkAwqLinear(AWQuantLinear):
@@ -88,17 +85,14 @@ class AllSparkAwqLinear(AWQuantLinear):
 
     @classmethod
     def validate_device(cls, device):
-        # ROCm runs in torch's CUDA namespace, so a ``torch.device("cuda")``
-        # selector is ambiguous: it means ROCm under HIP and CUDA otherwise.
-        # Both runtime families are declared above.
-        if IS_ROCM and _device_type(device) == "cuda":
-            return
         super().validate_device(device)
+        if IS_ROCM:
+            validate_allspark_hip_device(device)
 
     @classmethod
     def validate_once(cls):
         if IS_ROCM:
-            if not allspark_hip_supported():
+            if not allspark_hip_available():
                 return False, NotImplementedError(
                     "AWQ AllSpark requires an RDNA4 device (gfx1200/gfx1201)"
                 )
@@ -206,19 +200,21 @@ class AllSparkAwqLinear(AWQuantLinear):
         if self._repacked:
             return
 
+        self.validate_device(self.qweight.device)
         # Honor dtype moves performed after construction, before repacking.
         scales = self.scales.data.reshape(-1, self.out_features).contiguous()
         if self._hip:
-            if not prewarm_allspark_hip_extension():
-                raise RuntimeError("AllSpark HIP extension failed to build")
-            packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
-                self.qweight.data,
-                self.qzeros.data,
-                scales,
-                self.out_features,
-                self.in_features,
-                self._kernel_group_size,
-            )
+            with torch.cuda.device(self.qweight.device):
+                if not prewarm_allspark_hip_extension():
+                    raise RuntimeError("AllSpark HIP extension failed to build")
+                packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
+                    self.qweight.data,
+                    self.qzeros.data,
+                    scales,
+                    self.out_features,
+                    self.in_features,
+                    self._kernel_group_size,
+                )
         else:
             if not prewarm_allspark_extension():
                 raise RuntimeError("AllSpark CUDA extension failed to build")
