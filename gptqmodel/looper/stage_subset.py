@@ -29,7 +29,7 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
-from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy
+from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy, normalize_bypass_batch_size
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
@@ -560,7 +560,10 @@ def build_subset_plan(
     moe_routing = looper.gptq_model.quantize_config.moe
     batch_size = None
     if moe_routing is not None and isinstance(moe_routing.routing, ExpertsRoutingBypass):
-        batch_size = moe_routing.routing.batch_size
+        # Re-validate here: the attribute can be assigned after construction, and
+        # an invalid value would otherwise fall through the `batch_size > 0` guard
+        # below and silently quantize every expert in one chunk.
+        batch_size = normalize_bypass_batch_size(moe_routing.routing.batch_size)
 
     module_chunks = [subset]
     if is_moe_subset and batch_size is not None and batch_size > 0 and execute_forward:
