@@ -746,8 +746,7 @@ def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
     aborts inside Triton with "Unsupported DotOp found when converting
     TritonGPU to LLVM".
     """
-    import gptqmodel.nn_modules.qlinear.w4a_floatx as w4a_floatx
-
+    w4a_floatx = sys.modules[W4AFP8Linear.__module__]
     monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
     error = cls._rocm_unsupported_error()
     assert isinstance(error, NotImplementedError)
@@ -759,8 +758,8 @@ def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
 
 def test_rocm_kernels_refuse_before_lowering(monkeypatch):
     """Direct kernel calls must report the platform, not a PassManager crash."""
-    import gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton as nvfp4_triton
-    import gptqmodel.nn_modules.qlinear.w4a_triton as w4a_triton
+    from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as nvfp4_triton
+    from gptqmodel.nn_modules.qlinear import w4a_triton
 
     monkeypatch.setattr(w4a_triton, "IS_ROCM", True)
     monkeypatch.setattr(nvfp4_triton, "IS_ROCM", True)

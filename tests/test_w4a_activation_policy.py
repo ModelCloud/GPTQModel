@@ -386,10 +386,12 @@ def test_w4a_validate_rejects_a_rocm_target(monkeypatch, cls_name):
 
     import gptqmodel.nn_modules.qlinear.w4a_floatx as w4a_floatx
     from gptqmodel.models._const import DEVICE
-    from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
     from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
-    cls = {"W4AFP8Linear": W4AFP8Linear, "W4ANVFP4Linear": W4ANVFP4Linear}[cls_name]
+    cls = {
+        "W4AFP8Linear": w4a_floatx.W4AFP8Linear,
+        "W4ANVFP4Linear": W4ANVFP4Linear,
+    }[cls_name]
     # ``W4ANVFP4Linear`` inherits the gate from ``w4a_floatx``.
     monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
 
