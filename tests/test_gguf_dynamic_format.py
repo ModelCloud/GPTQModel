@@ -11,11 +11,20 @@ checkpoint therefore reloaded every module at the *default* type for its width,
 silently discarding the requested one.
 """
 
+import json
+
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.quantization import FORMAT
-from gptqmodel.quantization.config import _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH, GGUFConfig
+from gptqmodel.quantization.config import (
+    _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH,
+    GGUFConfig,
+    QuantizeConfig,
+    clone_weight_only_config_for_module,
+)
+from gptqmodel.utils.model import create_quant_module
 
 
 NAME = "model.layers.0.mlp.down_proj"
@@ -30,26 +39,19 @@ NON_DEFAULT = [
 ]
 
 
-def _gguf_module(alias, width):
-    try:
-        from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
-    except Exception:  # pragma: no cover - depends on the ggml runtime
-        pytest.skip("ggml runtime is unavailable")
-    from gptqmodel.utils.model import create_quant_module
-
+def _gguf_module(config, *, dynamic=None):
     root = torch.nn.Module()
     root.model = torch.nn.Module()
     root.model.layers = torch.nn.ModuleList([torch.nn.Module()])
     root.model.layers[0].mlp = torch.nn.Module()
     root.model.layers[0].mlp.down_proj = torch.nn.Linear(256, 256, bias=False)
 
-    config = GGUFConfig(bits="q4_k", dynamic={NAME: {"bits": width, "format": alias}})
     create_quant_module(
         name=NAME,
-        linear_cls=GGUFCppKernel,
+        linear_cls=GGUFTorchLinear,
         bits=config.runtime_bits,
         desc_act=False,
-        dynamic=config.dynamic,
+        dynamic=config.dynamic if dynamic is None else dynamic,
         group_size=-1,
         module=root,
         submodule=root.get_submodule(NAME),
@@ -58,9 +60,9 @@ def _gguf_module(alias, width):
         lm_head_name="lm_head",
         pack_dtype=torch.int32,
         format=FORMAT.GGUF,
-        register_buffers=False,
+        register_buffers=True,
     )
-    return root.get_submodule(NAME).gguf_tensor_qtype
+    return root.get_submodule(NAME)
 
 
 def test_the_cases_really_are_non_default():
@@ -71,4 +73,46 @@ def test_the_cases_really_are_non_default():
 
 @pytest.mark.parametrize("alias,width", NON_DEFAULT)
 def test_per_module_format_beats_the_default_type_for_that_width(alias, width):
-    assert _gguf_module(alias, width) == alias.upper()
+    config = GGUFConfig(bits="q4_k", dynamic={NAME: {"bits": width, "format": alias}})
+    assert _gguf_module(config).gguf_tensor_qtype == alias.upper()
+
+
+@pytest.mark.parametrize(
+    "base,overrides,expected",
+    [
+        ("q4_k", {"bits": 4}, "Q4_K"),
+        ("q3_k", {"bits": 4}, "Q4_K"),
+        ("q4_1", {"bits": 5}, "Q5_1"),
+        ("q4_0", {"format": "q_k"}, "Q4_K"),
+        ("q4_0", {"bits": 4, "format": "q_k"}, "Q4_K"),
+        ("q4_k", {"bits": "q2_k"}, "Q2_K"),
+    ],
+)
+def test_reload_uses_the_same_type_and_packed_layout_as_quantization(base, overrides, expected):
+    config = GGUFConfig(bits=base, dynamic={NAME: overrides})
+    per_module_config = clone_weight_only_config_for_module(config, NAME)
+    quantized = _gguf_module(per_module_config, dynamic={})
+    assert quantized.gguf_tensor_qtype == expected
+    quantized.qweight.copy_(torch.arange(quantized.qweight.numel()).reshape_as(quantized.qweight).to(torch.uint8))
+
+    reloaded_config = QuantizeConfig.from_quant_config(json.loads(json.dumps(config.to_dict())))
+    reloaded = _gguf_module(reloaded_config)
+    assert reloaded.gguf_tensor_qtype == expected
+    reloaded.load_state_dict(quantized.state_dict(), strict=True)
+    assert torch.equal(reloaded.qweight, quantized.qweight)
+
+
+def test_raw_format_only_override_replaces_the_inherited_type():
+    config = GGUFConfig(bits="q4_0")
+    assert _gguf_module(config, dynamic={NAME: {"format": "q_k"}}).gguf_tensor_qtype == "Q4_K"
+
+
+@pytest.mark.parametrize("dynamic", [None, {}, {"other_module": {"bits": 2}}, {NAME: {"sym": True}}])
+def test_no_type_override_preserves_the_base_type(dynamic):
+    config = GGUFConfig(bits="q4_k", dynamic=dynamic)
+    assert _gguf_module(config).gguf_tensor_qtype == "Q4_K"
+
+
+def test_negative_dynamic_match_keeps_the_original_module():
+    config = GGUFConfig(bits="q4_k", dynamic={f"-:{NAME}": {}})
+    assert isinstance(_gguf_module(config), torch.nn.Linear)

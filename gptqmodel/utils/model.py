@@ -665,18 +665,14 @@ def create_quant_module(
                         overrides.get("compress_statistics", overrides.get("bnb_compress_statistics"))
                     )
             elif format == FORMAT.GGUF:
-                # A GGUF width maps to several ggml types (`q4_0`, `q4_1`,
-                # `q4_k`, ...), and `dynamic` stores the width and the type in
-                # separate fields. Resolving only `bits` would pick the default
-                # type for that width, so a per-module `format` override (which
-                # is what RCO's per-layer type allocation writes) has to be
-                # folded back into the structured spec here.
-                gguf_format_override = overrides.get(FORMAT_FIELD_CODE)
-                if gguf_format_override is not None:
-                    _, _, gguf_spec = _normalize_gguf_config_spec(
-                        overrides.get("bits", bits), gguf_format_override
-                    )
-                    tmp_bits = gguf_spec
+                # Resolve width and subtype independently, matching the config
+                # used to quantize this module. Width-only overrides inherit the
+                # base subtype; format-only overrides inherit only its width.
+                base_width, base_format, _ = _normalize_gguf_config_spec(bits, None)
+                _, _, tmp_bits = _normalize_gguf_config_spec(
+                    overrides.get("bits", base_width),
+                    overrides.get(FORMAT_FIELD_CODE, base_format),
+                )
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
