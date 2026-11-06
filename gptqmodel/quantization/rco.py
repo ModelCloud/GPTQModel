@@ -30,6 +30,7 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 """
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -516,3 +517,102 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                   f'loss={history[-1]["loss"]:.6f} bits={achieved:.6f} '
                   f'drift={history[-1]["drift"]:.2e}', flush=True)
     return torch.softmax(interpolated.alpha, dim=-1).detach(), history
+
+@dataclass(frozen=True)
+class RCOBlock:
+    """A decoder block and its declared allocatable, block-relative modules."""
+
+    index: int
+    path: str
+    projections: tuple[str, ...]
+
+    @property
+    def names(self):
+        return tuple(f'{self.path}.{name}' for name in self.projections)
+
+
+def discover_blocks(model, *, model_definition=None, quantize_config=None):
+    """Resolve RCO's inventory from the model definition, never from name heuristics.
+
+    Prefer a loaded BaseQModel wrapper: its effective tree includes per-instance
+    overrides. A bare Torch model requires its definition explicitly. The shared
+    tree parser honors exclusion/capture tags, aliases and expert placeholders;
+    the definition's layer/module hooks handle heterogeneous decoder blocks.
+    Only declared, live Linear (or staged TorchLinear) leaves are allocatable.
+    Non-strict definitions may omit alternatives in heterogeneous blocks. A
+    missing required leaf, empty block or unsupported declared leaf is an error.
+    """
+    from ..models.base import BaseQModel
+    from ..nn_modules.qlinear.torch import TorchLinear
+    from .config import dynamic_get
+
+    if isinstance(model, BaseQModel):
+        definition = type(model)
+        tree = model.effective_module_tree
+        quantize_config = model.quantize_config if quantize_config is None else quantize_config
+        model = model.model
+    else:
+        definition = model_definition
+        if (not isinstance(definition, type) or not issubclass(definition, BaseQModel)
+                or definition.module_tree is None):
+            raise ValueError('RCO discovery requires an explicit model definition or a loaded BaseQModel wrapper')
+        tree = definition._resolve_effective_module_tree(model, quantize_config)
+
+    if not tree:
+        raise ValueError('RCO discovery requires a nonempty model definition tree')
+    embeddings = set()
+    for getter in ('get_input_embeddings', 'get_output_embeddings'):
+        method = getattr(model, getter, None)
+        if callable(method):
+            embeddings.add(id(method()))
+
+    found = {}
+    for variant in definition._iter_module_tree_variants(tree):
+        if '#' not in variant:
+            raise ValueError('RCO model definition must declare its decoder boundary with #')
+        # Use the existing DSL parser with this variant, retaining the wrapper's
+        # effective tree rather than the class's unmodified declaration.
+        with definition._module_tree_context(variant):
+            prefixes = definition.extract_layers_node()
+            groups = definition.simple_layer_modules(model.config, quantize_config)
+            declared = tuple(dict.fromkeys(name for group in groups for name in group))
+            for prefix in prefixes:
+                container = model.get_submodule(prefix)
+                for local_index, (child, layer) in enumerate(container.named_children()):
+                    path = f'{prefix}.{child}'
+                    if not definition.should_quantize_layer(layer, path, local_index, quantize_config):
+                        raise ValueError(f'RCO staged arms do not support a skipped decoder block: {path}')
+                    projections = found.setdefault(path, [])
+                    for name in declared:
+                        try:
+                            module = layer.get_submodule(name)
+                        except AttributeError as exc:
+                            if definition.layer_modules_strict:
+                                raise ValueError(f'RCO declared projection is missing: {path}.{name}') from exc
+                            continue  # optional leaf in a heterogeneous decoder
+                        full_name = f'{path}.{name}'
+                        if (id(module) in embeddings
+                                or dynamic_get(getattr(quantize_config, 'dynamic', None), full_name) is False
+                                or not definition.should_quantize_module(model, full_name, module, quantize_config)):
+                            continue
+                        if not isinstance(module, (torch.nn.Linear, TorchLinear)):
+                            raise ValueError(f'RCO cannot restore declared projection {full_name}: {type(module).__name__}')
+                        if name not in projections:
+                            projections.append(name)
+    if not found or any(not names for names in found.values()):
+        raise ValueError('RCO model definition resolved no allocatable projections for one or more decoder blocks')
+    return tuple(RCOBlock(index, path, tuple(sorted(names)))
+                 for index, (path, names) in enumerate(found.items()))
+
+
+def discover_projections(model, *, model_definition=None, quantize_config=None, exclude=()):
+    """Return declared projection paths in decoder order, with exact exclusions."""
+    excluded = set(exclude)
+    return tuple(name for block in discover_blocks(
+        model, model_definition=model_definition, quantize_config=quantize_config)
+        for name in block.names if name not in excluded)
+
+
+def block_of(name, blocks):
+    """Look up a projection's decoder ordinal in a definition-derived inventory."""
+    return next((block.index for block in blocks if name in block.names), None)

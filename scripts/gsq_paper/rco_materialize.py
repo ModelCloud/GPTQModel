@@ -23,10 +23,6 @@ from pathlib import Path
 import torch
 
 
-PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-               'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -38,26 +34,33 @@ def parse_args():
     return parser.parse_args()
 
 
-def assignment_projection_bits(payload, layer_count):
-    """Expand legacy blocks or validate a complete per-projection assignment."""
-    expected = {f'model.layers.{index}.{name}' for index in range(layer_count) for name in PROJECTIONS}
+def assignment_projection_bits(payload, blocks):
+    """Validate an assignment against the independently resolved model inventory."""
+    expected = {name for block in blocks for name in block.names}
     if 'projection_bits' in payload:
         result = dict(payload['projection_bits'])
     else:
-        result = {f'model.layers.{int(index)}.{name}': width
-                  for index, width in payload['layer_bits'].items() for name in PROJECTIONS}
+        layer_bits = payload.get('layer_bits') or {}
+        if set(layer_bits) != {str(block.index) for block in blocks}:
+            raise ValueError('RCO materialization requires every projection of every decoder block')
+        result = {name: layer_bits[str(block.index)] for block in blocks for name in block.names}
     if set(result) != expected:
-        raise ValueError('RCO materialization requires every projection of every decoder block')
+        missing, extra = sorted(expected - set(result)), sorted(set(result) - expected)
+        raise ValueError('RCO materialization requires every projection of every decoder block; '
+                         f'missing={missing}, extra={extra}')
     if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
            for width in result.values()):
         raise ValueError('RCO staged materialization requires W2/W3/W4')
     return result
 
 
-def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
+def restore_assignment_block(layer, block, widths, arms, *, group_size, device,
+                             projections):
     """Merge selected packed tensors, checking the shared non-projection state."""
     from gptqmodel.looper.gsq_training_model import _restore_packed_layer
 
+    if not projections or set(widths) != set(projections):
+        raise ValueError('RCO widths must cover every declared projection in the block')
     states = {}
     for width in sorted(set(widths.values())):
         checkpoint = Path(arms.format(bits=width)) / f'layer-{block:02d}.pt'
@@ -68,7 +71,7 @@ def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
         states[width] = saved['state_dict']
 
     def shared(key):
-        return not any(key.startswith(name + '.') for name in PROJECTIONS)
+        return not any(key.startswith(name + '.') for name in projections)
 
     first = states[min(states)]
     merged = {key: value for key, value in first.items() if shared(key)}
@@ -78,7 +81,7 @@ def restore_assignment_block(layer, block, widths, arms, *, group_size, device):
             raise ValueError('RCO width arms disagree on shared block state')
     for name, width in widths.items():
         merged.update({key: value for key, value in states[width].items() if key.startswith(name + '.')})
-    return _restore_packed_layer(layer, merged, names=PROJECTIONS, bits=widths,
+    return _restore_packed_layer(layer, merged, names=tuple(projections), bits=widths,
                                  group_size=group_size, device=device)
 
 
@@ -93,6 +96,7 @@ def main():
         finalize_llama_gsq_wrapper,
     )
     from gptqmodel.quantization import FORMAT, GPTQConfig
+    from gptqmodel.quantization.rco import discover_blocks
     from gptqmodel.utils.torch import resolve_torch_device, torch_empty_cache
 
     device = resolve_torch_device(args.device)
@@ -105,16 +109,19 @@ def main():
                              attn_implementation='sdpa')
     model = wrapper.model.to(device)
 
-    projection_bits = assignment_projection_bits(payload, len(model.model.layers))
-    for block in range(len(model.model.layers)):
-        widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in PROJECTIONS}
-        model.model.layers[block] = restore_assignment_block(
-            model.model.layers[block], block, widths, args.arms, group_size=group_size, device=device)
-        print(f'  block {block:02d} <- {widths}', flush=True)
+    blocks = discover_blocks(wrapper)
+    projection_bits = assignment_projection_bits(payload, blocks)
+    for block in blocks:
+        widths = {name: projection_bits[full_name] for name, full_name in zip(block.projections, block.names)}
+        restored = restore_assignment_block(
+            model.get_submodule(block.path), block.index, widths, args.arms, group_size=group_size,
+            device=device, projections=block.projections)
+        model.set_submodule(block.path, restored)
+        print(f'  block {block.index:02d} <- {widths}', flush=True)
 
     run = {
         'state': 'complete',
-        'layer_indices': list(range(len(model.model.layers))),
+        'layer_indices': [block.index for block in blocks],
         'bits': base,
         'projection_bits': projection_bits,
         'group_size': group_size,

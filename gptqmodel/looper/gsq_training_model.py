@@ -113,8 +113,7 @@ def _restore_packed_layer(layer, state_dict, *, names, bits, group_size, device)
         linear = TorchLinear(bits=widths[name], group_size=group_size, sym=True, desc_act=False,
                              in_features=source.in_features, out_features=source.out_features,
                              bias=source.bias is not None, backend=BACKEND.TORCH)
-        parent, leaf = name.rsplit('.', 1)
-        setattr(packed.get_submodule(parent), leaf, linear)
+        packed.set_submodule(name, linear)
     packed.load_state_dict(state_dict, strict=True)
     for name in names:
         packed.get_submodule(name).post_init()
@@ -541,7 +540,7 @@ def dynamic_layer_bits(quantize_config):
     return resolved or None
 
 
-def prepare_llama_gsq_export(model, run):
+def prepare_llama_gsq_export(model, run, *, blocks=None):
     """Finalize a complete staged model without creating a wrapper or writing files.
 
     Returns its matching quantization configuration. A public lifecycle caller
@@ -551,14 +550,17 @@ def prepare_llama_gsq_export(model, run):
     from ..nn_modules.qlinear.torch import TorchLinear
     from ..quantization.config import FORMAT, GPTQConfig
 
-    if (run['state'] != 'complete' or run['layer_indices'] != list(range(len(model.model.layers)))
+    if blocks is None:
+        from ..models.auto import MODEL_MAP
+        from ..quantization.rco import discover_blocks
+
+        blocks = discover_blocks(model, model_definition=MODEL_MAP.get(model.config.model_type))
+    if (run['state'] != 'complete' or run['layer_indices'] != [block.index for block in blocks]
             or not any(record is run for record in getattr(model, 'gsq_training_runs', []))):
         raise ValueError('Uniform staged export requires this model’s completed all-layer run')
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    if any(not isinstance(layer.get_submodule(name), TorchLinear)
-           for layer in model.model.layers for name in names):
-        raise ValueError('Uniform staged export requires all seven packed projections in every layer')
+    if any(not isinstance(model.get_submodule(name), TorchLinear)
+           for block in blocks for name in block.names):
+        raise ValueError('Staged export requires every declared projection to be packed')
     layer_bits = dict(run.get('layer_bits') or {})
     widths = set(layer_bits.values())
     uniform = None if not layer_bits else (next(iter(widths)) if len(widths) == 1 else None)
@@ -576,16 +578,14 @@ def prepare_llama_gsq_export(model, run):
         base = run['bits'] if not isinstance(run['bits'], dict) else min(widths)
         qcfg.bits = base
         qcfg.dynamic = {
-            f'model.layers.{index}.{name}': {'bits': int(width)}
-            for index, width in sorted(layer_bits.items())
-            for name in ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-                         'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-            if int(width) != base
+            name: {'bits': int(layer_bits[block.index])}
+            for block in blocks for name in block.names
+            if int(layer_bits[block.index]) != base
         } or None
         qcfg.meta['gsq_layer_bits'] = {str(k): int(v) for k, v in sorted(layer_bits.items())}
     projection_bits = run.get('projection_bits')
     if projection_bits is not None:
-        expected = {f'model.layers.{index}.{name}' for index in range(len(model.model.layers)) for name in names}
+        expected = {name for block in blocks for name in block.names}
         if set(projection_bits) != expected:
             raise ValueError('Projection export requires an exact all-layer projection assignment')
         if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
@@ -619,10 +619,11 @@ def finalize_llama_gsq_wrapper(wrapper, run):
     import copy
 
     from ..nn_modules.qlinear.torch import TorchLinear
+    from ..quantization.rco import discover_blocks
 
     requested = wrapper.quantize_config.to_dict()
     caller_meta = copy.deepcopy(wrapper.quantize_config.meta)
-    config = prepare_llama_gsq_export(wrapper.model, run)
+    config = prepare_llama_gsq_export(wrapper.model, run, blocks=discover_blocks(wrapper))
     caller_meta.update(config.meta)
     caller_meta['gsq_requested_quantization'] = requested
     config.meta = caller_meta
