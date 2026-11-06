@@ -916,42 +916,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         return counts
 
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
-        """Collapse expert module names into a stable MoE routing group key."""
+        """Collapse expert module names using the definition's declared experts."""
 
         if not module_name:
             return None
 
-        if ".experts." in module_name:
-            prefix, remainder = module_name.split(".experts.", 1)
-            expert_id = remainder.split(".", 1)[0]
-            if expert_id:
-                return f"{prefix}.experts.{expert_id}"
+        plan = getattr(self.gptq_model, "module_plan", None)
+        if plan is None:
             return None
-
-        if ".shared_experts." in module_name:
-            prefix, _ = module_name.split(".shared_experts.", 1)
-            return f"{prefix}.shared_experts"
-
-        if ".shared_expert." in module_name:
-            prefix, _ = module_name.split(".shared_expert.", 1)
-            return f"{prefix}.shared_expert"
-
-        return None
+        return plan.expert_root(module_name)
 
     def _is_attention_module_name(self, module_name: str) -> bool:
-        """Heuristically detect attention modules from their qualified name."""
+        """Return whether the declared tree marks this path as attention."""
 
-        if not module_name:
+        plan = getattr(self.gptq_model, "module_plan", None)
+        if plan is None or not module_name:
             return False
-
-        lowered = module_name.lower()
-        if ".attn" in lowered or "attn." in lowered:
-            return True
-        if ".attention" in lowered or "attention." in lowered:
-            return True
-        if lowered.endswith("attn") or lowered.endswith("attention"):
-            return True
-        return False
+        return "q" in plan.roles(module_name) or "k" in plan.roles(module_name) or "v" in plan.roles(module_name)
 
     def _should_use_moe_lifecycle(
         self,

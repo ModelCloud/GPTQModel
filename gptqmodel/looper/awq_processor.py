@@ -1583,7 +1583,14 @@ class AWQProcessor(LoopProcessor):
         if staged_gsq is not None and staged_gsq.enabled:
             from .gsq_training_awq import capture_awq_staged_teacher
 
-            staged_teacher = capture_awq_staged_teacher(self, layer_module_ref, named_childs, fallback_names)
+            plan = getattr(self.gptq_model, "module_plan", None)
+            projections = tuple(
+                name for name, named in named_childs.items()
+                if plan is None or plan.roles(name)
+            )
+            staged_teacher = capture_awq_staged_teacher(
+                self, layer_module_ref, named_childs, fallback_names, projections=projections,
+            )
 
         if self.apply_clip:
             clip_list = self._search_best_clip(

@@ -16,7 +16,6 @@ class HunYuanMoEV1QModel(BaseQModel):
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
-    moe_lifecycle_hooks.shared_expert_block_names = ["shared_mlp"]
 
     module_tree = [
         "model",

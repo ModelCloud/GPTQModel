@@ -70,7 +70,7 @@ def test_afmoe_simple_layer_modules_cover_attention_and_mlp():
     assert AfMoeQModel.layer_modules_strict is False
     hooks = AfMoeQModel.moe_lifecycle_hooks
     assert isinstance(hooks, GateUpDownMoELifecycleHooks)
-    # Lifecycle hooks look names up with hasattr(moe_block, name), so the
-    # default bare attribute names must be used rather than module-tree keys.
-    assert hooks.expert_block_names == ["experts"]
-    assert hooks.shared_expert_block_names == ["shared_experts", "shared_expert"]
+    # Container names now come from the model definition's tree, not a static
+    # candidate list. AFMoE declares the routed and shared expert containers.
+    assert hooks.expert_block_names == ()
+    assert hooks.shared_expert_block_names == ()

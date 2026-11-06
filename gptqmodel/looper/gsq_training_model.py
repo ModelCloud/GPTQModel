@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 
+from ..quantization.gsq_training import LLAMA_STAGED_PROJECTIONS as STAGED_PROJECTIONS
 from ..quantization.gsq_training_config import GSQTrainingConfig
 from .gsq_training_capture import advance_llama_gsq_inputs, capture_llama_gsq_inputs, quantize_llama_gsq_capture
 
@@ -154,7 +155,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                              initialization_documents=None, validation_documents=None,
                              checkpoint_directory=None, distributed=None,
                              target_cache='none', activation_checkpointing=False,
-                             resume_prefix_directory=None, reuse_capture=False):
+                             resume_prefix_directory=None, reuse_capture=False, projections=None):
     """Quantize selected dense decoder blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
@@ -227,6 +228,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         raise ValueError('Staged model quantization requires nonempty validation documents')
     if validation_documents is not None and not gsq.enabled:
         raise ValueError('Validation documents require enabled staged GSQ')
+    names = tuple(projections or STAGED_PROJECTIONS)
     layers = model.model.layers
     indices = list(range(len(layers))) if layer_indices is None else list(layer_indices)
     if (not indices or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(layers) for i in indices)
@@ -236,8 +238,6 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     if len(devices) != 1 or next(iter(devices)).type == 'meta':
         raise ValueError('Staged model quantization currently requires one materialized model device')
     device = next(iter(devices))
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     for index in indices:
         for name in names:
             module = layers[index].get_submodule(name)
@@ -441,7 +441,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                                                            initialization_cache=initialization_cache,
                                                            validation_cache=validation_cache,
                                                            distributed=distributed, target_cache=target_cache,
-                                                           activation_checkpointing=activation_checkpointing)
+                                                           activation_checkpointing=activation_checkpointing,
+                                                           projections=names)
             finally:
                 if not reuse_capture:
                     for captured in (cache, initialization_cache, validation_cache):

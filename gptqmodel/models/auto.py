@@ -581,7 +581,8 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
-    # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
+    # Unsupported model types use BaseQModel and fail closed unless the caller
+    # supplies an explicit model definition/module tree.
     if model_type not in SUPPORTED_MODELS:
         return BaseQModel
 
