@@ -56,6 +56,7 @@ from ..quantization.config import (
     _normalize_fp8_scale_semantics,
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
+    _normalize_gguf_config_spec,
     _normalize_quant_bits,
     dynamic_get,
     dynamic_matching_pattern,
@@ -663,6 +664,19 @@ def create_quant_module(
                     tmp_init_kwargs["compress_statistics"] = bool(
                         overrides.get("compress_statistics", overrides.get("bnb_compress_statistics"))
                     )
+            elif format == FORMAT.GGUF:
+                # A GGUF width maps to several ggml types (`q4_0`, `q4_1`,
+                # `q4_k`, ...), and `dynamic` stores the width and the type in
+                # separate fields. Resolving only `bits` would pick the default
+                # type for that width, so a per-module `format` override (which
+                # is what RCO's per-layer type allocation writes) has to be
+                # folded back into the structured spec here.
+                gguf_format_override = overrides.get(FORMAT_FIELD_CODE)
+                if gguf_format_override is not None:
+                    _, _, gguf_spec = _normalize_gguf_config_spec(
+                        overrides.get("bits", bits), gguf_format_override
+                    )
+                    tmp_bits = gguf_spec
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
