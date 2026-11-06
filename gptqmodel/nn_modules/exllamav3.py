@@ -114,8 +114,25 @@ class ExllamaV3Linear(nn.Module):
         self._inner = None
         self._inner_signature = None
 
+    def _coerce_buffer_dtypes(self) -> None:
+        """Restore the dtypes the EXL3 kernels require after a model-wide cast.
+
+        ``nn.Module._apply`` converts every floating-point buffer to the target
+        model dtype, so loading a bf16 checkpoint turns the unpacked sign vectors
+        ``suh``/``svh`` into bf16. ``LinearEXL3`` asserts they are ``torch.half``
+        because the Hadamard kernels are typed for fp16, which made a bf16 load
+        fail with ``AssertionError: suh is wrong datatype``. The packed ``su``/``sv``
+        are int16 and are untouched by the cast.
+        """
+        for buffer_name in ("suh", "svh"):
+            tensor = getattr(self, buffer_name, None)
+            if tensor is not None and tensor.is_floating_point() and tensor.dtype != torch.half:
+                setattr(self, buffer_name, tensor.half())
+
     def _ensure_inner(self) -> "LinearEXL3":
         from ..exllamav3.modules.quant.exl3 import LinearEXL3
+
+        self._coerce_buffer_dtypes()
 
         trellis = getattr(self, "trellis", None)
         if trellis is None:
@@ -152,12 +169,15 @@ class ExllamaV3Linear(nn.Module):
 
     def post_init(self) -> None:
         self._drop_inner()
+        self._coerce_buffer_dtypes()
         if getattr(self, "trellis", None) is not None and self.trellis.device.type != "meta":
             self._ensure_inner()
 
     def _apply(self, fn):
         self._drop_inner()
-        return super()._apply(fn)
+        result = super()._apply(fn)
+        self._coerce_buffer_dtypes()
+        return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         inner = self._ensure_inner()
