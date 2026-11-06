@@ -1919,6 +1919,35 @@ class ExpertsRoutingOverride(BaseMoERouting):
 
 # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
 # This ensures all experts receive sufficient calibration samples but increases quantization time
+_BYPASS_BATCH_SIZE_ERROR = "ExpertsRoutingBypass.batch_size must be a positive int or None"
+
+
+def normalize_bypass_batch_size(batch_size: Any) -> Optional[int]:
+    """Validate ``ExpertsRoutingBypass.batch_size`` and coerce numeric strings.
+
+    The batching runs behind a ``batch_size > 0`` guard in the staged executor,
+    so zero or a negative value silently degrades to "one chunk" - the VRAM
+    pressure this option exists to avoid. Numeric strings are coerced the same
+    way ``ExpertsRoutingOverride`` coerces ``num_experts_per_tok``, so a value
+    that came through JSON still works.
+    """
+
+    if batch_size is None:
+        return None
+    if isinstance(batch_size, bool):
+        raise ValueError(f"{_BYPASS_BATCH_SIZE_ERROR}, got bool: {batch_size!r}")
+    if isinstance(batch_size, str):
+        raw = batch_size.strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+        raise ValueError(f"{_BYPASS_BATCH_SIZE_ERROR}, got str: {batch_size!r}")
+    if not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError(
+            f"{_BYPASS_BATCH_SIZE_ERROR}, got {type(batch_size).__name__}: {batch_size!r}"
+        )
+    return batch_size
+
+
 @dataclass
 class ExpertsRoutingBypass(BaseMoERouting):
     # Number of modules to process in a single batch to reduce VRAM pressure during quantization
@@ -1927,25 +1956,12 @@ class ExpertsRoutingBypass(BaseMoERouting):
     # - Second batch processes remaining 10 modules
     batch_size: Optional[int] = field(
         default=None,
-        metadata={"help": "Number of modules to process in a single batch during MoE quantization"}
+        metadata={"help": "Number of modules to process in a single batch during MoE quantization. "
+                          "Numeric strings are coerced; zero and negatives are rejected."}
     )
 
     def __post_init__(self):
-        # The batching only happens behind a `batch_size > 0` guard in the staged
-        # executor, so a string, zero or a negative value silently degrades to
-        # "one chunk" - which is the VRAM pressure this option exists to avoid.
-        if self.batch_size is None:
-            return
-        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
-            raise ValueError(
-                f"ExpertsRoutingBypass.batch_size must be a positive int or None, "
-                f"got {type(self.batch_size).__name__}: {self.batch_size!r}"
-            )
-        if self.batch_size <= 0:
-            raise ValueError(
-                f"ExpertsRoutingBypass.batch_size must be a positive int or None, "
-                f"got {self.batch_size}"
-            )
+        self.batch_size = normalize_bypass_batch_size(self.batch_size)
 
 
 @dataclass
