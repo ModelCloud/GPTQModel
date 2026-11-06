@@ -801,6 +801,46 @@ class _LazyCheckpointAssembly:
     concat_dim: Optional[int]
 
 
+# A shard holding several model layers is re-opened and re-read once per layer
+# it contains. The layout is fixed per checkpoint, so a process only needs to
+# hear it once.
+_NON_LAYERWISE_SHARD_WARNING_LOCK = threading.Lock()
+_NON_LAYERWISE_SHARD_WARNING_EMITTED = False
+
+# Path segments that conventionally introduce a decoder/encoder layer index in
+# Hugging Face checkpoints. Used only when the model's `module_tree` does not
+# describe the checkpoint naming scheme.
+_LAYER_CONTAINER_SEGMENTS = frozenset(
+    {
+        "block",
+        "blocks",
+        "decoder_block",
+        "decoder_blocks",
+        "decoder_layer",
+        "decoder_layers",
+        "encoder_block",
+        "encoder_blocks",
+        "encoder_layer",
+        "encoder_layers",
+        "h",
+        "layer",
+        "layers",
+        "transformer_block",
+        "transformer_blocks",
+        "transformer_layer",
+        "transformer_layers",
+    }
+)
+
+
+def reset_non_layerwise_shard_warning() -> None:
+    """Allow the one-shot checkpoint shard-layout warning to fire again."""
+
+    global _NON_LAYERWISE_SHARD_WARNING_EMITTED
+    with _NON_LAYERWISE_SHARD_WARNING_LOCK:
+        _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -1498,6 +1538,105 @@ class LazyTurtle:
                     continue
                 return parts[start : end + 1], parts[end + 1 :]
         return (), parts
+
+    @staticmethod
+    def _fallback_layer_key(name: str) -> Optional[str]:
+        """Infer a layer key from a checkpoint path without `module_tree` prefixes."""
+
+        parts = tuple(part for part in name.split(".") if part)
+        for index in range(1, len(parts)):
+            if parts[index].isdigit() and parts[index - 1] in _LAYER_CONTAINER_SEGMENTS:
+                return ".".join(parts[: index + 1])
+        return None
+
+    def checkpoint_layer_key(self, name: str) -> Optional[str]:
+        """Return the layer that owns checkpoint tensor `name`, if any.
+
+        Tensors that are not owned by a layer (embeddings, the language
+        model head, model-level norms, ...) return `None` and are ignored by the
+        shard-layout check.
+        """
+
+        layer_head, _ = self._split_layer_relative_path(name)
+        if layer_head:
+            return ".".join(layer_head)
+        return self._fallback_layer_key(name)
+
+    def checkpoint_shard_layer_groups(self) -> Dict[str, frozenset[str]]:
+        """Map every checkpoint shard to the layers whose tensors it stores."""
+
+        groups: Dict[str, set[str]] = {}
+        for tensor_name, shard_name in self._weight_map.items():
+            bucket = groups.setdefault(shard_name, set())
+            layer_key = self.checkpoint_layer_key(tensor_name)
+            if layer_key is not None:
+                bucket.add(layer_key)
+        return {shard_name: frozenset(layer_keys) for shard_name, layer_keys in groups.items()}
+
+    def warn_if_checkpoint_shards_are_not_layerwise(self) -> None:
+        """Warn once per process when a shard stores tensors from several layers.
+
+        LazyTurtle is only used by the quantization offload path, so this check
+        intentionally stays out of the inference load path. The warning is
+        advisory: a failure while inspecting the index must never disable lazy
+        loading.
+        """
+
+        global _NON_LAYERWISE_SHARD_WARNING_EMITTED
+
+        try:
+            shard_groups = self.checkpoint_shard_layer_groups()
+        except Exception as exc:  # never let an advisory break lazy loading
+            log.debug("LazyTurtle: checkpoint shard-layout check skipped: %s", exc)
+            return
+
+        multi_layer_shards = {
+            shard_name: layer_keys
+            for shard_name, layer_keys in shard_groups.items()
+            if len(layer_keys) > 1
+        }
+        if not multi_layer_shards:
+            return
+
+        with _NON_LAYERWISE_SHARD_WARNING_LOCK:
+            if _NON_LAYERWISE_SHARD_WARNING_EMITTED:
+                return
+            _NON_LAYERWISE_SHARD_WARNING_EMITTED = True
+
+        example_shard, example_layers = max(
+            multi_layer_shards.items(),
+            key=lambda item: len(item[1]),
+        )
+
+        log.warning(
+            "LazyTurtle: loading this checkpoint for quantization, but its shards are not layer-wise: "
+            "%s. The same shard is opened and re-read once per layer it holds, adding "
+            "avoidable I/O during quantization; re-shard so each layer has its own file.",
+            self._format_shard_layout_detail(
+                shard_groups=shard_groups,
+                multi_layer_shards=multi_layer_shards,
+                example_shard=example_shard,
+                example_layer_count=len(example_layers),
+            ),
+        )
+
+    @staticmethod
+    def _format_shard_layout_detail(
+        *,
+        shard_groups: Dict[str, frozenset[str]],
+        multi_layer_shards: Dict[str, frozenset[str]],
+        example_shard: str,
+        example_layer_count: int,
+    ) -> str:
+        """Describe the offending shards, keeping the count grammar-correct."""
+
+        if len(shard_groups) == 1:
+            return f"`{example_shard}` holds {example_layer_count} model layers"
+        verb = "holds" if len(multi_layer_shards) == 1 else "hold"
+        return (
+            f"{len(multi_layer_shards)} of {len(shard_groups)} safetensors files {verb} multiple "
+            f"model layers (e.g. `{example_shard}` holds {example_layer_count})"
+        )
 
     def _module_tree_name_aliases(self, name: str) -> list[str]:
         """Generate checkpoint-name candidates from MoE aliases declared in `module_tree`."""
