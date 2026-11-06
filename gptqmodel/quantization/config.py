@@ -158,7 +158,10 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
     METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
     # AWQ is 4-bit everywhere, with 8-bit available on Marlin/Machete.
-    METHOD.AWQ: (4, 8),
+    # RCO also allocates 2- and 3-bit modules, which only the portable torch
+    # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run; `create_quant_module`
+    # routes a non-4-bit module there, so the width has to be accepted here.
+    METHOD.AWQ: (2, 3, 4, 8),
     # QQQ and ParoQuant kernels are 4-bit only.
     METHOD.QQQ: (4,),
     METHOD.PARO: (4,),
