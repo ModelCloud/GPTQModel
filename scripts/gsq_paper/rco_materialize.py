@@ -23,15 +23,6 @@ from pathlib import Path
 import torch
 
 
-#: Fallback projection list. An architecture may add its own projection
-#: (Ripple-65B has a gated attention ``self_attn.g_proj``); a hardcoded tuple
-#: both drops it from the merge and makes the completeness check below reject a
-#: perfectly valid per-projection assignment. ``main`` discovers the real set
-#: from the live block.
-PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-               'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -43,21 +34,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def assignment_projection_bits(payload, layer_count, projections=PROJECTIONS):
-    """Expand legacy blocks or validate a complete per-projection assignment.
-
-    ``projections`` is the per-block list the target model actually has. It
-    defaults to the paper's Llama tuple so an existing block-level assignment
-    keeps expanding the same way.
-    """
-    expected = {f'model.layers.{index}.{name}' for index in range(layer_count) for name in projections}
+def assignment_projection_bits(payload, blocks):
+    """Validate an assignment against the independently resolved model inventory."""
+    expected = {name for block in blocks for name in block.names}
     if 'projection_bits' in payload:
         result = dict(payload['projection_bits'])
     else:
-        result = {f'model.layers.{int(index)}.{name}': width
-                  for index, width in payload['layer_bits'].items() for name in projections}
+        layer_bits = payload.get('layer_bits') or {}
+        if set(layer_bits) != {str(block.index) for block in blocks}:
+            raise ValueError('RCO materialization requires every projection of every decoder block')
+        result = {name: layer_bits[str(block.index)] for block in blocks for name in block.names}
     if set(result) != expected:
-        raise ValueError('RCO materialization requires every projection of every decoder block')
+        missing, extra = sorted(expected - set(result)), sorted(set(result) - expected)
+        raise ValueError('RCO materialization requires every projection of every decoder block; '
+                         f'missing={missing}, extra={extra}')
     if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
            for width in result.values()):
         raise ValueError('RCO staged materialization requires W2/W3/W4')
@@ -65,10 +55,12 @@ def assignment_projection_bits(payload, layer_count, projections=PROJECTIONS):
 
 
 def restore_assignment_block(layer, block, widths, arms, *, group_size, device,
-                             projections=PROJECTIONS):
+                             projections):
     """Merge selected packed tensors, checking the shared non-projection state."""
     from gptqmodel.looper.gsq_training_model import _restore_packed_layer
 
+    if not projections or set(widths) != set(projections):
+        raise ValueError('RCO widths must cover every declared projection in the block')
     states = {}
     for width in sorted(set(widths.values())):
         checkpoint = Path(arms.format(bits=width)) / f'layer-{block:02d}.pt'
@@ -104,6 +96,7 @@ def main():
         finalize_llama_gsq_wrapper,
     )
     from gptqmodel.quantization import FORMAT, GPTQConfig
+    from gptqmodel.quantization.rco import discover_blocks
     from gptqmodel.utils.torch import resolve_torch_device, torch_empty_cache
 
     device = resolve_torch_device(args.device)
@@ -116,27 +109,19 @@ def main():
                              attn_implementation='sdpa')
     model = wrapper.model.to(device)
 
-    # The assignment names every allocated projection, so it is the authority on
-    # what this model has: deriving the list here keeps an architecture-specific
-    # projection (Ripple-65B's `self_attn.g_proj`) from being silently dropped.
-    layer_count = len(model.model.layers)
-    projections = tuple(sorted({
-        name.split(f'model.layers.{block}.', 1)[-1]
-        for block in range(layer_count)
-        for name in (payload.get('projection_bits') or {})
-        if name.startswith(f'model.layers.{block}.')
-    })) or PROJECTIONS
-    projection_bits = assignment_projection_bits(payload, layer_count, projections)
-    for block in range(layer_count):
-        widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in projections}
-        model.model.layers[block] = restore_assignment_block(
-            model.model.layers[block], block, widths, args.arms, group_size=group_size,
-            device=device, projections=projections)
-        print(f'  block {block:02d} <- {widths}', flush=True)
+    blocks = discover_blocks(wrapper)
+    projection_bits = assignment_projection_bits(payload, blocks)
+    for block in blocks:
+        widths = {name: projection_bits[full_name] for name, full_name in zip(block.projections, block.names)}
+        restored = restore_assignment_block(
+            model.get_submodule(block.path), block.index, widths, args.arms, group_size=group_size,
+            device=device, projections=block.projections)
+        model.set_submodule(block.path, restored)
+        print(f'  block {block.index:02d} <- {widths}', flush=True)
 
     run = {
         'state': 'complete',
-        'layer_indices': list(range(len(model.model.layers))),
+        'layer_indices': [block.index for block in blocks],
         'bits': base,
         'projection_bits': projection_bits,
         'group_size': group_size,

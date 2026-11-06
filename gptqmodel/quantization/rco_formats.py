@@ -3,38 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Per-format adapters that let RCO allocate widths for AWQ, EXL3 and GGUF.
+"""Reconstruction-error allocation for AWQ, EXL3 and GGUF.
 
-``gptqmodel.quantization.rco`` is a pure optimizer: it takes one weight per
-group, one cost per option and one score per (group, option), and returns a
-budget-feasible assignment. Everything that differs between backends lives
-here:
-
-===============  =========================  =======================  ==============
-backend          options                    cost (bits/parameter)    search
-===============  =========================  =======================  ==============
-AWQ              ``w2`` / ``w3`` / ``w4``   ``bits + (16+bits)/group``  interpolation
-EXL3             ``k2`` / ``k3`` / ``k4``   ``bits``                 reconstruction
-GGUF             ``iq2_xxs`` ... ``q6_k``   ggml block bpw           reconstruction
-===============  =========================  =======================  ==============
-
-Why the fidelity split is forced by the checkpoint layouts
-----------------------------------------------------------
-The paper-faithful search (GSQ, arXiv 2604.18556 Sec. 4.2 and Table 1, built on
-the exact-budget manifold of Helcig & Alistarh, arXiv 2605.00649 Secs. 2-3)
-needs the model loss as a differentiable function of the assignment, which
-``rco.InterpolatedLlamaLayers`` obtains by interpolating *dense* staged arms.
-AWQ stages dense weights and only then packs affine codes, so its arms can be
-interpolated. EXL3 stores a trellis and GGUF stores ggml blocks; neither is a
-linear function of a dense weight, so those backends score each option with the
-Hessian-weighted reconstruction error their quantizer already reports
-(``trace(err H err^T) / trace(W H W^T)``). Every plan records which search
-produced it in :attr:`RCOPlan.search`, so a proxy allocation is never reported
-as the paper search.
-
-The module also owns architecture-generic projection discovery. The staged GSQ
-scripts previously hardcoded the seven Llama projections, which silently
-omitted Ripple's eighth projection (``self_attn.g_proj``, gated attention).
+All adapters here use measured reconstruction errors, not differentiable
+Gumbel/KL search. Packed-weight budgets include format metadata and padding
+when module shapes are supplied; biases and unquantized tensors are excluded.
+Projection identity comes from the shared model-definition tree inventory.
 """
 
 from __future__ import annotations
@@ -46,11 +20,10 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, T
 import torch
 
 from .config import (
-    _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS,
     FORMAT_FIELD_CODE,
     METHOD,
 )
-from .rco import achieved_bits, budget_constrained_argmax, discover_projections
+from .rco import budget_constrained_argmax, discover_projections
 
 
 #: Staged AWQ widths. ``AwqTorchLinear`` packs and runs 2-8 bits; the CUDA
@@ -74,6 +47,7 @@ GGUF_STAGED_ALIASES: Tuple[str, ...] = (
     "q5_k",
     "q6_k",
 )
+
 
 class RCOFormatError(ValueError):
     """Raised when an option set or assignment cannot be realised by a backend."""
@@ -106,9 +80,22 @@ class RCOPlan:
     #: Non-empty when the assignment is representable but needs a specific
     #: runtime to serve (e.g. mixed-width AWQ needs the torch kernel).
     runtime_note: Optional[str] = None
+    settings: Dict[str, Any] = field(default_factory=dict)
+    weights: Tuple[float, ...] = ()
+    module_costs: Tuple[Tuple[float, ...], ...] = ()
+    shapes: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    score_metric: str = "relative_frobenius"
+
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": 1,
+            "settings": dict(self.settings),
+            "params": dict(zip(self.names, self.weights)),
+            "module_costs": dict(zip(self.names, self.module_costs)),
+            "shapes": dict(self.shapes),
+            "score_metric": self.score_metric,
+            "budget_unit": "packed_weight_bits" if self.shapes else "nominal_weight_bits",
             "method": self.method,
             "search": self.search,
             "target_bits": self.target_bits,
@@ -124,23 +111,57 @@ class RCOPlan:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RCOPlan":
-        module_bits: Mapping[str, str] = payload["module_bits"]
+        if payload.get("schema_version") != 1:
+            raise RCOFormatError("RCO plan requires schema_version=1; regenerate the plan")
+        module_bits = payload["module_bits"]
         names = tuple(module_bits)
         labels = tuple(payload["options"])
-        index = {label: position for position, label in enumerate(labels)}
+        settings = dict(payload["settings"])
+        adapter = adapter_from_settings(payload["method"], settings, labels)
+        if labels != adapter.labels() or payload["search"] != "reconstruction":
+            raise RCOFormatError("RCO plan options/search do not match the reconstruction adapter")
+        try:
+            assignment = tuple(labels.index(module_bits[name]) for name in names)
+        except ValueError as exc:
+            raise RCOFormatError("RCO plan selects an unknown option") from exc
+        dynamic = adapter.build_dynamic(names, assignment)
+        if dynamic != payload["dynamic"]:
+            raise RCOFormatError("RCO plan dynamic config disagrees with its assignment")
+        weights = torch.tensor([payload["params"][name] for name in names], dtype=torch.float64)
+        costs = torch.tensor([payload["module_costs"][name] for name in names], dtype=torch.float64)
+        shapes = {name: tuple(shape) for name, shape in payload.get("shapes", {}).items()}
+        expected_unit = "packed_weight_bits" if shapes else "nominal_weight_bits"
+        if payload.get("budget_unit") != expected_unit:
+            raise RCOFormatError("RCO plan budget unit disagrees with its module shapes")
+        if shapes:
+            if set(shapes) != set(names):
+                raise RCOFormatError("RCO shapes must cover the complete assignment")
+            expected = adapter.cost_matrix([shapes[name] for name in names])
+            if not torch.equal(costs, expected) or any(
+                weights[i] != math.prod(shapes[name]) for i, name in enumerate(names)
+            ):
+                raise RCOFormatError("RCO plan costs/counts disagree with module shapes")
+        elif not torch.equal(costs, adapter.costs().expand(len(names), -1)):
+            raise RCOFormatError("RCO plan nominal costs disagree with its options")
+        target = float(payload["target_bits"])
+        _validate_inputs(torch.zeros_like(costs), weights, costs, target, names)
+        achieved = _achieved(assignment, weights, costs)
+        if achieved > target or not math.isclose(achieved, float(payload["achieved_bits"]), rel_tol=1e-12, abs_tol=1e-12):
+            raise RCOFormatError("RCO plan has an incorrect or overspent budget")
+        counts = {label: sum(value == label for value in module_bits.values()) for label in labels}
+        counts = {label: count for label, count in counts.items() if count}
+        if counts != payload["width_counts"] or tuple(payload["costs"]) != tuple(adapter.costs().tolist()):
+            raise RCOFormatError("RCO plan option costs/counts disagree with its assignment")
+        metric = payload.get("score_metric")
+        if metric not in {"relative_frobenius", "relative_hessian"}:
+            raise RCOFormatError("RCO plan requires an explicit reconstruction score metric")
         return cls(
-            method=str(payload["method"]),
-            search=str(payload["search"]),
-            target_bits=float(payload["target_bits"]),
-            achieved_bits=float(payload["achieved_bits"]),
-            names=names,
-            labels=labels,
-            costs=tuple(float(cost) for cost in payload["costs"]),
-            assignment=tuple(index[module_bits[name]] for name in names),
-            dynamic={name: dict(entry) for name, entry in payload["dynamic"].items()},
-            counts={str(k): int(v) for k, v in payload["width_counts"].items()},
-            resolution=int(payload.get("resolution", 0)),
-            runtime_note=payload.get("runtime_note"),
+            method=adapter.method.value, search="reconstruction", target_bits=target,
+            achieved_bits=achieved, names=names, labels=labels, costs=tuple(adapter.costs().tolist()),
+            assignment=assignment, dynamic=dynamic, counts=counts, resolution=int(payload["resolution"]),
+            runtime_note=adapter.runtime_requirement(dict(zip(names, assignment))), settings=settings,
+            weights=tuple(weights.tolist()), module_costs=tuple(tuple(row) for row in costs.tolist()),
+            shapes=shapes, score_metric=metric,
         )
 
 
@@ -148,9 +169,7 @@ class RCOFormatAdapter:
     """Maps an RCO assignment onto one backend's ``dynamic`` configuration."""
 
     method: METHOD
-    #: ``"interpolation"`` when staged dense arms can be interpolated, otherwise
-    #: ``"reconstruction"`` for the Hessian-weighted error proxy.
-    search: str
+    search = "reconstruction"
 
     def __init__(self, qcfg: Any):
         self.qcfg = qcfg
@@ -159,10 +178,27 @@ class RCOFormatAdapter:
         raise NotImplementedError
 
     def costs(self) -> torch.Tensor:
-        return torch.tensor([option.cost for option in self.options()], dtype=torch.float32)
+        return torch.tensor([option.cost for option in self.options()], dtype=torch.float64)
 
     def labels(self) -> Tuple[str, ...]:
         return tuple(option.label for option in self.options())
+
+    def settings(self):
+        return {}
+
+    def cost_matrix(self, shapes):
+        """Packed tensor bits / original matrix parameters for each option."""
+        rows = []
+        for shape in shapes:
+            if len(shape) != 2 or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in shape):
+                raise RCOFormatError("RCO requires positive integer [out, in] shapes")
+            out_features, in_features = shape
+            rows.append([self.packed_bits(option, in_features, out_features) / math.prod(shape)
+                         for option in self.options()])
+        return torch.tensor(rows, dtype=torch.float64)
+
+    def packed_bits(self, option, in_features, out_features):
+        raise NotImplementedError
 
     def dynamic_entry(self, option: RCOOption) -> Dict[str, Any]:
         return dict(option.payload)
@@ -183,10 +219,12 @@ class RCOFormatAdapter:
         self, names: Sequence[str], assignment: Sequence[int]
     ) -> Dict[str, Dict[str, Any]]:
         options = self.options()
-        if len(names) != len(assignment):
+        if len(names) != len(assignment) or len(set(names)) != len(names):
             raise RCOFormatError("RCO assignment must cover every allocated module")
         dynamic: Dict[str, Dict[str, Any]] = {}
         for name, index in zip(names, assignment):
+            if isinstance(index, bool) or int(index) != index:
+                raise RCOFormatError("RCO option indices must be integers")
             position = int(index)
             if not 0 <= position < len(options):
                 raise RCOFormatError(
@@ -215,7 +253,23 @@ class AWQFormatAdapter(RCOFormatAdapter):
     """AWQ per-module affine widths (``bits`` in ``dynamic``)."""
 
     method = METHOD.AWQ
-    search = "interpolation"
+
+    def __init__(self, qcfg, widths=None):
+        super().__init__(qcfg)
+        self.widths = _widths(widths, AWQ_STAGED_WIDTHS)
+        if qcfg.format != "gemm":
+            raise RCOFormatError("AWQ RCO requires FORMAT.GEMM for mixed widths")
+
+    def settings(self):
+        return {"group_size": self.qcfg.group_size, "sym": self.qcfg.sym, "format": "gemm"}
+
+    def packed_bits(self, option, in_features, out_features):
+        group = in_features if self.qcfg.group_size == -1 else self.qcfg.group_size
+        if in_features % group or out_features % 8:
+            raise RCOFormatError("AWQ shapes require complete groups and out_features divisible by 8")
+        words = math.ceil(out_features * option.payload["bits"] / 32)
+        return 32 * words * (in_features + in_features // group) + 16 * out_features * (in_features // group)
+
 
     def options(self) -> Tuple[RCOOption, ...]:
         group_size = int(getattr(self.qcfg, "group_size", -1) or -1)
@@ -225,7 +279,7 @@ class AWQFormatAdapter(RCOFormatAdapter):
                 cost=bits + _scale_overhead_bits(bits, group_size),
                 payload={"bits": int(bits)},
             )
-            for bits in AWQ_STAGED_WIDTHS
+            for bits in self.widths
         )
 
     def runtime_requirement(self, assignment: Mapping[str, int]) -> Optional[str]:
@@ -255,10 +309,23 @@ class EXL3FormatAdapter(RCOFormatAdapter):
     method = METHOD.EXL3
     search = "reconstruction"
 
+    def __init__(self, qcfg, widths=None):
+        super().__init__(qcfg)
+        self.widths = _widths(widths, EXL3_STAGED_WIDTHS)
+
+    def settings(self):
+        return {"codebook": self.qcfg.codebook, "out_scales": self.qcfg.out_scales}
+
+    def packed_bits(self, option, in_features, out_features):
+        if in_features % 128 or out_features % 128:
+            raise RCOFormatError("EXL3 shapes require in_features and out_features divisible by 128")
+        metadata = 32 if self.qcfg.codebook in {"mcg", "mul1"} else 0
+        return option.payload["bits"] * in_features * out_features + 16 * (in_features + out_features) + metadata
+
     def options(self) -> Tuple[RCOOption, ...]:
         return tuple(
             RCOOption(label=f"k{bits}", cost=float(bits), payload={"bits": int(bits)})
-            for bits in EXL3_STAGED_WIDTHS
+            for bits in self.widths
         )
 
     def validate(self, assignment: Mapping[str, int]) -> None:
@@ -280,24 +347,35 @@ class GGUFFormatAdapter(RCOFormatAdapter):
 
     def __init__(self, qcfg: Any, aliases: Optional[Sequence[str]] = None):
         super().__init__(qcfg)
-        self.aliases = tuple(aliases or GGUF_STAGED_ALIASES)
+        self.aliases = tuple(GGUF_STAGED_ALIASES if aliases is None else aliases)
 
     def options(self) -> Tuple[RCOOption, ...]:
         options = []
         for alias in self.aliases:
             normalized = alias.strip().lower()
-            cost = _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS.get(normalized)
-            if cost is None:
-                raise RCOFormatError(
-                    f"GGUF RCO has no bits-per-weight estimate for `{alias}`; "
-                    "add it to `_GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS`"
-                )
+            from ..nn_modules.qlinear.gguf import _GGUF_TYPE_INFO, _normalize_gguf_bits
+
+            try:
+                _, qtype = _normalize_gguf_bits(normalized)
+                info = _GGUF_TYPE_INFO[qtype]
+            except (ValueError, KeyError) as exc:
+                raise RCOFormatError(f"Unsupported GGUF option: {alias}") from exc
+            cost = info["type_size"] * 8 / info["block_size"]
             # `clone_weight_only_config_for_module` resolves a string `bits` into
             # both the width and the ggml type, so a bare alias is enough.
             options.append(
                 RCOOption(label=normalized, cost=float(cost), payload={"bits": normalized})
             )
+        if not options or len({option.label for option in options}) != len(options):
+            raise RCOFormatError("RCO options must be nonempty and unique")
         return tuple(options)
+
+    def packed_bits(self, option, in_features, out_features):
+        from ..nn_modules.qlinear.gguf import _GGUF_TYPE_INFO, _normalize_gguf_bits
+
+        _, qtype = _normalize_gguf_bits(option.label)
+        info = _GGUF_TYPE_INFO[qtype]
+        return out_features * math.ceil(in_features / info["block_size"]) * info["type_size"] * 8
 
     def dynamic_entry(self, option: RCOOption) -> Dict[str, Any]:
         entry = dict(option.payload)
@@ -322,7 +400,35 @@ _ADAPTERS: Dict[METHOD, type] = {
 }
 
 
-def adapter_for(qcfg: Any) -> RCOFormatAdapter:
+def _widths(values, defaults):
+    values = tuple(defaults if values is None else values)
+    if (not values or len(set(values)) != len(values)
+            or any(isinstance(v, bool) or not isinstance(v, int) or v not in defaults for v in values)):
+        raise RCOFormatError(f"RCO widths must be unique integers from {defaults}")
+    return values
+
+
+def adapter_from_settings(method, settings, labels):
+    from .config import AWQConfig, EXL3Config, GGUFConfig
+
+    if not labels or any(not isinstance(label, str) for label in labels):
+        raise RCOFormatError("RCO option labels must be nonempty strings")
+    config_cls = {"awq": AWQConfig, "exl3": EXL3Config, "gguf": GGUFConfig}.get(method)
+    if config_cls is None:
+        raise RCOFormatError(f"Unsupported RCO method: {method}")
+    if method == "gguf":
+        return adapter_for(config_cls(bits=labels[0], **settings), options=labels)
+    prefix = "w" if method == "awq" else "k"
+    try:
+        if any(not label.startswith(prefix) for label in labels):
+            raise ValueError
+        widths = tuple(int(label[1:]) for label in labels)
+    except (ValueError, TypeError) as exc:
+        raise RCOFormatError("Option labels do not match the RCO method") from exc
+    return adapter_for(config_cls(bits=widths[0], **settings), options=widths)
+
+
+def adapter_for(qcfg: Any, *, options=None) -> RCOFormatAdapter:
     """Return the RCO adapter matching a quantisation config."""
     method = getattr(qcfg, "method", None)
     if isinstance(method, str):
@@ -333,14 +439,7 @@ def adapter_for(qcfg: Any) -> RCOFormatAdapter:
         raise RCOFormatError(
             f"RCO has no per-format adapter for method `{method}`; supported: {supported}"
         )
-    return adapter(qcfg)
-
-
-# Projection discovery is shared with the GPTQ RCO scripts. A per-format plan
-# and a staged-arm plan must see the same module set, or the two budgets are
-# computed over different denominators. `rco.discover_projections` walks the live
-# module tree, so a model that adds a projection (Ripple's `self_attn.g_proj`)
-# is covered without a per-architecture list.
+    return adapter(qcfg, options)
 
 
 def module_weights(
@@ -356,17 +455,17 @@ def module_weights(
     for name in names:
         try:
             module = model.get_submodule(str(name))
-        except AttributeError:
-            continue
+        except AttributeError as exc:
+            raise RCOFormatError(f"Declared RCO projection is missing: {name}") from exc
         in_features = getattr(module, "in_features", None)
         out_features = getattr(module, "out_features", None)
         if in_features is None or out_features is None:
-            continue
+            raise RCOFormatError(f"RCO projection has no matrix dimensions: {name}")
         weights.append(float(int(in_features) * int(out_features)))
         kept.append(str(name))
     if not kept:
         raise RCOFormatError("RCO found no quantisable projection to allocate")
-    return torch.tensor(weights, dtype=torch.float32), tuple(kept)
+    return torch.tensor(weights, dtype=torch.float64), tuple(kept)
 
 
 def relative_reconstruction_error(
@@ -381,13 +480,15 @@ def relative_reconstruction_error(
     Without a Hessian the plain Frobenius ratio is used, which is the
     ``H = I`` special case.
     """
-    error = dequantized.detach().to(torch.float32) - reference.detach().to(torch.float32)
-    reference = reference.detach().to(torch.float32)
+    if reference.ndim != 2 or reference.shape != dequantized.shape:
+        raise RCOFormatError("RCO reference and reconstruction must have identical matrix shapes")
+    reference = reference.detach().to(torch.float64)
+    error = dequantized.detach().to(device=reference.device, dtype=torch.float64) - reference
     if hessian is None:
         numerator = error.pow(2).sum()
         denominator = reference.pow(2).sum().clamp_min(1e-30)
     else:
-        h = hessian.detach().to(torch.float32)
+        h = hessian.detach().to(device=reference.device, dtype=torch.float64)
         if h.shape != (reference.shape[1], reference.shape[1]):
             raise RCOFormatError(
                 "Hessian must be the input second moment "
@@ -398,7 +499,7 @@ def relative_reconstruction_error(
         numerator = (err_h * error).sum()
         denominator = (ref_h * reference).sum().clamp_min(1e-30)
     value = float(numerator / denominator)
-    if not math.isfinite(value):
+    if not math.isfinite(value) or value < 0:
         raise RCOFormatError(f"RCO reconstruction error is not finite: {value!r}")
     return value
 
@@ -424,135 +525,115 @@ def reconstruction_scores(
 def default_resolution(module_count: int) -> int:
     """DP budget buckets for ``budget_constrained_argmax``.
 
-    The solver rounds costs to ``resolution`` buckets, so too few buckets make
-    the exact optimum infeasible (four 2-bit and four 3-bit modules on 8 modules
-    needs 256, not 500). Sixty-four buckets per module keeps the rounding error
-    under ``0.5 / 64`` bits per parameter while staying near 1 GiB of DP state.
+    Sixty-four buckets per module bounds aggregate cost-rounding error by
+    ``0.5 / 64`` bits per parameter before the memory cap is applied. The
+    discretized optimum can differ from the exact-budget optimum; allocation
+    repairs any overspend after solving.
     """
     return max(256, 64 * max(1, int(module_count)))
 
 
-#: Upper bound on the DP's ``choice`` table so a refinement cannot exhaust RAM.
+#: Upper bound on the DP's ``choice`` table.
 _DP_TABLE_BUDGET_BYTES = 1 << 30
 
 
-def _dp_table_bytes(module_count: int, resolution: int, target_bits: float) -> float:
-    """Approximate size of ``budget_constrained_argmax``'s backtrack table."""
-    buckets = max(1, round(target_bits * resolution))
-    return module_count * buckets * 8 * 1.1
+def _achieved(assignment, weights, costs):
+    weights = torch.as_tensor(weights, dtype=torch.float64, device="cpu")
+    costs = torch.as_tensor(costs, dtype=torch.float64, device="cpu")
+    assignment = torch.as_tensor(assignment, dtype=torch.long, device="cpu")
+    selected = costs[assignment] if costs.ndim == 1 else costs[torch.arange(len(assignment)), assignment]
+    return float((selected * weights).sum() / weights.sum())
 
 
 def repair_overspend(assignment, scores, weights, costs, target_bits):
-    """Greedily downgrade modules until the exact budget is met.
-
-    The DP optimizes over a rounded cost grid, so its solution can evaluate a
-    few thousandths of a bit above the target even though a feasible assignment
-    exists. Each step applies the single-module downgrade with the smallest
-    score loss per bit saved, which keeps the repair as close to the DP optimum
-    as a greedy pass can be, and stops as soon as the budget holds.
-    """
-    assignment = assignment.clone()
-    achieved = achieved_bits(assignment, weights, costs)
-    if achieved <= target_bits:
-        return assignment
-    costs = costs.to(assignment.device)
-    weights = weights.to(assignment.device)
-    scores = scores.detach()
-    for _ in range(len(assignment)):
-        best = None
-        for index in range(len(assignment)):
-            current = int(assignment[index])
-            for option in range(scores.shape[1]):
-                if float(costs[option]) >= float(costs[current]):
-                    continue
-                saved = float(costs[current] - costs[option]) * float(weights[index])
-                if saved <= 0:
-                    continue
-                loss = float(scores[index, current] - scores[index, option])
-                key = (loss / saved, -saved)
-                if best is None or key < best[0]:
-                    best = (key, index, option)
-        if best is None:
+    """Downgrade until the float64 budget holds; each row may need several steps."""
+    device = assignment.device
+    assignment = assignment.detach().cpu().clone()
+    scores, weights, costs = (tensor.detach().cpu().double() for tensor in (scores, weights, costs))
+    if costs.ndim == 1:
+        costs = costs.expand(len(assignment), -1)
+    for _ in range(len(assignment) * (costs.shape[1] - 1)):
+        if _achieved(assignment, weights, costs) <= target_bits:
             break
-        assignment[best[1]] = best[2]
-        achieved = achieved_bits(assignment, weights, costs)
-        if achieved <= target_bits:
+        current_costs = costs.gather(1, assignment[:, None])
+        saved = (current_costs - costs) * weights[:, None]
+        losses = scores.gather(1, assignment[:, None]) - scores
+        ratios = torch.where(saved > 0, losses / saved.clamp_min(1e-300), torch.inf)
+        best_ratio = ratios.min()
+        if not torch.isfinite(best_ratio):
             break
-    return assignment
+        # On equal score loss per bit, take the largest saving deterministically.
+        choices = torch.where(ratios == best_ratio, saved, -torch.inf)
+        flat = int(choices.argmax())
+        row, option = divmod(flat, costs.shape[1])
+        assignment[row] = option
+    return assignment.to(device)
 
 
-def allocate(
-    adapter: RCOFormatAdapter,
-    scores: torch.Tensor,
-    weights: torch.Tensor,
-    target_bits: float,
-    *,
-    names: Sequence[str],
-    resolution: Optional[int] = None,
-) -> RCOPlan:
-    """Solve the rate-constrained assignment and wrap it in an :class:`RCOPlan`."""
-    if scores.ndim != 2 or scores.shape != (len(names), len(adapter.options())):
-        raise RCOFormatError(
-            f"RCO scores must be [{len(names)}, {len(adapter.options())}], "
-            f"got {tuple(scores.shape)}"
-        )
-    if weights.shape != (len(names),):
-        raise RCOFormatError("RCO weights must have one entry per allocated module")
-    module_count = len(names)
-    resolution = default_resolution(module_count) if resolution is None else int(resolution)
-    costs = adapter.costs()
+def _validate_inputs(scores, weights, costs, target, names):
+    if not names or len(set(names)) != len(names) or any(not isinstance(name, str) or not name for name in names):
+        raise RCOFormatError("RCO module names must be nonempty and unique")
+    if scores.ndim != 2 or scores.shape[0] != len(names) or costs.shape != scores.shape:
+        raise RCOFormatError("RCO scores/costs must have one row per module and one column per option")
+    if weights.shape != (len(names),) or not torch.isfinite(weights).all() or (weights <= 0).any():
+        raise RCOFormatError("RCO parameter weights must be finite and positive")
+    if not torch.isfinite(scores).all() or not torch.isfinite(costs).all() or (costs <= 0).any():
+        raise RCOFormatError("RCO scores and positive costs must be finite")
+    if not math.isfinite(target) or target <= 0:
+        raise RCOFormatError("RCO target must be finite and positive")
+    if _achieved(costs.argmin(1), weights, costs) > target:
+        raise RCOFormatError("RCO target is below the cheapest feasible assignment")
 
-    def solve(buckets: int) -> torch.Tensor:
-        return budget_constrained_argmax(
-            scores, weights, costs, target_bits, resolution=buckets
-        )
 
-    assignment = solve(resolution)
-    achieved = achieved_bits(assignment, weights, costs)
-    # `budget_constrained_argmax` rounds every unit cost onto the budget grid, so
-    # a solution can land up to `0.5 * n / resolution` bits above the target even
-    # when an exact assignment exists. Refine on a finer grid while the DP table
-    # still fits, then judge the result against that rounding bound instead of a
-    # fixed epsilon (a fixed 1e-3 rejected every 640-module plan at the default
-    # resolution, where the bound is 0.0078).
-    tolerance = 0.5 * module_count / resolution
-    while (
-        achieved > target_bits + 1e-9
-        and _dp_table_bytes(module_count, resolution * 2, target_bits) <= _DP_TABLE_BUDGET_BYTES
-    ):
-        resolution *= 2
-        assignment = solve(resolution)
-        achieved = achieved_bits(assignment, weights, costs)
-        tolerance = 0.5 * module_count / resolution
-    if achieved > target_bits + 1e-9:
+def allocate(adapter, scores, weights, target_bits, *, names, resolution=None,
+             shapes=None, score_metric="relative_frobenius") -> RCOPlan:
+    """Solve a discretized reconstruction allocation, then enforce the exact budget."""
+    if score_metric not in {"relative_frobenius", "relative_hessian"}:
+        raise RCOFormatError("RCO requires an explicit reconstruction score metric")
+    options = adapter.options()
+    names = tuple(names)
+    shapes = dict(shapes or {})
+    if shapes and set(shapes) != set(names):
+        raise RCOFormatError("RCO shapes must cover every module")
+    scores, weights = scores.detach().cpu().double(), weights.detach().cpu().double()
+    nominal = adapter.costs()
+    costs = adapter.cost_matrix([shapes[name] for name in names]) if shapes else nominal.expand(len(names), -1)
+    if scores.shape != (len(names), len(options)):
+        raise RCOFormatError("RCO score columns must match the adapter options")
+    _validate_inputs(scores, weights, costs, target_bits, names)
+    if shapes and any(float(weights[i]) != math.prod(shapes[name]) for i, name in enumerate(names)):
+        raise RCOFormatError("RCO weights must equal each matrix's parameter count")
+    if resolution is not None and (isinstance(resolution, bool) or not isinstance(resolution, int) or resolution < 1):
+        raise RCOFormatError("RCO resolution must be a positive integer")
+    resolution = default_resolution(len(names)) if resolution is None else resolution
+    maximum = int(_DP_TABLE_BUDGET_BYTES / (8.8 * len(names) * target_bits)) - 1
+    if maximum < 1:
+        raise RCOFormatError("RCO DP exceeds the memory budget")
+    resolution = min(resolution, maximum)
+    cheapest = costs.argmin(1)
+    try:
+        assignment = budget_constrained_argmax(scores, weights, costs, target_bits, resolution=resolution)
+    except RuntimeError as exc:
+        if "no feasible assignment" not in str(exc):
+            raise
+        # Rounding can make a feasible boundary budget unreachable on this grid.
+        assignment = cheapest
+    if _achieved(assignment, weights, costs) > target_bits:
         assignment = repair_overspend(assignment, scores, weights, costs, target_bits)
-        achieved = achieved_bits(assignment, weights, costs)
-    if achieved > target_bits + tolerance:
-        raise RCOFormatError(
-            f"RCO allocation overspent the budget: {achieved:.6f} > {target_bits:.6f} "
-            f"(rounding bound {tolerance:.6f} at resolution {resolution})"
-        )
+    achieved = _achieved(assignment, weights, costs)
+    if achieved > target_bits:
+        raise RCOFormatError(f"RCO allocation overspent the budget: {achieved} > {target_bits}")
     labels = adapter.labels()
-    chosen = [labels[int(index)] for index in assignment]
-    counts: Dict[str, int] = {}
-    for label in chosen:
-        counts[label] = counts.get(label, 0) + 1
-    index_map = {str(name): int(index) for name, index in zip(names, assignment)}
-    dynamic = adapter.build_dynamic(names, assignment)
-    runtime_note = adapter.runtime_requirement(index_map)
+    counts = {label: sum(labels[int(index)] == label for index in assignment) for label in labels}
+    counts = {label: count for label, count in counts.items() if count}
+    index_map = dict(zip(names, assignment.tolist()))
     return RCOPlan(
-        method=str(getattr(adapter.method, "value", adapter.method)),
-        search=adapter.search,
-        target_bits=float(target_bits),
-        achieved_bits=achieved,
-        names=tuple(str(name) for name in names),
-        labels=labels,
-        costs=tuple(float(cost) for cost in costs),
-        assignment=tuple(int(index) for index in assignment),
-        dynamic=dynamic,
-        counts=counts,
-        resolution=resolution,
-        runtime_note=runtime_note,
+        method=adapter.method.value, search="reconstruction", target_bits=float(target_bits),
+        achieved_bits=achieved, names=names, labels=labels, costs=tuple(nominal.tolist()),
+        assignment=tuple(assignment.tolist()), dynamic=adapter.build_dynamic(names, assignment), counts=counts,
+        resolution=resolution, runtime_note=adapter.runtime_requirement(index_map), settings=adapter.settings(),
+        weights=tuple(weights.tolist()), module_costs=tuple(tuple(row) for row in costs.tolist()),
+        shapes=shapes, score_metric=score_metric,
     )
 
 
@@ -568,6 +649,7 @@ __all__ = [
     "RCOOption",
     "RCOPlan",
     "adapter_for",
+    "adapter_from_settings",
     "allocate",
     "awq_runtime_requirement",
     "default_resolution",

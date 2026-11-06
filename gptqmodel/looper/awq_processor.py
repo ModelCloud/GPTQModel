@@ -1429,13 +1429,6 @@ class AWQProcessor(LoopProcessor):
             inspect_module = entry.get("module2inspect") or layer_module_ref
             entry_kwargs = entry.get("kwargs") or module_kwargs_global
             entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
-            # A scaling group shares one activation scale, so its members are
-            # expected to share a width; the first member's width drives the
-            # search. RCO can still place different widths inside one group, and
-            # `apply_quant` re-quantizes each module at its own width afterwards.
-            first_layer = (entry.get("layers") or [None])[0]
-            if isinstance(first_layer, torch.nn.Module):
-                entry["bits"] = self._bits_for(layer_module_ref, first_layer)
             sanitized_module_config.append(entry)
 
         filtered_module_config: List[Dict] = []
@@ -1643,8 +1636,8 @@ class AWQProcessor(LoopProcessor):
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
-        ``bits`` is the width of the group being searched; it defaults to the
-        global width when the group has no per-module override.
+        Unless explicitly overridden by ``bits``, evaluate each member at its
+        own configured width, even though the group shares one channel scale.
         """
 
         if module2inspect is None:
@@ -1741,7 +1734,7 @@ class AWQProcessor(LoopProcessor):
             module_kwargs,
             replay_batch_size=replay_batch_size,
             prepared_forward=prepared_forward,
-            bits=bits,
+            bits=[self._bits_for(module, layer) for layer in layers] if bits is None else bits,
         )
 
         return (
@@ -2087,7 +2080,7 @@ class AWQProcessor(LoopProcessor):
         kwargs: Dict={},
         replay_batch_size: Optional[int] = None,
         prepared_forward: Optional[Tuple[torch.Tensor, Dict]] = None,
-        bits: Optional[int] = None,
+        bits: Optional[int | List[int]] = None,
     ):
         """
         Compute loss and select best scales
@@ -2102,6 +2095,12 @@ class AWQProcessor(LoopProcessor):
         history = []
         best_scales = None
         best_error = None
+        if bits is None or isinstance(bits, int):
+            layer_bits = [self.qcfg.runtime_bits if bits is None else bits] * len(linears2scale)
+        else:
+            layer_bits = list(bits)
+        if len(layer_bits) != len(linears2scale):
+            raise ValueError("AWQ scale search requires one bit width per linear")
 
         # Stash a pristine master copy of every scaled linear once so the per-ratio
         # quantize/restore cycle never reaches back to host memory. The master stays on
@@ -2198,8 +2197,8 @@ class AWQProcessor(LoopProcessor):
             # `apply_scaled_weights` rebuilds the product from that master, so the
             # restore the previous iteration needed is folded into this step.
             apply_scaled_weights(scales_view)
-            for fc in linears2scale:
-                self._pseudo_quantize_tensor_into(fc.weight, fc.weight, bits=bits)
+            for fc, module_bits in zip(linears2scale, layer_bits):
+                self._pseudo_quantize_tensor_into(fc.weight, fc.weight, bits=module_bits)
                 fc.weight.div_(scales_view)
 
             # W * X

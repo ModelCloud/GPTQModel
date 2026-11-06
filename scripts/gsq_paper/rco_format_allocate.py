@@ -21,22 +21,15 @@ the allocation stays on the host:
     python scripts/gsq_paper/rco_format_allocate.py quantize \
         --method awq --model <dense model> --plan plan.json --out <dir>
 
-Fidelity
---------
-AWQ is scored with the affine quantizer the processor itself uses, and its
-staged arms are dense, so the same scores feed the paper's interpolation search.
-EXL3 and GGUF store a trellis and ggml blocks respectively; neither is a linear
-function of a dense weight, so both are scored with the Hessian-weighted
-reconstruction error their own quantizer reports. ``plan.json`` records which
-search produced the assignment in its ``search`` field.
-
-See ``gptqmodel/quantization/rco_formats.py`` for the adapters and the
-GSQ / exact-budget references (arXiv 2604.18556 Sec. 4.2, arXiv 2605.00649
-Secs. 2-3).
+All three methods use reconstruction-error allocation. This runner does not
+perform differentiable Gumbel/KL interpolation. The score metric records whether
+an input Hessian was supplied. Budgets cover packed projection weights and their
+metadata/padding, excluding biases and unquantized model state.
 """
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -56,9 +49,9 @@ def parse_args(argv=None):
     parser.add_argument("--out", required=True, help="output path for this stage")
     parser.add_argument("--options", help="comma-separated widths or GGUF aliases")
     parser.add_argument("--target-bits", type=float, default=2.5)
-    parser.add_argument("--group-size", type=int, default=128, help="AWQ group size")
+    parser.add_argument("--group-size", type=int, default=None, help="AWQ group size (measure default: 128; otherwise inherited)")
     parser.add_argument(
-        "--sym", action=argparse.BooleanOptionalAction, default=True, help="AWQ symmetric codes"
+        "--sym", action=argparse.BooleanOptionalAction, default=None, help="AWQ symmetric codes"
     )
     parser.add_argument("--hessian", help=".pt file: {module name: input second moment}")
     parser.add_argument("--limit", type=int, default=0, help="measure only the first N modules")
@@ -66,7 +59,10 @@ def parse_args(argv=None):
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--resolution", type=int, default=0, help="DP budget buckets (0 = auto)")
     parser.add_argument("--calibration", help="text/json calibration corpus for `quantize`")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.limit < 0 or args.resolution < 0:
+        parser.error("--limit and --resolution must be nonnegative")
+    return args
 
 
 def parse_options(raw, method):
@@ -88,19 +84,26 @@ def parse_options(raw, method):
     return tuple(int(value) for value in values)
 
 
-def quant_config(method, plan, args):
-    """Build the backend config that carries the plan's per-module widths."""
-    from gptqmodel.quantization.config import AWQConfig, EXL3Config, GGUFConfig
+def _check_settings(args, settings):
+    if args.method == "awq":
+        for field in ("group_size", "sym"):
+            value = getattr(args, field, None)
+            if value is not None and value != settings[field]:
+                raise ValueError(f"--{field.replace('_', '-')} disagrees with measured RCO settings")
 
-    dynamic = {name: dict(entry) for name, entry in plan.dynamic.items()}
-    if method == "awq":
-        base = min(int(entry["bits"]) for entry in dynamic.values())
-        return AWQConfig(bits=base, group_size=args.group_size, sym=args.sym, dynamic=dynamic)
-    if method == "exl3":
-        base = min(int(entry["bits"]) for entry in dynamic.values())
-        return EXL3Config(bits=float(base), dynamic=dynamic)
-    base = next(iter(dynamic.values()))["bits"]
-    return GGUFConfig(bits=base, dynamic=dynamic)
+
+def quant_config(method, plan, args):
+    """Carry measured settings and validated widths into final quantization."""
+    from gptqmodel.quantization.config import AWQConfig, EXL3Config, GGUFConfig
+    from gptqmodel.utils.torch import resolve_torch_device
+
+    if method != plan.method:
+        raise ValueError("RCO plan method does not match --method")
+    _check_settings(args, plan.settings)
+    config_cls = {"awq": AWQConfig, "exl3": EXL3Config, "gguf": GGUFConfig}[method]
+    base = next(iter(plan.dynamic.values()))["bits"]
+    return config_cls(bits=base, dynamic=plan.dynamic, **plan.settings, offload_to_disk=False,
+                      device=resolve_torch_device(args.device))
 
 
 def awq_dequantize(weight, bits, group_size, sym):
@@ -136,30 +139,32 @@ def measure(args):
         discover_projections,
         relative_reconstruction_error,
     )
+    from gptqmodel.utils.torch import resolve_torch_device
 
     options = parse_options(args.options, args.method)
-    if args.method == "awq":
-        adapter = adapter_for(AWQConfig(bits=4, group_size=args.group_size, sym=args.sym))
-    elif args.method == "exl3":
-        adapter = adapter_for(EXL3Config(bits=float(min(options))))
-    else:
-        adapter = adapter_for(GGUFConfig(bits=options[0]))
-        adapter.aliases = tuple(options)
-
-    device = torch.device(args.device)
+    group_size = 128 if args.group_size is None else args.group_size
+    sym = True if args.sym is None else args.sym
+    config_cls = {"awq": AWQConfig, "exl3": EXL3Config, "gguf": GGUFConfig}[args.method]
+    settings = {"group_size": group_size, "sym": sym} if args.method == "awq" else {}
+    adapter = adapter_for(config_cls(bits=options[0], **settings, offload_to_disk=False), options=options)
+    device = resolve_torch_device(args.device)
     dtype = getattr(torch, args.dtype)
-    wrapper = GPTQModel.load(args.model, device=device, dtype=dtype)
+    wrapper = GPTQModel.load(args.model, quantize_config=adapter.qcfg, device=device, dtype=dtype)
     model = wrapper.model.to(device).eval()
-
-    names = list(discover_projections(model))
+    names = list(discover_projections(wrapper))
     if args.limit:
-        names = names[: args.limit]
+        names = names[:args.limit]
     if not names:
-        raise SystemExit("no quantisable projection found")
+        raise SystemExit("no declared quantisable projection found")
+    shapes = {name: tuple(model.get_submodule(name).weight.shape) for name in names}
+    # Validate packability before expensive quantizer calls.
+    adapter.cost_matrix([shapes[name] for name in names])
 
     hessians = {}
     if args.hessian:
         hessians = torch.load(args.hessian, map_location="cpu", weights_only=True)
+        if any(name not in hessians for name in names):
+            raise ValueError("Hessian file must cover every measured projection")
 
     measured = {}
     params = {}
@@ -180,11 +185,11 @@ def measure(args):
             for option in adapter.options():
                 if args.method == "awq":
                     restored = awq_dequantize(
-                        weight, int(option.payload["bits"]), args.group_size, args.sym
+                        weight, int(option.payload["bits"]), group_size, sym
                     )
                     errors.append(relative_reconstruction_error(weight, restored, hessian))
                 elif args.method == "exl3":
-                    errors.append(exl3_error(weight, int(option.payload["bits"]), hessian, device))
+                    errors.append(exl3_error(weight, int(option.payload["bits"]), hessian, device, adapter.qcfg))
                 else:
                     restored = gguf_dequantize(weight, option.label)
                     errors.append(relative_reconstruction_error(weight, restored, hessian))
@@ -199,12 +204,14 @@ def measure(args):
             )
 
     payload = {
+        "schema_version": 1,
         "method": args.method,
-        "search": adapter.search,
+        "settings": adapter.settings(),
+        "shapes": shapes,
+        "score_metric": "relative_hessian" if args.hessian else "relative_frobenius",
+        "search": "reconstruction",
         "options": list(adapter.labels()),
         "costs": [float(cost) for cost in adapter.costs()],
-        "group_size": args.group_size,
-        "sym": bool(args.sym),
         "errors": measured,
         "params": params,
     }
@@ -212,11 +219,15 @@ def measure(args):
     print(f"wrote {args.out} ({len(measured)} modules)", flush=True)
 
 
-def exl3_error(weight, bits, hessian, device):
-    """Score one EXL3 width with the quantizer's own Hessian-weighted proxy."""
+def exl3_error(weight, bits, hessian, device, config=None):
+    """Score the native reconstruction against the original weight and Hessian."""
     from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3
     from gptqmodel.looper.exllamav3_processor import _EXL3_SIGMA_REG, _OUT_SCALES_TO_ARG
+    from gptqmodel.quantization.config import EXL3Config
+    from gptqmodel.quantization.rco_formats import relative_reconstruction_error
 
+    config = EXL3Config(bits=bits) if config is None else config
+    original_hessian = hessian
     in_features = weight.shape[1]
     if hessian is None:
         hessian = torch.eye(in_features, dtype=torch.float32, device=device)
@@ -229,20 +240,24 @@ def exl3_error(weight, bits, hessian, device):
     quant_args = {
         "K": int(bits),
         "devices": [device],
-        "apply_out_scales": _OUT_SCALES_TO_ARG.get("auto", None),
+        "apply_out_scales": _OUT_SCALES_TO_ARG.get(config.out_scales, None),
         "sigma_reg": _EXL3_SIGMA_REG,
         "seed": 787,
-        "mcg": True,
     }
-    _, proxy, _ = quantize_exl3(
-        weight.to(device).t().contiguous(), h_data, quant_args, False
+    if config.codebook in {"mcg", "mul1"}:
+        quant_args[config.codebook] = True
+    restored, _, _ = quantize_exl3(
+        weight.to(device).t().contiguous().clone(), h_data, quant_args, True
     )
-    return float(proxy)
+    # Native proxy can be -1 on OOM or 0 on fallback. Compare the returned
+    # reconstruction with the original Hessian instead of treating sentinels as accuracy.
+    return relative_reconstruction_error(weight, restored.t(), original_hessian)
 
 
 def gguf_dequantize(weight, alias):
     """Round-trip one matrix through ggml's own quantizer."""
     from gptqmodel.nn_modules.qlinear.gguf import (
+        _GGUF_TYPE_INFO,
         _dequantize_gguf_tensor_numpy,
         _normalize_gguf_bits,
         _quantize_gguf_tensor_numpy,
@@ -251,99 +266,86 @@ def gguf_dequantize(weight, alias):
     # Resolve the public alias (`q4_k`) to the canonical ggml type (`Q4_K`) and
     # use the same packer/dequantizer the loader uses, including its fallbacks.
     _, tensor_qtype = _normalize_gguf_bits(alias)
-    packed = _quantize_gguf_tensor_numpy(weight.numpy(), tensor_qtype)
+    block_size = _GGUF_TYPE_INFO[tensor_qtype]["block_size"]
+    columns = weight.shape[1]
+    padded = torch.nn.functional.pad(weight, (0, (-columns) % block_size))
+    packed = _quantize_gguf_tensor_numpy(padded.cpu().numpy(), tensor_qtype)
     restored = _dequantize_gguf_tensor_numpy(packed, tensor_qtype)
-    return torch.from_numpy(np.asarray(restored, dtype=np.float32))
+    return torch.from_numpy(np.asarray(restored, dtype=np.float32))[:, :columns]
+
+
+def _load_score_data(paths):
+    """Read labelled score columns with matching settings, counts and shapes."""
+    from gptqmodel.quantization.rco_formats import adapter_from_settings
+
+    payloads = [json.loads(Path(item).read_text()) for item in paths.split(",")]
+    first = payloads[0]
+    required = {"schema_version", "method", "search", "options", "settings", "score_metric", "params", "shapes"}
+    names, columns, labels = None, [], []
+    for payload in payloads:
+        if not required <= payload.keys() or payload["schema_version"] != 1:
+            raise ValueError("RCO scores require versioned option labels, settings, parameter counts and shapes")
+        if payload["search"] != "reconstruction" or payload["score_metric"] not in {"relative_frobenius", "relative_hessian"}:
+            raise ValueError("RCO scores must identify their reconstruction metric")
+        for key in ("method", "settings", "score_metric", "params", "shapes"):
+            if payload[key] != first[key]:
+                raise ValueError(f"RCO score files disagree on {key}")
+        table = payload.get("errors", payload.get("losses"))
+        if not isinstance(table, dict) or not table:
+            raise ValueError("RCO score table must be nonempty")
+        names = list(table) if names is None else names
+        if set(table) != set(names) or set(payload["params"]) != set(names) or set(payload["shapes"]) != set(names):
+            raise ValueError("RCO scores, counts and shapes must cover the same modules")
+        option_labels = payload["options"]
+        rows = [[table[name]] if isinstance(table[name], (int, float)) else table[name] for name in names]
+        errors = torch.tensor(rows, dtype=torch.float64)
+        if errors.shape != (len(names), len(option_labels)) or not torch.isfinite(errors).all() or (errors < 0).any():
+            raise ValueError("RCO errors must be finite nonnegative values matching the option columns")
+        columns.append(errors)
+        labels.extend(option_labels)
+    adapter = adapter_from_settings(first["method"], first["settings"], labels)
+    if adapter.labels() != tuple(labels):
+        raise ValueError("RCO option labels must be canonical and unique")
+    weights = torch.tensor([first["params"][name] for name in names], dtype=torch.float64)
+    shapes = {name: tuple(first["shapes"][name]) for name in names}
+    adapter.cost_matrix([shapes[name] for name in names])
+    if not torch.isfinite(weights).all() or any(weights[i] != math.prod(shapes[name]) for i, name in enumerate(names)):
+        raise ValueError("RCO parameter counts disagree with matrix shapes")
+    return names, torch.cat(columns, dim=1), adapter, weights, shapes, first["score_metric"]
 
 
 def _load_score_matrix(paths):
-    """Return `(names, errors[n_modules, n_options])` from one or more score files.
-
-    A single `measure` run writes the whole matrix. The EXL3 arm sweep instead
-    writes one file per width, each holding the same module names under
-    `losses`; passing every staged arm as a comma-separated list rebuilds the
-    same matrix without re-measuring.
-    """
-    payloads = [json.loads(Path(item).read_text()) for item in paths.split(",")]
-    if len(payloads) == 1:
-        table = payloads[0].get("errors") or payloads[0]["losses"]
-        names = list(table)
-        return names, torch.tensor([table[name] for name in names], dtype=torch.float32)
-    names = list(payloads[0].get("errors") or payloads[0]["losses"])
-    columns = []
-    for payload in payloads:
-        table = payload.get("errors") or payload["losses"]
-        if set(table) != set(names):
-            raise SystemExit("staged arm score files cover different module sets")
-        columns.append([float(table[name]) for name in names])
-    return names, torch.tensor(columns, dtype=torch.float32).t().contiguous()
+    names, errors, *_ = _load_score_data(paths)
+    return names, errors
 
 
 def allocate(args):
-    from gptqmodel.quantization.config import AWQConfig, EXL3Config, GGUFConfig
-    from gptqmodel.quantization.rco_formats import adapter_for
     from gptqmodel.quantization.rco_formats import allocate as solve
 
-    # `measure` writes `errors`; the EXL3 arm sweep writes the same data as
-    # `losses`. Accept both so a plan can be rebuilt from either source.
-    names, errors = _load_score_matrix(args.scores)
-    payload = json.loads(Path(args.scores.split(",")[0]).read_text())
-    if args.method == "awq":
-        adapter = adapter_for(
-            AWQConfig(
-                bits=4,
-                group_size=int(payload.get("group_size", args.group_size)),
-                sym=bool(payload.get("sym", args.sym)),
-            )
-        )
-    elif args.method == "exl3":
-        adapter = adapter_for(EXL3Config(bits=float(min(parse_options(args.options, "exl3")))))
-    else:
-        adapter = adapter_for(GGUFConfig(bits="q4_k"))
-        adapter.aliases = tuple(payload["options"])
-
-    # RCO maximises the score, so a lower reconstruction error is a higher score.
-    scores = -errors
-    # The budget is a ratio over the parameters that are actually quantized, so a
-    # 5.2M k_proj must not weigh the same as a 209.7M mlp projection. Without
-    # per-module counts the solver would think it can buy accuracy cheaply by
-    # upgrading every small matrix and downgrading the MLPs, which is the
-    # opposite of what the parameter budget allows.
-    params = payload.get("params")
-    if params:
-        weights = torch.tensor([params[name] for name in names], dtype=torch.float32)
-    else:
-        print(
-            "WARN: scores file has no 'params'; falling back to uniform module weights. "
-            "Re-run the `measure` stage to get a parameter-weighted allocation.",
-            file=sys.stderr,
-            flush=True,
-        )
-        weights = torch.ones(len(names), dtype=torch.float32)
-    plan = solve(
-        adapter,
-        scores,
-        weights,
-        args.target_bits,
-        names=names,
-        resolution=args.resolution or None,
-    )
+    names, errors, adapter, weights, shapes, metric = _load_score_data(args.scores)
+    if adapter.method.value != args.method:
+        raise ValueError("RCO score method does not match --method")
+    _check_settings(args, adapter.settings())
+    if args.options:
+        requested = parse_options(args.options, args.method)
+        labels = tuple(requested if args.method == "gguf" else
+                       [f'{"w" if args.method == "awq" else "k"}{width}' for width in requested])
+        if labels != adapter.labels():
+            raise ValueError("--options must match the measured score columns in order")
+    plan = solve(adapter, -errors, weights, args.target_bits, names=names, shapes=shapes,
+                 score_metric=metric, resolution=args.resolution or None)
     Path(args.out).write_text(json.dumps(plan.to_dict(), indent=2))
-    print(
-        f"wrote {args.out}: target={plan.target_bits} achieved={plan.achieved_bits:.4f} "
-        f"counts={plan.counts} search={plan.search}",
-        flush=True,
-    )
+    print(f"wrote {args.out}: target={plan.target_bits} achieved={plan.achieved_bits:.6f} "
+          f"counts={plan.counts} search={plan.search}", flush=True)
     if plan.runtime_note:
         print(f"RUNTIME: {plan.runtime_note}", flush=True)
 
 
 def quantize(args):
     from gptqmodel import GPTQModel
-    from gptqmodel.quantization.rco_formats import RCOPlan
+    from gptqmodel.quantization.rco_formats import RCOPlan, discover_projections
 
     plan = RCOPlan.from_dict(json.loads(Path(args.plan).read_text()))
-    device = torch.device(args.device)
     dtype = getattr(torch, args.dtype)
     config = quant_config(args.method, plan, args)
     backend = None
@@ -358,8 +360,13 @@ def quantize(args):
         backend = BACKEND.AWQ_TORCH
         print(f"RUNTIME: {plan.runtime_note}", flush=True)
     wrapper = GPTQModel.load(
-        args.model, quantize_config=config, device=device, dtype=dtype
+        args.model, quantize_config=config, dtype=dtype
     )
+    names = discover_projections(wrapper)
+    if set(names) != set(plan.names) or not plan.shapes:
+        raise ValueError("RCO plan must cover the complete model definition; remeasure without --limit")
+    if any(tuple(wrapper.model.get_submodule(name).weight.shape) != plan.shapes[name] for name in names):
+        raise ValueError("RCO plan matrix shapes differ from the loaded model")
     wrapper.quantize(calibration=load_calibration(args.calibration), backend=backend)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

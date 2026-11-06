@@ -30,7 +30,7 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 """
 
 import math
-import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -160,7 +160,7 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     n_layers, n_options = scores.shape
     if not n_layers or not n_options:
         raise ValueError('RCO assignment requires nonempty groups and options')
-    if weights.shape != (n_layers,) or costs.shape != (n_options,):
+    if weights.shape != (n_layers,) or costs.shape not in ((n_options,), (n_layers, n_options)):
         raise ValueError('RCO assignment requires per-group weights and per-option costs')
 
     budget = round(target * resolution)
@@ -518,74 +518,101 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                   f'drift={history[-1]["drift"]:.2e}', flush=True)
     return torch.softmax(interpolated.alpha, dim=-1).detach(), history
 
-#: Projection suffixes the GSQ paper's Llama configuration stages. These are the
-#: names a packed block is rebuilt from, so a model that adds a projection must
-#: extend this list -- or, better, be discovered from the live module tree with
-#: :func:`discover_projections`. Kept as the default so existing staged arms
-#: keep rebuilding exactly the tensors they were written with.
-DEFAULT_PROJECTIONS = (
-    'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-    'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj',
-)
+@dataclass(frozen=True)
+class RCOBlock:
+    """A decoder block and its declared allocatable, block-relative modules."""
 
-#: Modules that are never bit-allocated: the vocabulary projections are stored at
-#: a higher precision on purpose.
-_NON_ALLOCATABLE_NAME_PARTS = frozenset(
-    {'lm_head', 'embed_tokens', 'wte', 'wpe', 'embed', 'embeddings'}
-)
+    index: int
+    path: str
+    projections: tuple[str, ...]
 
-_INDEXED_BLOCK = re.compile(r'\.(\d+)\.')
+    @property
+    def names(self):
+        return tuple(f'{self.path}.{name}' for name in self.projections)
 
 
-def discover_projections(model, *, suffixes=None, exclude=()):
-    """Return the bit-allocatable projections of a dense decoder, arch-generic.
+def discover_blocks(model, *, model_definition=None, quantize_config=None):
+    """Resolve RCO's inventory from the model definition, never from name heuristics.
 
-    Walking the live module tree instead of matching an architecture's names
-    keeps additional projections visible. Ripple-65B, for example, adds a gated
-    attention projection ``self_attn.g_proj``; with a hardcoded tuple the
-    allocator silently skips 80 of its 640 quantised modules, and the ones it
-    does allocate are chosen against a budget computed from the wrong
-    denominator.
-
-    Only ``torch.nn.Linear`` modules under an indexed block qualify, so fused
-    ``qkv_proj``-style layers (which the packer handles as one module) and MoE
-    expert projections are covered without a per-architecture list. Pass
-    ``suffixes`` to restrict the result to known projections, and ``exclude`` to
-    drop names the quantizer already skips.
-
-    Returns a tuple sorted by decoder block, then by name.
+    Prefer a loaded BaseQModel wrapper: its effective tree includes per-instance
+    overrides. A bare Torch model requires its definition explicitly. The shared
+    tree parser honors exclusion/capture tags, aliases and expert placeholders;
+    the definition's layer/module hooks handle heterogeneous decoder blocks.
+    Only declared, live Linear (or staged TorchLinear) leaves are allocatable.
+    Non-strict definitions may omit alternatives in heterogeneous blocks. A
+    missing required leaf, empty block or unsupported declared leaf is an error.
     """
-    excluded = {str(name) for name in exclude}
-    allowed = None if suffixes is None else {str(s).strip('.') for s in suffixes}
-    found = []
-    for name, module in model.named_modules():
-        if name in excluded or not _is_allocatable(name, module):
-            continue
-        if allowed is not None and name.rsplit('.', 1)[-1] not in allowed:
-            continue
-        found.append(name)
-    return tuple(sorted(found, key=_allocation_order))
+    from ..models.base import BaseQModel
+    from ..nn_modules.qlinear.torch import TorchLinear
+    from .config import dynamic_get
+
+    if isinstance(model, BaseQModel):
+        definition = type(model)
+        tree = model.effective_module_tree
+        quantize_config = model.quantize_config if quantize_config is None else quantize_config
+        model = model.model
+    else:
+        definition = model_definition
+        if (not isinstance(definition, type) or not issubclass(definition, BaseQModel)
+                or definition.module_tree is None):
+            raise ValueError('RCO discovery requires an explicit model definition or a loaded BaseQModel wrapper')
+        tree = definition._resolve_effective_module_tree(model, quantize_config)
+
+    if not tree:
+        raise ValueError('RCO discovery requires a nonempty model definition tree')
+    embeddings = set()
+    for getter in ('get_input_embeddings', 'get_output_embeddings'):
+        method = getattr(model, getter, None)
+        if callable(method):
+            embeddings.add(id(method()))
+
+    found = {}
+    for variant in definition._iter_module_tree_variants(tree):
+        if '#' not in variant:
+            raise ValueError('RCO model definition must declare its decoder boundary with #')
+        # Use the existing DSL parser with this variant, retaining the wrapper's
+        # effective tree rather than the class's unmodified declaration.
+        with definition._module_tree_context(variant):
+            prefixes = definition.extract_layers_node()
+            groups = definition.simple_layer_modules(model.config, quantize_config)
+            declared = tuple(dict.fromkeys(name for group in groups for name in group))
+            for prefix in prefixes:
+                container = model.get_submodule(prefix)
+                for local_index, (child, layer) in enumerate(container.named_children()):
+                    path = f'{prefix}.{child}'
+                    if not definition.should_quantize_layer(layer, path, local_index, quantize_config):
+                        raise ValueError(f'RCO staged arms do not support a skipped decoder block: {path}')
+                    projections = found.setdefault(path, [])
+                    for name in declared:
+                        try:
+                            module = layer.get_submodule(name)
+                        except AttributeError as exc:
+                            if definition.layer_modules_strict:
+                                raise ValueError(f'RCO declared projection is missing: {path}.{name}') from exc
+                            continue  # optional leaf in a heterogeneous decoder
+                        full_name = f'{path}.{name}'
+                        if (id(module) in embeddings
+                                or dynamic_get(getattr(quantize_config, 'dynamic', None), full_name) is False
+                                or not definition.should_quantize_module(model, full_name, module, quantize_config)):
+                            continue
+                        if not isinstance(module, (torch.nn.Linear, TorchLinear)):
+                            raise ValueError(f'RCO cannot restore declared projection {full_name}: {type(module).__name__}')
+                        if name not in projections:
+                            projections.append(name)
+    if not found or any(not names for names in found.values()):
+        raise ValueError('RCO model definition resolved no allocatable projections for one or more decoder blocks')
+    return tuple(RCOBlock(index, path, tuple(sorted(names)))
+                 for index, (path, names) in enumerate(found.items()))
 
 
-def _is_allocatable(name, module):
-    """Whether ``module`` is a decoder projection that may be bit-allocated."""
-    if not isinstance(module, torch.nn.Linear):
-        return False
-    if any(part in _NON_ALLOCATABLE_NAME_PARTS for part in name.split('.')):
-        return False
-    # Every decoder projection lives under an indexed block, e.g.
-    # `model.layers.7.self_attn.g_proj`. Requiring an integer segment excludes
-    # the embedding and the LM head without hardcoding a block attribute name.
-    return _INDEXED_BLOCK.search(f'.{name}.') is not None
+def discover_projections(model, *, model_definition=None, quantize_config=None, exclude=()):
+    """Return declared projection paths in decoder order, with exact exclusions."""
+    excluded = set(exclude)
+    return tuple(name for block in discover_blocks(
+        model, model_definition=model_definition, quantize_config=quantize_config)
+        for name in block.names if name not in excluded)
 
 
-def _allocation_order(name):
-    """Sort by decoder block, then by name, so plans read layer by layer."""
-    match = _INDEXED_BLOCK.search(f'.{name}.')
-    return (int(match.group(1)) if match else -1), name
-
-
-def block_of(name):
-    """Decoder block index of an allocated module, or ``None``."""
-    match = _INDEXED_BLOCK.search(f'.{name}.')
-    return int(match.group(1)) if match else None
+def block_of(name, blocks):
+    """Look up a projection's decoder ordinal in a definition-derived inventory."""
+    return next((block.index for block in blocks if name in block.names), None)

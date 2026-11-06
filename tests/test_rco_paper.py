@@ -15,7 +15,13 @@ import pytest
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from gptqmodel.quantization.rco import InterpolatedLlamaLayers, LlamaTeacherKL, projected_gumbel_search
+from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.quantization.rco import (
+    InterpolatedLlamaLayers,
+    LlamaTeacherKL,
+    discover_blocks,
+    projected_gumbel_search,
+)
 
 
 def script(name):
@@ -197,18 +203,20 @@ def test_projection_groups_preserve_unequal_parameter_counts():
     groups, weights = allocate.allocation_groups(counts, 'projection')
     assert len(groups) == 3
     assert dict(zip((group[0] for group in groups), weights.tolist())) == counts
-    groups, weights = allocate.allocation_groups(counts, 'block')
+    blocks = discover_blocks(tiny_model(layers=2), model_definition=LlamaQModel)
+    groups, weights = allocate.allocation_groups(counts, 'block', blocks=blocks)
     assert weights.tolist() == [24., 32.]
     assert len(groups) == 2
 
 
 def test_assignment_schema_accepts_legacy_and_rejects_incomplete_projection_map():
-    expected = {f'model.layers.0.{name}': 2 for name in materialize.PROJECTIONS}
-    assert materialize.assignment_projection_bits({'layer_bits': {'0': 2}}, 1) == expected
-    assert materialize.assignment_projection_bits({'projection_bits': expected}, 1) == expected
+    blocks = discover_blocks(tiny_model(), model_definition=LlamaQModel)
+    expected = {name: 2 for block in blocks for name in block.names}
+    assert materialize.assignment_projection_bits({'layer_bits': {'0': 2}}, blocks) == expected
+    assert materialize.assignment_projection_bits({'projection_bits': expected}, blocks) == expected
     for broken in ({}, {**expected, 'model.layers.9.mlp.up_proj': 2}):
         with pytest.raises(ValueError, match='every projection'):
-            materialize.assignment_projection_bits({'projection_bits': broken}, 1)
+            materialize.assignment_projection_bits({'projection_bits': broken}, blocks)
 
 
 def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
@@ -235,9 +243,11 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
     for width in (2, 3):
         quantize_llama_gsq_model(copy.deepcopy(model), [{'input_ids': list(range(1, 9))}],
                                  bits=width, group_size=32, checkpoint_directory=tmp_path / f'w{width}')
-    widths = {name: 2 + i % 2 for i, name in enumerate(materialize.PROJECTIONS)}
+    block = discover_blocks(wrapper)[0]
+    widths = {name: 2 + i % 2 for i, name in enumerate(block.projections)}
     restored = materialize.restore_assignment_block(
-        model.model.layers[0], 0, widths, str(tmp_path / 'w{bits}'), group_size=32, device='cpu')
+        model.model.layers[0], 0, widths, str(tmp_path / 'w{bits}'), group_size=32, device='cpu',
+        projections=block.projections)
     model.model.layers[0] = restored
     # Codes, scales and group indices must come unchanged from the selected arm.
     for name, width in widths.items():
@@ -265,7 +275,7 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
     assert loaded.quantize_config.meta['gsq_projection_bits'] == projection_bits
     with pytest.raises(ValueError, match='group size mismatch'):
         materialize.restore_assignment_block(restored, 0, widths, str(tmp_path / 'w{bits}'),
-                                             group_size=128, device='cpu')
+                                             group_size=128, device='cpu', projections=block.projections)
 
     # Exercise the real CLI wiring: cache the dense teacher, search, serialize,
     # materialize and reload, on a locally generated model and corpus.

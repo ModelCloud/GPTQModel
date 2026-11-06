@@ -3,6 +3,7 @@
 
 """Per-format RCO adapters: option sets, costs, discovery and allocation."""
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -12,8 +13,8 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.quantization.config import (
-    _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS,
     FORMAT_FIELD_CODE,
     AWQConfig,
     EXL3Config,
@@ -45,11 +46,16 @@ def script(name):
     return module
 
 
-def tiny_model(layers=2, with_g_proj=True):
+class ExtendedLlama(LlamaQModel):
+    module_tree = copy.deepcopy(LlamaQModel.module_tree)
+    module_tree[-1]["self_attn"] += ("g_proj:0:in=x",)
+
+
+def tiny_model(layers=2, with_g_proj=True, hidden=64):
     config = LlamaConfig(
         vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
+        hidden_size=hidden,
+        intermediate_size=2 * hidden,
         num_hidden_layers=layers,
         num_attention_heads=4,
         num_key_value_heads=2,
@@ -62,7 +68,7 @@ def tiny_model(layers=2, with_g_proj=True):
 
 
 def test_discovery_includes_extra_projections_and_excludes_the_head():
-    names = discover_projections(tiny_model())
+    names = discover_projections(tiny_model(), model_definition=ExtendedLlama)
     assert any(name.endswith("self_attn.g_proj") for name in names)
     assert not any("lm_head" in name for name in names)
     assert not any("embed_tokens" in name for name in names)
@@ -72,22 +78,21 @@ def test_discovery_includes_extra_projections_and_excludes_the_head():
     assert names[-1].startswith("model.layers.1.")
 
 
-def test_discovery_honours_suffix_and_exclusion_filters():
+def test_discovery_honours_definition_tags_and_exclusions():
+    class MLPOnly(ExtendedLlama):
+        module_tree = ["model", "layers", "#", {"mlp": ExtendedLlama.module_tree[-1]["mlp"]}]
+
     model = tiny_model()
-    only_mlp = discover_projections(model, suffixes=("gate_proj", "up_proj", "down_proj"))
-    assert {name.rsplit(".", 1)[-1] for name in only_mlp} == {
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    }
-    excluded = discover_projections(model, exclude=[only_mlp[0]])
+    only_mlp = discover_projections(model, model_definition=MLPOnly)
+    assert len(only_mlp) == 6
+    excluded = discover_projections(model, model_definition=ExtendedLlama, exclude=[only_mlp[0]])
     assert only_mlp[0] not in excluded
-    assert len(excluded) == len(discover_projections(model)) - 1
+    assert len(excluded) == 15
 
 
 def test_module_weights_counts_the_quantised_matrix_only():
     model = tiny_model()
-    names = discover_projections(model)
+    names = discover_projections(model, model_definition=ExtendedLlama)
     weights, kept = module_weights(model, names)
     assert kept == names
     # q_proj is 64x64 and gate_proj is 128x64 in this fixture.
@@ -97,7 +102,7 @@ def test_module_weights_counts_the_quantised_matrix_only():
 
 def test_awq_options_carry_the_scale_overhead():
     adapter = adapter_for(AWQConfig(bits=4, group_size=128))
-    assert adapter.search == "interpolation"
+    assert adapter.search == "reconstruction"
     assert adapter.labels() == tuple(f"w{bits}" for bits in AWQ_STAGED_WIDTHS)
     costs = adapter.costs().tolist()
     for bits, cost in zip(AWQ_STAGED_WIDTHS, costs):
@@ -125,9 +130,13 @@ def test_gguf_options_use_the_ggml_block_costs():
     adapter = adapter_for(GGUFConfig(bits=4))
     assert adapter.search == "reconstruction"
     assert adapter.labels() == GGUF_STAGED_ALIASES
+    from gptqmodel.nn_modules.qlinear.gguf import _GGUF_TYPE_INFO, _normalize_gguf_bits
+
     assert adapter.costs().tolist() == [
-        _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS[alias] for alias in GGUF_STAGED_ALIASES
+        _GGUF_TYPE_INFO[_normalize_gguf_bits(alias)[1]]["type_size"] * 8 /
+        _GGUF_TYPE_INFO[_normalize_gguf_bits(alias)[1]]["block_size"] for alias in GGUF_STAGED_ALIASES
     ]
+    assert adapter.costs()[-1] == 6.5625
     entry = adapter.dynamic_entry(adapter.options()[0])
     assert entry["bits"] == GGUF_STAGED_ALIASES[0]
     assert entry[FORMAT_FIELD_CODE] == GGUF_STAGED_ALIASES[0]
@@ -146,10 +155,7 @@ def test_gguf_module_resolves_the_per_module_type_from_dynamic():
     RCO's GGUF plan writes the ggml type into `dynamic`, so the module factory
     must fold that back into the structured spec instead of defaulting by width.
     """
-    try:
-        from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
-    except Exception:  # pragma: no cover - depends on the ggml runtime
-        pytest.skip("ggml runtime is unavailable")
+    from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
     from gptqmodel.quantization import FORMAT
     from gptqmodel.utils.model import create_quant_module
 
@@ -171,7 +177,7 @@ def test_gguf_module_resolves_the_per_module_type_from_dynamic():
     for name in names:
         create_quant_module(
             name=name,
-            linear_cls=GGUFCppKernel,
+            linear_cls=GGUFTorchLinear,
             bits=config.runtime_bits,
             desc_act=False,
             dynamic=config.dynamic,
@@ -192,7 +198,7 @@ def test_gguf_module_resolves_the_per_module_type_from_dynamic():
 @pytest.mark.parametrize("method", ["awq", "exl3", "gguf"])
 def test_allocation_respects_the_budget_and_the_option_set(method):
     model = tiny_model()
-    names = discover_projections(model)
+    names = discover_projections(model, model_definition=ExtendedLlama)
     weights, names = module_weights(model, names)
     adapter = adapter_for(
         {"awq": AWQConfig(bits=4), "exl3": EXL3Config(bits=3), "gguf": GGUFConfig(bits=4)}[method]
@@ -210,7 +216,7 @@ def test_allocation_respects_the_budget_and_the_option_set(method):
 
 def test_plan_round_trips_through_json():
     model = tiny_model()
-    weights, names = module_weights(model, discover_projections(model))
+    weights, names = module_weights(model, discover_projections(model, model_definition=ExtendedLlama))
     adapter = adapter_for(EXL3Config(bits=3))
     torch.manual_seed(3)
     scores = -torch.rand(len(names), len(adapter.options()))
@@ -385,7 +391,7 @@ def test_awq_pseudo_quantize_honours_the_requested_width():
     assert torch.isfinite(wq3).all()
 
 
-def test_runner_weights_the_budget_by_parameter_count():
+def test_runner_weights_the_budget_by_parameter_count(tmp_path):
     """A 5.2M k_proj must not outweigh a 209.7M mlp projection in the budget.
 
     The budget is a ratio over quantised parameters, so the solver has to see
@@ -402,10 +408,15 @@ def test_runner_weights_the_budget_by_parameter_count():
         names[1]: [0.5, 0.1, 0.01],
     }
     params = {names[0]: 5_242_880, names[1]: 209_715_200}
-    path_scores = Path("/tmp/rco_runner_params_scores.json")
+    path_scores = tmp_path / "scores.json"
     path_scores.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "search": "reconstruction",
+                "score_metric": "relative_frobenius",
+                "settings": {},
+                "shapes": {names[0]: [1024, 5120], names[1]: [40960, 5120]},
                 "method": "gguf",
                 "options": ["q2_k", "q3_k", "q4_k"],
                 "errors": scores,
@@ -440,16 +451,22 @@ def _gguf_adapter(aliases):
     return adapter
 
 
-def test_runner_loads_staged_arm_scores_as_columns():
+def test_runner_loads_staged_arm_scores_as_columns(tmp_path):
     """The EXL3 sweep writes one file per width; they must fuse into a matrix."""
     runner = script("rco_format_allocate")
 
     names = ["model.layers.0.self_attn.q_proj", "model.layers.0.mlp.up_proj"]
     paths = []
     for index, width in enumerate((2.0, 3.0, 4.0)):
-        path = Path(f"/tmp/rco_runner_arm_{index}.json")
+        path = tmp_path / f"arm_{index}.json"
         path.write_text(
-            json.dumps({"losses": {name: 0.5**width + offset for offset, name in enumerate(names)}})
+            json.dumps({
+                "schema_version": 1, "method": "exl3", "search": "reconstruction",
+                "score_metric": "relative_hessian", "settings": {"codebook": "mcg", "out_scales": "auto"},
+                "options": [f"k{int(width)}"], "params": dict.fromkeys(names, 16384),
+                "shapes": dict.fromkeys(names, [128, 128]),
+                "losses": {name: 0.5**width + offset for offset, name in enumerate(names)},
+            })
         )
         paths.append(str(path))
 
@@ -461,3 +478,245 @@ def test_runner_loads_staged_arm_scores_as_columns():
         arm = json.loads(Path(path).read_text())["losses"]
         for row, name in enumerate(names):
             assert fused[row][index].item() == pytest.approx(arm[name])
+
+
+def test_repair_can_downgrade_the_same_module_more_than_once():
+    assignment = torch.tensor([2])
+    repaired = repair_overspend(assignment, torch.tensor([[0., 100., 101.]]),
+                                torch.ones(1), torch.tensor([1., 2., 3.]), 1.)
+    assert repaired.tolist() == [0]
+    assert assignment.tolist() == [2]
+
+
+def test_budget_checks_do_not_round_parameter_counts_to_fp32():
+    adapter = adapter_for(EXL3Config(bits=3), options=(2, 4))
+    weights = torch.tensor([16777217, 16777216], dtype=torch.float64)
+    plan = allocate(adapter, torch.tensor([[0., 10.], [0., 1.]]), weights, 3., names=['a', 'b'])
+    total_bits = sum(weights[i].item() * plan.costs[option] for i, option in enumerate(plan.assignment))
+    assert total_bits <= 3 * weights.sum().item()
+    assert plan.achieved_bits == total_bits / weights.sum().item()
+
+
+@pytest.mark.parametrize('weights,target', [([0., 1.], 3.), ([-1., 2.], 3.), ([float('nan'), 1.], 3.),
+                                           ([1., 1.], 1.999), ([1., 1.], float('nan'))])
+def test_invalid_or_infeasible_budgets_are_rejected(weights, target):
+    with pytest.raises(RCOFormatError):
+        allocate(adapter_for(EXL3Config(bits=3)), torch.zeros(2, 3), torch.tensor(weights), target, names=['a', 'b'])
+
+
+def test_duplicate_names_are_rejected():
+    with pytest.raises(RCOFormatError, match='unique'):
+        allocate(adapter_for(EXL3Config(bits=3)), torch.zeros(2, 3), torch.ones(2), 3., names=['a', 'a'])
+
+
+def test_row_specific_costs_match_a_brute_force_oracle():
+    import itertools
+
+    from gptqmodel.quantization.rco import budget_constrained_argmax
+
+    scores = torch.tensor([[1., 8., 10.], [1., 5., 7.], [2., 9., 11.]], dtype=torch.float64)
+    weights = torch.tensor([1., 2., 3.], dtype=torch.float64)
+    costs = torch.tensor([[2., 3., 4.], [2.5, 3.5, 4.5], [2., 3., 4.]], dtype=torch.float64)
+    target = 3.
+    feasible = [a for a in itertools.product(range(3), repeat=3)
+                if sum(float(costs[i, j] * weights[i]) for i, j in enumerate(a)) <= target * float(weights.sum())]
+    expected = max(feasible, key=lambda a: sum(float(scores[i, j]) for i, j in enumerate(a)))
+    got = budget_constrained_argmax(scores, weights, costs, target, resolution=1200)
+    assert tuple(got.tolist()) == expected
+
+
+@pytest.mark.parametrize('group_size', [-1, 16, 32])
+@pytest.mark.parametrize('width', [2, 3, 4])
+def test_awq_cost_includes_partial_words_and_metadata(group_size, width):
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+
+    adapter = adapter_for(AWQConfig(bits=4, group_size=group_size), options=(width,))
+    module = AwqTorchLinear(bits=width, group_size=group_size, sym=True, desc_act=False,
+                            in_features=32, out_features=8, register_buffers=True)
+    actual = sum(t.numel() * t.element_size() * 8 for t in module.buffers())
+    assert adapter.cost_matrix([(8, 32)]).item() * 256 == actual
+
+
+@pytest.mark.parametrize('alias', ['q4_0', 'q2_k', 'q3_k', 'q6_k'])
+def test_gguf_cost_and_measurement_include_row_padding(alias):
+    from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+
+    adapter = adapter_for(GGUFConfig(bits=alias), options=(alias,))
+    module = GGUFTorchLinear(bits=alias, group_size=-1, sym=True, desc_act=False,
+                             in_features=260, out_features=8, register_buffers=True)
+    actual = module.qweight.numel() * module.qweight.element_size() * 8
+    assert adapter.cost_matrix([(8, 260)]).item() * (8 * 260) == pytest.approx(actual)
+    if alias in {'q4_0', 'q6_k'}:  # CPU quantizers available without optional native ggml.
+        weight = torch.randn(8, 260)
+        assert script('rco_format_allocate').gguf_dequantize(weight, alias).shape == weight.shape
+
+
+def test_exl3_cost_includes_sign_scales_and_codebook_marker():
+    adapter = adapter_for(EXL3Config(bits=3), options=(3,))
+    # trellis[int16, 8, 8, 48], suh[fp16,128], svh[fp16,128], mcg[int32].
+    expected = 8 * 8 * 48 * 16 + 2 * 128 * 16 + 32
+    assert adapter.cost_matrix([(128, 128)]).item() * (128 * 128) == expected
+
+
+def score_payload(method='awq', options=('w4', 'w2'), names=('a', 'b')):
+    settings = {'group_size': 32, 'sym': False, 'format': 'gemm'} if method == 'awq' else {}
+    return {'schema_version': 1, 'method': method, 'search': 'reconstruction', 'settings': settings,
+            'score_metric': 'relative_frobenius', 'options': list(options),
+            'errors': {name: [0.01, 0.2] for name in names},
+            'params': dict.fromkeys(names, 4096), 'shapes': dict.fromkeys(names, [64, 64])}
+
+
+def test_runner_preserves_custom_option_order_and_measured_settings(tmp_path):
+    runner = script('rco_format_allocate')
+    scores, plan_path = tmp_path / 'scores.json', tmp_path / 'plan.json'
+    scores.write_text(json.dumps(score_payload()))
+    runner.main(['allocate', '--method', 'awq', '--scores', str(scores), '--target-bits', '3.6', '--out', str(plan_path)])
+    plan = RCOPlan.from_dict(json.loads(plan_path.read_text()))
+    assert plan.labels == ('w4', 'w2')
+    assert plan.search == 'reconstruction'
+    args = runner.parse_args(['quantize', '--method', 'awq', '--out', 'unused', '--device', 'cpu'])
+    config = runner.quant_config('awq', plan, args)
+    assert config.group_size == 32 and config.sym is False
+    with pytest.raises(ValueError, match='method'):
+        runner.quant_config('gguf', plan, args)
+    args.group_size = 128
+    with pytest.raises(ValueError, match='measured'):
+        runner.quant_config('awq', plan, args)
+
+
+@pytest.mark.parametrize('mutation', ['method', 'missing_params', 'bad_count', 'negative_error', 'duplicate_options'])
+def test_runner_rejects_mislabelled_or_unbudgeted_scores(tmp_path, mutation):
+    runner = script('rco_format_allocate')
+    payload = score_payload()
+    if mutation == 'method':
+        payload['method'] = 'exl3'
+    elif mutation == 'missing_params':
+        del payload['params']
+    elif mutation == 'bad_count':
+        payload['params']['a'] = 1
+    elif mutation == 'negative_error':
+        payload['errors']['a'][0] = -1
+    elif mutation == 'duplicate_options':
+        payload['options'] = ['w2', 'w2']
+    path = tmp_path / 'scores.json'
+    path.write_text(json.dumps(payload))
+    with pytest.raises((ValueError, TypeError)):
+        runner._load_score_matrix(str(path))
+
+
+@pytest.mark.parametrize('mutation', [
+    'dynamic', 'achieved_bits', 'params', 'module_costs', 'width_counts', 'search', 'budget_unit', 'options',
+])
+def test_plan_revalidates_assignment_and_budget_on_read(mutation):
+    adapter = adapter_for(AWQConfig(bits=4, group_size=32, sym=False), options=(4, 2))
+    plan = allocate(adapter, torch.tensor([[-.01, -.2], [-.01, -.2]]), torch.full((2,), 4096.), 3.6,
+                    names=['a', 'b'], shapes={'a': (64, 64), 'b': (64, 64)})
+    payload = plan.to_dict()
+    if mutation == 'dynamic':
+        payload['dynamic']['a']['bits'] = 3
+    elif mutation == 'achieved_bits':
+        payload['achieved_bits'] = 0
+    elif mutation == 'params':
+        payload['params']['a'] = 1
+    elif mutation == 'module_costs':
+        payload['module_costs']['a'] = [2., 2.]
+    elif mutation == 'width_counts':
+        payload['width_counts'] = {}
+    elif mutation == 'search':
+        payload['search'] = 'interpolation'
+    elif mutation == 'budget_unit':
+        payload['budget_unit'] = 'nominal_weight_bits'
+    elif mutation == 'options':
+        payload['options'] = []
+    with pytest.raises(RCOFormatError):
+        RCOPlan.from_dict(payload)
+
+
+@pytest.mark.parametrize('method', ['awq', 'gguf'])
+def test_measure_allocate_quantize_and_reload(tmp_path, method):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.utils.backend import BACKEND
+
+    model_dir = tmp_path / 'dense'
+    tiny_model(layers=1, with_g_proj=False, hidden=128).save_pretrained(model_dir)
+    tokenizer = Tokenizer(WordLevel({str(i): i for i in range(64)}, unk_token='0'))
+    tokenizer.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token='0', pad_token='0').save_pretrained(model_dir)
+    runner = script('rco_format_allocate')
+    scores, plan_path, output = tmp_path / 'scores.json', tmp_path / 'plan.json', tmp_path / 'quantized'
+    common = ['--method', method, '--model', str(model_dir), '--device', 'cpu', '--dtype', 'float16']
+    measure_options = (['--options', '3,2', '--group-size', '32', '--no-sym'] if method == 'awq' else
+                       ['--options', 'q6_k,q4_0'])
+    runner.main(['measure', *common, *measure_options, '--out', str(scores)])
+    payload = json.loads(scores.read_text())
+    assert payload['options'] == (['w3', 'w2'] if method == 'awq' else ['q6_k', 'q4_0'])
+    assert len(payload['errors']) == 7
+    target = '3.1' if method == 'awq' else '6.0'
+    runner.main(['allocate', '--method', method, '--scores', str(scores), '--target-bits', target, '--out', str(plan_path)])
+    calibration = tmp_path / 'calibration.json'
+    calibration.write_text(json.dumps([' '.join(str(i) for i in range(1, 33))] * 4))
+    runner.main(['quantize', *common, '--plan', str(plan_path), '--calibration', str(calibration), '--out', str(output)])
+    backend = BACKEND.AWQ_TORCH if method == 'awq' else BACKEND.GGUF_TORCH
+    loaded = GPTQModel.load(str(output), backend=backend, device='cpu', dtype=torch.float16)
+    plan = RCOPlan.from_dict(json.loads(plan_path.read_text()))
+    actual_bits = 0
+    for name in plan.names:
+        module = loaded.model.get_submodule(name)
+        assert module.bits == plan.dynamic[name]['bits']
+        if method == 'awq':
+            assert module.group_size == 32
+        actual_bits += sum(t.numel() * t.element_size() * 8 for key, t in module.named_buffers()
+                           if key in {'qweight', 'qzeros', 'scales'})
+    assert actual_bits / sum(plan.weights) <= plan.target_bits
+    assert actual_bits / sum(plan.weights) == pytest.approx(plan.achieved_bits)
+    with torch.inference_mode():
+        output_logits = loaded.model(torch.tensor([[1, 2, 3, 4]])).logits
+    assert torch.isfinite(output_logits).all()
+
+
+def test_exl3_measurement_recomputes_error_instead_of_using_native_sentinels(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    runner = script('rco_format_allocate')
+    seen = {}
+
+    def quantize(weight, h_data, args, return_weight_q):
+        seen.update(args)
+        assert return_weight_q is True
+        h_data['H'].zero_()  # native finalization mutates its private copy
+        return weight * .5, -1., {}
+
+    monkeypatch.setitem(sys.modules, 'gptqmodel.exllamav3.modules.quant.exl3_lib.quantize',
+                        SimpleNamespace(quantize_exl3=quantize))
+    weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    hessian = torch.eye(4)
+    config = EXL3Config(bits=3, codebook='mul1', out_scales='never')
+    assert runner.exl3_error(weight, 3, hessian, torch.device('cpu'), config) == pytest.approx(.25)
+    assert seen['K'] == 3 and seen['mul1'] is True and seen['apply_out_scales'] is False
+    assert torch.equal(hessian, torch.eye(4))
+
+
+def test_quantize_rejects_a_partial_measured_inventory(tmp_path, monkeypatch):
+    from gptqmodel import GPTQModel
+    from tests.test_rco_discovery import wrapper_for
+
+    model = tiny_model(layers=1, with_g_proj=False)
+    names = discover_projections(model, model_definition=LlamaQModel)[:1]
+    shapes = {name: tuple(model.get_submodule(name).weight.shape) for name in names}
+    weights, _ = module_weights(model, names)
+    adapter = adapter_for(AWQConfig(bits=4, group_size=32), options=(2, 3))
+    plan = allocate(adapter, torch.zeros(1, 2), weights, 4., names=names, shapes=shapes)
+    path = tmp_path / 'partial.json'
+    path.write_text(json.dumps(plan.to_dict()))
+    wrapper = wrapper_for(model, LlamaQModel)
+    monkeypatch.setattr(GPTQModel, 'load', lambda *args, **kwargs: wrapper)
+    with pytest.raises(ValueError, match='complete model definition'):
+        script('rco_format_allocate').main(['quantize', '--method', 'awq', '--model', 'unused', '--plan', str(path),
+                                          '--out', str(tmp_path / 'out'), '--device', 'cpu'])
+    assert not (tmp_path / 'out').exists()

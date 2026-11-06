@@ -157,10 +157,10 @@ class METHOD(str, Enum):
 METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
     METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
-    # AWQ is 4-bit everywhere, with 8-bit available on Marlin/Machete.
+    # AWQ native GEMM/GEMV kernels require 4 bits.
     # RCO also allocates 2- and 3-bit modules, which only the portable torch
-    # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run; `create_quant_module`
-    # routes a non-4-bit module there, so the width has to be accepted here.
+    # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run. Request GEMM plus
+    # AWQ_TORCH; the AWQ processor also selects it for non-4-bit GEMM modules.
     METHOD.AWQ: (2, 3, 4, 8),
     # QQQ and ParoQuant kernels are 4-bit only.
     METHOD.QQQ: (4,),

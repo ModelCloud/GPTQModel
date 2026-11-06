@@ -21,14 +21,6 @@ from tempfile import TemporaryDirectory
 import torch
 
 
-#: Fallback projections for the packed-block rebuild. The GSQ paper stages the
-#: seven Llama names, but an architecture may add its own (Ripple-65B has a gated
-#: attention ``self_attn.g_proj``), and a hardcoded tuple silently drops those
-#: tensors. ``load_block`` discovers the real set from the live block and only
-#: falls back to this tuple when discovery yields nothing.
-PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-               'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_BATCH_TOKENS = 2048
 
@@ -111,47 +103,42 @@ def parse_args(argv=None):
     return args
 
 
-def allocation_groups(param_counts, grouping):
+def allocation_groups(param_counts, grouping, *, blocks=None):
     """Partition decisions while retaining each projection's parameter weight."""
     names = sorted(param_counts)
     if grouping == 'projection':
         groups = [[name] for name in names]
     elif grouping == 'block':
-        blocks = sorted({int(name.split('.')[2]) for name in names})
-        groups = [[name for name in names if int(name.split('.')[2]) == block] for block in blocks]
+        if blocks is None:
+            raise ValueError('Block grouping requires the model definition inventory')
+        groups = [[name for name in block.names if name in param_counts] for block in blocks]
+        groups = [group for group in groups if group]
+        if sorted(name for group in groups for name in group) != names:
+            raise ValueError('RCO block inventory must cover every allocated projection exactly')
     else:
         raise ValueError(f'Unknown RCO grouping: {grouping}')
     return groups, torch.tensor([sum(param_counts[name] for name in group) for group in groups],
                                  dtype=torch.float32)
 
 
-def load_block(model, checkpoint, width, *, index, group_size):
+def load_block(model, checkpoint, width, *, block, group_size):
     """Rebuild one packed block from a staged checkpoint and return its widths.
 
     Staged GSQ writes one checkpoint per block, so an arm already on disk is
     the width database entry for that block: no re-quantization is required.
     """
     from gptqmodel.looper.gsq_training_model import _restore_packed_layer
-    from gptqmodel.quantization.rco import discover_projections
 
     saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
-    if saved.get('layer_index') != index or group_size_of(saved) != group_size:
+    if saved.get('layer_index') != block.index or group_size_of(saved) != group_size:
         raise ValueError(f'Block index or group size differs in {checkpoint}')
     bits = saved['signature'].get('bits')
     if bits != width:
         raise ValueError(f'{checkpoint} holds W{bits}, expected W{width}')
-    layer = model.model.layers[saved['layer_index']]
-    # Discover from the live block so a model-level projection the paper's Llama
-    # tuple does not know about is still rebuilt. ``state_dict`` only contains
-    # the tensors this arm actually wrote, so intersecting with it keeps a
-    # partial arm from asking for a missing tensor.
-    names = tuple(
-        name for name in discover_projections(layer, suffixes=None)
-        if f'{name}.weight' in saved['state_dict']
-    ) or PROJECTIONS
-    relative = [name.split('.', 1)[-1] if name.startswith('model.layers.') else name
-                for name in names]
-    return _restore_packed_layer(layer, saved['state_dict'], names=tuple(relative), bits=width,
+    layer = model.get_submodule(block.path)
+    # Packed checkpoints have qweight/qzeros/scales, not dense .weight entries.
+    # Restore the entire declared inventory; strict loading rejects partial arms.
+    return _restore_packed_layer(layer, saved['state_dict'], names=block.projections, bits=width,
                                  group_size=group_size_of(saved), device='cpu')
 
 
@@ -187,7 +174,7 @@ def main():
         LlamaTeacherKL,
         achieved_bits,
         budget_constrained_argmax,
-        discover_projections,
+        discover_blocks,
         projected_gumbel_search,
     )
     from gptqmodel.quantization.rco_mlx import (
@@ -207,38 +194,24 @@ def main():
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                             attn_implementation='sdpa')
     wrapper.model.to(device).eval().requires_grad_(False)
-    layers = len(wrapper.model.model.layers)
+    blocks = discover_blocks(wrapper)
+    layers = len(blocks)
     if args.layers is not None and args.layers != layers:
         raise SystemExit('--layers must cover the complete model for an exportable allocation')
     args.layers = layers
 
     calib_docs = documents(args.corpus, 'validation', args.calib_seqs)
 
-    # Discover the projections from the live model instead of trusting the
-    # paper's Llama tuple: a model that adds one (Ripple-65B's gated
-    # `self_attn.g_proj`) would otherwise be allocated against a budget that
-    # omits those tensors entirely.
-    block_projections = tuple(
-        name.split('model.layers.0.', 1)[-1]
-        for name in discover_projections(wrapper.model.model.layers[0])
-    )
-    if not block_projections:
-        block_projections = PROJECTIONS
-    if set(block_projections) != set(PROJECTIONS):
-        print(f'  discovering {len(block_projections)} projections per block: '
-              f'{len(set(block_projections) - set(PROJECTIONS))} beyond the Llama default',
-              flush=True)
-
     database, param_counts = {}, {}
     started = time.monotonic()
-    for index in range(args.layers):
+    for block in blocks:
+        index = block.index
         for width, arm in zip(options, arms):
             checkpoint = arm / f'layer-{index:02d}.pt'
             if not checkpoint.exists():
                 raise SystemExit(f'Width database is missing block {index} at W{width}: {checkpoint}')
-            packed = load_block(wrapper.model, checkpoint, width, index=index, group_size=args.group_size)
-            for name in block_projections:
-                key = f'model.layers.{index}.{name}'
+            packed = load_block(wrapper.model, checkpoint, width, block=block, group_size=args.group_size)
+            for name, key in zip(block.projections, block.names):
                 # ``dequantize_weight`` returns [in, out]; nn.Linear holds
                 # [out, in]. Square projections hide the difference, so this
                 # transpose is required for k/v/gate/up/down.
@@ -257,7 +230,7 @@ def main():
     layer_weights = {name: [database[name][width] for width in options] for name in names}
     costs = torch.tensor([float(width) for width in options])
 
-    groups, weights = allocation_groups(param_counts, args.grouping)
+    groups, weights = allocation_groups(param_counts, args.grouping, blocks=blocks)
     print('database ready:', len(names), 'modules in', len(groups), args.grouping, 'groups,',
           int(weights.sum().item()), 'parameters')
 
@@ -374,9 +347,7 @@ def main():
 
     projection_bits = {name: options[option] for group, option in zip(groups, assignment.tolist())
                        for name in group}
-    blocks = sorted({int(name.split('.')[2]) for name in names})
-    first_projection = block_projections[0]
-    layer_bits = ({block: projection_bits[f'model.layers.{block}.{first_projection}'] for block in blocks}
+    layer_bits = ({block.index: projection_bits[block.names[0]] for block in blocks}
                   if args.grouping == 'block' else None)
 
     result = {
