@@ -1109,3 +1109,40 @@ def test_labels_with_logits_to_keep_keeps_finite_loss(tmp_path: Path):
     assert torch.isfinite(kept_pos.loss)
     torch.testing.assert_close(kept_pos.loss, full.loss, atol=1e-6, rtol=1e-6)
     assert kept.logits.shape == (1, 1, model.config.vocab_size)
+
+
+def test_patch_classes_are_disjoint_and_documented():
+    """The upstream/local patch split is a contract, not a comment.
+
+    ``ricursiveAI/Ripple-65B-Preview`` may only receive accuracy and memory
+    fixes. Fast paths are bound to Ripple's 80-query/8-KV head split and to
+    this Torch build's ``enable_gqa`` / fused ``rms_norm``, so they must never
+    be proposed upstream. Guard the split in CI so a new patch cannot land in
+    the wrong class by accident, and so the markers that document it cannot be
+    dropped.
+    """
+    from gptqmodel.utils import ricursive_patch as rp
+
+    upstream = set(rp.UPSTREAM_ELIGIBLE_PATCHES)
+    local = set(rp.LOCAL_ONLY_FAST_PATHS)
+
+    assert upstream, "the upstream-eligible set must not be empty"
+    assert local, "the local-only fast-path set must not be empty"
+    assert not (upstream & local), "a patch cannot be both upstream-eligible and local-only"
+
+    for name in local:
+        fn = getattr(rp, name, None)
+        assert callable(fn), f"{name} is listed in LOCAL_ONLY_FAST_PATHS but is missing"
+        doc = fn.__doc__ or ""
+        assert "LOCAL-ONLY FAST PATH" in doc, f"{name} must carry the local-only marker"
+        assert "never upstream" in doc.lower(), f"{name} must state it is never upstream"
+
+    for name in upstream:
+        fn = getattr(rp, name, None)
+        if not name.startswith("_patch_"):
+            # Implementation helpers (``_update_causal_mask`` and friends) are
+            # nested inside their installer and carry no separate marker.
+            continue
+        assert callable(fn), f"{name} is listed in UPSTREAM_ELIGIBLE_PATCHES but is missing"
+        doc = fn.__doc__ or ""
+        assert "upstream-eligible" in doc, f"{name} must carry the upstream marker"
