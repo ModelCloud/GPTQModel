@@ -62,6 +62,8 @@ def test_validate_device_reason_survives(monkeypatch):
 
 
 def test_empty_reason_keeps_the_plain_message(monkeypatch):
+    # Assert the plain message; a HIP host appends a ROCm hint to it.
+    monkeypatch.setattr(torch.version, "hip", None)
     _reject(monkeypatch, "")
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False

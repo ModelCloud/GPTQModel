@@ -139,6 +139,9 @@ def _force_auto_candidates_valid(monkeypatch, method, fmt):
 
 
 def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch):
+    # Assert the NVIDIA-family mapping; a ROCm host maps ``cuda`` to ROCM.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
     class CudaKernel:
         SUPPORTS_DEVICES = [DEVICE.CUDA]
 
@@ -177,6 +180,95 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     )
 
     assert qlinear_cls is CudaKernel
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])
+def test_rocm_normalizes_cuda_selectors_to_rocm(monkeypatch, selector):
+    """HIP reuses the CUDA namespace, so ``cuda`` means the AMD accelerator."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    assert model_const.normalize_device(selector) is DEVICE.ROCM
+
+
+def test_rocm_auto_select_device_returns_rocm(monkeypatch):
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+
+    assert auto_select_device(None, BACKEND.AUTO) is DEVICE.ROCM
+
+
+@pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])
+def test_rocm_cuda_selector_never_picks_cuda_only_kernel(monkeypatch, selector):
+    """A CUDA-only kernel must not pass the family gate for a ROCm selector."""
+
+    class CudaOnlyKernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    class PortableKernel:
+        SUPPORTS_DEVICES = [DEVICE.ALL]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+
+    device = model_const.normalize_device(selector)
+    assert device is DEVICE.ROCM
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict(
+            [
+                (BACKEND.QQQ, CudaOnlyKernel),
+                (BACKEND.QQQ_TORCH, PortableKernel),
+            ]
+        ),
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=device,
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is PortableKernel
+    assert selected is not CudaOnlyKernel
+
+
+def test_rocm_device_never_selects_triton_v2_linear():
+    """The ROCm family must not resolve to the CUDA-only Triton V2 kernel."""
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.ROCM,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is not TritonV2Linear
 
 
 def test_role_only_kernel_is_excluded_from_backend_discovery():
@@ -1182,6 +1274,9 @@ def test_sharded_select_tolerates_kernel_without_shard_attrs(monkeypatch):
 
 
 def test_select_quant_linear_validates_each_exact_multi_gpu_target(monkeypatch):
+    # Assert CUDA ordinals; a ROCm host maps ``cuda:N`` to the ROCM family.
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
     calls = []
 
     class IndexedKernel:

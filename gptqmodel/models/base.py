@@ -103,6 +103,7 @@ from ._const import (
     DEVICE,
     EXPERT_INDEX_PLACEHOLDER,
     META,
+    normalize_device,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -1590,7 +1591,7 @@ class BaseQModel(nn.Module):
                 backend=preferred_backend,
                 format=format_code,
                 quant_method=export_quant_method,
-                device=DEVICE(self.quantize_config.device),
+                device=normalize_device(self.quantize_config.device),
                 pack=True,
                 pack_dtype=self.quantize_config.pack_dtype,
             )
@@ -1629,7 +1630,7 @@ class BaseQModel(nn.Module):
                     sym=self.quantize_config.sym,
                     pack=True,
                     dynamic=self.quantize_config.dynamic,
-                    device=DEVICE(self.quantize_config.device),
+                    device=normalize_device(self.quantize_config.device),
                     pack_dtype=self.quantize_config.pack_dtype,
                     multi_select=False,
                     backend=preferred_backend,
@@ -1939,7 +1940,7 @@ class BaseQModel(nn.Module):
             endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
             if endpoint_device.type == "meta":
                 endpoint_device = CPU
-            quantize_config.device = DEVICE(endpoint_device.type)
+            quantize_config.device = normalize_device(endpoint_device)
 
         result = self.quantize(
             calibration=calibration,

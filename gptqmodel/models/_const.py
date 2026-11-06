@@ -107,9 +107,17 @@ def validate_cuda_support(raise_exception: bool = False):
 
 
 def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
+    """Return the kernel support family for a public device value.
+
+    HIP reuses torch's ``cuda`` namespace, so on a ROCm host an integer ordinal
+    and every ``cuda`` spelling name the AMD accelerator.  They must map to
+    ``DEVICE.ROCM``; keeping them as ``DEVICE.CUDA`` lets CUDA-only kernels
+    (Triton V2, W4A-FP8/NVFP4, ...) pass the support-family gate on ROCm.
+    An explicit ``DEVICE.CUDA`` is preserved as the caller's declared family.
+    """
     if isinstance(type_value, int):
         if HAS_CUDA:
-            return DEVICE.CUDA
+            return DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
         elif HAS_XPU:
             return DEVICE.XPU
         elif HAS_NPU:
@@ -133,7 +141,11 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
     if not isinstance(type_value, str):
         raise ValueError(f"Invalid device type_value type: {type(type_value)}")
 
-    return DEVICE(type_value.lower())
+    device = DEVICE(type_value.lower())
+    if device == DEVICE.CUDA and IS_ROCM:
+        # HIP exposes AMD devices through the ``cuda`` namespace.
+        return DEVICE.ROCM
+    return device
 
 
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:

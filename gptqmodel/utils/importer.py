@@ -1112,7 +1112,9 @@ def auto_select_device(
         if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
-            device = DEVICE.CUDA
+            # HIP reuses torch's ``cuda`` namespace, so the default accelerator
+            # on a ROCm host is the AMD family, not NVIDIA CUDA.
+            device = DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
         elif HAS_NPU:
