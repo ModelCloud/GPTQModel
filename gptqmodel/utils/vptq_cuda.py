@@ -95,14 +95,14 @@ def clear_vptq_extension_cache() -> None:
 
 
 def vptq_cuda_runtime_available() -> bool:
-    if not torch.cuda.is_available():
+    if not _validate_vptq_build_support():
         return False
     return _extension_api().is_available("vptq")
 
 
 def vptq_cuda_runtime_error() -> str:
-    if not torch.cuda.is_available():
-        return "VPTQ CUDA requires an available CUDA device."
+    if not _validate_vptq_build_support():
+        return vptq_cuda_build_error()
     extension_api = _extension_api()
     if extension_api.is_available("vptq"):
         return ""
@@ -110,7 +110,7 @@ def vptq_cuda_runtime_error() -> str:
 
 
 def prewarm_vptq_extension() -> bool:
-    if not torch.cuda.is_available():
+    if not _validate_vptq_build_support():
         return False
     return _extension_api().load(name="vptq")["vptq"]
 
@@ -212,6 +212,7 @@ def vptq_cuda_linear(
 __all__ = [
     "clear_vptq_extension_cache",
     "prewarm_vptq_extension",
+    "vptq_cuda_build_error",
     "vptq_cuda_dequantize",
     "vptq_cuda_linear",
     "vptq_cuda_runtime_available",

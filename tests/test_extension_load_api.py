@@ -7,6 +7,7 @@ import threading
 import time
 
 import pytest
+import torch
 
 import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
@@ -20,6 +21,7 @@ import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.rocm as rocm
 import gptqmodel.utils.swordfish as swordfish_utils
 import gptqmodel.utils.vptq_cuda as vptq_utils
 
@@ -165,6 +167,32 @@ def test_load_specific_vptq_reports_the_build_requirement(monkeypatch):
         extension_api.load(name="vptq")
 
     assert fakes["vptq"].load_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "is_rocm", "expected"),
+    [
+        (True, False, True),
+        (True, True, False),
+        (False, False, False),
+        (False, True, False),
+    ],
+)
+def test_vptq_build_support_requires_nvidia_cuda(
+    monkeypatch, cuda_available, is_rocm, expected
+):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(rocm, "IS_ROCM", is_rocm)
+
+    assert vptq_utils._validate_vptq_build_support() is expected
+
+
+def test_vptq_runtime_helpers_fail_fast_without_nvidia_cuda(monkeypatch):
+    monkeypatch.setattr(vptq_utils, "_validate_vptq_build_support", lambda: False)
+
+    assert vptq_utils.prewarm_vptq_extension() is False
+    assert vptq_utils.vptq_cuda_runtime_available() is False
+    assert "NVIDIA CUDA device" in vptq_utils.vptq_cuda_runtime_error()
 
 
 def test_load_specific_unsupported_extension_raises_without_building(monkeypatch):
