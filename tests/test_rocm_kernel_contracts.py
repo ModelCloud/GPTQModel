@@ -9,7 +9,6 @@ import pytest
 import torch
 
 import gptqmodel.models._const as model_const
-from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
@@ -70,9 +69,9 @@ def test_audit_covers_every_registered_kernel():
 
 
 @pytest.mark.parametrize("cls,devices", [
-    (ExllamaV3Linear, [DEVICE.CUDA]),
-    (ExllamaV3TorchLinear, [DEVICE.ALL]),
-    (TorchFP4Linear, [DEVICE.CPU, DEVICE.CUDA]),
+    (ExllamaV3Linear, [model_const.DEVICE.CUDA]),
+    (ExllamaV3TorchLinear, [model_const.DEVICE.ALL]),
+    (TorchFP4Linear, [model_const.DEVICE.CPU, model_const.DEVICE.CUDA]),
 ])
 def test_specialized_loader_kernel_declarations(cls, devices):
     # These nn.Module implementations use dedicated loader paths rather than
@@ -84,14 +83,14 @@ def test_specialized_loader_kernel_declarations(cls, devices):
 def test_explicit_rocm_family_never_probes_nvidia_capability(monkeypatch, is_rocm):
     monkeypatch.setattr(importer, "IS_ROCM", is_rocm)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, **k: pytest.fail("AMD family has no NVIDIA SM"))
-    assert importer._device_capability(DEVICE.ROCM) is None
+    assert importer._device_capability(model_const.DEVICE.ROCM) is None
 
 
 @pytest.mark.parametrize("cls", KERNELS, ids=lambda c: c.__name__)
-@pytest.mark.parametrize("device", [DEVICE.ROCM, DEVICE.CUDA, "rocm", "cuda", "cuda:1", torch.device("cuda:1")])
+@pytest.mark.parametrize("device", [model_const.DEVICE.ROCM, model_const.DEVICE.CUDA, "rocm", "cuda", "cuda:1", torch.device("cuda:1")])
 def test_rocm_device_contract(cls, device, hip_runtime):
     expected = cls.__name__ in ROCM_KERNELS
-    advertised = DEVICE.ROCM in cls.SUPPORTS_DEVICES or DEVICE.ALL in cls.SUPPORTS_DEVICES
+    advertised = model_const.DEVICE.ROCM in cls.SUPPORTS_DEVICES or model_const.DEVICE.ALL in cls.SUPPORTS_DEVICES
     assert advertised is expected
     # Exercise shared validation, including class overrides, while avoiding
     # optional extension imports and unrelated bit/group/shape contracts.
@@ -103,7 +102,7 @@ def test_rocm_device_contract(cls, device, hip_runtime):
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("backend", [BACKEND.AUTO, BACKEND.BITSANDBYTES])
-@pytest.mark.parametrize("device", [DEVICE.ROCM, DEVICE.CUDA, "cuda:1", torch.device("cuda:1")])
+@pytest.mark.parametrize("device", [model_const.DEVICE.ROCM, model_const.DEVICE.CUDA, "cuda:1", torch.device("cuda:1")])
 def test_bitsandbytes_rocm_selection(bits, backend, device, hip_runtime, monkeypatch):
     monkeypatch.setattr(BitsAndBytesLinear, "cached_validate_once", classmethod(lambda cls: (True, None)))
     importer.clear_validation_cache()
@@ -118,7 +117,7 @@ def test_bitsandbytes_rocm_selection(bits, backend, device, hip_runtime, monkeyp
 
 
 @pytest.mark.parametrize("cls", [AllSparkLinear, AllSparkAwqLinear])
-@pytest.mark.parametrize("device", ["cuda:1", torch.device("cuda:1"), DEVICE.ROCM, DEVICE.CUDA])
+@pytest.mark.parametrize("device", ["cuda:1", torch.device("cuda:1"), model_const.DEVICE.ROCM, model_const.DEVICE.CUDA])
 def test_allspark_rejects_non_rdna4_target(cls, device, hip_runtime, monkeypatch):
     def properties(target=None):
         index = 0 if target is None else torch.device(target).index
