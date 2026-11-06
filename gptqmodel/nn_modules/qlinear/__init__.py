@@ -18,7 +18,7 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -38,17 +38,19 @@ log = setup_logger()
 
 
 def _device_family(device: DEVICE | t.device):
-    """Map a concrete torch device onto its declared support family.
+    """Map a device selector onto its declared support family.
 
-    DEVICE declarations describe families, so a `torch.device("cuda:1")`
-    selector is checked as `DEVICE.CUDA`. Unknown device types fall back to
-    their raw string so the caller reports a mismatch instead of raising.
+    DEVICE declarations describe families, so both a ``torch.device("cuda:1")``
+    and an explicit ``DEVICE.CUDA`` selector are checked through
+    ``normalize_device`` (HIP's ``cuda`` namespace maps to ``DEVICE.ROCM``).
+    Unknown device types fall back to their raw string so the caller reports a
+    mismatch instead of raising.
     """
-    if isinstance(device, t.device):
+    if isinstance(device, (DEVICE, t.device)):
         try:
-            return DEVICE(device.type)
+            return normalize_device(device)
         except ValueError:
-            return device.type
+            return device.type if isinstance(device, t.device) else device.value
     return device
 
 

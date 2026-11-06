@@ -151,20 +151,6 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
     return device
 
 
-def torch_compatible_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
-    """Return a support family whose value is also a valid torch device type.
-
-    ``quantize_config.device`` is consumed both as a kernel support family and
-    as a concrete device (device thread pool, ``torch.device``, module moves).
-    ``DEVICE.ROCM`` only names the support family -- ``"rocm"`` is not a torch
-    device type -- so it is stored as HIP's ``cuda`` spelling and kernel
-    selection resolves it back to ``DEVICE.ROCM`` through
-    :func:`normalize_device`.
-    """
-    family = normalize_device(type_value)
-    return DEVICE.CUDA if family == DEVICE.ROCM else family
-
-
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
     if HAS_CUDA:
         return CUDA_0

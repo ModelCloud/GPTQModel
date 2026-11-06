@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from ...quantization import METHOD
+from ...utils.torch import as_torch_device
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .ovis2_5 import Ovis2_5QModel
 
@@ -72,7 +73,7 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         # Ovis 2.6 checkpoints omit SigLIP2 post_layernorm tensors even though
         # the remote code constructs the LayerNorm. Keep its default init instead of
         # resolving nonexistent checkpoint keys.
-        self._materialize_missing_vision_post_layernorm(torch.device(self.quantize_config.device))
+        self._materialize_missing_vision_post_layernorm(as_torch_device(self.quantize_config.device))
         super().pre_quantize_generate_hook_start()
 
 

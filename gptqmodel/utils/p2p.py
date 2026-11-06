@@ -46,6 +46,7 @@ from typing import Iterable, Sequence
 import torch
 
 from .logger import setup_logger
+from .torch import as_torch_device
 
 
 log = setup_logger()
@@ -861,7 +862,7 @@ def safe_move_to(
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"safe_move_to expects a Tensor, got {type(tensor).__name__}")
 
-    device = torch.device(device) if not isinstance(device, torch.device) else device
+    device = as_torch_device(device)
     target_dtype = tensor.dtype if dtype is None else dtype
     ordinal = _device_ordinal(device)
     if ordinal is not None and device.index is None:
@@ -892,7 +893,7 @@ def safe_module_to(
     runs, which preserves dtype/format handling and cache invalidation in
     quantized subclasses.
     """
-    device = torch.device(device) if not isinstance(device, torch.device) else device
+    device = as_torch_device(device)
     ordinal = _device_ordinal(device)
     if ordinal is not None and device.index is None:
         device = torch.device(device.type, ordinal)

@@ -1116,12 +1116,11 @@ def auto_select_device(
         if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
-            # The default stays ``DEVICE.CUDA`` because this value is also used
-            # as a concrete torch device (``"cuda"`` is valid on HIP too).
-            # Kernel selection resolves the support family separately through
-            # ``normalize_device``/``_device_family``, which map it to
-            # ``DEVICE.ROCM`` on a ROCm host.
-            device = DEVICE.CUDA
+            # HIP reuses torch's ``cuda`` namespace, so the default accelerator
+            # on a ROCm host is the AMD family, not NVIDIA CUDA.  Keep the
+            # family explicit: consumers that need a concrete torch device
+            # resolve it through ``DEVICE.to_torch_device()``.
+            device = DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
         elif HAS_NPU:

@@ -102,7 +102,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ._const import DEVICE, HAS_NPU, normalize_device, torch_compatible_device
+from ._const import DEVICE, HAS_NPU, normalize_device
 
 
 log = setup_logger()
@@ -1285,9 +1285,9 @@ def ModelLoader(cls):
             if quantize_config.device is None:
                 requested_devices = _explicit_requested_devices(device)
                 # `quantize_config.device` only carries an accelerator family
-                # (`DEVICE(self.quantize_config.device)` rejects ordinals), so an
-                # explicit device list is expressed through the compute filter.
-                quantize_config.device = torch_compatible_device(auto_select_device(None, None))
+                # (ordinals are stripped by `normalize_device`), so an explicit
+                # device list is expressed through the compute filter.
+                quantize_config.device = auto_select_device(None, None)
                 if requested_devices is not None and quantize_config.compute_device_filter is None:
                     wanted = {str(target) for target in requested_devices}
                     quantize_config.compute_device_filter = (
@@ -1296,7 +1296,7 @@ def ModelLoader(cls):
                         ]
                     )
             else:
-                quantize_config.device = torch_compatible_device(quantize_config.device)
+                quantize_config.device = normalize_device(quantize_config.device)
 
             if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
                 # TODO FIX ME for `dynamic`, non-quantized modules should be in native type

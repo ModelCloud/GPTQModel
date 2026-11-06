@@ -44,7 +44,8 @@ from gptqmodel.utils.importer import (
     validate_quant_linear,
 )
 from gptqmodel.utils.rocm import IS_ROCM
-from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from gptqmodel.utils.threadx import _coerce_device
+from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU, as_torch_device
 
 
 def _iter_kernel_classes():
@@ -192,35 +193,46 @@ def test_rocm_normalizes_cuda_selectors_to_rocm(monkeypatch, selector):
     assert model_const.normalize_device(selector) is DEVICE.ROCM
 
 
-def test_rocm_support_family_is_stored_as_a_torch_device(monkeypatch):
-    """A stored quantize device must also work as a concrete torch device."""
+def test_rocm_support_family_stays_explicit(monkeypatch):
+    """ROCm must stay ``DEVICE.ROCM``; never be rewritten back to ``DEVICE.CUDA``."""
 
     monkeypatch.setattr(model_const, "IS_ROCM", True)
     monkeypatch.setattr(model_const, "HAS_CUDA", True)
 
     for selector in ("cuda", DEVICE.ROCM):
-        stored = model_const.torch_compatible_device(selector)
-        assert stored is DEVICE.CUDA
-        torch.device(stored)  # must not raise
-        assert model_const.normalize_device(stored) is DEVICE.ROCM
+        family = model_const.normalize_device(selector)
+        assert family is DEVICE.ROCM
+        # The concrete device is resolved through the enum's own mapping.
+        assert family.to_torch_device() == torch.device("cuda:0")
 
 
-def test_rocm_auto_select_device_stays_a_valid_torch_device(monkeypatch):
-    """The auto-selected default doubles as a concrete torch device.
-
-    ``DEVICE.ROCM`` is a kernel support family only: its value ``"rocm"`` is not
-    a torch device type, so storing it in ``quantize_config.device`` broke the
-    ROCm quantize path (device thread pool keys and ``torch.device``).  The
-    default therefore stays torch-compatible and the family is resolved
-    separately at kernel-selection time.
-    """
+def test_rocm_auto_select_device_is_the_explicit_rocm_family(monkeypatch):
+    """The auto-selected default must be the AMD family, not NVIDIA CUDA."""
 
     monkeypatch.setattr(importer, "IS_ROCM", True)
     monkeypatch.setattr(importer, "HAS_CUDA", True)
 
     device = auto_select_device(None, BACKEND.AUTO)
-    torch.device(device)  # must not raise
+    assert device is DEVICE.ROCM
     assert importer.selector_device_family(device) is DEVICE.ROCM
+    assert device.to_torch_device() == torch.device("cuda:0")
+
+
+def test_rocm_family_resolves_at_the_torch_boundary(monkeypatch):
+    """``DEVICE.ROCM`` must be usable wherever a concrete device is required."""
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "HAS_CUDA", True)
+
+    assert as_torch_device(DEVICE.ROCM) == torch.device("cuda:0")
+    # Kernel validation maps HIP's ``cuda`` namespace to the ROCm family too,
+    # so a concrete ``cuda:N`` target cannot pass a CUDA-only family gate.
+    from gptqmodel.nn_modules.qlinear import _device_family as kernel_device_family
+    assert kernel_device_family(torch.device("cuda:0")) is DEVICE.ROCM
+    assert kernel_device_family(DEVICE.CUDA) is DEVICE.ROCM
+    # The thread pool keeps the family spelling so family-wide locks still
+    # cover every visible ROCm device rather than only ordinal 0.
+    assert _coerce_device(DEVICE.ROCM) == torch.device("cuda")
 
 
 @pytest.mark.parametrize("selector", ["cuda", "cuda:3", 0, torch.device("cuda:0")])

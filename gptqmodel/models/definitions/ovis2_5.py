@@ -11,6 +11,7 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import load_image_from_url
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
+from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
 
@@ -48,7 +49,7 @@ class Ovis2_5QModel(BaseQModel):
         rotary_pos_emb_cls = type(self.model.visual_tokenizer.vit.vision_model.encoder.rotary_pos_emb)
         config = self.model.config.vit_config
         assert "VisionRotaryEmbedding" in rotary_pos_emb_cls.__name__
-        rotary_pos_emb = rotary_pos_emb_cls(config.hidden_size // config.num_attention_heads // 2).to(self.quantize_config.device)
+        rotary_pos_emb = rotary_pos_emb_cls(config.hidden_size // config.num_attention_heads // 2).to(as_torch_device(self.quantize_config.device))
         self.model.visual_tokenizer.vit.vision_model.encoder.rotary_pos_emb = rotary_pos_emb
 
     def pre_quantize_generate_hook_end(self):

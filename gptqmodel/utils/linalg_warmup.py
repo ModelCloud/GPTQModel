@@ -13,7 +13,7 @@ import torch
 from .env import env_flag
 from .logger import setup_logger
 from .rocm import quantize_tuning
-from .torch import TORCH_GTE_210
+from .torch import TORCH_GTE_210, as_torch_device
 
 
 if TYPE_CHECKING:
@@ -344,7 +344,7 @@ def _linear_prewarm_device(device: Optional[Union[str, torch.device]]) -> Option
     if isinstance(device, int):
         device = f"cuda:{device}"
     try:
-        resolved = torch.device(device)
+        resolved = as_torch_device(device)
     except (RuntimeError, TypeError, ValueError):
         return None
     if resolved.type not in _LINEAR_PREWARM_DEVICE_TYPES:

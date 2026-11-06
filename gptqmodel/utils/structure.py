@@ -46,6 +46,7 @@ from torch import nn
 
 from ..utils.logger import setup_logger
 from .p2p import safe_move_to
+from .torch import as_torch_device
 
 
 # =========================
@@ -1113,7 +1114,7 @@ class LazyTurtle:
         """Materialize only direct meta params/buffers for one shell submodule."""
 
         if device is not None:
-            device = torch.device(device)
+            device = as_torch_device(device)
             if device.type == "meta":
                 raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
 
@@ -2315,7 +2316,7 @@ class LazyTurtle:
 
         if self.is_no_placement_tensor(module_path, rel_name):
             return torch.device("cpu")
-        return torch.device(default_device)
+        return as_torch_device(default_device)
 
     def is_no_placement_tensor(self, module_path: str, rel_name: str) -> bool:
         """Check Transformers' accelerator placement exclusions."""
