@@ -88,6 +88,9 @@ def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
 
 
 def test_exllamav2_awq_validate_once_surfaces_jit_error(monkeypatch):
+    # Pin the host family so this exercises the non-ROCm JIT-error path even
+    # when the suite runs on a HIP device.
+    monkeypatch.setattr(exllamav2_awq_module, "IS_ROCM", False)
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_available", lambda: False)
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_error", lambda: "missing exllamav2 awq jit ops")
 

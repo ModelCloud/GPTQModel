@@ -354,6 +354,15 @@ class TestKernelOutput(unittest.TestCase):
             if not swordfish_runtime_available():
                 self.skipTest(f"Swordfish kernel unavailable: {swordfish_runtime_error()}")
 
+        if backend == BACKEND.EXLLAMA_V2:
+            # The native ExLlamaV2 extension is CUDA-only. On ROCm (and on a
+            # CUDA host without a working JIT toolchain) validate_once now
+            # refuses immediately with an actionable error, so skip instead of
+            # reporting a kernel failure.
+            ok, error = ExllamaV2Linear.cached_validate_once()
+            if not ok:
+                self.skipTest(f"ExLlamaV2 kernel unavailable: {error}")
+
     # Updated CUDA kernel tolerances below were re-baselined from full
     # torch-vs-kernel validation on H200.
     float16_cases = [

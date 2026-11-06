@@ -12,6 +12,7 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
+    EXLLAMAV2_AWQ_ROCM_UNSUPPORTED,
     ScratchSpace,
     exllamav2_awq_gemm_half_q_half,
     exllamav2_awq_make_q_matrix,
@@ -19,6 +20,7 @@ from ...utils.exllamav2 import (
     exllamav2_awq_runtime_error,
 )
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -80,6 +82,11 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls):
+        # The native ExLlamaV2 AWQ extension is CUDA-only: hipcc cannot build it
+        # and the kernel had accuracy regressions on ROCm. Fail fast with an
+        # actionable error instead of attempting the JIT build.
+        if IS_ROCM:
+            return False, NotImplementedError(EXLLAMAV2_AWQ_ROCM_UNSUPPORTED)
         # Validate through the shared JIT loader so import-time checks match the
         # runtime build path used on first kernel access.
         if not exllamav2_awq_runtime_available():
