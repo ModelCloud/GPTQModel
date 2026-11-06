@@ -151,7 +151,7 @@ class _ScalingGroup(torch.nn.Module):
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"))])
-@pytest.mark.parametrize("widths", [(4, 8), (8, 4)])
+@pytest.mark.parametrize("widths", [(2, 3), (3, 2), (4, 8), (8, 4)])
 @pytest.mark.parametrize("chunked", [False, True])
 @pytest.mark.parametrize("sym", [False, True])
 @torch.inference_mode()
@@ -200,7 +200,7 @@ def _pack_oracle(codes, bits):
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"))])
-@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
 @pytest.mark.parametrize("sym", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @torch.inference_mode()
@@ -261,7 +261,7 @@ def test_clip_search_uses_module_width(sym):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
 def test_gemm_kernel_selection_respects_module_width(bits):
     from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 

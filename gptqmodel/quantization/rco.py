@@ -160,7 +160,7 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     n_layers, n_options = scores.shape
     if not n_layers or not n_options:
         raise ValueError('RCO assignment requires nonempty groups and options')
-    if weights.shape != (n_layers,) or costs.shape != (n_options,):
+    if weights.shape != (n_layers,) or costs.shape not in ((n_options,), (n_layers, n_options)):
         raise ValueError('RCO assignment requires per-group weights and per-option costs')
 
     budget = round(target * resolution)
