@@ -3683,6 +3683,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     )
     _offload_temp_dir: Optional[_SharedTemporaryDirectory] = field(default=None, init=False, repr=False, compare=False)
 
+    # Keep the per-processor log file that a quantization run writes to `logs/`.
+    # Only a successful run is affected: a run that dies keeps its log either way,
+    # since that is when the file is worth reading.
+    keep_processor_logs: bool = field(
+        default=True,
+        metadata={"help": "Keep logs/<processor>_log_*.log after a successful quantization run"},
+    )
+
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     # if calibration is insufficient, fallback to a simple quantization strategy

@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Successful quantization runs should not leave a processor log behind.
+"""Processor logs are kept by default and cleaned up on request.
 
-Each run writes one ``logs/<processor>_log_<random>_time_<stamp>.log`` and
-nothing removed it, so the directory grew by one file per quantization. The
-file is still useful when a run fails, so the flag keeps it on request.
+Each run writes one ``logs/<processor>_log_<random>_time_<stamp>.log``. Nothing
+removed it, so the directory grew by one file per quantization - 17 files and
+552 KB in a checkout two days old. ``QuantizeConfig.keep_processor_logs``
+defaults to True so the existing behaviour does not change under anyone; setting
+it False removes the file after a successful run. A run that fails keeps its log
+either way, because ``finalize()`` only runs once the loop completes.
 """
 
 import pytest
 
 from gptqmodel.looper.loop_processor import remove_processor_log
+from gptqmodel.quantization import GPTQConfig, QuantizeConfig
 
 
 @pytest.fixture
@@ -19,32 +23,38 @@ def log_file(tmp_path):
     return path
 
 
-def test_removes_the_log_file(log_file, monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_KEEP_PROCESSOR_LOGS", raising=False)
-    assert remove_processor_log(str(log_file)) is True
-    assert not log_file.exists()
-
-
-def test_keeping_the_log_is_opt_in(log_file, monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KEEP_PROCESSOR_LOGS", "1")
+def test_keep_is_the_default(log_file):
     assert remove_processor_log(str(log_file)) is False
     assert log_file.exists()
 
 
-def test_missing_file_is_not_an_error(tmp_path, monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_KEEP_PROCESSOR_LOGS", raising=False)
-    assert remove_processor_log(str(tmp_path / "never_written.log")) is False
+def test_cleanup_removes_the_log_file(log_file):
+    assert remove_processor_log(str(log_file), keep=False) is True
+    assert not log_file.exists()
 
 
-def test_none_path_is_ignored(monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_KEEP_PROCESSOR_LOGS", raising=False)
-    assert remove_processor_log(None) is False
+def test_missing_file_is_not_an_error(tmp_path):
+    assert remove_processor_log(str(tmp_path / "never_written.log"), keep=False) is False
 
 
-def test_directory_path_is_left_alone(tmp_path, monkeypatch):
+def test_none_path_is_ignored():
+    assert remove_processor_log(None, keep=False) is False
+
+
+def test_directory_path_is_left_alone(tmp_path):
     """A directory must never be unlinked, even if it somehow ends up in the field."""
-    monkeypatch.delenv("GPTQMODEL_KEEP_PROCESSOR_LOGS", raising=False)
     target = tmp_path / "logs_dir"
     target.mkdir()
-    assert remove_processor_log(str(target)) is False
+    assert remove_processor_log(str(target), keep=False) is False
     assert target.is_dir()
+
+
+@pytest.mark.parametrize("config_cls", [QuantizeConfig, GPTQConfig])
+def test_config_defaults_to_keeping_logs(config_cls):
+    config = config_cls(bits=4, group_size=128)
+    assert config.keep_processor_logs is True
+
+
+def test_config_accepts_an_opt_out():
+    config = QuantizeConfig(bits=4, group_size=128, keep_processor_logs=False)
+    assert config.keep_processor_logs is False
