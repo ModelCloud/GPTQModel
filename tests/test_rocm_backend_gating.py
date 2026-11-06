@@ -413,6 +413,19 @@ def test_exllamav2_kernels_reject_rocm_without_jit_build(monkeypatch):
     assert ok_validate is False
     assert isinstance(error_validate, NotImplementedError)
 
+    # The public extension API must refuse too, or `extension.load("all")` would
+    # still start the doomed build for every caller that prewarms extensions.
+    from gptqmodel import extension as extension_api
+
+    assert "exllamav2" not in extension_api._resolve_requested_extensions("all")
+    assert "exllamav2_awq" not in extension_api._resolve_requested_extensions("all")
+    assert extension_api.is_available("exllamav2") is False
+    assert extension_api.is_available("exllamav2_awq") is False
+    with pytest.raises(RuntimeError, match="BACKEND.TORCH"):
+        extension_api.load(name="exllamav2")
+    with pytest.raises(RuntimeError, match="BACKEND.AWQ_TORCH"):
+        extension_api.load(name="exllamav2_awq")
+
 
 def test_auto_on_rocm_never_selects_a_cuda_only_backend(monkeypatch):
     from gptqmodel.quantization import FORMAT, METHOD

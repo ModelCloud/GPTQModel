@@ -189,10 +189,20 @@ def clear_exllamav2_gptq_extension_cache() -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
+def exllamav2_gptq_supported() -> bool:
+    """Whether the native ExLlamaV2 GPTQ extension can run on this host.
+
+    The extension is CUDA-only: hipcc cannot compile the CUDA sources, and the
+    kernel had accuracy regressions on ROCm.
+    """
+
+    return not IS_ROCM
+
+
 def exllamav2_gptq_runtime_available() -> bool:
     # ROCm cannot build the native extension (hipcc rejects the CUDA sources),
     # so report it as unavailable instead of triggering a doomed JIT build.
-    if IS_ROCM:
+    if not exllamav2_gptq_supported():
         return False
     return _extension_api().is_available("exllamav2")
 
@@ -247,9 +257,18 @@ def clear_exllamav2_awq_extension_cache() -> None:
     _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
+def exllamav2_awq_supported() -> bool:
+    """Whether the native ExLlamaV2 AWQ extension can run on this host.
+
+    See ``exllamav2_gptq_supported``: the extension is CUDA-only.
+    """
+
+    return not IS_ROCM
+
+
 def exllamav2_awq_runtime_available() -> bool:
     # See exllamav2_gptq_runtime_available: never attempt the ROCm JIT build.
-    if IS_ROCM:
+    if not exllamav2_awq_supported():
         return False
     return _extension_api().is_available("exllamav2_awq")
 

@@ -62,6 +62,11 @@ class _FakeExtension:
 
 
 def _install_fake_extensions(monkeypatch):
+    # These tests cover the API mechanics (aliases, use_cache, locking), not
+    # host support. Pin the host family so the ROCm-gated ExLlamaV2 entries stay
+    # resolvable on a HIP host and the assertions stay deterministic.
+    monkeypatch.setattr(exllamav2_utils, "IS_ROCM", False)
+
     fakes = {
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
