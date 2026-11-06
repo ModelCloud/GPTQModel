@@ -147,6 +147,12 @@ def test_nemotron_prepare_dataset_keeps_image_fields(monkeypatch):
         assert name in prepared[0]
 
 
+def test_nemotron_batch_quantize_disabled_for_variable_image_sizes():
+    # Nemotron's dynamic-resolution processor returns a list of pixel tensors
+    # when image sizes differ, which its generate() cannot consume.
+    assert NemotronOmniQModel.support_batch_quantize is False
+
+
 def test_glm_ocr_prepare_dataset_requires_mm_token_type_ids(monkeypatch):
     processor = _FakeVisionProcessor(
         image_fields={

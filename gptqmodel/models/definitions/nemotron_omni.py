@@ -27,6 +27,12 @@ class NemotronOmniQModel(NemotronHQModel):
 
     require_load_processor = True
 
+    # The dynamic-resolution image processor returns `pixel_values` as a list
+    # when image sizes differ, but the remote `generate()` only accepts a
+    # stacked tensor. Keep calibration single-sample so batching cannot mix
+    # differently sized images.
+    support_batch_quantize = False
+
     pre_lm_head_norm_module = "language_model.backbone.norm_f"
 
     module_tree = [
