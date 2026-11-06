@@ -315,6 +315,8 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
     ROCm kernel exists for these backends.
     """
 
+    import sys
+
     from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
     from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
     from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
@@ -322,6 +324,7 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
     from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
     monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
 
     cases = [
         (MarlinLinear, "ROCm"),
@@ -331,9 +334,12 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
         (W4ANVFP4Linear, "CUDA-only"),
     ]
     for cls, needle in cases:
-        cached = getattr(cls, "cached_validate_once", None)
-        if cached is not None and hasattr(cached, "cache_clear"):
-            cached.cache_clear()
+        module = sys.modules[cls.__module__]
+        if hasattr(module, "IS_ROCM"):
+            monkeypatch.setattr(module, "IS_ROCM", True)
+        # Runtime guards must see HIP even on a CUDA test host. Do not retain
+        # a simulated refusal in the class's process-wide availability cache.
+        monkeypatch.setattr(cls, "cached_validate_once", classmethod(lambda kernel: kernel.validate_once()))
         ok, error = cls.validate(
             bits=4,
             group_size=128,

@@ -163,6 +163,32 @@ def allspark_hip_supported(device: torch.device | None = None) -> bool:
     return arch in ("gfx1200", "gfx1201")
 
 
+def validate_allspark_hip_device(device: str | torch.device) -> None:
+    """Check the selected device(s), not just the process's current GPU.
+
+    A string/DEVICE family selects all visible accelerators; a torch.device or
+    indexed string selects that target. Call after the kernel's family gate.
+    """
+    targets = (
+        tuple(torch.device("cuda", index) for index in range(torch.cuda.device_count()))
+        if isinstance(device, str) and ":" not in device
+        else (torch.device(device),)
+    )
+    if not targets or any(not allspark_hip_supported(target) for target in targets):
+        raise NotImplementedError(
+            f"AllSpark on ROCm requires an RDNA4 device (gfx1200/gfx1201): target={device}"
+        )
+
+
+def allspark_hip_available() -> bool:
+    """Whether the runtime contains a usable GPU; placement is checked separately."""
+    return (
+        torch.cuda.is_available()
+        and torch.version.hip is not None
+        and any(allspark_hip_supported(torch.device("cuda", i)) for i in range(torch.cuda.device_count()))
+    )
+
+
 def _n32(n: int) -> int:
     return (n + ALLSPARK_HIP_N_ALIGN - 1) // ALLSPARK_HIP_N_ALIGN * ALLSPARK_HIP_N_ALIGN
 

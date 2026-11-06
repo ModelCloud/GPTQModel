@@ -57,9 +57,9 @@ def test_native_awq_gemv_validate_rejects_rocm_placement():
         assert isinstance(error, NotImplementedError), cls.__name__
 
 
-def test_native_awq_gemv_validate_still_accepts_cuda():
-    # The ROCm restriction must not change the CUDA contract, including packing
-    # on a ROCm host (packing is pure Torch and is used for conversion).
+def test_native_awq_gemv_validate_still_accepts_cuda(monkeypatch):
+    # Test the NVIDIA contract even when this suite runs on a HIP host.
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", False)
     for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
         ok, error = cls.validate(
             bits=4,

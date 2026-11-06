@@ -1068,7 +1068,7 @@ def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None)
     if cuda_available is None:
         cuda_available = torch.cuda.is_available()
     device_family = selector_device_family(device)
-    if cuda_available and device_family == DEVICE.CUDA:
+    if cuda_available and device_family in ExllamaV3Linear.SUPPORTS_DEVICES:
         return BACKEND.EXL3_EXLLAMA_V3
     return BACKEND.EXL3_TORCH
 
@@ -1640,9 +1640,8 @@ def ModelLoader(cls):
                 backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
-                    raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
-                if selector_device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM):
-                    raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
+                    raise ValueError("EXL3_EXLLAMA_V3 loading requires NVIDIA CUDA; use EXL3_TORCH instead.")
+                ExllamaV3Linear.validate_device(selector_device_family(device))
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
                 raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")

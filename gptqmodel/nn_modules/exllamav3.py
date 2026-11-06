@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..models._const import DEVICE, normalize_device
+
 
 if TYPE_CHECKING:
     from ..exllamav3.modules.quant.exl3 import LinearEXL3
@@ -32,6 +34,14 @@ def _torch_dtype(value: Any) -> torch.dtype:
 class ExllamaV3Linear(nn.Module):
     QUANT_TYPE = "exl3"
     SUPPORTS_SHARDS = True
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+    @classmethod
+    def validate_device(cls, device) -> None:
+        if normalize_device(device) not in cls.SUPPORTS_DEVICES:
+            raise NotImplementedError(
+                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA; use EXL3_TORCH on ROCm or CPU."
+            )
 
     def __init__(
         self,
@@ -115,15 +125,14 @@ class ExllamaV3Linear(nn.Module):
         self._inner_signature = None
 
     def _ensure_inner(self) -> "LinearEXL3":
-        from ..exllamav3.modules.quant.exl3 import LinearEXL3
-
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
         if trellis.device.type == "meta":
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
-        if trellis.device.type != "cuda":
-            raise RuntimeError("EXL3 inference requires CUDA/HIP tensors.")
+        self.validate_device(trellis.device)
+
+        from ..exllamav3.modules.quant.exl3 import LinearEXL3
 
         signature = self._current_signature()
         if self._inner is not None and signature == self._inner_signature:

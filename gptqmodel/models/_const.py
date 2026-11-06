@@ -32,20 +32,27 @@ XPU_0 = device("xpu:0")
 NPU = _optional_torch_device("npu", CPU)
 NPU_0 = _optional_torch_device("npu:0", CPU)
 MPS = device("mps")
-ROCM = device("cuda:0")  # rocm maps to fake cuda
+ROCM = device("cuda:0")  # Concrete HIP runtime target; use DEVICE.ROCM for the AMD family.
 
 SUPPORTS_MODULE_TYPES = [nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D]
 
 DEFAULT_MAX_SHARD_SIZE = "4GB"
 
 class DEVICE(str, Enum):
+    """GPTQModel hardware families, distinct from PyTorch's runtime namespace.
+
+    In SUPPORTS_DEVICES, CUDA declares NVIDIA and ROCM declares AMD. HIP also
+    calls its runtime devices "cuda"; normalize requests with normalize_device
+    and translate back only at Torch boundaries, never in support declarations.
+    """
+
     ALL = "all"  # All device
     CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
     CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
     NPU = "npu"  # Ascend NPU: portable Torch kernels
     MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
-    ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
+    ROCM = "rocm"  # AMD GPU family; HIP's Torch runtime namespace is "cuda".
 
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")

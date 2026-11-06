@@ -148,12 +148,18 @@ def _selector_devices(device: Optional[SelectorDevices]) -> Optional[tuple[Selec
 def _device_capability(device: SelectorDevice):
     """Return one device's capability, if its runtime exposes one."""
     if isinstance(device, DEVICE):
-        if device not in (DEVICE.CUDA, DEVICE.ROCM):
+        # An explicit AMD-family inspection must not probe an unrelated
+        # NVIDIA device, even when performed by a CUDA-build process.
+        if device != DEVICE.CUDA:
             return None
         target = device.to_torch_device()
     else:
         target = torch.device(device)
     if target.type == "cuda":
+        # HIP's capability tuple is not an NVIDIA SM version. Do not include
+        # it in selector validation/cache keys for AMD devices.
+        if IS_ROCM:
+            return None
         try:
             return tuple(torch.cuda.get_device_capability(target))
         except Exception:

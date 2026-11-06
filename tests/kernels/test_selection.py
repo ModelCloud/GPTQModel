@@ -48,6 +48,17 @@ from gptqmodel.utils.threadx import _coerce_device
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU, as_torch_device
 
 
+@pytest.fixture
+def nvidia_runtime(monkeypatch):
+    """NVIDIA-specific selector tests must be deterministic on HIP hosts too."""
+    monkeypatch.setattr(model_const, "IS_ROCM", False)
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+    monkeypatch.setattr(torch.version, "hip", None)
+    clear_validation_cache()
+    yield
+    clear_validation_cache()
+
+
 def _iter_kernel_classes():
     seen = set()
     stack = list(BaseQuantLinear.__subclasses__())
@@ -459,7 +470,7 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
     assert GGUFTorchLinear in candidates
 
 
-def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
+def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch, nvidia_runtime):
     # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
     monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
@@ -667,7 +678,7 @@ def test_inference_only_kernel_train_error_names_trainable_backend():
         layer.train(True)
 
 
-def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch):
+def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch, nvidia_runtime):
     # Assert the NVIDIA-family ordering; a ROCm host maps ``cuda`` to ROCM.
     monkeypatch.setattr(importer, "IS_ROCM", False)
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
@@ -757,7 +768,7 @@ def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
     assert qlinear_cls is GGUFCppKernel
 
 
-def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch):
+def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(
         GGUFCudaKernel,
         "cached_validate_once",
@@ -1255,7 +1266,7 @@ def test_iter_dynamic_contracts_yields_base_and_distinct_overrides():
     assert {"bits": 2, "group_size": 32, "desc_act": True, "sym": False, "pack_dtype": torch.int32} in contracts
 
 
-def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch):
+def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch, nvidia_runtime):
     """A 4-bit dynamic override must be visible to kernels that only support 4-bit weights,
     even when the base quantize config is 3-bit."""
     # Assert the NVIDIA-family kernel set; a ROCm host maps ``cuda`` to ROCM.
@@ -1385,7 +1396,7 @@ def test_select_quant_linear_validates_each_exact_multi_gpu_target(monkeypatch):
     assert calls == [torch.device("cuda:0"), torch.device("cuda:1")]
 
 
-def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatch):
+def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(
         importer.torch.cuda,
         "get_device_capability",
@@ -1402,7 +1413,7 @@ def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatc
     )
 
 
-def test_auto_device_map_rejects_mixed_visible_capabilities(monkeypatch):
+def test_auto_device_map_rejects_mixed_visible_capabilities(monkeypatch, nvidia_runtime):
     monkeypatch.setattr(importer.torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
     monkeypatch.setattr(importer.torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(
@@ -1553,7 +1564,7 @@ def test_public_integer_device_uses_active_accelerator(monkeypatch, has_cuda, ha
     ) is ActiveAcceleratorKernel
 
 
-def test_validation_cache_partitions_capability_and_index(monkeypatch):
+def test_validation_cache_partitions_capability_and_index(monkeypatch, nvidia_runtime):
     clear_validation_cache()
     capability = {0: (8, 0), 1: (8, 0)}
     monkeypatch.setattr(

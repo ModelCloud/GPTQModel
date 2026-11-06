@@ -409,7 +409,9 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA]
+    # HIP uses torch's CUDA namespace for both the vendor 4/8-bit kernels and
+    # our tuned 4-bit Triton path. Keep AMD explicit at the support-family gate.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
     SUPPORTS_ADAPTERS = []
