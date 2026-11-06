@@ -77,6 +77,31 @@ def _cache_seq_length(past_key_values) -> int:
         return 0
 
 
+def _cache_layer_seq_length(past_key_values, layer_idx: int):
+    """Actual number of keys written for ``layer_idx``, or ``None`` if unknown.
+
+    ``Cache.get_seq_length(layer_idx)`` counts *written* tokens. For a
+    preallocated static layer that is smaller than the tensor ``update()``
+    returns until the cache fills; for an evicting sliding-window layer it is
+    larger, because the layer only returns a trailing window.
+    """
+    if past_key_values is None:
+        return None
+    getter = getattr(past_key_values, "get_seq_length", None)
+    if not callable(getter):
+        return None
+    try:
+        return int(getter(layer_idx))
+    except TypeError:  # transformers 4.x cache without a layer argument
+        pass
+    except Exception:  # pragma: no cover - unknown cache implementations
+        return None
+    try:
+        return int(getter())
+    except Exception:  # pragma: no cover - unknown cache implementations
+        return None
+
+
 def _prepare_inputs_for_generation(
     self,
     input_ids: torch.LongTensor,
@@ -510,8 +535,34 @@ def _patch_gqa_attention(model) -> bool:
             cos, sin = self.rotary_emb(v, position_ids)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        total_kv = None
         if past_key_value is not None:
             k, v = past_key_value.update(k, v, self.layer_idx)
+            # Number of keys this layer has actually written. A preallocated
+            # (StaticCache) layer returns its full capacity from `update()`,
+            # including slots that have not been filled yet; an evicting
+            # (sliding-window) layer reports more than the trailing window it
+            # returns. The mask must use the real positions, not the tensor size.
+            total_kv = _cache_layer_seq_length(past_key_value, self.layer_idx)
+
+        # Drop the unwritten tail of a preallocated cache. Without this a
+        # six-token prefill into a sixteen-slot StaticCache looks like a
+        # ten-token prefix, and the end-anchored verify mask below would let
+        # each query attend slots belonging to a different absolute position.
+        if total_kv is not None and 0 < total_kv < k.shape[2]:
+            k = k[:, :, :total_kv]
+            v = v[:, :, :total_kv]
+
+        # Align an incoming mask that is longer than the keys this layer holds.
+        # The shared mask is built over absolute key positions
+        # `0..target_length-1`; keep the slice that matches the keys present.
+        if attention_mask is not None and attention_mask.shape[-1] > k.shape[2]:
+            if total_kv is not None and total_kv > k.shape[2]:
+                # Evicting cache: the keys are the trailing window.
+                attention_mask = attention_mask[..., -k.shape[2] :]
+            else:
+                # Keys occupy positions `0..kv_len-1`.
+                attention_mask = attention_mask[..., : k.shape[2]]
 
         # No repeat_kv: SDPA broadcasts the grouped heads itself.
         attention_mask = self._apply_sliding_window_mask(
@@ -526,11 +577,25 @@ def _patch_gqa_attention(model) -> bool:
         if attention_mask is None and q.shape[2] > 1 and k.shape[2] > q.shape[2]:
             # Multi-token block verified against a warm cache. SDPA's implicit
             # causal mask is aligned to the top-left corner, which would hide
-            # every key before the block; build the end-anchored mask instead.
-            query_positions = torch.arange(
-                k.shape[2] - q.shape[2], k.shape[2], device=q.device
-            )
-            key_positions = torch.arange(k.shape[2], device=q.device)
+            # every key before the block; build the mask from the actual query
+            # positions and the absolute positions of the returned keys.
+            if cache_position is not None and cache_position.numel() == q.shape[2]:
+                query_positions = cache_position.to(
+                    device=q.device, dtype=torch.long
+                ).reshape(-1)
+            else:
+                query_positions = torch.arange(
+                    k.shape[2] - q.shape[2], k.shape[2], device=q.device
+                )
+            if total_kv is not None and total_kv > k.shape[2]:
+                # Evicting cache: the returned keys are the trailing window that
+                # ends at the newest query, not positions 0..kv_len-1.
+                last_query = int(query_positions[-1].item())
+                key_positions = torch.arange(
+                    last_query - k.shape[2] + 1, last_query + 1, device=q.device
+                )
+            else:
+                key_positions = torch.arange(k.shape[2], device=q.device)
             attention_mask = (
                 key_positions[None, :] <= query_positions[:, None]
             )[None, None]
@@ -591,7 +656,15 @@ def _patch_logits_to_keep(model) -> bool:
     def forward(self, *args, **kwargs):
         keep = kwargs.pop("logits_to_keep", None)
         head = getattr(self, "lm_head", None)
-        if keep and head is not None:
+        # A labeled call needs the full sequence: the causal-LM loss shifts logits
+        # and labels by one position, so trimming the LM head input to a short
+        # window leaves the shift empty (and the loss NaN). `labels` is positional
+        # argument 5 in the reference forward, or a keyword argument.
+        labels = kwargs.get("labels")
+        if labels is None and len(args) > 5:
+            labels = args[5]
+        slice_input = bool(keep) and head is not None and labels is None
+        if slice_input:
             # Slice the LM head's *input* so the full [batch, seq, vocab]
             # projection never materialises: prefill on a long prompt otherwise
             # costs several GiB that a single position needs.
@@ -602,6 +675,8 @@ def _patch_logits_to_keep(model) -> bool:
             if head is not None:
                 head._gptqmodel_keep_last = None
         if keep and getattr(outputs, "logits", None) is not None:
+            # The loss (if any) was computed on the full logits above; trimming
+            # the returned tensor afterwards keeps the documented output shape.
             outputs.logits = outputs.logits[..., -int(keep):, :]
         return outputs
 
