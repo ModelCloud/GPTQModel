@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForImageTextToText
-
-from ..base import BaseQModel
+from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
-class GlmOCRGPTQ(BaseQModel):
-    loader = AutoModelForImageTextToText
+class GlmOCRGPTQ(BaseQwen3VLGPTQ):
+    # GLM-OCR computes multimodal RoPE from `mm_token_type_ids`, so the
+    # processor-produced field must reach the model on the calibration path.
+    require_mm_token_type_ids = True
 
     require_load_processor = True
 
