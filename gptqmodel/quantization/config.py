@@ -873,8 +873,17 @@ def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
     return normalized.serialize() if isinstance(normalized, GGUFBits) else normalized
 
 
-def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
-    """Normalize EXL3 fractional bits-per-weight values."""
+def _normalize_exl3_bits(bits: Union[int, float, str], *, field: str = "bits") -> float:
+    """Normalize and validate an EXL3 integer trellis width.
+
+    EXL3 stores exactly one integer trellis depth (``K``) per module: the packer
+    builds ``256 * K // 16`` entries per tile and the kernel takes ``K`` as an
+    ``int``. A fractional width therefore cannot be realised -- ``quant_bits_width``
+    floors it -- so accepting one would mislabel the checkpoint (a saved
+    ``bits: 2.5`` describing 2.0 bpw tensors). Reject it rather than silently
+    quantizing narrower. A fractional *average* is expressed with per-module
+    ``dynamic`` widths, each of which is an integer.
+    """
 
     if isinstance(bits, str):
         bits = float(bits.strip())
@@ -884,9 +893,17 @@ def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
         raise ValueError(f"EXL3Config: unsupported bits specification `{bits}`.")
 
     if not math.isfinite(bits):
-        raise ValueError("EXL3Config: `bits` must be finite.")
+        raise ValueError(f"EXL3Config: `{field}` must be finite.")
     if bits < 1.0 or bits > 8.0:
-        raise ValueError("EXL3Config: `bits` must be between 1.0 and 8.0.")
+        raise ValueError(f"EXL3Config: `{field}` must be between 1.0 and 8.0.")
+    if not bits.is_integer():
+        raise ValueError(
+            f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. EXL3 "
+            "packs one integer trellis depth (`K`) per module, so a fractional width "
+            f"cannot be realised and would silently quantize at {quant_bits_width(bits)} bpw. "
+            "Pass an integer `bits` and express a fractional average with per-module "
+            "widths, e.g. `dynamic={'model.layers.0.mlp.down_proj': {'bits': 3}}`."
+        )
     return float(bits)
 
 
@@ -5530,7 +5547,7 @@ class EXL3Config(BaseQuantizeConfig):
         return False
 
     def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
-        return _normalize_exl3_bits(bits_value)
+        return _normalize_exl3_bits(bits_value, field="bits")
 
     def _normalize_dynamic_layer_config(
         self,
@@ -5543,9 +5560,15 @@ class EXL3Config(BaseQuantizeConfig):
         del valid_bit_widths, checkpoint_format
         for key, value in layer_dict.items():
             if key == "bits":
-                layer_dict[key] = _normalize_exl3_bits(value)
+                layer_dict[key] = _normalize_exl3_bits(
+                    value, field=f"dynamic['{layer_name}'].bits"
+                )
             elif key == "head_bits":
-                layer_dict[key] = None if value is None else _normalize_exl3_bits(value)
+                layer_dict[key] = (
+                    None
+                    if value is None
+                    else _normalize_exl3_bits(value, field=f"dynamic['{layer_name}'].head_bits")
+                )
             elif key == "group_size" and value not in (-1, None):
                 raise ValueError("EXL3Config: `group_size` is not used; keep it at `-1`.")
 
@@ -5554,7 +5577,11 @@ class EXL3Config(BaseQuantizeConfig):
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
         self.bits = _normalize_exl3_bits(self.bits)
-        self.head_bits = None if self.head_bits is None else _normalize_exl3_bits(self.head_bits)
+        self.head_bits = (
+            None
+            if self.head_bits is None
+            else _normalize_exl3_bits(self.head_bits, field="head_bits")
+        )
 
         if self.method != METHOD.EXL3:
             raise ValueError("EXL3Config: `method` must be `exl3`.")

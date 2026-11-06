@@ -19,7 +19,7 @@ def test_exllamav3_quantize_config_round_trip():
     cfg = QuantizeConfig(
         quant_method=METHOD.EXL3,
         format=FORMAT.EXL3,
-        bits=2.25,
+        bits=2,
         head_bits=4.0,
         out_scales="always",
         codebook="mul1",
@@ -33,18 +33,33 @@ def test_exllamav3_quantize_config_round_trip():
     assert cfg.requires_calibration_dataset() is True
 
     payload = cfg.to_dict()
-    assert payload["bits"] == 2.25
+    assert payload["bits"] == 2.0
     assert payload["head_bits"] == 4.0
     assert payload["out_scales"] == "always"
     assert payload["codebook"] == "mul1"
 
     reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded, EXL3Config)
-    assert reloaded.bits == 2.25
+    assert reloaded.bits == 2.0
     assert reloaded.head_bits == 4.0
     assert reloaded.out_scales == "always"
     assert reloaded.codebook == "mul1"
     assert reloaded.runtime_bits == 2
+
+
+def test_exllamav3_rejects_fractional_bits():
+    """EXL3 packs one integer trellis depth per module; a fractional width cannot
+    be realised and would silently quantize narrower than requested."""
+
+    for bits in (2.5, 2.25, 3.5):
+        with pytest.raises(ValueError, match="not an integer trellis width"):
+            EXL3Config(bits=bits)
+
+    with pytest.raises(ValueError, match="not an integer trellis width"):
+        EXL3Config(bits=3, head_bits=4.5)
+
+    with pytest.raises(ValueError, match="not an integer trellis width"):
+        EXL3Config(bits=3, dynamic={"model.layers.0.mlp.down_proj": {"bits": 2.5}})
 
 
 class _TinyModel(nn.Module):
