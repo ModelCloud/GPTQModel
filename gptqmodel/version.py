@@ -5,4 +5,4 @@
 
 # minor versions add features; micro versions are patch fixes
 # 7.7.0 => feature release, 7.7.1 => patch release
-__version__ = "7.9.0"
+__version__ = "7.10.0"

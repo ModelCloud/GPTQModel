@@ -26,6 +26,15 @@
 
 ## Latest News 🗞️🚀
 
+* **7.10.0**:
+  * **Models:** Added Ricursive Ripple (`ricursive`) quantization support for the 65B preview checkpoint, including load-time Transformers 5 generation/masking patches, per-head Q/K norm and gated-attention handling, and `v_proj` Hessian isolation. Fixed pre-lm-head norm resolution across multimodal model definitions.
+  * **Performance:** Accelerated Ricursive Ripple decode by up to 10x per row at batch 16 with fused RMSNorm and native GQA attention, and added chunked MLP prefill to bound activation memory. The CUDA expandable-segments allocator is now installed before Torch initializes, so wide-layer multi-GPU runs actually use it.
+  * **Checkpointing:** Added `gptqmodel.reshard()` for per-layer safetensors sharding with one global shard, byte-for-byte tensor copies, preserved metadata, and config/tokenizer copying. Added a one-time warning when quantization shards are not layer-wise.
+  * **Multi-GPU:** Honored explicit device lists for quantization placement, routed cross-device moves per direction to avoid asymmetric ROCm SIGSEGVs, and documented `cudaMallocAsync` for wide-layer Hessian allocation.
+  * **ROCm:** Made AMD device families explicit and enforced kernel support contracts; gated W4A FP8/NVFP4 and ExLlamaV2/VPTQ off unsupported HIP paths with fast failures; fixed QQQ kernel launches to use the tensor's device context.
+  * **Quantization:** Added method-specific integer bit-width validation across GPTQ, AWQ, QQQ, ParoQuant, FP8, bitsandbytes, EXL3, GGUF, and VPTQ; EXL3 now rejects fractional trellis widths; MoE routing-bypass batch sizes are validated.
+  * **Correctness:** Fixed Ricursive Ripple cached decode, mask alignment, per-row positions, and labeled-loss handling, plus EXL3 tile-scratch bounds and sign-vector precision.
+
 * **7.9.0**:
   * **Correctness:** Fixed packing/inference overflow, underflow, FP32 reductions, BF16 bias cancellation, 8-bit BitBLAS zero points, and stale fused Torch metadata after checkpoint loads or tensor changes.
   * **MoE:** Fixed skipped routed experts in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE; added warnings for unresolved module paths.
