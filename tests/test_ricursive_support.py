@@ -763,6 +763,61 @@ def test_decode_patches_install_and_stay_idempotent(tmp_path: Path):
     assert norm_cls.forward is patched_norm
 
 
+def test_chunked_mlp_is_bit_identical_and_idempotent(monkeypatch):
+    """Splitting the MLP over rows must only bound the peak, never change the result.
+
+    Ripple's MLP expands 5120 -> 40960, so a long-prompt prefill materialises three
+    ``tokens x 40960`` tensors at once. Chunking the row dimension is what keeps a
+    33 GiB 4-bit model inside a 48 GiB card at eval batch sizes, so it has to be
+    exactly equivalent to the unchunked forward.
+    """
+    import types
+
+    from gptqmodel.utils.ricursive_patch import _MLP_CHUNK_PATCH_FLAG, _patch_chunked_mlp
+
+    class _MLP(torch.nn.Module):
+        def __init__(self, hidden: int = 128, intermediate: int = 512, clamp: float = 10.0):
+            super().__init__()
+            self.clamp_threshold = clamp
+            self.gate_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+            self.up_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+            self.down_proj = torch.nn.Linear(intermediate, hidden, bias=False)
+
+        def forward(self, x):
+            gate = self.gate_proj(x)
+            up = self.up_proj(x)
+            if self.clamp_threshold:
+                gate = gate.clamp(min=None, max=self.clamp_threshold)
+                up = up.clamp(min=-self.clamp_threshold, max=self.clamp_threshold)
+            return self.down_proj(torch.nn.functional.silu(gate) * up)
+
+    monkeypatch.setenv("RIPPLE_MLP_CHUNK", "64")
+    torch.manual_seed(0)
+    mlp = _MLP().to(torch.bfloat16)
+    holder = types.SimpleNamespace(
+        model=types.SimpleNamespace(layers=[types.SimpleNamespace(mlp=mlp)])
+    )
+
+    x = torch.randn(3, 200, 128, dtype=torch.bfloat16)
+    reference = mlp(x).clone()
+
+    assert _patch_chunked_mlp(holder) is True
+    assert getattr(type(mlp), _MLP_CHUNK_PATCH_FLAG, False) is True
+
+    chunked = mlp(x)
+    assert chunked.dtype == x.dtype
+    assert torch.equal(chunked, reference), "chunked MLP diverged from the row-wise reference"
+
+    # 2-D inputs (already flattened by some callers) take the same path.
+    assert torch.equal(mlp(x.reshape(-1, 128)), reference.reshape(-1, 128))
+    # A prefill shorter than the chunk budget must not be split at all.
+    assert torch.equal(mlp(x[:, :10]), reference[:, :10])
+    # Installing twice must not wrap the wrapper.
+    patched = type(mlp).forward
+    assert _patch_chunked_mlp(holder) is False
+    assert type(mlp).forward is patched
+
+
 def test_gqa_attention_is_bit_identical_to_repeat_kv(tmp_path: Path):
     """``enable_gqa`` must reproduce the expanded-KV path exactly."""
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
@@ -823,3 +878,128 @@ def test_fused_rms_norm_matches_reference(tmp_path: Path):
 
     assert got.dtype == hidden.dtype
     assert torch.allclose(ref, got, atol=1e-6, rtol=1e-5), (ref - got).abs().max()
+
+
+def test_multi_token_block_on_warm_cache_matches_full_forward(tmp_path: Path):
+    """A multi-token verify block on a warm cache must match the full forward.
+
+    SDPA's implicit causal mask is aligned top-left, so it is only correct when the
+    query block is the whole sequence. Speculative decoders verify a block that sits
+    at the *end* of a warm cache; using the implicit mask there hides every earlier
+    key and corrupts the block. The patch must build the end-anchored mask instead.
+    """
+    from transformers import DynamicCache
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(11)
+    ids = torch.randint(0, model.config.vocab_size, (1, 24))
+    split = 12
+    with torch.no_grad():
+        full = model(input_ids=ids, use_cache=False).logits
+        cache = DynamicCache(config=model.config)
+        cache.activate_past_recording()
+        model(input_ids=ids[:, :split], past_key_values=cache, use_cache=True)
+        block = model(input_ids=ids[:, split:], past_key_values=cache, use_cache=True).logits
+
+    assert block.shape[1] == ids.shape[1] - split
+    torch.testing.assert_close(block[0], full[0, split:], atol=1e-5, rtol=1e-4)
+
+
+def test_logits_to_keep_projects_only_the_kept_positions(tmp_path: Path):
+    """``logits_to_keep`` must return the trailing row(s) and match the full logits."""
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(13)
+    ids = torch.randint(0, model.config.vocab_size, (2, 16))
+    with torch.no_grad():
+        full = model(input_ids=ids).logits
+        kept = model(input_ids=ids, logits_to_keep=1).logits
+
+    assert kept.shape == (2, 1, model.config.vocab_size)
+    torch.testing.assert_close(kept[:, -1], full[:, -1], atol=1e-6, rtol=1e-5)
+
+
+def test_static_cache_uses_actual_positions_not_capacity(tmp_path: Path):
+    """A preallocated cache must not be treated as occupied context.
+
+    A six-token prompt in a 16-slot ``StaticCache`` used to get query positions
+    10-15 because the block mask used ``k.shape[2]`` (capacity). Changing the last
+    token then changed earlier tokens' outputs in the full-attention layers, which
+    is impossible under causal attention. The mask must use the real cache length.
+    """
+    from transformers import StaticCache
+
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+    cfg = model.config
+
+    torch.manual_seed(17)
+    ids = torch.randint(0, cfg.vocab_size, (1, 6))
+    changed = ids.clone()
+    changed[0, -1] = (int(changed[0, -1]) + 7) % cfg.vocab_size
+
+    with torch.no_grad():
+        a = model(
+            input_ids=ids,
+            past_key_values=StaticCache(config=cfg, max_cache_len=16),
+            use_cache=True,
+        ).logits
+        b = model(
+            input_ids=changed,
+            past_key_values=StaticCache(config=cfg, max_cache_len=16),
+            use_cache=True,
+        ).logits
+
+    # Only the last token changed, so every earlier position must be identical.
+    assert torch.equal(a[:, :5], b[:, :5]), (a[:, :5] - b[:, :5]).abs().max()
+
+    # A multi-token verify block on the preallocated cache must match a full forward.
+    full_ids = torch.randint(0, cfg.vocab_size, (1, 10))
+    cache = StaticCache(config=cfg, max_cache_len=16)
+    with torch.no_grad():
+        full = model(input_ids=full_ids, use_cache=False).logits
+        model(input_ids=full_ids[:, :6], past_key_values=cache, use_cache=True)
+        block = model(
+            input_ids=full_ids[:, 6:],
+            past_key_values=cache,
+            cache_position=torch.arange(6, 10),
+            use_cache=True,
+        ).logits
+
+    torch.testing.assert_close(block[0], full[0, 6:], atol=1e-5, rtol=1e-4)
+
+
+def test_labels_with_logits_to_keep_keeps_finite_loss(tmp_path: Path):
+    """A labeled call must keep the full sequence so the shifted loss is defined.
+
+    Trimming both logits and labels to one position leaves the causal shift empty
+    and returns NaN. The patch must skip the LM-head input slice when labels are
+    present, and the loss must match the full (untrimmed) forward.
+    """
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    model, *_ = _load_tiny_with_originals(tmp_path)
+    apply_ricursive_generate_patch(model)
+
+    torch.manual_seed(19)
+    ids = torch.randint(0, model.config.vocab_size, (1, 12))
+    with torch.no_grad():
+        full = model(input_ids=ids, labels=ids)
+        kept = model(input_ids=ids, labels=ids, logits_to_keep=1)
+        # `labels` may also arrive as positional argument 5.
+        kept_pos = model(ids, None, None, None, None, ids, logits_to_keep=1)
+
+    assert torch.isfinite(kept.loss)
+    torch.testing.assert_close(kept.loss, full.loss, atol=1e-6, rtol=1e-6)
+    assert torch.isfinite(kept_pos.loss)
+    torch.testing.assert_close(kept_pos.loss, full.loss, atol=1e-6, rtol=1e-6)
+    assert kept.logits.shape == (1, 1, model.config.vocab_size)
