@@ -19,6 +19,34 @@ first decoder layer dies on ``bsz, q_len, _ = hidden_states.shape``.
 The fix reconstructs ``cache_position`` when it is missing and only slices
 ``input_ids`` when the cache actually holds tokens, which is the behaviour the
 upstream code was trying to express.
+
+Two classes of patch -- do not mix them when contributing upstream
+-----------------------------------------------------------------
+Everything in this module is a runtime monkeypatch applied by GPTQModel. It is
+**not** the same thing as the native ``modeling_ricursive.py`` that ships in a
+checkpoint, and the two upstream destinations have different bars.
+
+**1. Correctness and memory fixes -- upstream-eligible.**
+These change behaviour only where the shipped code is wrong or unbounded:
+the ``cache_position``/``input_ids`` slicing bug, the all-masked decode row,
+the sliding-window key anchoring, mask alignment after eviction, forwarding
+``cache_position`` into ``update()``, honouring ``logits_to_keep``, and chunking
+the MLP so prefill does not materialise ``tokens x 40960`` three times over.
+They are architecture-agnostic, add no dependency, and are safe to propose to
+``ricursiveAI/Ripple-65B-Preview``. See ``UPSTREAM_ELIGIBLE_PATCHES``.
+
+**2. Fast paths -- local only, never upstream.**
+These are performance rewrites of code that is already correct, and they are
+bound to *this* deployment: Ripple's exact 80-query/8-KV head split, this Torch
+build's ``enable_gqa`` and fused ``rms_norm`` support, and the assumption that a
+wholesale replacement of the attention forward is acceptable. A general upstream
+model file must run everywhere and must not depend on ModelCloud's runtime, so
+these are never sent upstream. See ``LOCAL_ONLY_FAST_PATHS``.
+
+The upstream model repository (``ricursiveAI/Ripple-65B-Preview``) therefore
+receives accuracy and memory-usage changes **only**. The ModelCloud checkpoint
+build may bake the fast paths into its own ``modeling_ricursive.py``; the
+upstream file must not.
 """
 
 import torch
@@ -37,6 +65,30 @@ _GQA_PATCH_FLAG = "_gptqmodel_ricursive_gqa_patched"
 
 # original class -> class that actually carries the patch (may be a GenerationMixin subclass)
 _PATCHED_CLASSES: dict = {}
+
+
+# --- upstream contribution policy -------------------------------------------
+# Fixes for wrong or unbounded behaviour. Architecture-agnostic, no extra
+# dependency, safe to propose to ricursiveAI/Ripple-65B-Preview. This is the
+# complete set that may be upstreamed.
+UPSTREAM_ELIGIBLE_PATCHES = (
+    "prepare_inputs_for_generation",  # spurious axis on prefill
+    "_update_causal_mask",            # all-masked decode row
+    "_apply_sliding_window_mask",     # key anchoring after eviction
+    "_patch_causal_mask",
+    "_patch_sliding_window_mask",
+    "_patch_logits_to_keep",          # memory: no full [B, T, vocab] projection
+    "_patch_chunked_mlp",             # memory: bounded prefill activation peak
+)
+
+# Performance-only rewrites bound to this runtime and architecture. NEVER
+# upstream: they assume Ripple's exact 80-query/8-KV head split, this Torch
+# build's `enable_gqa` / fused `rms_norm` support, and that replacing the whole
+# attention forward is acceptable. A general upstream file must run everywhere.
+LOCAL_ONLY_FAST_PATHS = (
+    "_patch_fused_rms_norm",
+    "_patch_gqa_attention",
+)
 
 
 def _max_cache_shape(_cache):
@@ -258,7 +310,11 @@ def _update_causal_mask(
 
 
 def _patch_causal_mask(model) -> bool:
-    """Install the corrected mask builder on the inner ``RicursiveModel`` class."""
+    """Install the corrected mask builder on the inner ``RicursiveModel`` class.
+
+    ``[upstream-eligible: correctness]`` The shipped builder returns an
+    all-masked row at decode, which is a plain bug.
+    """
     inner = getattr(model, "model", None)
     if inner is None:
         return False
@@ -277,6 +333,9 @@ def _patch_causal_mask(model) -> bool:
 
 def _patch_sliding_window_mask(model) -> bool:
     """Skip the per-step sliding-window mask when it cannot exclude any key.
+
+    ``[upstream-eligible: correctness]`` Key anchoring after eviction is wrong
+    upstream; the skip is a safe consequence of fixing it.
 
     ``_apply_sliding_window_mask`` materialises an ``arange``, a broadcast comparison
     and a ``[1, 1, q, kv]`` boolean tensor on **every** decode step for each of the
@@ -297,14 +356,26 @@ def _patch_sliding_window_mask(model) -> bool:
     if not callable(original):
         return False
 
-    def _apply_sliding_window_mask(self, attention_mask, q_len, kv_len, dtype, device, cache_position):
+    def _apply_sliding_window_mask(
+        self, attention_mask, q_len, kv_len, dtype, device, cache_position, total_kv=None
+    ):
         if attention_mask is not None and attention_mask.shape[-1] > kv_len:
             # transformers 5 builds a hybrid cache: sliding layers get a
             # DynamicSlidingWindowLayer that evicts from the left, so they hold only
             # the most recent `sliding_window` keys while full layers keep growing.
             # The causal mask is built once per forward from the full span, so trim it
             # to the keys this layer actually holds.
-            attention_mask = attention_mask[..., -kv_len:]
+            #
+            # The retained keys sit at the absolute positions
+            # `[total_kv - kv_len, total_kv)`. Slicing `[-kv_len:]` is only correct
+            # when the mask length equals `total_kv`; with a mask sized to the
+            # allocated cache capacity it selects the unwritten tail instead.
+            mask_len = attention_mask.shape[-1]
+            if total_kv is not None:
+                start = max(0, min(total_kv - kv_len, mask_len - kv_len))
+                attention_mask = attention_mask[..., start : start + kv_len]
+            else:
+                attention_mask = attention_mask[..., -kv_len:]
 
         window = getattr(self.config, "sliding_window", None)
         if window is not None and kv_len <= window:
@@ -342,6 +413,14 @@ def _sdpa_supports_gqa() -> bool:
 
 def _patch_fused_rms_norm(model) -> bool:
     """Route ``RicursiveRMSNorm`` through Torch's fused ``rms_norm``.
+
+    ``[LOCAL-ONLY FAST PATH -- never upstream]``
+    This is a speed optimisation, not a fix. It is safe here because it is
+    applied at load time by GPTQModel against a known Torch build, but it is
+    not something to push into ``ricursiveAI/Ripple-65B-Preview``: it depends
+    on ``F.rms_norm`` existing and on this model's specific norm placement, and
+    a fast path in shipped model code would silently change numerics for every
+    consumer of the checkpoint.
 
     Ripple-65B applies six RMS norms per layer (input, post-attention,
     pre-feedforward, post-feedforward, plus the per-head ``q_norm``/``k_norm``),
@@ -385,6 +464,12 @@ _MLP_CHUNK_PATCH_FLAG = "_gptqmodel_ricursive_mlp_chunk_patch"
 
 def _patch_chunked_mlp(model) -> bool:
     """Bound the prefill activation peak of ``RicursiveMLP`` by chunking rows.
+
+    ``[upstream-eligible: memory usage]``
+    Pure row-wise split of an exact computation -- the arithmetic and the
+    reduction order are unchanged, only the peak transient is smaller. Safe to
+    propose upstream, and worth it: this is the difference between OOM and
+    not-OOM on a 48 GiB card at long prompts.
 
     Ripple's MLP expands 5120 -> 40960, so a prefill of ``batch x prompt`` tokens
     materialises three intermediate tensors of ``tokens x 40960`` at once
@@ -445,6 +530,16 @@ def _patch_chunked_mlp(model) -> bool:
 
 def _patch_gqa_attention(model) -> bool:
     """Let SDPA broadcast the grouped KV heads instead of materialising them.
+
+    ``[LOCAL-ONLY FAST PATH -- never upstream]``
+    Two reasons this must not ship upstream. It requires
+    ``F.scaled_dot_product_attention(..., enable_gqa=True)``, which older Torch
+    builds reject, and it wholesale replaces the attention forward -- so it is
+    bound to the exact 80-query-head / 8-KV-head layout and the exact SDPA call
+    shape of this checkpoint revision. A shipped model that swapped its own
+    attention for this would break on any upstream refactor or Torch downgrade.
+    GPTQModel probes ``_sdpa_supports_gqa()`` and degrades to the reference
+    forward; the reference code cannot probe for itself safely.
 
     The reference attention calls ``repeat_kv`` before SDPA. Ripple-65B has 80
     query heads and 8 KV heads, so that expands the cache 10x with a strided
@@ -537,7 +632,19 @@ def _patch_gqa_attention(model) -> bool:
 
         total_kv = None
         if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
+            # Forward the absolute positions being written: a transformers 4.x
+            # StaticCache falls back to `arange(q_len)` without them and the
+            # first decode step overwrites the prompt instead of appending.
+            cache_kwargs = (
+                {"cache_position": cache_position} if cache_position is not None else None
+            )
+            if cache_kwargs is not None:
+                try:
+                    k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+                except TypeError:
+                    k, v = past_key_value.update(k, v, self.layer_idx)
+            else:
+                k, v = past_key_value.update(k, v, self.layer_idx)
             # Number of keys this layer has actually written. A preallocated
             # (StaticCache) layer returns its full capacity from `update()`,
             # including slots that have not been filled yet; an evicting
@@ -556,23 +663,36 @@ def _patch_gqa_attention(model) -> bool:
         # Align an incoming mask that is longer than the keys this layer holds.
         # The shared mask is built over absolute key positions
         # `0..target_length-1`; keep the slice that matches the keys present.
+        #
+        # The keys returned by `update()` occupy the absolute positions
+        # `[total_kv - kv_len, total_kv)`. Anchoring on the tensor tail is only
+        # correct when the mask length equals `total_kv`; with a mask sized to
+        # the *allocated cache capacity* it selects the unwritten tail instead
+        # and silently produces wrong attention.
         if attention_mask is not None and attention_mask.shape[-1] > k.shape[2]:
-            if total_kv is not None and total_kv > k.shape[2]:
-                # Evicting cache: the keys are the trailing window.
-                attention_mask = attention_mask[..., -k.shape[2] :]
+            kv_len_now = k.shape[2]
+            mask_len = attention_mask.shape[-1]
+            if total_kv is not None:
+                start = max(0, min(total_kv - kv_len_now, mask_len - kv_len_now))
+                attention_mask = attention_mask[..., start : start + kv_len_now]
             else:
-                # Keys occupy positions `0..kv_len-1`.
-                attention_mask = attention_mask[..., : k.shape[2]]
+                # Unknown cache: the keys are the trailing window.
+                attention_mask = attention_mask[..., -kv_len_now:]
 
         # No repeat_kv: SDPA broadcasts the grouped heads itself.
-        attention_mask = self._apply_sliding_window_mask(
-            attention_mask=attention_mask,
-            q_len=q.shape[2],
-            kv_len=k.shape[2],
-            dtype=q.dtype,
-            device=q.device,
-            cache_position=cache_position,
-        )
+        mask_kwargs = {
+            "attention_mask": attention_mask,
+            "q_len": q.shape[2],
+            "kv_len": k.shape[2],
+            "dtype": q.dtype,
+            "device": q.device,
+            "cache_position": cache_position,
+        }
+        try:
+            attention_mask = self._apply_sliding_window_mask(total_kv=total_kv, **mask_kwargs)
+        except TypeError:
+            # Class without the window patch: the mask is already aligned above.
+            attention_mask = self._apply_sliding_window_mask(**mask_kwargs)
 
         if attention_mask is None and q.shape[2] > 1 and k.shape[2] > q.shape[2]:
             # Multi-token block verified against a warm cache. SDPA's implicit
@@ -635,6 +755,13 @@ _LOGITS_TO_KEEP_PATCH_FLAG = "_gptqmodel_logits_to_keep_patch"
 
 def _patch_logits_to_keep(model) -> bool:
     """Honour the ``logits_to_keep`` forward argument that speculative decoders pass.
+
+    ``[upstream-eligible: contract + memory]``
+    The shipped forward accepts ``logits_to_keep`` via ``**kwargs`` and ignores
+    it, so it silently violates its own documented signature. Honouring it is a
+    pure fix: the returned rows are unchanged for callers that do not pass it,
+    and callers that do pass it stop getting a wrong-shaped result plus an
+    unnecessary ``batch x seq x vocab`` allocation.
 
     DFlash-style drafters call the target with ``logits_to_keep=1`` and expect a
     single position back.  The reference Ripple implementation accepts the
@@ -708,10 +835,17 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     if cls is None:
         return False
 
-    # Decode-throughput patches. These are pure optimisations and numerically
-    # identical to the reference implementation, so they are installed even when the
-    # checkpoint already ships the transformers-5 correctness fixes inline -- the
-    # two concerns are independent.
+    # Two disjoint patch classes -- see the module docstring.
+    #
+    #   LOCAL_ONLY_FAST_PATHS   speed only; installed here, never upstreamed.
+    #   UPSTREAM_ELIGIBLE_PATCHES   correctness + memory; candidates for
+    #                               ricursiveAI/Ripple-65B-Preview.
+    #
+    # The fast paths below are numerically identical to the reference
+    # implementation but are bound to this model's head layout and this Torch
+    # build, so they are installed even when the checkpoint already ships the
+    # transformers-5 correctness fixes inline -- the two concerns are
+    # independent, and a fixed checkpoint still benefits from them locally.
     _patch_fused_rms_norm(model)
     _patch_gqa_attention(model)
     _patch_logits_to_keep(model)
