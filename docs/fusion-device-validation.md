@@ -222,3 +222,20 @@ PYTHON_GIL=0 PYTHONPATH=. /opt/venvs/rocm101t/bin/python -m pytest \
   tests/module_tree/test_fusable_merge.py tests/module_tree/test_fusable_config.py \
   tests/module_tree/test_llama_fusion.py tests/module_tree/test_fusion_device_inference.py -q
 ```
+
+## Review regression validation
+
+Native operand/mapping collections retain their variable-length layout contract;
+zero-free kernels never receive placeholder zero-point fields. A fast contract
+regression covers that invariant. A forward-analysis regression rejects dynamic
+metadata arguments explicitly. Guard variable names and test imports were
+clarified, and unused non-compacting descriptor-owner bindings use the discard
+name; actual ExLlamaV2 descriptor lifetime remains covered by the native matrix.
+
+| Review regression run | Passed | Skipped |
+| --- | ---: | ---: |
+| module_tree | 1,594 | 142 |
+| native_cuda | 147 | 34 |
+| native_rocm | 88 | 93 |
+
+Ruff, compileall and diff-whitespace checks pass.

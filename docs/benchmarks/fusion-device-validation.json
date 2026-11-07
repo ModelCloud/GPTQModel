@@ -5363,5 +5363,38 @@
       "Profile/layer policy reaches actual GPTQ/AWQ parent execution, with extracted/printed provenance.",
       "Renamed parents and weight paths resolve exclusively from the module plan; side-effecting preambles run once on success and fallback."
     ]
+  },
+  "review_validation": {
+    "scope": "Import/guard cleanup and typed variable-length native operand collections; no synthetic zero-point operands.",
+    "runs": {
+      "module_tree": {
+        "tests": 1736,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 142,
+        "passed": 1594,
+        "seconds": 64.081
+      },
+      "native_cuda": {
+        "tests": 181,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 34,
+        "passed": 147,
+        "seconds": 132.469
+      },
+      "native_rocm": {
+        "tests": 181,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 93,
+        "passed": 88,
+        "seconds": 158.333
+      }
+    },
+    "regressions": [
+      "Zero-free native contracts exclude zero-point operands.",
+      "Dynamic metadata arguments reject native forward rewriting."
+    ]
   }
 }

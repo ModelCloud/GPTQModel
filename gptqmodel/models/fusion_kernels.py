@@ -27,8 +27,12 @@ class FusionKernelSpec:
     scale_name: str = "scales"
 
     @property
-    def private_mappings(self):
-        return ("q_tensors",) if self.layout == "exllamav2" else ()
+    def private_mappings(self) -> tuple[str, ...]:
+        """Names of private mappings present in this layout; not a fixed record."""
+        mappings = []
+        if self.layout == "exllamav2":
+            mappings.append("q_tensors")
+        return tuple(mappings)
 
     @property
     def cpu(self):
@@ -43,19 +47,22 @@ class FusionKernelSpec:
                                     *((self.zero_name,) if self.zero_name is not None else ()))))
 
     @property
-    def axes(self):
+    def axes(self) -> tuple[tuple[str, int], ...]:
+        """Variable-length operand/axis collection; absent zero points stay absent."""
         if self.layout in ("allspark", "int8"):
-            axes = ((self.weight_name, 0), (self.scale_name, 0))
+            axes = [(self.weight_name, 0), (self.scale_name, 0)]
             if self.zero_name is not None:
-                axes += ((self.zero_name, 0),)
-            return (*axes, ("bias", 0))
-        if self.cpu:
-            return (("qweight", 0), ("qzeros", 1), ("scales", 1), ("bias", 0))
-        if self.layout == "awq_gemv":
-            return (("qweight", 0), ("qzeros", 0), ("scales", 0), ("bias", 0))
-        if self.layout == "awq_fast":
-            return (("qweight", 0), (self.zero_name, 1), ("scales", 1), ("bias", 0))
-        return (("qweight", 1), ("qzeros", 1), ("scales", 1), ("bias", 0))
+                axes.append((self.zero_name, 0))
+        elif self.cpu:
+            axes = [("qweight", 0), ("qzeros", 1), ("scales", 1)]
+        elif self.layout == "awq_gemv":
+            axes = [("qweight", 0), ("qzeros", 0), ("scales", 0)]
+        elif self.layout == "awq_fast":
+            axes = [("qweight", 0), (self.zero_name, 1), ("scales", 1)]
+        else:
+            axes = [("qweight", 1), ("qzeros", 1), ("scales", 1)]
+        axes.append(("bias", 0))
+        return tuple(axes)
 
     def input_dtype(self, module):
         if self.layout == "cpu_avx512":
@@ -170,7 +177,7 @@ class FusionKernelSpec:
 
             fused.q_tensors = dict(getattr(first, "q_tensors", None) or {})
             fused.q_tensors.update({name: getattr(fused, name) for name in ("qweight", "qzeros", "scales")})
-            fused.q_handle, _owners = exllamav2_clone_q_matrix(fused, awq=not self.gptq)
+            fused.q_handle, _ = exllamav2_clone_q_matrix(fused, awq=not self.gptq)
             fused._fusion_native_view = False
         if self.layout in ("cpu_aten", "cpu_legacy"):
             fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
@@ -201,7 +208,7 @@ class FusionKernelSpec:
                 from ..utils.exllamav2 import exllamav2_clone_q_matrix, exllamav2_free_q_matrix
 
                 old = module.q_handle
-                module.q_handle, _owners = exllamav2_clone_q_matrix(module, awq=not self.gptq)
+                module.q_handle, _ = exllamav2_clone_q_matrix(module, awq=not self.gptq)
                 exllamav2_free_q_matrix(old, awq=not self.gptq)
                 module._fusion_native_view = False
             else:

@@ -49,6 +49,14 @@ def test_every_registered_gptq_awq_kernel_has_an_explicit_fusion_contract():
         assert cls in SPECS or cls.__name__ in EXCLUDED, cls.__name__
 
 
+def test_zero_free_kernel_contracts_never_include_a_zero_operand():
+    for cls, spec in SPECS.items():
+        if spec.zero_name is None:
+            # Padding these collections would make source rebinding consume
+            # zero tensors that this finalized native layout does not own.
+            assert set(dict(spec.axes)) == {spec.weight_name, spec.scale_name, "bias"}, cls.__name__
+
+
 def _cases():
     for cls in sorted(SPECS, key=lambda cls: cls.__name__):
         for family in (DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM):

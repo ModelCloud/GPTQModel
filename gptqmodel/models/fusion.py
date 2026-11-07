@@ -122,7 +122,8 @@ def _parent_template(original, names):
                     if all(isinstance(ast.literal_eval(arg), int) for arg in outer.args):
                         continue
                 except (ValueError, TypeError):
-                    pass
+                    # A dynamic argument is not proven constant metadata access.
+                    return None
         return None
     counts = [0] * len(names)
     valid = True
@@ -228,19 +229,19 @@ def _mutation_guard(parent, modules, names, packed=None, *, fields=_FIELDS, tens
             if mapping is not None:
                 for key, value in mapping.items():
                     checks.append(f"{bind(mapping)}.get({key!r}) is {bind(value)}")
-        for name in tensors:
-            mapping = module._parameters if name in module._parameters else module._buffers if name in module._buffers else vars(module)
-            tensor = mapping.get(name)
+        for tensor_name in tensors:
+            mapping = module._parameters if tensor_name in module._parameters else module._buffers if tensor_name in module._buffers else vars(module)
+            tensor = mapping.get(tensor_name)
             ref = bind(tensor)
-            checks.append(f"{bind(mapping)}.get({name!r}) is {ref}")
+            checks.append(f"{bind(mapping)}.get({tensor_name!r}) is {ref}")
             if not isinstance(tensor, torch.Tensor):
                 continue
             if not tensor.is_inference():
                 # _share_operands constructs sibling views with the packed
                 # tensor's version counter. One check covers writes through
                 # every slice; all binding/storage/metadata checks stay per leaf.
-                version = (getattr(packed, name) if packed is not None and tensor.numel()
-                           and name in dict(axes) else tensor)
+                version = (getattr(packed, tensor_name) if packed is not None and tensor.numel()
+                           and tensor_name in dict(axes) else tensor)
                 if id(version) not in versioned:
                     checks.append(f"{bind(version)}._version == {version._version}")
                     versioned.add(id(version))

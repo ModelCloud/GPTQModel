@@ -14,9 +14,9 @@ import pytest
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
 
+import gptqmodel.models.fusion as fusion
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.fusable import LlamaFusableConfig
-from gptqmodel.models.fusion import FusionPlanner
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -202,7 +202,7 @@ def test_fuse_returns_inspectable_plan_and_disable_returns_none(overrides):
     model, _ = _wrapper()
     assert not hasattr(model, "fusion_plan")
     plan = model.fuse(overrides=overrides)
-    assert isinstance(plan, FusionPlanner)
+    assert isinstance(plan, fusion.FusionPlanner)
     assert len(plan.groups) == (4 if overrides is None else 0)
     output = io.StringIO()
     plan.print(file=output)
@@ -463,8 +463,6 @@ def test_training_and_direct_projection_calls_use_original_execution():
 
 
 def test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards(monkeypatch):
-    import gptqmodel.models.fusion as fusion
-
     model, _ = _wrapper()
     leaves = list(model.model.model.layers[0].self_attn.children())
     original_forwards = [leaf.forward for leaf in leaves]
@@ -644,13 +642,16 @@ def _conditional_projection(self, x):
     return x
 
 
+def _dynamic_metadata_axis(self, x, axis=0):
+    x.size(axis)
+    return self.gate_proj(x) * self.up_proj(x)
+
+
 @pytest.mark.parametrize("forward", [_different_inputs, _repeated_projection, _projection_weight_access,
                                      _preprocess_input, _mutate_input, _indirectly_mutate_input,
-                                     _escape_input_alias, _conditional_projection])
+                                     _escape_input_alias, _conditional_projection, _dynamic_metadata_axis])
 def test_unfamiliar_forward_fails_closed(forward):
-    from gptqmodel.models.fusion import _parent_template
-
-    assert _parent_template(forward, ("gate_proj", "up_proj")) is None
+    assert fusion._parent_template(forward, ("gate_proj", "up_proj")) is None
 
 
 def test_same_storage_dtype_and_shape_changes_are_detected():
@@ -707,11 +708,9 @@ def test_compiled_parent_uses_original_path():
 
 @pytest.mark.parametrize("previously_fused", [False, True])
 def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, previously_fused):
-    from gptqmodel.models.fusion import _FusionGroup
-
     model, _ = _wrapper(automatic=previously_fused)
     previous = model._fusion_plan
-    original = _FusionGroup._operand
+    original = fusion._FusionGroup._operand
     calls = 0
 
     def fail_second(group, key):
@@ -721,7 +720,7 @@ def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, pr
             raise RuntimeError("native descriptor construction failed")
         return original(group, key)
 
-    monkeypatch.setattr(_FusionGroup, "_operand", fail_second)
+    monkeypatch.setattr(fusion._FusionGroup, "_operand", fail_second)
     with pytest.raises(RuntimeError, match="native descriptor construction failed"):
         model.fuse()
     assert model._fusion_plan is previous

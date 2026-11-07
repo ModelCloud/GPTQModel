@@ -186,6 +186,11 @@ The [kernel inventory](fusion-kernel-inventory.md) accounts for every registered
 backend, including architecture/dependency exclusions, other quantization
 formats, and the format-specific EXL3/FP4 loaders.
 
+`FusionKernelSpec.axes` and `private_mappings` are immutable, variable-length
+collections. They contain only operands and mappings owned by that native
+layout. A layout with `zero_name=None`, including native INT8 and symmetric
+AllSpark, has no zero-point entry; no placeholder `qzeros` is introduced.
+
 ```mermaid
 flowchart TD
     SELECT["AUTO or explicit backend selects native class"] --> SPEC{"kernel_specs has this exact class?"}
@@ -488,8 +493,8 @@ execution performs neither collection nor compiler-cache resets.
 | Execution concern | Fusion disabled | Fusion enabled | Implementation |
 | --- | --- | --- | --- |
 | Projection launches | Original separate calls | One native packed call; split outputs feed the original continuation | `gptqmodel/models/fusion.py:58` (`_parent_template`) |
-| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:434` (`_share_operands`) |
-| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:636` (`FusionPlanner`) |
+| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:435` (`_share_operands`) |
+| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:637` (`FusionPlanner`) |
 | Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:683` (`BaseQModel.fuse`) |
 
 Fusion preserves registered state-dict keys and tensor values. Saving serializes
