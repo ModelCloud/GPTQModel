@@ -38,6 +38,7 @@ import argparse
 import functools
 import json
 import statistics
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -240,6 +241,23 @@ def gbps(shape: Shape, ms: float) -> float:
     return weight_bytes / (ms * 1e-3) / 1e9
 
 
+def warm_up_gpu(device: str, seconds: float = 1.0) -> None:
+    """Pull the GPU out of its idle clock state before measuring anything.
+
+    The first measurement in a process is otherwise slower than every later one
+    on the same kernel - 29.5us vs 21.5us for the same fused GEMM here - because
+    the card starts at idle clocks and only boosts once it has work.
+    """
+    a = torch.randn(4096, 4096, dtype=torch.float16, device=device)
+    b = torch.randn(4096, 4096, dtype=torch.float16, device=device)
+    deadline = time.perf_counter() + seconds
+    while time.perf_counter() < deadline:
+        a @ b
+    torch.cuda.synchronize()
+    del a, b
+    torch.cuda.empty_cache()
+
+
 def _measure(shape: Shape, m: int, args, device: str, dtype) -> dict:
     module = build_marlin(shape, device, dtype)
     x = torch.randn(m, shape.k, dtype=dtype, device=device)
@@ -273,6 +291,7 @@ def _best_of(best: dict, key, row: dict) -> None:
 def run(args) -> list[dict]:
     device = args.device
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+    warm_up_gpu(device)
     shapes = PRESETS[args.preset]
     if args.shapes:
         shapes = tuple(
@@ -311,6 +330,7 @@ def run_fusions(args) -> list[dict]:
     """
     device = args.device
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+    warm_up_gpu(device)
     groups = FUSIONS[args.preset]
     rows = []
     for group in groups:
