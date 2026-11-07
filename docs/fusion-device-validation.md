@@ -175,21 +175,50 @@ enabled; source graphs cannot be installed as the fused native parent. Local
 checkpoints are not downloaded by these tests. Full hardware qualification of
 every model architecture is separate from this kernel/Llama report.
 
-## Fusion return API validation
+## Configuration composition and tree-owned qualification
+
+`FusableConfig("target").merge(...)` composes immutable role profiles and policy.
+The target identity stays local. Multiple sources and diamond contributions
+are supported; conflicting profiles require `replace_profile()` and inherited
+policy conflicts require `override()`. Scoped rules select profile families and
+layer indices. Incomplete/unresolved configurations cannot change an installed
+fusion plan. Printed/extracted decisions include origins and winning policy.
+
+The tree resolves exact projection paths and actual live parents. Declarations
+contain no HF parent-class import paths or class allowlists. Forward structure,
+quantization settings and native layouts remain validated. Indexer/cache
+preambles execute once, including when execution uses the original continuation.
+
+| Validation after composition and tree-owned parent resolution | Passed | Skipped |
+| --- | ---: | ---: |
+| configuration | 58 | 0 |
+| module tree CUDA | 1,593 | 142 |
+| core config device ROCm | 138 | 29 |
+| save reload and fresh quantization | 4 | 0 |
+| native kernels CUDA | 146 | 34 |
+| native kernels ROCm | 87 | 93 |
+
+The full module-tree run includes all 198 registry aliases, 101 real-model
+topology cases and 464 native-parent oracle cases. Skips are retained with their
+pytest reasons; an inactive vendor runtime is not counted as native validation.
+Renamed runtime-parent/weight regressions cover GPTQ and AWQ, including a
+side-effecting preamble and hooked fallback. Llama checkpoint tests verify
+Marlin selection, identical greedy IDs, zero extra packed-weight storage and
+exact save/reload behavior. Ruff, compileall and diff-whitespace checks pass.
 
 `plan = model.fuse()` applies fusion and returns the `FusionPlanner` directly.
-Inspection uses `plan.print()`, `plan.render()`, and `plan.to_dict()`;
-`model.fuse(False)` returns `None`. Callers retain that plan, including benchmark
-storage/diagnostic helpers. The numerical kernel path is unchanged.
+Inspect it with `plan.print()`, `plan.render()` and `plan.to_dict()`;
+`model.fuse(False)` returns `None`. Benchmark callers retain that object for
+storage/diagnostics. Updated Llama latency samples and retained-storage
+measurements are in [the benchmark report](benchmarks/llama32-fusion-native-backends.json).
 
-| API/consumer regression run | Passed | Skipped |
-| --- | ---: | ---: |
-| Module-tree suite, CUDA runtime, excluding the separate native backend matrix | 1,562 | 142 |
-| Core/config/device suites, ROCm runtime | 107 | 29 |
-| Llama 1B GPTQ/AWQ save/reload and fresh quantization, CUDA | 4 | 0 |
-| Native Marlin workspace lifecycle with the returned plan | 6 | 0 |
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. \
+  python -m pytest tests/module_tree \
+  --ignore=tests/module_tree/test_fusion_kernel_backends.py -q
 
-Both benchmark programs pass smoke runs for GPTQ and AWQ through the returned
-plan API, including storage-layout controls and independent projection oracles.
-Those short smoke runs do not replace the measured latency tables. Ruff and
-compileall pass; no public plan accessor is needed.
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 \
+PYTHON_GIL=0 PYTHONPATH=. /opt/venvs/rocm101t/bin/python -m pytest \
+  tests/module_tree/test_fusable_merge.py tests/module_tree/test_fusable_config.py \
+  tests/module_tree/test_llama_fusion.py tests/module_tree/test_fusion_device_inference.py -q
+```

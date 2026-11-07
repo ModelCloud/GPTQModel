@@ -4,15 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class GptNeoQModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("gpt_neo", parent_types={
-        "qkv": (
-            "transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoSelfAttention",
-        ),
-    })
+    fusable = FusableConfig("gpt_neo").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "transformer.ln_f"
     lm_head = "lm_head"

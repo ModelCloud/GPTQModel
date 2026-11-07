@@ -626,6 +626,18 @@ def _mutate_input(self, x):
     return self.gate_proj(x) * self.up_proj(x)
 
 
+def _indirectly_mutate_input(self, x):
+    gate = self.gate_proj(x)
+    self.preprocess(x)
+    return gate * self.up_proj(x)
+
+
+def _escape_input_alias(self, x):
+    alias = x
+    self.preprocess(alias)
+    return self.gate_proj(x) * self.up_proj(x)
+
+
 def _conditional_projection(self, x):
     if self.training:
         return self.gate_proj(x) * self.up_proj(x)
@@ -633,7 +645,8 @@ def _conditional_projection(self, x):
 
 
 @pytest.mark.parametrize("forward", [_different_inputs, _repeated_projection, _projection_weight_access,
-                                     _preprocess_input, _mutate_input, _conditional_projection])
+                                     _preprocess_input, _mutate_input, _indirectly_mutate_input,
+                                     _escape_input_alias, _conditional_projection])
 def test_unfamiliar_forward_fails_closed(forward):
     from gptqmodel.models.fusion import _parent_template
 

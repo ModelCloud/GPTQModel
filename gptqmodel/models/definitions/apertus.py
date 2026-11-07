@@ -11,15 +11,11 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class ApertusQModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("apertus", parent_types={
-        "qkv": (
-            "transformers.models.apertus.modeling_apertus.ApertusAttention",
-        ),
-    })
+    fusable = FusableConfig("apertus").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "model.norm"
 

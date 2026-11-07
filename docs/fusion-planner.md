@@ -53,12 +53,12 @@ flowchart TD
     ENABLED -->|"yes"| ADMIT
     DONE["Quantized checkpoint loaded<br/>or quantize finished"] --> AUTO{"Explicit fusion opt-in?"}
     AUTO -->|"no"| OLD["Original projection forwards"]
-    AUTO -->|"yes"| ADMIT["require_fusable_config<br/>definition instance, model_type, parent types"]
+    AUTO -->|"yes"| ADMIT["require_fusable_config<br/>definition instance, model_type, role profiles"]
     ADMIT --> VALIDPROFILE{"Valid declared FusableConfig?"}
     VALIDPROFILE -->|"no"| ERROR["Raise before mutation<br/>or before calibration when quantize opts in"]
     VALIDPROFILE -->|"yes"| PLAN["FusionPlanner reads model.module_plan()"]
     PLAN --> ROLES["Group exact sibling roles<br/>q+k+v or gate+up"]
-    ROLES --> POLICY{"Configured profile and family/path overrides allow?"}
+    ROLES --> POLICY{"Configured profile and scoped policy allow?"}
     POLICY -->|"no"| SKIP["Decision records skip reason"]
     POLICY -->|"yes"| CONFIG{"All effective configs and packed operands compatible?"}
     CONFIG -->|"no"| SKIP
@@ -71,12 +71,13 @@ flowchart TD
     SKIP --> RETURN["BaseQModel.fuse returns the applied FusionPlanner<br/>including an empty plan when no groups qualify"]
     PREPARE --> RETURN
     RETURN --> INSPECT["Caller retains plan<br/>plan.print / render / to_dict"]
-    PREPARE --> CALL["Parent invocation calls execute once"]
+    PREPARE --> PREFIX["Parent invocation preserves native preamble once"]
+    PREFIX --> CALL["At first projection: execute once"]
     CALL --> RUNTIME{"Inference, input and hooks allow fusion?"}
-    RUNTIME -->|"no"| OLD
+    RUNTIME -->|"no"| CONTINUE["Continue original body after preamble"]
     RUNTIME -->|"yes"| GUARD{"Cached mutation guard passes?"}
     GUARD -->|"no"| REFRESH["Cold _refresh revalidates live owners"]
-    REFRESH -->|"incompatible"| OLD
+    REFRESH -->|"incompatible"| CONTINUE
     REFRESH -->|"compatible: rebuild descriptors"| GEMM
     GUARD -->|"yes"| GEMM["Bound packed.forward<br/>split Q/K/V or gate/up outputs"]
     GEMM --> END["Upstream parent math consumes local outputs<br/>no projection interception or activation context"]
@@ -106,15 +107,39 @@ or `marlin_awq.py:355`. Fusion moves grouping into `FusionPlanner` and the
 parent's `_FusionGroup.execute` call; the selected native linear kernel remains
 the computation boundary shown in the comparison above.
 
-The compiler reads the installed native parent `forward` source named by the
-definition's selected profile. Each declared projection must occur exactly once and take the same
+The compiler reads the actual parent `forward` resolved from the compiled
+tree. Profiles declare sibling roles, with no Python class import paths. Each
+declared projection must occur exactly once and take the same
 parent input without extra arguments; extra weight/metadata references,
 decorated functions, instance forward overrides, unavailable source, and
 unsupported call shapes reject the group. Conditional projection calls and
 reassigned or in-place-mutated input arguments also reject the group. It substitutes tuple selections for
 those calls and retains upstream RoPE, cache updates, attention dispatch,
 activation, multiplication, output projection, and the public forward signature.
-It does not maintain separately copied architecture forward implementations.
+The original preamble runs once before the first projection, including any
+indexer/cache updates. The compiler branches into the original continuation on
+fallback or the projection-substituted continuation on success; it does not
+restart the preamble. Extra input consumers between projections and escaped
+input aliases are rejected because they could change a later projection's
+input. An explicit forward override still takes the original path before any
+preamble executes. No separately maintained architecture forward is used.
+
+The generated forward has one shared preamble and two continuations:
+
+```mermaid
+flowchart TD
+    ENTER["Installed parent forward"] --> OVERRIDE{"Original parent_forward replaced?"}
+    OVERRIDE -->|"yes"| FULL["Call replacement before running any preamble"]
+    OVERRIDE -->|"no"| PREAMBLE["Run original native preamble once<br/>indexer, cache and shape work"]
+    PREAMBLE --> EXECUTE["_FusionGroup.execute at first declared projection"]
+    EXECUTE --> READY{"Fused outputs available?"}
+    READY -->|"no"| ORIGINAL["Original continuation<br/>separate projection calls in original order"]
+    READY -->|"yes"| FUSED["Rewritten continuation<br/>projection calls replaced with split output selections"]
+    ORIGINAL --> RETURN["Original upstream result and postprocessing"]
+    FUSED --> RETURN
+    style FULL fill:#fff1f0,stroke:#cf1322
+    style ORIGINAL fill:#fff1f0,stroke:#cf1322
+```
 
 There is no suffix-based selection. Each requested role must resolve to exactly
 one distinct quantizable sibling in the compiled tree. Fused leaves carrying
@@ -203,17 +228,21 @@ cache. `fuse(False)` restores contiguous independent source operands exactly.
 
 ## Definition-owned FusableConfig
 
-`BaseQModel.fusable` defaults to `None`. The definition must declare a
-`FusableConfig` instance before the caller can enable fusion. The llama-only
-default is:
+`BaseQModel.fusable` defaults to `None`. A definition must declare a completed,
+validated `FusableConfig` before callers can enable fusion. Construction is
+target-first; merges never import source model identities or enable fusion:
 
 ```python
-from gptqmodel import LlamaFusableConfig
-from gptqmodel.models.base import BaseQModel
+from gptqmodel import FusableConfig, LlamaFusableConfig
 
-class LlamaQModel(BaseQModel):
-    fusable = LlamaFusableConfig()
+fusable = FusableConfig("qwen2").merge(LlamaFusableConfig())
 ```
+
+`LlamaFusableConfig()` supplies immutable `qkv` (`q/k/v`) and `gate_up`
+(`gate/up`) profiles. The target can also be a tuple of model-type aliases:
+`FusableConfig(("glm", "glm4"))`. Every admitted alias is validated separately.
+Concrete projection paths and actual parent modules always resolve through
+`model.module_plan()`; there are no HF class import paths or class allowlists.
 
 ```mermaid
 classDiagram
@@ -222,69 +251,132 @@ classDiagram
         +tuple profiles
         +Mapping model_profiles
         +Mapping overrides
+        +merge(sources, profiles, source_model_type)
+        +profile(name, roles)
+        +replace_profile(name, roles)
+        +override(family, enabled, layers)
+        +validate()
         +profiles_for(model_type)
-        +derive(model_types, parent_types)
         +to_dict()
     }
     class FusableProfile {
         +str name
         +tuple roles
-        +tuple parent_types
-        +resolve_parent_types()
     }
     class LlamaFusableConfig
-    class LlamaQModel
+    class FusionPlanner
     FusableConfig <|-- LlamaFusableConfig
-    FusableConfig "0..*" o-- "1..*" FusableProfile : profiles
-    LlamaQModel --> LlamaFusableConfig : fusable
+    FusableConfig "0..*" o-- "0..*" FusableProfile : immutable roles
+    FusionPlanner --> FusableConfig : validates definition contract
 ```
 
-| Field | Meaning | Llama default |
-| --- | --- | --- |
-| `model_types` | Explicit runtime HF architecture names admitted by the profile | `("llama",)` |
-| `profiles` | Ordered `FusableProfile` instances; each declares a name, distinct sibling roles, and allowed native parent types | `qkv`: `q/k/v` under `LlamaAttention`; `gate_up`: `gate/up` under `LlamaMLP` |
-| `model_profiles` | Optional explicit per-model profile tuples for definitions shared by native architectures; only the selected type is imported | Empty in `LlamaFusableConfig()`; `LlamaQModel` declares native aliases here |
-| `overrides` | Immutable family/relative-parent/full-parent boolean policy | Empty |
+### Merge, extend and override
 
-These configuration objects are frozen. Constructor inputs are copied to
-immutable tuples/mappings; extensions cannot mutate the shared Llama defaults.
-Parent types may be actual classes or dotted type names resolved on explicit
-opt-in. They identify allowed executors; weight paths and roles still come only
-from `model.module_plan()`. `plan.to_dict()["fusable"]`, on the object returned
-by `model.fuse()`,
-exposes the effective definition contract.
-
-Policy lookup prefers the exact full parent path, then the layer-relative
-parent path, then the family name, then `True`. Per-call overrides replace
-configuration overrides for the same key. A profile cannot bypass quantization,
-packed-layout, native-source, input-sharing, or runtime safety checks.
-
-### Inherit and extend
-
-Use frozen dataclass inheritance and `dataclasses.replace()` to select or extend
-profiles, or use `derive()` to reuse immutable profiles and select/rebind their
-native parent types. This example keeps only the validated Llama gate/up profile:
+Every fluent operation returns a new frozen configuration. Constructor inputs
+are copied to immutable tuples/mappings, so shared sources never change.
+Repeated merges let each source contribute its own selected profiles:
 
 ```python
-from dataclasses import dataclass
-from gptqmodel import FusableProfile, LlamaFusableConfig
-from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel import FusableConfig, LlamaFusableConfig
 
-@dataclass(frozen=True)
-class GateOnlyFusableConfig(LlamaFusableConfig):
-    profiles: tuple[FusableProfile, ...] = (LlamaFusableConfig().profiles[1],)
+attention = FusableConfig("attention_policy").merge(
+    LlamaFusableConfig(), profiles=("qkv",),
+)
+mlp = FusableConfig("mlp_policy").profile("gate_up", roles=("gate", "up"))
 
-class MyLlamaQModel(LlamaQModel):
-    fusable = GateOnlyFusableConfig(overrides={"model.layers.0.mlp": False})
+fusable = (
+    FusableConfig("custom_model")
+    .merge(attention, profiles=("qkv",))
+    .merge(mlp, profiles=("gate_up",))
+    .override("qkv", enabled=False, layers=(0, 1))
+)
+
+# Unrestricted composition also accepts multiple sources in one call.
+fusable = FusableConfig("custom_model").merge(attention, mlp)
 ```
 
-A different architecture must also declare its own `model_types` and compatible
-`parent_types`. Inheriting Llama's config does not admit a new HF model type or
-its parent classes automatically. An inherited definition can set
-`fusable = None` to reject fusion entirely. Qwen2 declares its own validated
-profiles, and Qwen2 audio reuses those immutable parent profiles through
-`Qwen2QModel.fusable.derive("qwen2_audio")`. The real-model matrix and declaration
-examples are in [fusion model qualification](fusion-model-coverage.md).
+`profiles=` selects exactly the named role profiles and their matching family
+policy; it requires a single source. The same applies to `source_model_type=`:
+use a separate merge call for each source-specific selection. Omitting selectors
+merges all default profiles, while preserving a source's matching target-alias
+variants from `model_profiles`. An explicit source alias selects that alias's
+role policy for every target:
+
+```python
+from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.models.definitions.qwen2 import Qwen2QModel
+
+attention_only = FusableConfig("qwen2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+audio = FusableConfig("qwen2_audio").merge(Qwen2QModel.fusable)
+wrapper = FusableConfig("mistral3").merge(LlamaQModel.fusable, source_model_type="mistral")
+```
+
+Use `.profile(name, roles=...)` to add a new role group. An existing name requires
+`.replace_profile(name, roles=...)`; replacement is explicit for every target
+alias containing that profile, records the target as its origin, and wins over
+later merges for that profile. Adding a profile does not create a new native
+kernel contract: quantization settings, common inputs, source structure and
+native packed layouts must still qualify.
+
+```mermaid
+flowchart TD
+    TARGET["FusableConfig(target model types)"] --> MERGE["merge: validate each source; select role profiles and policy"]
+    MERGE --> IDENTICAL{"Same profile or policy contribution?"}
+    IDENTICAL -->|"identical"| DEDUP["Deduplicate; preserve origins"]
+    IDENTICAL -->|"different name or selector"| ADD["Add contribution"]
+    IDENTICAL -->|"same name or selector, different value"| CONFLICT["Record unresolved conflict; never choose last source"]
+    CONFLICT --> RESOLVE["replace_profile or local override"]
+    DEDUP --> BIND["require_fusable_config validates completed composition"]
+    ADD --> BIND
+    RESOLVE --> BIND
+    BIND --> VALID{"Every alias has profiles; all conflicts resolved?"}
+    VALID -->|"no"| ERROR["ValueError before changing an installed plan"]
+    VALID -->|"yes"| TREE["FusionPlanner resolves model.module_plan roles and live parents"]
+    TREE --> NATIVE["Existing source, shared-input, config and native-kernel checks"]
+    style CONFLICT fill:#fff1f0,stroke:#cf1322
+    style ERROR fill:#fff1f0,stroke:#cf1322
+```
+
+| Composition case | Behavior |
+| --- | --- |
+| Sources contribute different profile names | Merge in declaration order |
+| Identical profiles or policies, including a diamond | Deduplicate; retain contributing origins |
+| Same profile name has different roles | Record a conflict; explicit `replace_profile()` is required |
+| Inherited values differ for the same policy selector | Record a conflict; explicit local `override()` is required |
+| Target already explicitly replaced a profile or set that selector | Its local choice wins over merged contributions |
+| Local scoped overrides overlap with conflicting values | Reject the conflicting call atomically |
+| Source is incomplete or has unresolved conflicts | Reject that merge source |
+| Completed target is empty or still conflicting | Reject definition binding before any fusion mutation |
+
+A target-only constructor is a valid intermediate builder. It cannot execute
+fusion. Individual argument errors are immediate; cross-source conflicts remain
+inspectable in `to_dict()["conflicts"]` until explicitly resolved. Call
+`config.validate()` to check completion yourself. Definition admission and
+`profiles_for()` perform the same validation. No implicit last-source-wins rule
+exists, and neither merge nor override can relax mandatory compatibility checks.
+
+### Policy lookup and inspection
+
+`.override("qkv", enabled=False, layers=(0, 1))` addresses compiled profile
+groups by their local index within the declared decoder stack. It does not name
+a Python class, an attention attribute or a projection path. Indices must be
+nonnegative integers. A family-wide override omits `layers`.
+
+Policy precedence is: applicable per-call `model.fuse(overrides=...)` policy
+(full parent, relative parent, family), then definition policy (full parent,
+relative parent, family plus layer index, family), then enabled. Legacy exact
+parent keys remain supported by the constructor's `overrides` mapping; the fluent
+API uses role families and optional layer indices. Layer-specific rules beat
+family-wide rules; local policy wins inherited policy for the same selector.
+Conflicting inherited selectors must be resolved even if a more specific rule
+would hide them on one layer. Conflicting local rules are rejected rather than
+silently overwritten.
+
+`plan = model.fuse()` returns the applied `FusionPlanner`. `plan.print()` and
+`plan.render()` show each group's profile origins, winning policy and runtime
+acceptance/skip reason. `plan.to_dict()` includes the same data and the completed
+configuration, including scoped overrides and conflict diagnostics. Definition
+policy resolves during planning; it adds no policy lookup to the token loop.
 
 ### Admission and failure contract
 
@@ -292,15 +384,15 @@ examples are in [fusion model qualification](fusion-model-coverage.md).
 | --- | --- |
 | No definition config | Enabling fusion raises `ValueError`; disabling is allowed |
 | Config has the wrong type | `TypeError`; a `FusableConfig` instance is required |
-| Runtime model type absent from config | `ValueError`, including for inherited profiles |
-| Invalid parent type declaration | Preflight raises before touching installed fusion |
-| Two eligible profiles target the same parent | `ValueError` before installing new execution; no ambiguous overlapping groups |
+| Runtime model type absent from config | `ValueError`; merge cannot import another model's identity |
+| Unknown/duplicate/empty profile selection | Reject before composition |
+| Incomplete config or unresolved merge conflict | `ValueError` before changing an installed plan |
+| Two eligible profiles target the same parent | `ValueError` before installation; no ambiguous overlapping groups |
 | Valid profile, incompatible layer/config/kernel | Record a skipped group and its reason |
 
-Admission runs before changing an installed plan. Constructor opt-in and
-`quantize(..., fuse=True)` also preflight the definition so missing/mismatched
-profiles fail before calibration. The profile grants eligibility; caller opt-in
-still controls activation, and fusion remains off by default.
+Constructor opt-in and `quantize(..., fuse=True)` preflight the same definition
+before calibration. The profile grants eligibility; caller opt-in controls
+activation. An inherited definition can set `fusable = None` to reject fusion.
 
 Runtime checks preserve separate execution for training, inputs requiring
 gradients, direct projection calls outside the parent, global/projection hooks,
@@ -319,7 +411,7 @@ flowchart LR
     DESCRIPTOR --> VALID{"execute: guard valid?"}
     VALID -->|"yes"| USE["One existing native kernel call"]
     VALID -->|"no"| REFRESH
-    REFRESH -->|"incompatible"| FALLBACK["Original parent forward"]
+    REFRESH -->|"incompatible"| FALLBACK["Original continuation; native preamble is not repeated"]
     USE --> OUT["Split outputs: forward locals only"]
     OUT --> RELEASE["Return or exception releases activations"]
     MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire guard and clear its bindings<br/>release operands and descriptor"]
@@ -393,6 +485,13 @@ execution performs neither collection nor compiler-cache resets.
 
 ## Checkpoint and test contract
 
+| Execution concern | Fusion disabled | Fusion enabled | Implementation |
+| --- | --- | --- | --- |
+| Projection launches | Original separate calls | One native packed call; split outputs feed the original continuation | `gptqmodel/models/fusion.py:58` (`_parent_template`) |
+| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:434` (`_share_operands`) |
+| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:636` (`FusionPlanner`) |
+| Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:683` (`BaseQModel.fuse`) |
+
 Fusion preserves registered state-dict keys and tensor values. Saving serializes
 each projection view under its checkpoint key; loading rebuilds the ordinary modules and
 then applies the planner only when explicitly requested. The fusion cache, native workspace, and
@@ -410,6 +509,11 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   exercises 101 real native model definitions through the public module-plan API
   and fusion planner, and checks 116 distinct native parent/family pairs in
   GPTQ/AWQ and FP16/BF16 against separate forwards and integer-weight oracles.
+- `tests/module_tree/test_fusable_merge.py` checks target-first construction,
+  multiple sources, diamond deduplication, alias variants, explicit conflict
+  resolution, local/scoped policy precedence, immutability, printed/extracted
+  provenance and failure before changing an installed plan. Actual GPTQ/AWQ
+  parents verify that compiled layer policy changes the intended groups.
 - `tests/models/test_llama3_2_fusion.py` exercises local Llama 3.2 1B GPTQ/AWQ
   checkpoints, logits, greedy tokens, opt-in after reload,
   and actual checkpoint save/reload. It asserts zero additional packed-weight
@@ -451,17 +555,17 @@ loading, packed construction, and source-view binding are outside timing.
 
 | Method | Phase | Kernel off / on | Off latency | On latency | Latency change | Off tok/s | On tok/s |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 7.401 ms | 7.152 ms | -3.37% | 17295.10 | 17897.43 |
-| GPTQ | Decode (per token) | `MarlinLinear` / same | 6.763 ms | 6.462 ms | -4.45% | 147.87 | 154.76 |
-| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 7.599 ms | 7.446 ms | -2.01% | 16845.34 | 17191.13 |
-| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 6.932 ms | 6.769 ms | -2.36% | 144.25 | 147.73 |
+| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 7.553 ms | 7.271 ms | -3.73% | 16947.50 | 17604.21 |
+| GPTQ | Decode (per token) | `MarlinLinear` / same | 6.901 ms | 6.578 ms | -4.68% | 144.92 | 152.03 |
+| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 7.557 ms | 7.485 ms | -0.95% | 16938.16 | 17100.35 |
+| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 6.959 ms | 6.838 ms | -1.74% | 143.70 | 146.24 |
 
 ```mermaid
 xychart-beta
     title "Fusion latency reduction: symmetric INT4 Llama 3.2 1B"
     x-axis ["GPTQ prefill", "GPTQ decode", "AWQ prefill", "AWQ decode"]
     y-axis "Latency reduction (%)" 0 --> 8
-    bar [3.37, 4.45, 2.01, 2.36]
+    bar [3.73, 4.68, 0.95, 1.74]
 ```
 
 | Method | Phase | Max absolute logit drift | RMS logit drift | Relative L2 | Top-1 agreement |

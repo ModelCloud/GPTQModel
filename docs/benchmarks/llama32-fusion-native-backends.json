@@ -14,43 +14,43 @@
   "gptq": {
     "off": {
       "kernel": "MarlinLinear",
-      "prefill_ms": 7.400938018690795,
-      "prefill_tokens_per_second": 17295.104982198303,
-      "decode_ms_per_token": 6.762719813195872,
-      "decode_tokens_per_second": 147.86950038189266,
+      "prefill_ms": 7.5527360022533685,
+      "prefill_tokens_per_second": 16947.500874095298,
+      "decode_ms_per_token": 6.900565187606844,
+      "decode_tokens_per_second": 144.915666008918,
       "prefill_samples_ms": [
-        7.286978012416512,
-        7.437472988385707,
-        7.391374005237594,
-        7.309551991056651,
-        7.396339991828427,
-        7.400938018690795,
-        7.463692018063739,
-        7.327838015044108,
-        11.025122978026047,
-        7.328309991862625,
-        7.508707989472896,
-        7.350022002356127,
-        18.768261012155563,
-        7.533005002187565,
-        7.536920020356774
+        7.4255079962313175,
+        7.394401996862143,
+        7.406770018860698,
+        7.5527360022533685,
+        7.42699098191224,
+        7.422383001539856,
+        7.4494229920674115,
+        7.448221003869548,
+        8.200615993700922,
+        7.592495996505022,
+        7.768134993966669,
+        7.727794989477843,
+        7.764118985505775,
+        7.599295990075916,
+        7.598614989547059
       ],
       "decode_samples_ms_per_token": [
-        6.718386812281096,
-        6.733874313795241,
-        6.762719813195872,
-        6.9058212502568495,
-        6.745693000993924,
-        6.775767873477889,
-        6.7345306888455525,
-        6.762539998817374,
-        6.757914312402136,
-        6.73187431129918,
-        6.784330062146182,
-        10.36988481246226,
-        6.856616437289631,
-        7.154545126468292,
-        6.953930313102319
+        6.8392425619094865,
+        6.825146687333472,
+        6.963739313505357,
+        6.835323687482742,
+        6.853766624772106,
+        6.829592000940465,
+        6.836822749392013,
+        7.225954188470496,
+        6.94335975094873,
+        7.281002499439637,
+        7.067429000017,
+        6.9167203746474115,
+        6.900565187606844,
+        7.269747749887756,
+        6.826924998676986
       ],
       "storage": {
         "model_tensor_storage_bytes": 1027272960,
@@ -60,43 +60,43 @@
     },
     "on": {
       "kernel": "MarlinLinear",
-      "prefill_ms": 7.151864992920309,
-      "prefill_tokens_per_second": 17897.4295693093,
-      "decode_ms_per_token": 6.461593624408124,
-      "decode_tokens_per_second": 154.76058355365842,
+      "prefill_ms": 7.270989008247852,
+      "prefill_tokens_per_second": 17604.207605705786,
+      "decode_ms_per_token": 6.577748687050189,
+      "decode_tokens_per_second": 152.02769938120773,
       "prefill_samples_ms": [
-        7.201900996733457,
-        7.087158999638632,
-        7.872009999118745,
-        7.155290979426354,
-        7.482960005290806,
-        7.0912750088609755,
-        7.10451600025408,
-        7.063294004183263,
-        7.348938990617171,
-        7.067419996019453,
-        7.10926199099049,
-        7.113277999451384,
-        7.420735986670479,
-        7.151864992920309,
-        7.196392019977793
+        7.256477983901277,
+        7.248285983223468,
+        7.234465010697022,
+        7.73342399043031,
+        7.2931619943119586,
+        7.306342013180256,
+        7.269647991051897,
+        7.278010016307235,
+        7.398707995889708,
+        7.270989008247852,
+        7.23108000238426,
+        7.255065982462838,
+        7.286651991307735,
+        7.314393995329738,
+        7.251420000102371
       ],
       "decode_samples_ms_per_token": [
-        6.4688096863392275,
-        6.967297375013004,
-        6.454128311816021,
-        6.485613999757334,
-        6.467159626481589,
-        6.4134739368455485,
-        6.432124873754219,
-        6.418724811737775,
-        6.456827937654452,
-        6.447954625400598,
-        6.461593624408124,
-        6.463623500167159,
-        6.482604374468792,
-        6.451987437685602,
-        6.475699625298148
+        6.542192313645501,
+        6.537970437420881,
+        7.130095375032397,
+        6.577748687050189,
+        8.182412624591962,
+        6.5992811250907835,
+        6.55936706243665,
+        6.581004750842112,
+        6.620787311476306,
+        6.602651124921977,
+        6.559349500093958,
+        6.569331811988377,
+        6.5719932499632705,
+        6.611298249481479,
+        6.5670859985402785
       ],
       "storage": {
         "model_tensor_storage_bytes": 1027289344,
@@ -146,9 +146,6 @@
               "q",
               "k",
               "v"
-            ],
-            "parent_types": [
-              "transformers.models.llama.modeling_llama.LlamaAttention"
             ]
           },
           {
@@ -156,267 +153,10 @@
             "roles": [
               "gate",
               "up"
-            ],
-            "parent_types": [
-              "transformers.models.llama.modeling_llama.LlamaMLP"
             ]
           }
         ],
-        "model_profiles": {
-          "cohere": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.cohere.modeling_cohere.CohereAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.cohere.modeling_cohere.CohereMLP"
-              ]
-            }
-          ],
-          "cohere2": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
-              ]
-            }
-          ],
-          "gemma": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.gemma.modeling_gemma.GemmaAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.gemma.modeling_gemma.GemmaMLP"
-              ]
-            }
-          ],
-          "granite": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.granite.modeling_granite.GraniteAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.granite.modeling_granite.GraniteMLP"
-              ]
-            }
-          ],
-          "helium": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.helium.modeling_helium.HeliumAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.helium.modeling_helium.HeliumMLP"
-              ]
-            }
-          ],
-          "mistral": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.mistral.modeling_mistral.MistralAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.mistral.modeling_mistral.MistralMLP"
-              ]
-            }
-          ],
-          "olmo": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.olmo.modeling_olmo.OlmoAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.olmo.modeling_olmo.OlmoMLP"
-              ]
-            }
-          ],
-          "olmo2": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
-              ]
-            }
-          ],
-          "seed_oss": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
-              ]
-            }
-          ],
-          "smollm3": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
-              ]
-            }
-          ],
-          "stablelm": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
-              ]
-            }
-          ]
-        }
+        "model_profiles": {}
       },
       "groups": [
         {
@@ -810,43 +550,43 @@
   "awq": {
     "off": {
       "kernel": "AwqMarlinLinear",
-      "prefill_ms": 7.598539988975972,
-      "prefill_tokens_per_second": 16845.341366328732,
-      "decode_ms_per_token": 6.932411937668803,
-      "decode_tokens_per_second": 144.24993912526713,
+      "prefill_ms": 7.556902011856437,
+      "prefill_tokens_per_second": 16938.157964622776,
+      "decode_ms_per_token": 6.959064063266851,
+      "decode_tokens_per_second": 143.69748444743612,
       "prefill_samples_ms": [
-        7.764478999888524,
-        7.68842498655431,
-        7.562317012343556,
-        7.566262996988371,
-        7.571019988972694,
-        7.826790999388322,
-        7.564509985968471,
-        7.604179991176352,
-        7.654665008885786,
-        7.58200598647818,
-        7.64870599959977,
-        7.581344980280846,
-        7.689316000323743,
-        7.598539988975972,
-        7.546512992121279
+        7.523363019572571,
+        7.538145000580698,
+        7.556902011856437,
+        7.528270012699068,
+        7.615940005052835,
+        7.718792010564357,
+        7.4796080007217824,
+        7.662607997190207,
+        7.621217984706163,
+        7.496432022890076,
+        7.539386017015204,
+        7.5120060064364225,
+        7.6370709866750985,
+        8.4674300160259,
+        8.443644997896627
       ],
       "decode_samples_ms_per_token": [
-        6.927624812306021,
-        6.915188751008827,
-        6.8973527504567755,
-        6.8893808747816365,
-        6.932411937668803,
-        6.914423125635949,
-        7.0695537488063565,
-        6.94129750081629,
-        6.952544938030769,
-        6.938403812455363,
-        6.9400888114614645,
-        6.901433687744429,
-        6.980579812079668,
-        6.934838374945684,
-        6.907883123858483
+        6.959064063266851,
+        6.945401313714683,
+        6.956499624720891,
+        6.999418748819153,
+        6.9624151874450035,
+        6.978598563364358,
+        6.95827975141583,
+        6.926942061909358,
+        6.909555124366307,
+        6.935584875463974,
+        6.93821187451249,
+        6.96087849973992,
+        7.097662188243703,
+        7.706945625614026,
+        7.307093312192592
       ],
       "storage": {
         "model_tensor_storage_bytes": 1031074048,
@@ -856,43 +596,43 @@
     },
     "on": {
       "kernel": "AwqMarlinLinear",
-      "prefill_ms": 7.445702009135857,
-      "prefill_tokens_per_second": 17191.125812306796,
-      "decode_ms_per_token": 6.768987375835422,
-      "decode_tokens_per_second": 147.73258457681507,
+      "prefill_ms": 7.485226000426337,
+      "prefill_tokens_per_second": 17100.352079243763,
+      "decode_ms_per_token": 6.838041124865413,
+      "decode_tokens_per_second": 146.24071159263204,
       "prefill_samples_ms": [
-        7.385442004306242,
-        7.362428004853427,
-        7.594833994517103,
-        7.4461729964241385,
-        7.432442012941465,
-        7.462317007593811,
-        7.442508009262383,
-        7.532000978244469,
-        7.447244017384946,
-        7.445702009135857,
-        7.436318002874032,
-        7.505480985855684,
-        7.432251994032413,
-        7.513091986766085,
-        7.396608998533338
+        7.458506006514654,
+        7.442873000400141,
+        7.529281021561474,
+        7.467719988198951,
+        7.5176139944233,
+        7.477304985513911,
+        7.486098009394482,
+        7.531355018727481,
+        7.412638980895281,
+        7.516152021707967,
+        7.43170699570328,
+        7.598634023452178,
+        7.559115998446941,
+        7.485226000426337,
+        7.43848699494265
       ],
       "decode_samples_ms_per_token": [
-        6.725200562868849,
-        6.7270921244926285,
-        6.825600248703267,
-        6.755409249308286,
-        6.733466500008944,
-        6.768842375095119,
-        6.817911751568317,
-        6.764654874132248,
-        6.724690250848653,
-        7.154278311645612,
-        6.791245750719099,
-        6.775706811822602,
-        6.774995124942507,
-        6.768987375835422,
-        6.9682920639024815
+        6.802385187256732,
+        6.837972186986008,
+        6.813974874603446,
+        6.807304936955916,
+        6.838041124865413,
+        7.007672125837416,
+        6.97355287411483,
+        6.842249811597867,
+        6.811720249970676,
+        6.8180289381416515,
+        6.881174249429023,
+        7.032943874946795,
+        6.877829313452821,
+        6.850376186775975,
+        6.83247975030099
       ],
       "storage": {
         "model_tensor_storage_bytes": 1031090432,
@@ -942,9 +682,6 @@
               "q",
               "k",
               "v"
-            ],
-            "parent_types": [
-              "transformers.models.llama.modeling_llama.LlamaAttention"
             ]
           },
           {
@@ -952,267 +689,10 @@
             "roles": [
               "gate",
               "up"
-            ],
-            "parent_types": [
-              "transformers.models.llama.modeling_llama.LlamaMLP"
             ]
           }
         ],
-        "model_profiles": {
-          "cohere": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.cohere.modeling_cohere.CohereAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.cohere.modeling_cohere.CohereMLP"
-              ]
-            }
-          ],
-          "cohere2": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
-              ]
-            }
-          ],
-          "gemma": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.gemma.modeling_gemma.GemmaAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.gemma.modeling_gemma.GemmaMLP"
-              ]
-            }
-          ],
-          "granite": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.granite.modeling_granite.GraniteAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.granite.modeling_granite.GraniteMLP"
-              ]
-            }
-          ],
-          "helium": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.helium.modeling_helium.HeliumAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.helium.modeling_helium.HeliumMLP"
-              ]
-            }
-          ],
-          "mistral": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.mistral.modeling_mistral.MistralAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.mistral.modeling_mistral.MistralMLP"
-              ]
-            }
-          ],
-          "olmo": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.olmo.modeling_olmo.OlmoAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.olmo.modeling_olmo.OlmoMLP"
-              ]
-            }
-          ],
-          "olmo2": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
-              ]
-            }
-          ],
-          "seed_oss": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
-              ]
-            }
-          ],
-          "smollm3": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
-              ]
-            }
-          ],
-          "stablelm": [
-            {
-              "name": "qkv",
-              "roles": [
-                "q",
-                "k",
-                "v"
-              ],
-              "parent_types": [
-                "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
-              ]
-            },
-            {
-              "name": "gate_up",
-              "roles": [
-                "gate",
-                "up"
-              ],
-              "parent_types": [
-                "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
-              ]
-            }
-          ]
-        }
+        "model_profiles": {}
       },
       "groups": [
         {

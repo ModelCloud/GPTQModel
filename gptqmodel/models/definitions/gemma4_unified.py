@@ -8,7 +8,7 @@ import torch
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 def _prepare_gemma4_unified_replay_kwargs(model_def, layer, layer_input, additional_inputs, target_device):
@@ -87,11 +87,7 @@ class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
     capture hooks are intentionally absent. The sliding/full rope boundaries still need the
     per-layer replay refresh below.
     """
-    fusable = LlamaFusableConfig().derive("gemma4_unified", parent_types={
-        "gate_up": (
-            "transformers.models.gemma4_unified.modeling_gemma4_unified.Gemma4UnifiedTextMLP",
-        ),
-    })
+    fusable = FusableConfig("gemma4_unified").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
 
     layer_modules_strict = False
@@ -121,7 +117,7 @@ class Gemma4UnifiedTextQModel(BaseQModel):
     rotary embedding at ``model.norm`` / ``model.rotary_emb``. The quantizable layout is identical
     to the composite variant, mirroring how ``gemma4_text`` parallels ``gemma4``.
     """
-    fusable = Gemma4UnifiedForConditionalGenerationGPTQ.fusable.derive("gemma4_unified_text")
+    fusable = FusableConfig("gemma4_unified_text").merge(Gemma4UnifiedForConditionalGenerationGPTQ.fusable)
 
 
     layer_modules_strict = False

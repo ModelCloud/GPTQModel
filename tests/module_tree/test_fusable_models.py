@@ -108,7 +108,7 @@ def test_registry_has_explicit_fusion_qualification_for_every_alias():
         if "profiles" in row:
             assert isinstance(config, FusableConfig) and key in config.model_types
             profiles = config.profiles_for(key)
-            actual = {p.name: list(p.parent_types) for p in profiles}
+            actual = {p.name: list(p.roles) for p in profiles}
             assert actual == row["profiles"], key
         else:
             assert row["reason"], key

@@ -2,17 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class FlintQModel(BaseQModel):
     """RecursiveSI Flint hybrid-attention MoE model."""
-    fusable = LlamaFusableConfig().derive("flint", parent_types={
-        "qkv": (
-            "transformers.models.flint.modeling_flint.FlintAttention",
-        ),
-    })
+    fusable = FusableConfig("flint").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
     require_trust_remote_code = False

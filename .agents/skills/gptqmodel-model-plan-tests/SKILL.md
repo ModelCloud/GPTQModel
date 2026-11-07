@@ -55,11 +55,18 @@ definition-owned `fusable` config or a precise reason the current executor is
 not applicable or remains unqualified. Keep `docs/fusion-model-coverage.md` in
 sync. Eligibility never enables fusion by default.
 
-Reuse immutable profiles through `FusableConfig.derive()` when the real native
-parent classes are identical. Rebind explicit parent types for other models;
-do not grant eligibility from inherited paths or familiar projection names.
-Definitions shared by native architectures use `model_profiles` to isolate
-their parent imports. MoE expert paths remain excluded by the current planner.
+Compose immutable role profiles through `FusableConfig("target").merge(...)`;
+merges preserve target identity and source immutability; use `profiles=("qkv",)` for a family subset.
+Concrete sibling paths and live parents must resolve from `model.module_plan()`.
+Do not add HF parent-class import paths, class allowlists, or name heuristics to
+fusion declarations. Inventory class names are independently observed test
+facts and never runtime admission rules. Keep native-forward/shared-input
+checks and verify preamble work runs once on both fused and fallback paths.
+Test multiple-source/diamond deduplication, explicit profile replacement, policy
+conflicts, scoped overrides and failure before changing an installed plan.
+Printed/extracted decisions must include origins and winning policy. Definitions
+may use `model_profiles` for per-model role policies. MoE expert
+paths remain excluded by the current planner.
 
 Before adding a qualification, run the real-model topology/planner test and
 the native parent tests in `tests/module_tree/test_fusable_models.py`. Cover

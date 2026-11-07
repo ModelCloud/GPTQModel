@@ -5,18 +5,11 @@
 
 from __future__ import annotations
 
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from .llama import LlamaQModel
 
 
 class Qwen2QModel(LlamaQModel):
-    fusable = LlamaFusableConfig().derive("qwen2", parent_types={
-        "qkv": (
-            "transformers.models.qwen2.modeling_qwen2.Qwen2Attention",
-        ),
-        "gate_up": (
-            "transformers.models.qwen2.modeling_qwen2.Qwen2MLP",
-        ),
-    })
+    fusable = FusableConfig("qwen2").merge(LlamaFusableConfig())
 
     shared_input_verified_model_types = frozenset({"qwen2"})

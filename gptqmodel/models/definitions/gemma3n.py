@@ -10,7 +10,7 @@ import torch
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -223,11 +223,7 @@ def _restore_gemma3n_per_layer_input_capture(model_def):
 
 
 class Gemma3nTextQModel(LlamaQModel):
-    fusable = LlamaFusableConfig().derive("gemma3n_text", parent_types={
-        "gate_up": (
-            "transformers.models.gemma3n.modeling_gemma3n.Gemma3nTextMLP",
-        ),
-    })
+    fusable = FusableConfig("gemma3n_text").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
     layer_modules_strict = False
     support_batch_quantize = False

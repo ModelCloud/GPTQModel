@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from .qwen3_moe import Qwen3MoeQModel
 
 
@@ -10,11 +10,7 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
     Text-only Qwen 3.5/3.6 MoE shells use the causal LM loader and keep routed
     experts under `model.layers`.
     """
-    fusable = LlamaFusableConfig().derive("qwen3_5_moe_text", parent_types={
-        "qkv": (
-            "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention",
-        ),
-    })
+    fusable = FusableConfig("qwen3_5_moe_text").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
     shared_input_verified_model_types = frozenset({"qwen3_5_moe_text"})

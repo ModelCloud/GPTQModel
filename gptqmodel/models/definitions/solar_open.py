@@ -4,17 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class SolarOpenQModel(BaseQModel):
     """GPTQ definition for Solar Open's GQA MoE decoder."""
-    fusable = LlamaFusableConfig().derive("solar_open", parent_types={
-        "qkv": (
-            "transformers.models.solar_open.modeling_solar_open.SolarOpenAttention",
-        ),
-    })
+    fusable = FusableConfig("solar_open").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
     dynamic_expert_index = "n_routed_experts"

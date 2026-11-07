@@ -4,17 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LagunaQModel(BaseQModel):
     # Laguna has a dense first MLP layer and sparse MoE layers after that.
-    fusable = LlamaFusableConfig().derive("laguna", parent_types={
-        "qkv": (
-            "transformers.models.laguna.modeling_laguna.LagunaAttention",
-        ),
-    })
+    fusable = FusableConfig("laguna").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"

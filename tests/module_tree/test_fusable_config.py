@@ -10,7 +10,6 @@ from dataclasses import FrozenInstanceError, dataclass, replace
 import pytest
 import torch
 from transformers import Qwen2Config, Qwen2ForCausalLM
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2MLP
 
 from gptqmodel import FusableConfig, FusableProfile, LlamaFusableConfig
 from gptqmodel.models.definitions.llama import LlamaQModel
@@ -22,6 +21,74 @@ from tests.module_tree.test_llama_fusion import _wrapper
 
 class NonFusableLlamaQModel(LlamaQModel):
     fusable = None
+
+
+class IndependentMlp(torch.nn.Module):
+    """A real runtime parent whose names/class are absent from any allowlist."""
+
+    def __init__(self, native):
+        super().__init__()
+        self.branch_alpha = native.gate_proj
+        self.branch_beta = native.up_proj
+        self.output = native.down_proj
+        self.activation = native.act_fn
+
+    def forward(self, x):
+        return self.output(self.activation(self.branch_alpha(x)) * self.branch_beta(x))
+
+
+class IndependentPrefixMlp(IndependentMlp):
+    def __init__(self, native):
+        super().__init__(native)
+        self.prefix_calls = 0
+
+    def forward(self, x):
+        self.prefix_calls += 1
+        return self.output(self.activation(self.branch_alpha(x)) * self.branch_beta(x))
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq"])
+@pytest.mark.parametrize("parent_type", [IndependentMlp, IndependentPrefixMlp])
+def test_live_parent_and_renamed_projections_resolve_only_from_definition_tree(method, parent_type):
+    source, _ = _wrapper(method)
+    for layer in source.model.model.layers:
+        layer.compute_unit = parent_type(layer.mlp).eval()
+        del layer.mlp
+
+    class RenamedDefinition(LlamaQModel):
+        fusable = FusableConfig("llama").merge(LlamaFusableConfig(), profiles=("gate_up",))
+        module_tree = copy.deepcopy(LlamaQModel.module_tree)
+
+    mapping = RenamedDefinition.module_tree[-1]
+    del mapping["mlp"]
+    mapping["compute_unit"] = ("branch_alpha:0:gate:in=x", "branch_beta:0:up:in=x", "output:1:down")
+    model = RenamedDefinition(source.model, quantized=True, quantize_config=source.quantize_config)
+    inputs = torch.randn(1, 3, 64, dtype=torch.float16)
+    with torch.inference_mode():
+        before = [layer.compute_unit(inputs) for layer in model.model.model.layers]
+        plan = model.fuse()
+        after = [layer.compute_unit(inputs) for layer in model.model.model.layers]
+    assert len(plan.groups) == 2
+    assert all(type(group.parent) is parent_type and group.calls == 1 for group in plan.groups)
+    assert all(group.decision.paths == ("compute_unit.branch_alpha", "compute_unit.branch_beta")
+               for group in plan.groups)
+    assert all(set(profile) == {"name", "roles"} for profile in plan.to_dict()["fusable"]["profiles"])
+    for actual, expected in zip(after, before):
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+    if parent_type is IndependentPrefixMlp:
+        group = plan.groups[0]
+        assert group.parent.prefix_calls == 2
+        handle = group.modules[0].register_forward_pre_hook(lambda _module, args: (args[0] + 0.25,))
+        try:
+            with torch.inference_mode():
+                fallback = group.parent(inputs)
+                assert group.parent.prefix_calls == 3  # Preamble executes once on fallback too.
+                expected = group.native_forward(inputs)
+            torch.testing.assert_close(fallback, expected, rtol=0, atol=0)
+            assert group.calls == 1 and group.packed is None
+        finally:
+            handle.remove()
+    model.fuse(False)
 
 
 def test_llama_profile_is_immutable_and_public():
@@ -40,13 +107,12 @@ def test_llama_profile_is_immutable_and_public():
         config.overrides["qkv"] = True
     assert copy.deepcopy(config) is config
     assert json.loads(json.dumps(config.to_dict()))["profiles"][0]["roles"] == ["q", "k", "v"]
-    for profile in config.profiles:
-        assert len(profile.resolve_parent_types()) == 1
+    assert all(set(profile) == {"name", "roles"} for profile in config.to_dict()["profiles"])
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"model_types": ()}, {"model_types": "llama"}, {"model_types": ("llama", "llama")},
-    {"model_types": ("",)}, {"profiles": ()}, {"profiles": (object(),)},
+    {"model_types": ()}, {"model_types": ("llama", "llama")},
+    {"model_types": ("",)}, {"profiles": (object(),)},
     {"profiles": (LlamaFusableConfig().profiles[0],) * 2},
     {"overrides": {"qkv": "yes"}}, {"overrides": {"": False}}, {"overrides": []},
 ])
@@ -55,14 +121,10 @@ def test_invalid_configs_reject(kwargs):
         LlamaFusableConfig(**kwargs)
 
 
-@pytest.mark.parametrize("roles,parents", [
-    (("q",), (Qwen2Attention,)), (("q", "q"), (Qwen2Attention,)),
-    ("qkv", (Qwen2Attention,)), (("q", "k"), ()),
-    (("q", "k"), ("not_dotted",)), (("q", "k"), "some.Parent"),
-])
-def test_invalid_profile_rejects(roles, parents):
+@pytest.mark.parametrize("roles", [("q",), ("q", "q"), "qkv", ("", "k"), ("q", object())])
+def test_invalid_profile_rejects(roles):
     with pytest.raises((TypeError, ValueError)):
-        FusableProfile("qkv", roles, parents)
+        FusableProfile("qkv", roles)
 
 
 def test_missing_definition_profile_rejects_without_mutation():
@@ -113,13 +175,13 @@ def test_failed_admission_leaves_existing_fusion_installed(monkeypatch):
     assert model._fusion_plan is None and plan.groups[0].packed is None
 
 
-def test_bad_executor_profile_rejects_before_removing_existing_fusion(monkeypatch):
+def test_unsupported_model_policy_rejects_before_removing_existing_fusion(monkeypatch):
     model, _ = _wrapper(automatic=True)
     plan = model.fuse()
     packed = plan.groups[0].packed
-    bad = replace(LlamaFusableConfig(), profiles=(FusableProfile("qkv", ("q", "k", "v"), ("builtins.len",)),))
+    bad = FusableConfig("other").merge(LlamaFusableConfig())
     monkeypatch.setattr(LlamaQModel, "fusable", bad)
-    with pytest.raises(TypeError, match="parent must resolve to a class"):
+    with pytest.raises(ValueError, match="does not support model_type"):
         model.fuse()
     assert model._fusion_plan is plan and plan.groups[0].packed is packed
     model.fuse(False)
@@ -184,10 +246,6 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
     @dataclass(frozen=True)
     class QwenFusableConfig(LlamaFusableConfig):
         model_types: tuple[str, ...] = ("qwen2",)
-        profiles: tuple[FusableProfile, ...] = (
-            replace(LlamaFusableConfig().profiles[0], parent_types=(Qwen2Attention,)),
-            replace(LlamaFusableConfig().profiles[1], parent_types=(Qwen2MLP,)),
-        )
 
     class OptInQwen2QModel(Qwen2QModel):
         fusable = QwenFusableConfig()
@@ -207,29 +265,8 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
     assert require_fusable_config(OptInQwen2QModel, "qwen2") is OptInQwen2QModel.fusable
 
 
-def test_derive_reuses_roles_and_inherited_profiles_without_mutation():
-    base = LlamaFusableConfig(overrides={"qkv": False})
-    derived = base.derive("qwen2", parent_types={"qkv": (Qwen2Attention,)}, overrides={"gate_up": False})
-    assert isinstance(derived, LlamaFusableConfig)
-    assert derived.profiles[0].roles is base.profiles[0].roles
-    assert derived.profiles[0].resolve_parent_types() == (Qwen2Attention,)
-    assert dict(derived.overrides) == {"qkv": False, "gate_up": False}
-    assert len(base.profiles) == 2 and dict(base.overrides) == {"qkv": False}
-    alias = derived.derive("wrapper")
-    assert alias.profiles is derived.profiles
-    assert alias.model_types == ("wrapper",)
-    with pytest.raises(ValueError, match="Unknown fusion profiles"):
-        base.derive("other", parent_types={"misspelled": (Qwen2Attention,)})
-    with pytest.raises(ValueError, match="FusableProfile"):
-        base.derive("other", parent_types={})
-    with pytest.raises(TypeError, match="mapping"):
-        base.derive("other", overrides=[])
-    with pytest.raises(TypeError, match="must map"):
-        base.derive("other", parent_types=["qkv"])
-
-
-def test_alias_profiles_are_immutable_and_import_only_the_selected_architecture():
-    other = FusableProfile("qkv", ("q", "k", "v"), ("unavailable_architecture.modeling.Parent",))
+def test_alias_role_profiles_are_immutable_and_need_no_architecture_imports():
+    other = FusableProfile("qkv", ("q", "k", "v"))
     variants = {"other": [other]}
     config = replace(LlamaFusableConfig(), model_types=("llama", "other"), model_profiles=variants)
     variants["other"].clear()
@@ -239,14 +276,13 @@ def test_alias_profiles_are_immutable_and_import_only_the_selected_architecture(
 
     assert require_fusable_config(AliasedDefinition, "llama") is config
     assert config.profiles_for("other") == (other,)
-    with pytest.raises(ModuleNotFoundError, match="unavailable_architecture"):
-        require_fusable_config(AliasedDefinition, "other")
+    assert require_fusable_config(AliasedDefinition, "other") is config
     with pytest.raises(TypeError):
         config.model_profiles["other"] = ()
-    assert config.derive("wrapper", source_model_type="other").profiles == (other,)
-    assert not config.derive("wrapper", source_model_type="other").model_profiles
+    assert FusableConfig("wrapper").merge(config, source_model_type="other").profiles == (other,)
+    assert not FusableConfig("wrapper").merge(config, source_model_type="other").model_profiles
     with pytest.raises(ValueError, match="does not support"):
-        config.derive("wrapper", source_model_type="typo")
+        FusableConfig("wrapper").merge(config, source_model_type="typo")
     with pytest.raises(ValueError, match="undeclared"):
         replace(config, model_profiles={"typo": (other,)})
     with pytest.raises(ValueError, match="distinct"):

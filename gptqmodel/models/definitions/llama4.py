@@ -6,18 +6,14 @@
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Llama4QModel(BaseQModel):
     # some bug in the attention_mask of transformers.modeling_llama4,
     # so batch quantization for Llama4 is temporarily not supported.
-    fusable = LlamaFusableConfig().derive("llama4", parent_types={
-        "qkv": (
-            "transformers.models.llama4.modeling_llama4.Llama4TextAttention",
-        ),
-    })
+    fusable = FusableConfig("llama4").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     support_batch_quantize = False
     loader = AutoModelForImageTextToText
@@ -50,7 +46,7 @@ class Llama4QModel(BaseQModel):
 
 
 class Llama4TextQModel(Llama4QModel):
-    fusable = Llama4QModel.fusable.derive("llama4_text")
+    fusable = FusableConfig("llama4_text").merge(Llama4QModel.fusable)
 
     shared_input_verified_model_types = frozenset({"llama4_text"})
 

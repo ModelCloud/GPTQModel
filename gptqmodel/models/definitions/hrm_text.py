@@ -3,7 +3,7 @@
 
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Chunk:
@@ -13,14 +13,7 @@ class Chunk:
 
 class HrmTextQModel(BaseQModel):
     # z_L_init is a Parameter on model itself, so child-module traversal misses it.
-    fusable = LlamaFusableConfig().derive("hrm_text", parent_types={
-        "qkv": (
-            "transformers.models.hrm_text.modeling_hrm_text.HrmTextAttention",
-        ),
-        "gate_up": (
-            "transformers.models.hrm_text.modeling_hrm_text.HrmTextMLP",
-        ),
-    })
+    fusable = FusableConfig("hrm_text").merge(LlamaFusableConfig())
 
     modules_with_direct_meta_tensors = ["model"]
 

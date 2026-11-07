@@ -13,16 +13,12 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekOCR2QModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("deepseek_ocr2", parent_types={
-        "qkv": (
-            "transformers.models.deepseek_ocr2.modeling_deepseek_ocr2.DeepseekOcr2TextAttention",
-        ),
-    })
+    fusable = FusableConfig("deepseek_ocr2").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     loader = AutoModelForImageTextToText
     modules_with_direct_meta_tensors = ["model"]

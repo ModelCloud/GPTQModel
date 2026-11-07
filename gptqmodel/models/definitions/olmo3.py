@@ -8,7 +8,7 @@ import torch
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 def _prepare_olmo3_replay_kwargs(model_def, layer, layer_input, additional_inputs, target_device):
@@ -51,14 +51,7 @@ def _prepare_olmo3_replay_kwargs(model_def, layer, layer_input, additional_input
 
 
 class Olmo3QModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("olmo3", parent_types={
-        "qkv": (
-            "transformers.models.olmo3.modeling_olmo3.Olmo3Attention",
-        ),
-        "gate_up": (
-            "transformers.models.olmo3.modeling_olmo3.Olmo3MLP",
-        ),
-    })
+    fusable = FusableConfig("olmo3").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"

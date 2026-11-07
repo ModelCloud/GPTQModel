@@ -5,7 +5,7 @@
 
 from ...quantization import METHOD
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -16,11 +16,7 @@ class Qwen3NextGPTQ(BaseQModel):
       - Dense MLP (Qwen3NextMLP) and Sparse MoE (Qwen3NextSparseMoeBlock)
       - Dynamic expert indexing via config.num_experts
     """
-    fusable = LlamaFusableConfig().derive("qwen3_next", parent_types={
-        "qkv": (
-            "transformers.models.qwen3_next.modeling_qwen3_next.Qwen3NextAttention",
-        ),
-    })
+    fusable = FusableConfig("qwen3_next").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
     shared_input_verified_model_types = frozenset({"qwen3_next"})

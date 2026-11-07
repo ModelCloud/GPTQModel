@@ -15,6 +15,7 @@ import gc
 import inspect
 import math
 import textwrap
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from types import FunctionType, MethodType
@@ -82,6 +83,47 @@ def _parent_template(original, names):
            and isinstance(n.func.value, ast.Name) and n.func.value.id == input_name
            and n.func.attr.endswith("_") for n in ast.walk(node)):
         return None
+
+    def projection(call):
+        return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name) and call.func.value.id == owner
+                and call.func.attr in names)
+
+    # Declared roles identify the live parent, regardless of its Python class.
+    # Preserve the native preamble, including cache/indexer updates. Reject
+    # additional input consumers between projections, where fusion would move
+    # a later projection ahead of a potentially mutating callback.
+    calls = [child for child in ast.walk(node) if projection(child)]
+    if not calls:
+        return None
+    first = min((call.lineno, call.col_offset) for call in calls)
+    last = max((call.lineno, call.col_offset) for call in calls)
+    first_statement = next(index for index, statement in enumerate(node.body)
+                           if statement.lineno <= first[0] <= statement.end_lineno)
+    insertion = (node.body[first_statement].lineno, node.body[first_statement].col_offset)
+    original_continuation = copy.deepcopy(node.body[first_statement:])
+    parents = {child: parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+    for use in ast.walk(node):
+        if (not isinstance(use, ast.Name) or use.id != input_name or not isinstance(use.ctx, ast.Load)
+                or (use.lineno, use.col_offset) > last):
+            continue
+        parent = parents[use]
+        if projection(parent) and parent.args == [use] and not parent.keywords:
+            continue
+        if isinstance(parent, ast.Call) and (parent.lineno, parent.col_offset) < insertion:
+            continue
+        if isinstance(parent, ast.Attribute) and parent.value is use:
+            if parent.attr in ("shape", "dtype", "device", "ndim"):
+                continue
+            outer = parents.get(parent)
+            if (parent.attr in ("size", "dim", "numel") and isinstance(outer, ast.Call)
+                    and outer.func is parent and not outer.keywords):
+                try:
+                    if all(isinstance(ast.literal_eval(arg), int) for arg in outer.args):
+                        continue
+                except (ValueError, TypeError):
+                    pass
+        return None
     counts = [0] * len(names)
     valid = True
 
@@ -127,9 +169,14 @@ def _parent_template(original, names):
     keywords = [ast.keyword(arg=a.arg, value=ast.Name(id=a.arg, ctx=ast.Load())) for a in node.args.kwonlyargs]
     if node.args.kwarg:
         keywords.append(ast.keyword(arg=None, value=ast.Name(id=node.args.kwarg.arg, ctx=ast.Load())))
-    prelude = ast.parse(f"__gptq_outputs = __gptq_execute({input_name})\nif __gptq_outputs is None:\n    return None").body
-    prelude[1].body[0].value = ast.Call(func=ast.Name(id="__gptq_fallback", ctx=ast.Load()), args=args, keywords=keywords)
-    node.body = prelude + node.body
+    entry = ast.parse("if __gptq_group_state['parent_forward'] is not __gptq_native_forward:\n    return None").body[0]
+    entry.body[0].value = ast.Call(func=ast.Name(id="__gptq_fallback", ctx=ast.Load()), args=args, keywords=keywords)
+    prelude = ast.parse(f"__gptq_outputs = __gptq_execute({input_name})\nif __gptq_outputs is None:\n    pass").body
+    # A fallback continues after the already-executed preamble. Calling the
+    # entire original forward here would run its side effects twice.
+    prelude[1].body = original_continuation
+    prelude[1].orelse = node.body[first_statement:]
+    node.body = [entry, *node.body[:first_statement], *prelude]
     node.name = "__gptq_direct_forward"
     # Resolve annotations lazily, as upstream modules using future annotations do.
     import __future__
@@ -227,6 +274,8 @@ class FusionDecision:
     parent: str
     paths: tuple[str, ...]
     reason: str = ""
+    profile_origins: tuple[str, ...] = ()
+    policy: str = "default: enabled"
 
     @property
     def enabled(self):
@@ -536,7 +585,8 @@ class _FusionGroup:
         original = self.native_forward.__func__
         code = _parent_template(original, self.names)
         namespace = original.__globals__.copy()
-        namespace.update(__gptq_execute=self.execute, __gptq_fallback=self._fallback)
+        namespace.update(__gptq_execute=self.execute, __gptq_fallback=self._fallback,
+                         __gptq_group_state=vars(self), __gptq_native_forward=self.native_forward)
         direct = FunctionType(code, namespace, original.__name__, original.__defaults__)
         direct.__kwdefaults__ = original.__kwdefaults__
         direct.__annotations__ = original.__annotations__.copy()
@@ -594,21 +644,23 @@ class FusionPlanner:
         self.config = require_fusable_config(type(model), getattr(model.model.config, "model_type", None))
         if not isinstance(model.model, torch.nn.Module):
             return
-        policy = {**self.config.overrides, **(overrides or {})}
-        if any(type(value) is not bool for value in policy.values()):
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise TypeError("Fusion overrides must be a mapping")
+        if any(type(value) is not bool for value in (overrides or {}).values()):
             raise TypeError("Fusion overrides must map family or parent paths to bool")
         plan = model.module_plan()
-        profiles = [(profile, profile.resolve_parent_types()) for profile in
-                    self.config.profiles_for(getattr(model.model.config, "model_type", None))]
+        profiles = self.config.profiles_for(getattr(model.model.config, "model_type", None))
         claimed_parents = {}
         layers, layer_names = get_layers_with_prefixes(model.model, model.extract_layers_node())
         if not layers:
             raise ValueError("No declared decoder layers resolved for fusion")
-        for layer_name, layer in zip(layer_names, layers):
+        for ordinal, (layer_name, layer) in enumerate(zip(layer_names, layers)):
+            index = layer_name.rsplit(".", 1)[-1]
+            layer_index = int(index) if index.isdecimal() else ordinal
             for parent in dict.fromkeys(spec.parent for spec in plan.specs if spec.roles):
                 if not parent or plan.is_moe(parent) or "{expert_index}" in parent:
                     continue
-                for profile, parent_types in profiles:
+                for profile in profiles:
                     family, roles = profile.name, profile.roles
                     candidates = [plan.role_paths_in_parent(parent, role) for role in roles]
                     if not any(candidates):
@@ -616,7 +668,9 @@ class FusionPlanner:
                     full_parent = f"{layer_name}.{parent}"
                     paths = tuple(paths[0] for paths in candidates if len(paths) == 1)
                     reason = ""
-                    if not policy.get(full_parent, policy.get(parent, policy.get(family, True))):
+                    enabled, policy = self.config.policy_for(
+                        family, layer_index, parent=parent, full_parent=full_parent, overrides=overrides)
+                    if not enabled:
                         reason = "disabled by fusion override"
                     elif any(len(paths) != 1 for paths in candidates) or len(set(paths)) != len(roles):
                         reason = "requires exactly one distinct declared projection per role"
@@ -632,8 +686,6 @@ class FusionPlanner:
                         configs = [_effective_config(model.quantize_config, f"{layer_name}.{p}") for p in paths]
                         if configs[0] is None or any(c != configs[0] for c in configs[1:]):
                             reason = "effective quantization configurations differ or exclude a projection"
-                        elif type(owner) not in parent_types:
-                            reason = f"parent forward is outside the declared {family} executor types"
                         elif hasattr(owner, "_hf_hook"):
                             reason = "parent has offload hooks"
                         else:
@@ -647,7 +699,8 @@ class FusionPlanner:
                                 or _parent_template(forward.__func__, tuple(path.rsplit(".", 1)[-1] for path in paths)) is None
                             ):
                                 reason = "native forward cannot be safely rewritten from declared projection calls"
-                    decision = FusionDecision(family, full_parent, paths, reason)
+                    decision = FusionDecision(family, full_parent, paths, reason,
+                                              self.config.profile_origins(family), policy)
                     self.decisions.append(decision)
                     if decision.enabled:
                         if id(owner) in claimed_parents:
@@ -676,14 +729,16 @@ class FusionPlanner:
     def to_dict(self):
         return {"fusable": self.config.to_dict(),
                 "groups": [{"family": d.family, "parent": d.parent, "paths": list(d.paths),
-                                "enabled": d.enabled, "reason": d.reason} for d in self.decisions],
+                                "enabled": d.enabled, "reason": d.reason,
+                                "profile_origins": list(d.profile_origins), "policy": d.policy} for d in self.decisions],
                 "fused_calls": sum(g.calls for g in self.groups)}
 
     def render(self):
         lines = [f"FusionPlanner: {len(self.groups)} eligible / {len(self.decisions)} declared groups"]
         for decision in self.decisions:
             status = "eligible" if decision.enabled else f"skip: {decision.reason}"
-            lines.append(f"  {decision.parent} [{decision.family}] [{status}]")
+            lines.append(f"  {decision.parent} [{decision.family}] [{status}]"
+                         f" [from: {', '.join(decision.profile_origins)}; {decision.policy}]")
         return "\n".join(lines)
 
     def print(self, *, file=None):

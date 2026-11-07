@@ -13,18 +13,11 @@ from ...utils.attn_mask import normalize_seq_mask
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class MuseGlimmerQModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("muse_glimmer", parent_types={
-        "qkv": (
-            "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextAttention",
-        ),
-        "gate_up": (
-            "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextMLP",
-        ),
-    })
+    fusable = FusableConfig("muse_glimmer").merge(LlamaFusableConfig())
 
     loader = AutoModelForImageTextToText
 

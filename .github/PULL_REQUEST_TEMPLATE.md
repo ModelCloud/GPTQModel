@@ -31,8 +31,13 @@ See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
       and applicable consumers, including layout variants and method overrides.
 - [ ] Runtime-created tensors are distinguished from checkpoint-owned weights.
 - [ ] Fusion eligibility is recorded in `fusable_models.json`: a validated
-      definition-owned `fusable` config reuses compatible native profiles, or
+      definition-owned `fusable` config composes role profiles with target-first `merge(...)`, or
       an explicit non-applicability/qualification-gap reason is given.
+- [ ] Fusion modules/parents resolve through `model.module_plan()` with no HF
+      class-path allowlist; preamble/fallback ordering is tested.
+- [ ] Composed fusion configs preserve target identity and source immutability;
+      merge conflicts, explicit resolution, scoped policy and printed provenance
+      have unit coverage.
 - [ ] New fusion qualifications pass real-model planner coverage and native
       GPTQ/AWQ FP16/BF16 forward/oracle tests; skipped tests are not counted as validation.
 - [ ] Registry and model-specific tests passed; any dependency skips and their

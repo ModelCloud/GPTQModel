@@ -4,15 +4,11 @@
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class HunYuanMoEV1QModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("hunyuan_v1_moe", parent_types={
-        "qkv": (
-            "transformers.models.hunyuan_v1_moe.modeling_hunyuan_v1_moe.HunYuanMoEV1Attention",
-        ),
-    })
+    fusable = FusableConfig("hunyuan_v1_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     dynamic_expert_index = "num_experts"
 

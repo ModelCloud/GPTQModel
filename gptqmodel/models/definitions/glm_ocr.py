@@ -3,18 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class GlmOCRGPTQ(BaseQwen3VLGPTQ):
     # GLM-OCR computes multimodal RoPE from `mm_token_type_ids`, so the
     # processor-produced field must reach the model on the calibration path.
-    fusable = LlamaFusableConfig().derive("glm_ocr", parent_types={
-        "qkv": (
-            "transformers.models.glm_ocr.modeling_glm_ocr.GlmOcrTextAttention",
-        ),
-    })
+    fusable = FusableConfig("glm_ocr").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     require_mm_token_type_ids = True
 

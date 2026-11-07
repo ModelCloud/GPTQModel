@@ -1,8 +1,8 @@
 # Fusion model qualification
 
 Fusion is opt-in and post-quantization only. A definition's `fusable` contract
-admits explicit model types and actual native parent classes. Projection paths
-and roles still come exclusively from `model.module_plan()`; matching a name,
+admits explicit model types and sibling role groups. Projection paths, live
+parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
@@ -29,11 +29,12 @@ are measured on Llama 3.2 1B; they are not measurements for every architecture.
 flowchart TD
     DEF["Definition.fusable"] --> TYPE{"Runtime model_type explicitly admitted?"}
     TYPE -->|"no"| REJECT["ValueError before fusion mutation"]
-    TYPE -->|"yes"| PROFILES["FusableConfig.profiles_for(model_type)"]
-    PROFILES --> IMPORT["Resolve only selected native parent types"]
-    IMPORT --> PLAN["FusionPlanner reads model.module_plan()"]
+    TYPE -->|"yes"| COMPLETE{"Composition complete and conflict-free?"}
+    COMPLETE -->|"no"| REJECT
+    COMPLETE -->|"yes"| PROFILES["FusableConfig.profiles_for(model_type)"]
+    PROFILES --> PLAN["FusionPlanner reads model.module_plan()"]
     PLAN --> LAYERS["get_layers_with_prefixes<br/>resolve alternatives and deduplicate stacks"]
-    LAYERS --> CHECK{"Exact role paths, native parent,<br/>effective config and source checks pass?"}
+    LAYERS --> CHECK{"Tree-resolved roles and live parent,<br/>effective config and source checks pass?"}
     CHECK -->|"no"| SKIP["Record skip reason"]
     CHECK -->|"yes"| GROUP["_FusionGroup<br/>one contiguous packed quantized operator"]
     GROUP --> MATH["Split outputs consumed by unchanged native parent math"]
@@ -41,40 +42,44 @@ flowchart TD
     style SKIP fill:#fff1f0,stroke:#cf1322
 ```
 
-`LlamaFusableConfig()` retains llama-only defaults. Definitions use immutable
-`derive(...)` calls to reuse the `qkv` and `gate_up` roles while explicitly
-rebinding parent types. Wrappers with identical text parents reuse the existing
-text definition's config. Definitions reused for multiple native architectures
-use `model_profiles`; only the selected architecture is imported. This keeps
-unrelated optional model implementations out of admission.
+`LlamaFusableConfig()` retains llama-only defaults. Target-first `merge(...)`
+composes reusable `qkv` and `gate_up` role profiles without importing source model
+identities. No Python class path or parent-type whitelist is part of the config.
+The actual parent resolves from the tree's sibling roles and its live `forward`
+is validated before fusion. Optional per-model role variants use `model_profiles`.
 
 ```python
-from gptqmodel import LlamaFusableConfig
+from gptqmodel import FusableConfig, LlamaFusableConfig
 from gptqmodel.models.definitions.qwen2 import Qwen2QModel
 
-# Reuse roles; select exactly the listed profiles and explicitly bind executors.
-fusable = LlamaFusableConfig().derive("qwen2", parent_types={
-    "qkv": ("transformers.models.qwen2.modeling_qwen2.Qwen2Attention",),
-    "gate_up": ("transformers.models.qwen2.modeling_qwen2.Qwen2MLP",),
-})
+fusable = FusableConfig("qwen2").merge(LlamaFusableConfig())
+attention_only = FusableConfig("qwen2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+audio = FusableConfig("qwen2_audio").merge(Qwen2QModel.fusable)
 
-# Same validated text parents in the audio wrapper; no duplicate role/type list.
-fusable = Qwen2QModel.fusable.derive("qwen2_audio")
-
-# Copy a specific native alias profile when adapting a wrapper.
-# LlamaQModel.fusable.derive("mistral3", source_model_type="mistral")
+# Repeated merges permit source-specific profile selection and local overrides.
+mlp = FusableConfig("mlp_policy").profile("gate_up", roles=("gate", "up"))
+custom = (
+    FusableConfig("custom_model")
+    .merge(LlamaFusableConfig(), profiles=("qkv",))
+    .merge(mlp)
+    .override("qkv", enabled=False, layers=(0, 1))
+)
 ```
 
-`derive` returns a frozen instance of the same config subclass. It copies policy
-mappings, preserves shared immutable profiles when no rebinding is requested,
-and rejects unknown profile names. It does not enable fusion. A definition
-without a qualified contract rejects `model.fuse()`; `model.fuse(False)` is
-always valid.
+All operations return frozen configurations without changing their inputs.
+Identical contributions deduplicate, including diamond composition. Conflicting
+profiles require `replace_profile()`; conflicting inherited policy requires
+`override()`. Incomplete or unresolved configurations cannot execute fusion.
+Profile origins and winning scoped policy appear in the returned plan's printed
+and extracted diagnostics. See the [composition flow and precedence contract](fusion-planner.md#merge-extend-and-override).
+A definition without a qualified contract rejects `model.fuse()`;
+`model.fuse(False)` remains valid. Composition never enables fusion.
 
 The compiler rejects projection calls guarded by conditions, loops, exception
 or context-manager scopes, comprehensions or lambdas, as well as rewritten or
 in-place-mutated parent inputs. These projections cannot safely move to the
-single fused invocation at the beginning of the parent forward. Additional
+single fused invocation at the first projection. Preamble indexer/cache work
+is preserved once, with the original continuation used on fallback. Additional
 weight references, decorated forwards, and instance overrides also fail closed.
 Gemma4/Gemma3n shared-KV attention is consequently excluded while compatible
 MLPs remain eligible. Ripple's value-residual and chunked helper forwards are
@@ -86,7 +91,7 @@ The table lists eligibility contracts. Runtime skip reasons still apply for
 unsupported layouts, dtypes, hooks, effective config mismatches or excluded
 leaves. Multimodal profiles cover only the declared decoder text stack.
 
-| Model type | Definition | Profiles | Native parent classes |
+| Model type | Definition | Profiles | Observed runtime parents (test evidence) |
 | --- | --- | --- | --- |
 | `afmoe` | `AfMoeQModel` | `qkv` | `AfmoeAttention` |
 | `apertus` | `ApertusQModel` | `qkv` | `ApertusAttention` |
@@ -302,9 +307,9 @@ layout alone does not authorize it.
 
 1. Inspect the real implementation and declared module-plan roles, including
    conditional branches, shared-KV behavior and fused expert conversion.
-2. Reuse an existing immutable config when the actual parent classes are
-   identical. Otherwise derive profiles with explicit native types; do not
-   expand an ancestor's allowlist based on path spelling.
+2. Compose immutable role profiles through target-first `merge(...)`, selecting only the
+   eligible families. Concrete module paths and parents must resolve from the
+   definition tree; do not add HF class import paths or runtime name heuristics.
 3. Add an inventory entry with a tiny real-model config, its concrete loader,
    and independently inspected parent paths/types. Update this coverage table.
 4. Run `tests/module_tree/test_fusable_models.py` and the config/consumer suites.

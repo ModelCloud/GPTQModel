@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from .llama import LlamaQModel
 
 
@@ -11,14 +11,7 @@ class HunYuanDenseV1QModel(LlamaQModel):
     RMSNorm modules inside attention. Those norms are metadata/base modules for
     quantization and should not be replaced by quantized linear kernels.
     """
-    fusable = LlamaFusableConfig().derive("hunyuan_v1_dense", parent_types={
-        "qkv": (
-            "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1Attention",
-        ),
-        "gate_up": (
-            "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1MLP",
-        ),
-    })
+    fusable = FusableConfig("hunyuan_v1_dense").merge(LlamaFusableConfig())
 
 
     module_tree = [

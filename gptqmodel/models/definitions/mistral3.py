@@ -3,11 +3,12 @@
 from transformers import AutoModelForPreTraining
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig
 from .llama import LlamaQModel
 
 
 class Mistral3GPTQ(BaseQModel):
-    fusable = LlamaQModel.fusable.derive("mistral3", source_model_type="mistral")
+    fusable = FusableConfig("mistral3").merge(LlamaQModel.fusable, source_model_type="mistral")
 
     loader = AutoModelForPreTraining
 

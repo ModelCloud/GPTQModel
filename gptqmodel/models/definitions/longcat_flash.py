@@ -4,16 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LongCatFlashQModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("longcat_flash", parent_types={
-        "gate_up": (
-            "transformers.models.longcat_flash.modeling_longcat_flash.LongcatFlashMLP",
-        ),
-    })
+    fusable = FusableConfig("longcat_flash").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
     dynamic_expert_index = "n_routed_experts"
 

@@ -3,29 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from dataclasses import replace
-
 from ..base import BaseQModel
 
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class GlmQModel(BaseQModel):
-    fusable = replace(LlamaFusableConfig().derive("glm", "glm4", parent_types={
-        "qkv": (
-            "transformers.models.glm.modeling_glm.GlmAttention",
-        ),
-    }),
-        model_types=("glm", "glm4"),
-        model_profiles={
-            "glm4": LlamaFusableConfig().derive("glm4", parent_types={
-                "qkv": (
-                    "transformers.models.glm4.modeling_glm4.Glm4Attention",
-                ),
-            }).profiles,
-        },
-    )
+    fusable = FusableConfig(("glm", "glm4")).merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "model.norm"
 

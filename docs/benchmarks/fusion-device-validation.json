@@ -5310,5 +5310,58 @@
       "skipped": 0,
       "seconds": 17.881
     }
+  },
+  "composition_validation": {
+    "configuration": "Target-first immutable FusableConfig.merge; role-only profiles, explicit conflict resolution, scoped policy, tree-resolved live parents and preserved native preambles.",
+    "runs": {
+      "configuration": {
+        "tests": 58,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 58
+      },
+      "module tree CUDA": {
+        "tests": 1735,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 142,
+        "passed": 1593
+      },
+      "core config device ROCm": {
+        "tests": 167,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 29,
+        "passed": 138
+      },
+      "save reload and fresh quantization": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 4
+      },
+      "native kernels CUDA": {
+        "tests": 180,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 34,
+        "passed": 146
+      },
+      "native kernels ROCm": {
+        "tests": 180,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 93,
+        "passed": 87
+      }
+    },
+    "regressions": [
+      "Multiple sources and diamond deduplication preserve target identity and immutable sources.",
+      "Structural and policy conflicts require explicit replacement or local override; invalid composition cannot replace an installed plan.",
+      "Profile/layer policy reaches actual GPTQ/AWQ parent execution, with extracted/printed provenance.",
+      "Renamed parents and weight paths resolve exclusively from the module plan; side-effecting preambles run once on success and fallback."
+    ]
   }
 }

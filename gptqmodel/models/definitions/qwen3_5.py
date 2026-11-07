@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from transformers import AutoModelForImageTextToText
 
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -14,14 +14,7 @@ class Qwen3_5QModel(LlamaQModel):
     ahead of the attention projections. We mark those helper modules as
     non-quantized so the layer walker captures the complete structure.
     """
-    fusable = LlamaFusableConfig().derive("qwen3_5", parent_types={
-        "qkv": (
-            "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention",
-        ),
-        "gate_up": (
-            "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP",
-        ),
-    })
+    fusable = FusableConfig("qwen3_5").merge(LlamaFusableConfig())
 
 
     loader = AutoModelForImageTextToText

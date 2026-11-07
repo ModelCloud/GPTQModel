@@ -12,16 +12,12 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MiniMaxM3VLGPTQ(BaseQModel):
-    fusable = LlamaFusableConfig().derive("minimax_m3_vl", parent_types={
-        "qkv": (
-            "transformers.models.minimax_m3_vl.modeling_minimax_m3_vl.MiniMaxM3VLAttention",
-        ),
-    })
+    fusable = FusableConfig("minimax_m3_vl").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     loader = AutoModelForImageTextToText
 

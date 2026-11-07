@@ -1,11 +1,13 @@
 {
-  "schema": 1,
+  "schema": 2,
   "models": {
     "afmoe": {
       "definition": "AfMoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.afmoe.modeling_afmoe.AfmoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -52,7 +54,9 @@
       "definition": "ApertusQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.apertus.modeling_apertus.ApertusAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -127,10 +131,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.cohere.modeling_cohere.CohereAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.cohere.modeling_cohere.CohereMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -173,10 +180,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -224,7 +234,9 @@
       "definition": "Cohere2MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.cohere2_moe.modeling_cohere2_moe.Cohere2MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -269,10 +281,13 @@
       "definition": "CohereCompassQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.cohere_compass.modeling_cohere_compass.CohereCompassAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.cohere_compass.modeling_cohere_compass.CohereCompassMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -358,7 +373,9 @@
       "definition": "DeepSeekOCR2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.deepseek_ocr2.modeling_deepseek_ocr2.DeepseekOcr2TextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -465,10 +482,13 @@
       "definition": "DeepSeekVLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama.modeling_llama.LlamaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.llama.modeling_llama.LlamaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -535,7 +555,8 @@
       "definition": "DiffusionGemmaQModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.diffusion_gemma.modeling_diffusion_gemma.DiffusionGemmaText4MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForMultimodalLM",
@@ -595,7 +616,9 @@
       "definition": "Dots1QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.dots1.modeling_dots1.Dots1Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -642,10 +665,13 @@
       "definition": "Ernie4_5QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.ernie4_5.modeling_ernie4_5.Ernie4_5Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.ernie4_5.modeling_ernie4_5.Ernie4_5MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -688,7 +714,9 @@
       "definition": "Ernie4_5_MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.ernie4_5_moe.modeling_ernie4_5_moe.Ernie4_5_MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -729,7 +757,9 @@
       "definition": "Ernie4_5_VLMoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe.Ernie4_5_VLMoeTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -796,10 +826,13 @@
       "definition": "Exaone4QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.exaone4.modeling_exaone4.Exaone4Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.exaone4.modeling_exaone4.Exaone4MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -847,10 +880,13 @@
       "definition": "Exaone4_5QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.exaone4.modeling_exaone4.Exaone4Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.exaone4.modeling_exaone4.Exaone4MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -923,10 +959,13 @@
       "definition": "FalconH1QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -973,7 +1012,9 @@
       "definition": "FlintQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.flint.modeling_flint.FlintAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1017,10 +1058,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.gemma.modeling_gemma.GemmaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.gemma.modeling_gemma.GemmaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1064,10 +1108,13 @@
       "definition": "Gemma2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.gemma2.modeling_gemma2.Gemma2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.gemma2.modeling_gemma2.Gemma2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1115,10 +1162,13 @@
       "definition": "Gemma3ForConditionalGenerationGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.gemma3.modeling_gemma3.Gemma3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.gemma3.modeling_gemma3.Gemma3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1184,10 +1234,13 @@
       "definition": "Gemma3QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.gemma3.modeling_gemma3.Gemma3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.gemma3.modeling_gemma3.Gemma3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1239,7 +1292,8 @@
       "definition": "Gemma3nTextQModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.gemma3n.modeling_gemma3n.Gemma3nTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1277,7 +1331,8 @@
       "definition": "Gemma4ForConditionalGenerationGPTQ",
       "profiles": {
         "gate_up": [
-          "transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1324,7 +1379,8 @@
       "definition": "Gemma4TextQModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1365,7 +1421,8 @@
       "definition": "Gemma4UnifiedForConditionalGenerationGPTQ",
       "profiles": {
         "gate_up": [
-          "transformers.models.gemma4_unified.modeling_gemma4_unified.Gemma4UnifiedTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1409,7 +1466,8 @@
       "definition": "Gemma4UnifiedTextQModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.gemma4_unified.modeling_gemma4_unified.Gemma4UnifiedTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1447,7 +1505,9 @@
       "definition": "GlmQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.glm.modeling_glm.GlmAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1482,7 +1542,9 @@
       "definition": "GlmQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.glm4.modeling_glm4.Glm4Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1517,7 +1579,9 @@
       "definition": "GLM4MoEGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.glm4_moe.modeling_glm4_moe.Glm4MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1560,7 +1624,9 @@
       "definition": "Glm4vGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.glm4v.modeling_glm4v.Glm4vTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -1611,7 +1677,9 @@
       "definition": "Glm4vMoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.glm4v_moe.modeling_glm4v_moe.Glm4vMoeTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -1667,7 +1735,9 @@
       "definition": "Glm4vMoeTextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.glm4v_moe.modeling_glm4v_moe.Glm4vMoeTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModel",
@@ -1714,7 +1784,9 @@
       "definition": "GlmOCRGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.glm_ocr.modeling_glm_ocr.GlmOcrTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -1778,7 +1850,9 @@
       "definition": "GptNeoQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoSelfAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1816,7 +1890,9 @@
       "definition": "GPTOSSGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.gpt_oss.modeling_gpt_oss.GptOssAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1862,7 +1938,9 @@
       "definition": "GptJQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.gptj.modeling_gptj.GPTJAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1896,10 +1974,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.granite.modeling_granite.GraniteAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.granite.modeling_granite.GraniteMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1943,7 +2024,9 @@
       "definition": "GraniteMoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.granitemoe.modeling_granitemoe.GraniteMoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -1980,7 +2063,9 @@
       "definition": "GraniteMoeHybridQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.granitemoehybrid.modeling_granitemoehybrid.GraniteMoeHybridAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2025,10 +2110,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.helium.modeling_helium.HeliumAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.helium.modeling_helium.HeliumMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2073,10 +2161,13 @@
       "definition": "HrmTextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.hrm_text.modeling_hrm_text.HrmTextAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.hrm_text.modeling_hrm_text.HrmTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2120,10 +2211,13 @@
       "definition": "HunYuanDenseV1QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2167,7 +2261,9 @@
       "definition": "HunYuanMoEV1QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.hunyuan_v1_moe.modeling_hunyuan_v1_moe.HunYuanMoEV1Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2203,10 +2299,13 @@
       "definition": "HunYuanVLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLDenseV1Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -2268,7 +2367,9 @@
       "definition": "HYV3QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.hy_v3.modeling_hy_v3.HYV3Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2315,7 +2416,9 @@
       "definition": "InklingMMQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.inkling.modeling_inkling.InklingAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForMultimodalLM",
@@ -2404,10 +2507,13 @@
       "definition": "InternVLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -2475,10 +2581,13 @@
       "definition": "JambaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.jamba.modeling_jamba.JambaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.jamba.modeling_jamba.JambaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2541,7 +2650,9 @@
       "definition": "LagunaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.laguna.modeling_laguna.LagunaAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2589,10 +2700,13 @@
       "definition": "LFM2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.lfm2.modeling_lfm2.Lfm2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.lfm2.modeling_lfm2.Lfm2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2639,7 +2753,9 @@
       "definition": "LFM2MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.lfm2_moe.modeling_lfm2_moe.Lfm2MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2684,10 +2800,13 @@
       "definition": "LFM2VLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.lfm2.modeling_lfm2.Lfm2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.lfm2.modeling_lfm2.Lfm2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -2767,10 +2886,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama.modeling_llama.LlamaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.llama.modeling_llama.LlamaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2815,7 +2937,9 @@
       "definition": "Llama4QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama4.modeling_llama4.Llama4TextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -2874,7 +2998,9 @@
       "definition": "Llama4TextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama4.modeling_llama4.Llama4TextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2915,10 +3041,13 @@
       "definition": "LlavaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama.modeling_llama.LlamaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.llama.modeling_llama.LlamaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -2991,7 +3120,8 @@
       "definition": "LongCatFlashQModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.longcat_flash.modeling_longcat_flash.LongcatFlashMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3067,7 +3197,8 @@
       "definition": "MiniCpm3QModel",
       "profiles": {
         "gate_up": [
-          "transformers.models.minicpm3.modeling_minicpm3.MiniCPM3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3114,10 +3245,13 @@
       "definition": "MiniCPMV4_6QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -3186,7 +3320,9 @@
       "definition": "MiniMaxQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.minimax.modeling_minimax.MiniMaxAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3228,7 +3364,9 @@
       "definition": "MiniMaxM2GPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.minimax_m2.modeling_minimax_m2.MiniMaxM2Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3266,7 +3404,9 @@
       "definition": "MiniMaxM3VLGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.minimax_m3_vl.modeling_minimax_m3_vl.MiniMaxM3VLAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -3330,10 +3470,13 @@
       "definition": "Ministral3GPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.ministral3.modeling_ministral3.Ministral3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.ministral3.modeling_ministral3.Ministral3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3378,10 +3521,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.mistral.modeling_mistral.MistralAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.mistral.modeling_mistral.MistralMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3426,10 +3572,13 @@
       "definition": "Mistral3GPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.mistral.modeling_mistral.MistralAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.mistral.modeling_mistral.MistralMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForPreTraining",
@@ -3494,7 +3643,9 @@
       "definition": "MixtralQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.mixtral.modeling_mixtral.MixtralAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3532,10 +3683,13 @@
       "definition": "MLlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.mllama.modeling_mllama.MllamaTextSelfAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.mllama.modeling_mllama.MllamaTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForPreTraining",
@@ -3597,10 +3751,13 @@
       "definition": "MLlamaTextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.mllama.modeling_mllama.MllamaTextSelfAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.mllama.modeling_mllama.MllamaTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "MllamaForCausalLM",
@@ -3656,10 +3813,13 @@
       "definition": "MuseGlimmerQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -3753,10 +3913,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.olmo.modeling_olmo.OlmoAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.olmo.modeling_olmo.OlmoMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3800,10 +3963,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3847,10 +4013,13 @@
       "definition": "Olmo3QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.olmo3.modeling_olmo3.Olmo3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.olmo3.modeling_olmo3.Olmo3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3898,7 +4067,9 @@
       "definition": "OlmoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.olmoe.modeling_olmoe.OlmoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3939,7 +4110,9 @@
       "definition": "OptQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.opt.modeling_opt.OPTAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -3981,10 +4154,13 @@
       "definition": "Ovis2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -4065,7 +4241,9 @@
       "definition": "PhiQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.phi.modeling_phi.PhiAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4108,7 +4286,9 @@
       "definition": "PhiMoEGPTQForCausalLM",
       "profiles": {
         "qkv": [
-          "transformers.models.phimoe.modeling_phimoe.PhimoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4149,10 +4329,13 @@
       "definition": "Qwen2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4200,10 +4383,13 @@
       "definition": "Qwen2_5_OmniGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForTextToWaveform",
@@ -4325,10 +4511,13 @@
       "definition": "Qwen2_5_VLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -4396,10 +4585,13 @@
       "definition": "Qwen2AudioGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForPreTraining",
@@ -4463,7 +4655,9 @@
       "definition": "Qwen2MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4506,10 +4700,13 @@
       "definition": "Qwen2VLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -4577,10 +4774,13 @@
       "definition": "Qwen3QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3.modeling_qwen3.Qwen3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen3.modeling_qwen3.Qwen3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4629,10 +4829,13 @@
       "definition": "Qwen3_5QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -4697,7 +4900,9 @@
       "definition": "Qwen3_5_MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -4755,7 +4960,9 @@
       "definition": "Qwen3_5_MoeTextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4797,10 +5004,13 @@
       "definition": "Qwen3_5TextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4849,7 +5059,9 @@
       "definition": "Qwen3MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4887,7 +5099,9 @@
       "definition": "Qwen3NextGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_next.modeling_qwen3_next.Qwen3NextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -4930,7 +5144,9 @@
       "definition": "Qwen3OmniMoeGPTQ",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe.Qwen3OmniMoeThinkerTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForTextToWaveform",
@@ -5054,10 +5270,13 @@
       "definition": "Qwen3_VLQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -5118,7 +5337,9 @@
       "definition": "Qwen3_VL_MoeQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe.Qwen3VLMoeTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -5173,7 +5394,9 @@
       "definition": "Qwen4ExpQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen4_exp.modeling_qwen4_exp.Qwen4ExpTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -5241,7 +5464,9 @@
       "definition": "Qwen4ExpTextQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.qwen4_exp.modeling_qwen4_exp.Qwen4ExpTextAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -5313,10 +5538,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -5361,10 +5589,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -5412,10 +5643,13 @@
       "definition": "SmolVLMQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.llama.modeling_llama.LlamaAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.llama.modeling_llama.LlamaMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForImageTextToText",
@@ -5479,7 +5713,9 @@
       "definition": "SolarOpenQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.solar_open.modeling_solar_open.SolarOpenAttention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -5525,10 +5761,13 @@
       "definition": "LlamaQModel",
       "profiles": {
         "qkv": [
-          "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
+          "q",
+          "k",
+          "v"
         ],
         "gate_up": [
-          "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
+          "gate",
+          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -5576,7 +5815,9 @@
       "definition": "Starcoder2QModel",
       "profiles": {
         "qkv": [
-          "transformers.models.starcoder2.modeling_starcoder2.Starcoder2Attention"
+          "q",
+          "k",
+          "v"
         ]
       },
       "loader": "AutoModelForCausalLM",

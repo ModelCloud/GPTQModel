@@ -5,18 +5,11 @@ import torch
 
 from ...utils.model import nested_move_to
 from ..base import BaseQModel
-from ..fusable import LlamaFusableConfig
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class JambaQModel(BaseQModel):
-    fusable = LlamaFusableConfig().derive("jamba", parent_types={
-        "qkv": (
-            "transformers.models.jamba.modeling_jamba.JambaAttention",
-        ),
-        "gate_up": (
-            "transformers.models.jamba.modeling_jamba.JambaMLP",
-        ),
-    })
+    fusable = FusableConfig("jamba").merge(LlamaFusableConfig())
 
     require_pkgs = ["mamba-ssm"]
 
