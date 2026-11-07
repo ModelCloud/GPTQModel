@@ -9,88 +9,90 @@
   "repeats": 5,
   "gptq": {
     "off": {
-      "prefill_ms": 16.207873995881528,
-      "prefill_tokens_per_second": 7897.396045436015,
-      "decode_ms_per_token": 11.288569312455365,
-      "decode_tokens_per_second": 88.5851849176883
+      "kernel": "MarlinLinear",
+      "prefill_ms": 9.307076019467786,
+      "prefill_tokens_per_second": 13752.976738586854,
+      "decode_ms_per_token": 8.883737313226447,
+      "decode_tokens_per_second": 112.56523743798253
     },
     "on": {
-      "prefill_ms": 16.63641899358481,
-      "prefill_tokens_per_second": 7693.963469503757,
-      "decode_ms_per_token": 12.951237999004661,
-      "decode_tokens_per_second": 77.21269581153962
+      "kernel": "MarlinLinear",
+      "prefill_ms": 11.194455000804737,
+      "prefill_tokens_per_second": 11434.232393698348,
+      "decode_ms_per_token": 9.908907437420567,
+      "decode_tokens_per_second": 100.91929976291257
     },
     "drift": {
       "prefill": {
-        "max_abs": 0.03125,
-        "rms": 0.004665711894631386,
-        "relative_l2": 0.0013693224173039198,
+        "max_abs": 0.0390625,
+        "rms": 0.004950724542140961,
+        "relative_l2": 0.0014660012675449252,
         "top1_agreement": 1.0
       },
       "decode": {
-        "max_abs": 0.02734375,
-        "rms": 0.004553108010441065,
-        "relative_l2": 0.001774232485331595,
+        "max_abs": 0.029296875,
+        "rms": 0.004982156213372946,
+        "relative_l2": 0.002316426020115614,
         "top1_agreement": 1.0
       }
     },
     "eligible_groups": 32,
-    "extra_packed_bytes": 331220992,
+    "extra_packed_bytes": 328744960,
     "projection_rounding": [
       {
         "family": "qkv",
+        "parent": "model.layers.0.self_attn",
         "packed_operands_equal": true,
         "on_vs_off": {
-          "max_abs": 0.0078125,
-          "rms": 6.394975207513198e-05,
-          "relative_l2": 4.0109243855113164e-05,
+          "max_abs": 0.00390625,
+          "rms": 1.784694177331403e-05,
+          "relative_l2": 1.1233711120439693e-05,
           "top1_agreement": 1.0
         },
         "off_vs_independent_oracle": {
           "max_abs": 0.00390625,
-          "rms": 4.3551444832701236e-05,
-          "relative_l2": 2.731541644607205e-05,
+          "rms": 2.2091324353823438e-05,
+          "relative_l2": 1.390532088407781e-05,
           "top1_agreement": 1.0
         },
         "on_vs_independent_oracle": {
-          "max_abs": 0.0078125,
-          "rms": 7.547919085482135e-05,
-          "relative_l2": 4.7340450691990554e-05,
+          "max_abs": 0.00390625,
+          "rms": 2.593010685814079e-05,
+          "relative_l2": 1.6321631846949458e-05,
           "top1_agreement": 1.0
-        },
-        "parent": "model.layers.0.self_attn"
+        }
       },
       {
         "family": "gate_up",
+        "parent": "model.layers.0.mlp",
         "packed_operands_equal": true,
         "on_vs_off": {
-          "max_abs": 0.00390625,
-          "rms": 2.7723954190150835e-05,
-          "relative_l2": 3.324802310089581e-05,
+          "max_abs": 0.001953125,
+          "rms": 2.042294727289118e-05,
+          "relative_l2": 2.456043876009062e-05,
           "top1_agreement": 1.0
         },
         "off_vs_independent_oracle": {
-          "max_abs": 0.00390625,
-          "rms": 3.8447633414762095e-05,
-          "relative_l2": 4.6108201786410064e-05,
+          "max_abs": 0.001953125,
+          "rms": 2.043164386122953e-05,
+          "relative_l2": 2.457088339724578e-05,
           "top1_agreement": 1.0
         },
         "on_vs_independent_oracle": {
           "max_abs": 0.001953125,
-          "rms": 2.6969652026309632e-05,
-          "relative_l2": 3.234332689316943e-05,
+          "rms": 2.7975247576250695e-05,
+          "relative_l2": 3.3642736525507644e-05,
           "top1_agreement": 1.0
-        },
-        "parent": "model.layers.0.mlp"
+        }
       }
     ],
-    "checkpoint": "Llama-3.2-1B-Instruct-GPTQ-bit4-g128-symFasle-descFalse",
+    "checkpoint": "Llama-3.2-1B-Instruct-HF-GPTQV2",
     "quantization": {
       "bits": 4,
       "group_size": 128,
-      "sym": false,
+      "sym": true,
       "desc_act": false,
-      "checkpoint_format": "gptq"
+      "checkpoint_format": "gptq_v2"
     },
     "decisions_summary": {
       "eligible": 32,
@@ -99,100 +101,107 @@
   },
   "awq": {
     "off": {
-      "prefill_ms": 127.85762699786574,
-      "prefill_tokens_per_second": 1001.1135276438115,
-      "decode_ms_per_token": 127.48629818634072,
-      "decode_tokens_per_second": 7.843980209844568
+      "kernel": "AwqMarlinLinear",
+      "prefill_ms": 9.935042995493859,
+      "prefill_tokens_per_second": 12883.688581725888,
+      "decode_ms_per_token": 9.094185250432929,
+      "decode_tokens_per_second": 109.96037275053254
     },
     "on": {
-      "prefill_ms": 127.88235099287704,
-      "prefill_tokens_per_second": 1000.9199784505801,
-      "decode_ms_per_token": 126.45883256300294,
-      "decode_tokens_per_second": 7.907711780446738
+      "kernel": "AwqMarlinLinear",
+      "prefill_ms": 11.182167014339939,
+      "prefill_tokens_per_second": 11446.79737262497,
+      "decode_ms_per_token": 10.208344312559348,
+      "decode_tokens_per_second": 97.95907831691157
     },
     "drift": {
       "prefill": {
-        "max_abs": 0.0390625,
-        "rms": 0.004610590171068907,
-        "relative_l2": 0.001408502459526062,
+        "max_abs": 0.03125,
+        "rms": 0.004384720232337713,
+        "relative_l2": 0.0013525675749406219,
         "top1_agreement": 1.0
       },
       "decode": {
-        "max_abs": 0.032470703125,
-        "rms": 0.006686302367597818,
-        "relative_l2": 0.0030240509659051895,
+        "max_abs": 0.02490234375,
+        "rms": 0.003947597462683916,
+        "relative_l2": 0.0015666855033487082,
         "top1_agreement": 1.0
       }
     },
-    "eligible_groups": 16,
-    "extra_packed_bytes": 278921216,
+    "eligible_groups": 32,
+    "extra_packed_bytes": 331235328,
     "projection_rounding": [
       {
-        "family": "gate_up",
+        "family": "qkv",
+        "parent": "model.layers.0.self_attn",
         "packed_operands_equal": true,
         "on_vs_off": {
-          "max_abs": 0.0078125,
-          "rms": 6.179982301546261e-05,
-          "relative_l2": 3.0926141334930435e-05,
+          "max_abs": 0.015625,
+          "rms": 7.842729246476665e-05,
+          "relative_l2": 1.7775546439224854e-05,
           "top1_agreement": 1.0
         },
         "off_vs_independent_oracle": {
-          "max_abs": 0.0078125,
-          "rms": 8.64437097334303e-05,
-          "relative_l2": 4.325835107010789e-05,
+          "max_abs": 0.015625,
+          "rms": 9.666037658462301e-05,
+          "relative_l2": 2.1908062990405597e-05,
           "top1_agreement": 1.0
         },
         "on_vs_independent_oracle": {
           "max_abs": 0.0078125,
-          "rms": 6.096853394410573e-05,
-          "relative_l2": 3.051006206078455e-05,
+          "rms": 6.644498353125528e-05,
+          "relative_l2": 1.5059747966006398e-05,
           "top1_agreement": 1.0
-        },
-        "parent": "model.layers.0.mlp"
+        }
       },
       {
         "family": "gate_up",
+        "parent": "model.layers.0.mlp",
         "packed_operands_equal": true,
         "on_vs_off": {
-          "max_abs": 0.015625,
-          "rms": 0.00012171029084129259,
-          "relative_l2": 3.289612868684344e-05,
+          "max_abs": 0.00390625,
+          "rms": 2.817480890371371e-05,
+          "relative_l2": 2.3723940103081986e-05,
           "top1_agreement": 1.0
         },
         "off_vs_independent_oracle": {
-          "max_abs": 0.015625,
-          "rms": 0.00016697142564225942,
-          "relative_l2": 4.512921441346407e-05,
+          "max_abs": 0.00390625,
+          "rms": 2.7511125153978355e-05,
+          "relative_l2": 2.3165088350651786e-05,
           "top1_agreement": 1.0
         },
         "on_vs_independent_oracle": {
-          "max_abs": 0.015625,
-          "rms": 0.00011538530816324055,
-          "relative_l2": 3.1186515116132796e-05,
+          "max_abs": 0.00390625,
+          "rms": 3.810078851529397e-05,
+          "relative_l2": 3.2081836252473295e-05,
           "top1_agreement": 1.0
-        },
-        "parent": "model.layers.1.mlp"
+        }
       }
     ],
-    "checkpoint": "Llama-3.2-1B-Instruct-AWQ-bit4-g128-symFasle-descFalse",
+    "checkpoint": "local symmetric AWQ of Llama-3.2-1B-Instruct; 16 calibration documents; recipe in fusion-planner.md",
     "quantization": {
       "bits": 4,
       "group_size": 128,
-      "sym": false,
+      "sym": true,
       "desc_act": false,
       "checkpoint_format": "gemm"
     },
     "decisions_summary": {
-      "eligible": 16,
+      "eligible": 32,
       "declared": 32
     }
   },
   "measurement": {
+    "requested_backend": "auto",
+    "sym": true,
+    "bits": 4,
+    "group_size": 128,
+    "desc_act": false,
     "attention": "eager",
     "torch_compile_disabled": true,
-    "latency": "median wall-clock with CUDA synchronization; excludes loading and packed-cache warmup",
-    "decode": "teacher-forced token 42, 16 cached single-token forwards; excludes cache prefill",
-    "projection_oracle": "independent integer bit shifts and FP32 matmul, with native FP16 weight/output rounding; 128 random input rows; seed 431",
+    "latency": "median synchronized wall time; 2 warmups, 5 repeats; other test workloads stopped",
+    "decode": "16 cached single-token forwards with token 42; cache prefill excluded",
+    "projection_oracle": "128 random rows, seed 431; independent checkpoint bit unpacking and FP32 matmul, native FP16 rounding",
     "source_base": "de7db05cc7219371b401d3205065ac63e41e9478"
   }
 }

@@ -11,8 +11,8 @@ quantization. It is optional:
 from gptqmodel import GPTQModel
 from gptqmodel.utils.backend import BACKEND
 
-# The initial executor supports the portable Torch GPTQ and Torch AWQ kernels.
-model = GPTQModel.load("/path/to/quantized-llama", backend=BACKEND.GPTQ_TORCH)
+# AUTO selects Marlin for the symmetric INT4/group-128/no-act-order case.
+model = GPTQModel.load("/path/to/quantized-llama", backend=BACKEND.AUTO)
 model.fusion_plan().print()
 decisions = model.fusion_plan().to_dict()
 
@@ -28,7 +28,7 @@ model = GPTQModel.load("/path/to/quantized-llama", fuse=False)
 
 `model.fuse()` returns the wrapper. `model.fusion_plan()` returns the applied
 `FusionPlanner`, or `None` when disabled. An enabled plan may have zero eligible
-groups; inspect its decisions for per-group skip reasons. The initial executor
+groups; inspect its decisions for per-group skip reasons. The planner
 does not convert unsupported backends into a different kernel. A direct
 `fuse()` call on an unquantized wrapper raises.
 
@@ -84,19 +84,26 @@ only the global bit width is insufficient. A disabled dynamic target rejects
 the group. Identical effective options can still be rejected by kernel/layout
 checks.
 
-The first executor accepts identical concrete `TorchLinear` or
-`AwqTorchLinear` classes, 2/4/8-bit storage with int32 packed words, aligned output words, compatible
-packed tensor shapes, identical input width, matching operand devices/dtypes,
-and matching bias layout. GPTQ additionally requires equal `g_idx` values.
-Adapters, online rotation on the projections, offload/projection hooks,
-unsupported parent implementations, and mixed kernel classes are excluded.
+The canonical acceptance case is **symmetric 4-bit, group size 128,
+`desc_act=False`, `BACKEND.AUTO`** on NVIDIA CUDA. AUTO selects `MarlinLinear`
+for GPTQ and `AwqMarlinLinear` for AWQ. Fusion preserves the selected concrete
+kernel class. Both support 32 groups (QKV plus gate/up across 16 layers) on
+Llama 3.2 1B.
 
-AWQ GQA QKV groups with unequal output widths are also excluded in this first
-executor. On Llama 3.2 1B the concatenated dequantized weights were bitwise
-identical, but the wider CUDA GEMM changed rounding and accumulated up to
-0.0286 absolute logit drift. The planner keeps those QKV calls separate rather
-than relaxing the numerical gate. GPTQ GQA QKV and AWQ gate/up remain eligible;
-the real 1B tests expect 32 GPTQ groups and 16 AWQ groups across 16 layers.
+Native Marlin fusion requires finalized operands without padding or activation
+reordering, equal input widths, and output widths aligned to 64 columns. Its
+packing permutations are local to those tiles, so whole-tile concatenation
+preserves the existing native layout. The finalized shell is copied without
+calling `post_init()` a second time, and owns a separate **zero-initialized**
+reduction workspace. Quantization metadata, kernel reduction settings, devices,
+dtypes, and bias policies must match. Original registered operands stay intact.
+
+Portable `TorchLinear` / `AwqTorchLinear` executors also remain available for
+int32-packed 2/4/8-bit weights. They require equal GPTQ group indices and
+compatible unpadded shapes. The portable Torch AWQ GQA QKV case remains
+conservatively excluded; that restriction does not apply to the validated native
+Marlin executor. Adapters, projection/offload hooks, and online projection
+rotation are excluded.
 
 The definition owns architecture enablement and policy:
 
@@ -142,11 +149,12 @@ flowchart LR
 The retained group cache contains packed quantized weights and their associated
 metadata. It adds packed storage on top of the original checkpoint-owned
 weights; it does not replace or remove those owners. No dense or expanded weight
-is retained. For this portable executor, temporary dequantization may be wider
-than a single original projection; account for that peak when choosing fusion.
+is retained. Native Marlin dequantizes in its kernel tiles. The optional portable
+Torch executor can temporarily dequantize a wider matrix; account for that peak
+when using the Torch backend.
 
 Normal tensor mutations/replacements invalidate through the source operand key.
-The source kernels' `clear_weight_cache()` methods also invalidate the group.
+The source projections' `clear_weight_cache()` methods also invalidate the group. This method is installed while fusion is active on kernels that have no original clear method.
 Inference tensors have no version counter: code mutating them inside
 `torch.inference_mode()` must explicitly call `clear_weight_cache()` on a source
 projection. This is the same explicit-clear contract used by the other runtime
@@ -162,7 +170,7 @@ set of decisions.
 
 Fusion preserves registered state-dict keys and tensor values. Saving uses the
 ordinary separate projection tensors; loading rebuilds the ordinary modules and
-then applies the optional planner. The fusion cache and activation context are
+then applies the optional planner. The fusion cache, native workspace, and activation context are
 runtime state, not new model-definition weight obligations.
 
 - `tests/module_tree/test_llama_fusion.py` builds a real tiny GQA Llama shell,
@@ -177,65 +185,96 @@ runtime state, not new model-definition weight obligations.
 
 The planner is a correctness-gated execution option, not a guarantee of speedup
 for every batch size or device. Evaluate its packed-memory cost and measured
-latency on the target workload. Other architectures, MoE, other backends, and
+latency on the target workload. Other architectures, MoE, additional backends, and
 compiled fused execution need dedicated implementation and validation.
 
 ## Measured Llama 3.2 1B results
 
-RTX 4090, Torch 2.15.0+cu132, FP16, batch 1, eager attention and
-`TORCHDYNAMO_DISABLE=1`. Each mode has two warmup sequences and five measured
-repeats; latency is the median with CUDA synchronization. Prefill is 128 tokens.
-Decode is 16 cached single-token forwards with fixed token IDs; cache-building
-prefill is excluded from decode timing. These are execution comparisons on
-existing quantized checkpoints, not dataset accuracy scores.
+**Symmetric INT4, group size 128, `desc_act=False`, AUTO selects Marlin in both
+modes.** RTX 4090, Torch 2.15.0+cu132, FP16, batch 1, eager attention,
+`TORCHDYNAMO_DISABLE=1`. Two warmups and five measured repeats per mode;
+median synchronized wall-clock time. Prefill is 128 tokens. Decode is 16 cached
+single-token forwards with fixed token 42; cache-building prefill is excluded.
+Loading and packed-cache construction are outside timing. Other test workloads
+were stopped during these measurements.
 
-| Method | Phase | Off latency | On latency | Latency change | Off tok/s | On tok/s |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| GPTQ | Prefill (128 tokens) | 16.208 ms | 16.636 ms | +2.64% | 7897.40 | 7693.96 |
-| GPTQ | Decode (per token) | 11.289 ms | 12.951 ms | +14.73% | 88.59 | 77.21 |
-| AWQ | Prefill (128 tokens) | 127.858 ms | 127.882 ms | +0.02% | 1001.11 | 1000.92 |
-| AWQ | Decode (per token) | 127.486 ms | 126.459 ms | -0.81% | 7.84 | 7.91 |
+| Method | Phase | Kernel off / on | Off latency | On latency | Latency change | Off tok/s | On tok/s |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 9.307 ms | 11.194 ms | +20.28% | 13752.98 | 11434.23 |
+| GPTQ | Decode (per token) | `MarlinLinear` / same | 8.884 ms | 9.909 ms | +11.54% | 112.57 | 100.92 |
+| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 9.935 ms | 11.182 ms | +12.55% | 12883.69 | 11446.80 |
+| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 9.094 ms | 10.208 ms | +12.25% | 109.96 | 97.96 |
 
 | Method | Phase | Max absolute logit drift | RMS logit drift | Relative L2 | Top-1 agreement |
 | --- | --- | ---: | ---: | ---: | ---: |
-| GPTQ | Prefill | 0.03125000 | 0.00466571 | 0.00136932 | 100.0% |
-| GPTQ | Decode | 0.02734375 | 0.00455311 | 0.00177423 | 100.0% |
-| AWQ | Prefill | 0.03906250 | 0.00461059 | 0.00140850 | 100.0% |
-| AWQ | Decode | 0.03247070 | 0.00668630 | 0.00302405 | 100.0% |
+| GPTQ | Prefill | 0.03906250 | 0.00495072 | 0.00146600 | 100.0% |
+| GPTQ | Decode | 0.02929688 | 0.00498216 | 0.00231643 | 100.0% |
+| AWQ | Prefill | 0.03125000 | 0.00438472 | 0.00135257 | 100.0% |
+| AWQ | Decode | 0.02490234 | 0.00394760 | 0.00156669 | 100.0% |
 
-| Method / projection | Packed operands match exactly | Max on-vs-off output drift | Max off-vs-oracle drift | Max on-vs-oracle drift |
+| Projection | Packed operands exact | Max off/on drift | Max off/oracle drift | Max on/oracle drift |
 | --- | --- | ---: | ---: | ---: |
-| GPTQ / `model.layers.0.self_attn` (qkv) | True | 0.00781250 | 0.00390625 | 0.00781250 |
-| GPTQ / `model.layers.0.mlp` (gate_up) | True | 0.00390625 | 0.00390625 | 0.00195312 |
-| AWQ / `model.layers.0.mlp` (gate_up) | True | 0.00781250 | 0.00781250 | 0.00781250 |
-| AWQ / `model.layers.1.mlp` (gate_up) | True | 0.01562500 | 0.01562500 | 0.01562500 |
+| GPTQ `model.layers.0.self_attn` | True | 0.00390625 | 0.00390625 | 0.00390625 |
+| GPTQ `model.layers.0.mlp` | True | 0.00195312 | 0.00195312 | 0.00195312 |
+| AWQ `model.layers.0.self_attn` | True | 0.01562500 | 0.01562500 | 0.00781250 |
+| AWQ `model.layers.0.mlp` | True | 0.00390625 | 0.00390625 | 0.00390625 |
 
-The wider GEMMs change reduction order and output rounding. Packed operands
-match exactly, and both paths pass `rtol=atol=2e-3` against the independent
-projection oracle (these are combined tolerances, not a uniform 0.002 absolute
-error bound at every magnitude). Composed model logits accumulate those
-projection differences; the 128-token measurements above are not bitwise equal,
-even though top-1 tokens agree at every measured prefill/decode position.
-Relative L2 is reported without replacing the absolute drift numbers.
 
-For the separate six-token save/reload acceptance prompt, both methods had
-zero observed logit drift and identical 12-token greedy continuations. This
-prompt-specific result does not establish zero drift for other contexts.
-The rejected AWQ GQA QKV path failed that short-prompt regression with 0.0286
-maximum absolute logit drift and remains disabled.
+Both native projections pass combined `rtol=atol=2e-3` against an independent
+checkpoint-unpacking/FP32 matmul oracle with native FP16 weight/output rounding.
+These combined tolerances are not a uniform 0.002 absolute bound at every
+magnitude. Sampled packed operands are bitwise equal. Composed model logits
+accumulate changes in reduction order and output rounding; their absolute,
+RMS, and relative drift are reported above. Top-1 agreement is measured at all
+128 prefill and 16 decode positions, not a dataset benchmark accuracy score.
 
-GPTQ retains 315.877 MiB of additional packed operands for 32 groups; AWQ
-retains 266 MiB for 16 gate/up groups. The largest fused FP16 dequantized weight
-is 64 MiB and is temporary; this does not count integer unpacking scratch or
-other activation allocations. These timings show a GPTQ decode regression and
-an approximately unchanged AWQ prefill path. Automatic eligibility is not a
-latency guarantee; use `fuse=False` when that tradeoff is unsuitable.
+The real save/reload test checks selected kernel types, unchanged checkpoint
+keys, fixed-prompt top-1 and 12-token greedy agreement, and bitwise equality
+between the fused model and its fused reload. It does not impose an artificial
+bitwise off/on requirement on accumulated model logits. Projection-oracle
+precision gates remain unchanged.
 
-Raw measurements and rounding diagnostics are in
-[llama32-fusion.json](benchmarks/llama32-fusion.json). Reproduce them with:
+The slower fused totals are not caused by changing away from Marlin. As a
+separate diagnostic on the same hardware, direct first-layer native QKV decode
+calls took 0.0591 ms separately versus 0.0230 ms combined; gate/up took 0.0367
+versus 0.0235 ms. The planner adds Python interception, context bookkeeping,
+input checks, and operand fingerprints. A first-layer fingerprint measurement,
+extrapolated to 16 layers, costs about 0.77 ms per token for both families; this
+is an estimate, not a complete profiler attribution. This overhead can exceed
+the saved kernel-launch time. Fusion does not reduce matrix-multiply FLOPs.
+Larger projection shapes can also select different native schedules.
+
+Both methods retain additional packed operands (exact bytes in the raw report)
+and reduction workspace. These are additional to checkpoint storage, not dense
+weight caches. Latency and memory are explicit tradeoffs; `fuse=False` disables
+this initial implementation. Automatic eligibility does not guarantee a speedup.
+
+Raw data: [llama32-fusion.json](benchmarks/llama32-fusion.json). Reproduce with:
 
 ```bash
 TORCHDYNAMO_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tests/benchmark_llama_fusion.py \
-  --gptq-path /path/to/llama32-gptq --awq-path /path/to/llama32-awq \
+  --gptq-path /path/to/symmetric-llama32-gptq \
+  --awq-path /path/to/symmetric-llama32-awq \
   --output-json /tmp/fusion-prefill-decode.json
+```
+
+The GPTQ fixture is local `Llama-3.2-1B-Instruct-HF-GPTQV2`. The AWQ fixture was
+quantized from local `Llama-3.2-1B-Instruct` with the following recipe; this is a
+calibration fixture for comparing execution, not a model-quality claim:
+
+```python
+import torch
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import AWQConfig
+from gptqmodel.utils.backend import BACKEND
+
+qcfg = AWQConfig(bits=4, group_size=128, sym=True, desc_act=False,
+                 offload_to_disk=False)
+model = GPTQModel.load("/path/to/Llama-3.2-1B-Instruct", qcfg, device="cuda:0",
+                       dtype=torch.float16, fuse=False, attn_implementation="eager")
+text = ("The capital of France is Paris. Science and mathematics explain the "
+        "natural world. Good software tests verify every important result. ")
+model.quantize([text * 12 for _ in range(16)], batch_size=1,
+               backend=BACKEND.AWQ_TORCH)
+model.save("/path/to/symmetric-llama32-awq")
 ```

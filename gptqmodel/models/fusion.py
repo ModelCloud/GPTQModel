@@ -19,14 +19,18 @@ import torch
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
 
 from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+from ..nn_modules.qlinear.marlin import MarlinLinear
+from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
+from ..utils.marlin import replace_parameter
 
 
 _FAMILIES = {"qkv": ("q", "k", "v"), "gate_up": ("gate", "up")}
 _FIELDS = (
     "bits", "requested_group_size", "group_size", "sym", "desc_act", "pack_dtype",
     "backend", "format", "_qzeros_format", "compute_dtype", "in_features",
+    "fp32", "weight_type", "is_k_full", "_marlin_tile_padding",
 )
 
 
@@ -62,8 +66,11 @@ def _effective_config(config, path):
 
 def _incompatible(modules):
     first = modules[0]
-    if type(first) not in (TorchLinear, AwqTorchLinear) or any(type(m) is not type(first) for m in modules):
-        return "executor requires identical Torch GPTQ or Torch AWQ kernels"
+    if type(first) not in (TorchLinear, AwqTorchLinear, MarlinLinear, AwqMarlinLinear) or any(type(m) is not type(first) for m in modules):
+        return "executor requires identical supported Torch or Marlin kernels"
+    marlin = type(first) in (MarlinLinear, AwqMarlinLinear)
+    if marlin and (first.bits != 4 or first.requested_group_size != 128 or not first.sym or first.desc_act):
+        return "Marlin fusion requires symmetric INT4, group 128, no activation order"
     if first.bits not in (2, 4, 8):
         return "executor requires 2, 4 or 8-bit word-aligned storage"
     if first.pack_dtype != torch.int32:
@@ -94,13 +101,6 @@ def _incompatible(modules):
                 return "trainable quantized operands"
         if module.scales.dtype not in module.SUPPORTS_DTYPES:
             return "operand dtype is unsupported by the executor"
-        columns = module.out_features * module.bits // module.pack_dtype_bits
-        rows = math.ceil(module.in_features / module.group_size)
-        weight_shape = ((math.ceil(module.in_features * module.bits / module.pack_dtype_bits), module.out_features)
-                        if isinstance(first, TorchLinear) else (module.in_features, columns))
-        if (tuple(module.qweight.shape) != weight_shape or tuple(module.qzeros.shape) != (rows, columns)
-                or tuple(module.scales.shape) != (rows, module.out_features)):
-            return "packed operand shapes require padding or a different layout"
         if (module.bias is None) != (first.bias is None):
             return "bias layouts differ"
         if module.bias is not None and (
@@ -108,6 +108,24 @@ def _incompatible(modules):
             or module.bias.requires_grad
         ):
             return "bias device, dtype or gradient policy differs"
+        columns = module.out_features * module.bits // module.pack_dtype_bits
+        rows = math.ceil(module.in_features / module.group_size)
+        if marlin:
+            if (getattr(module, "_marlin_tile_padding", True) is not None or module.out_features % 64
+                    or module.g_idx.numel() or module.g_idx_sort_indices.numel() or module.workspace.numel() == 0):
+                return "Marlin fusion requires finalized aligned operands without activation reordering"
+            if (tuple(module.qweight.shape) != (module.in_features // 16, module.out_features * 2)
+                    or tuple(module.scales.shape) != (rows, module.out_features)
+                    or (type(first) is AwqMarlinLinear and tuple(module.qzeros.shape) != (rows, columns))):
+                return "Marlin packed operand shapes differ from the validated layout"
+            if type(first) is MarlinLinear and module.qzeros.numel():
+                return "symmetric GPTQ Marlin requires implicit zero points"
+            continue
+        weight_shape = ((math.ceil(module.in_features * module.bits / module.pack_dtype_bits), module.out_features)
+                        if isinstance(first, TorchLinear) else (module.in_features, columns))
+        if (tuple(module.qweight.shape) != weight_shape or tuple(module.qzeros.shape) != (rows, columns)
+                or tuple(module.scales.shape) != (rows, module.out_features)):
+            return "packed operand shapes require padding or a different layout"
         if isinstance(first, TorchLinear) and (
             not isinstance(module.g_idx, torch.Tensor)
             or module.g_idx.device.type == "meta"
@@ -127,7 +145,7 @@ class _FusionGroup:
         self.parent = parent
         self.modules = modules
         self.originals = [m.forward for m in modules]
-        self.original_clears = [m.clear_weight_cache for m in modules]
+        self.original_clears = [getattr(m, "clear_weight_cache", None) for m in modules]
         self.parent_forward = parent.forward
         self.context = ContextVar(f"fusion_{decision.parent}", default=None)
         self.packed = None
@@ -136,10 +154,11 @@ class _FusionGroup:
 
     def _key(self):
         return (id(getattr(self.parent, "_hf_hook", None)), tuple(
-            (tuple(getattr(m, field, None) for field in _FIELDS), m.training,
+            (tuple(getattr(m, field, None) for field in _FIELDS), m.training, m.out_features,
              id(m.adapter), m.online_full_had, m.online_partial_had,
              tuple(m._forward_hooks), tuple(m._forward_pre_hooks), id(getattr(m, "_hf_hook", None)),
-             tuple(tensor_cache_key(getattr(m, name, None)) for name in ("qweight", "qzeros", "scales", "bias", "g_idx")))
+             tuple(tensor_cache_key(getattr(m, name, None)) for name in (
+                 "qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")))
             for m in self.modules
         ))
 
@@ -149,6 +168,29 @@ class _FusionGroup:
         if self.packed is not None and key == self.packed_key:
             return self.packed
         first = self.modules[0]
+        if type(first) in (MarlinLinear, AwqMarlinLinear):
+            # Marlin permutes within aligned N=64 tiles. Concatenating whole
+            # tiles preserves the native weight/scale/zero-point permutations.
+            # Clone the finalized shell, never run post_init/repack a second time.
+            fused = copy.copy(first)
+            fused._parameters = first._parameters.copy()
+            fused._buffers = first._buffers.copy()
+            fused._modules = first._modules.copy()
+            fused._forward_hooks = first._forward_hooks.copy()
+            fused._forward_pre_hooks = first._forward_pre_hooks.copy()
+            fused.__dict__.pop("forward", None)
+            fused.__dict__.pop("clear_weight_cache", None)
+            fused.out_features = sum(m.out_features for m in self.modules)
+            for name in ("qweight", "scales"):
+                replace_parameter(fused, name, torch.cat([getattr(m, name) for m in self.modules], dim=1))
+            if first.qzeros.numel():
+                replace_parameter(fused, "qzeros", torch.cat([m.qzeros for m in self.modules], dim=1))
+            if first.bias is not None:
+                fused.bias = torch.cat([m.bias for m in self.modules])
+            # Marlin's reduction barriers require zero-initialized scratch.
+            fused.workspace = torch.zeros_like(first.workspace)
+            self.packed, self.packed_key = fused, key
+            return fused
         kwargs = {
             "bits": first.bits, "group_size": first.requested_group_size, "sym": first.sym,
             "desc_act": first.desc_act, "in_features": first.in_features,
@@ -186,7 +228,8 @@ class _FusionGroup:
                 state = self.context.get()
                 if state is not None:
                     state.clear()
-                _clear()
+                if _clear is not None:
+                    _clear()
 
             module.clear_weight_cache = clear_weight_cache
             def forward(x, _index=index, _original=original):
@@ -196,10 +239,8 @@ class _FusionGroup:
                 if (torch.nn.modules.module._global_forward_pre_hooks
                         or torch.nn.modules.module._global_forward_hooks):
                     return _original(x)
-                key = self._key()
-                if state.get("key") != key:
-                    state.clear()
                 if "outputs" not in state:
+                    key = self._key()
                     if (any(m.training for m in self.modules) or hasattr(self.parent, "_hf_hook")
                             or ((self.packed is None or key != self.packed_key) and _incompatible(self.modules))):
                         self.packed = self.packed_key = None
@@ -219,7 +260,10 @@ class _FusionGroup:
         self.parent.forward = self.parent_forward
         for module, original, clear in zip(self.modules, self.originals, self.original_clears):
             module.forward = original
-            module.clear_weight_cache = clear
+            if clear is None:
+                module.__dict__.pop("clear_weight_cache", None)
+            else:
+                module.clear_weight_cache = clear
         self.packed = self.packed_key = None
 
 

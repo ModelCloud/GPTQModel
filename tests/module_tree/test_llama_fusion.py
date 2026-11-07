@@ -11,6 +11,8 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
 
 from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, AWQConfig, QuantizeConfig
@@ -18,9 +20,9 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 
 
 def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=False, dynamic=None,
-             kv_heads=2, bits=4):
+             kv_heads=2, bits=4, native=False):
     torch.manual_seed(912)
-    config = LlamaConfig(hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+    config = LlamaConfig(hidden_size=128 if native else 64, intermediate_size=256 if native else 128, num_hidden_layers=2,
                          num_attention_heads=4, num_key_value_heads=kv_heads, vocab_size=64,
                          attention_bias=True, mlp_bias=True)
     config._attn_implementation = "eager"
@@ -31,7 +33,7 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
                      "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"):
             linear = layer.get_submodule(path)
             size_in, size_out = linear.in_features, linear.out_features
-            group_size = 16
+            group_size = 128 if native else 16
             codes = torch.randint(0, 1 << bits, (size_in, size_out))
             zeros = torch.full((size_in // group_size, size_out), 1 << (bits - 1), dtype=torch.int32)
             scales = torch.full(zeros.shape, 1 / (32 * (1 << bits)), dtype=dtype)
@@ -41,7 +43,7 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
             linear.bias.data.uniform_(-0.01, 0.01)
             cls = TorchLinear if method == "gptq" else AwqTorchLinear
             kwargs = {"format": FORMAT.GPTQ_V2} if method == "gptq" else {}
-            module = cls(bits=bits, group_size=group_size, sym=False, desc_act=False,
+            module = cls(bits=bits, group_size=group_size, sym=native, desc_act=False,
                          in_features=size_in, out_features=size_out, bias=True,
                          register_buffers=True, dtype=dtype, **kwargs)
             if method == "gptq":
@@ -56,13 +58,60 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
                 value = getattr(module, name, None)
                 if isinstance(value, torch.Tensor):
                     setattr(module, name, value.clone())
+            if native:
+                kernel = MarlinLinear if method == "gptq" else AwqMarlinLinear
+                converted = kernel(bits=bits, group_size=group_size, sym=True, desc_act=False,
+                                   in_features=size_in, out_features=size_out, bias=True,
+                                   register_buffers=True, dtype=dtype).to(device)
+                for name in ("qweight", "qzeros", "scales", "bias", "g_idx"):
+                    src, dst = getattr(module, name, None), getattr(converted, name, None)
+                    if isinstance(src, torch.Tensor) and isinstance(dst, torch.Tensor) and src.shape == dst.shape:
+                        dst.data.copy_(src)
+                if method == "gptq":
+                    converted.qzero_format(format=2)
+                converted.post_init()
+                module = converted.eval()
             parent, leaf = path.rsplit(".", 1)
             setattr(layer.get_submodule(parent), leaf, module)
-            weights[f"model.layers.{layer_index}.{path}"] = (weight.to(device), module.bias.clone())
+            weights[f"model.layers.{layer_index}.{path}"] = (weight.to(device), linear.bias.detach().to(device=device, dtype=dtype).clone())
     model.to(device)
-    qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=16, sym=False, dynamic=dynamic)
+    qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=128 if native else 16,
+                                                           sym=native, dynamic=dynamic)
     wrapper = LlamaQModel(model, quantized=quantized, quantize_config=qcfg, fusion_enabled=automatic)
     return wrapper, weights
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_symmetric_marlin_fusion_real_llama_oracle(method, dtype):
+    if not torch.cuda.is_available() or torch.version.hip:
+        pytest.skip("Native Marlin fusion requires NVIDIA CUDA hardware")
+    model, weights = _wrapper(method, dtype, "cuda:0", native=True)
+    ids = torch.tensor([[1, 2, 3]], device="cuda:0")
+    with torch.inference_mode():
+        before = model.model(ids).logits
+        model.fuse()
+        after = model.model(ids).logits
+        assert len(model.fusion_plan().groups) == 4
+        for group in model.fusion_plan().groups:
+            x = torch.randn(2, 3, 128, dtype=dtype, device="cuda:0")
+            oracle = []
+            for path in group.decision.paths:
+                weight, bias = weights[f"{group.decision.parent}.{path.rsplit('.', 1)[-1]}"]
+                oracle.append((x.float() @ weight.float()).to(dtype) + bias)
+            torch.testing.assert_close(group.packed(x), torch.cat(oracle, dim=-1), rtol=2e-3, atol=2e-3)
+            assert torch.count_nonzero(group.packed.workspace) == 0
+    torch.testing.assert_close(after, before, rtol=2e-3, atol=2e-3)
+    group = model.fusion_plan().groups[0]
+    cached = group.packed
+    group.modules[0].clear_weight_cache()
+    assert group.packed is None
+    with torch.inference_mode():
+        model.model(ids)
+    assert group.packed is not cached
+    leaves = list(group.modules)
+    model.fuse(False)
+    assert all(not hasattr(leaf, "clear_weight_cache") for leaf in leaves)
 
 
 @pytest.mark.parametrize("method", ["gptq", "awq"])
