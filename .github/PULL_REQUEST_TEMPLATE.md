@@ -30,6 +30,16 @@ See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
       and verifies declared paths, checkpoint weight ownership/tags, roles,
       and applicable consumers, including layout variants and method overrides.
 - [ ] Runtime-created tensors are distinguished from checkpoint-owned weights.
+- [ ] Fusion eligibility is recorded in `fusable_models.json`: a validated
+      definition-owned `fusable` config composes role profiles with target-first `merge(...)`, or
+      an explicit non-applicability/qualification-gap reason is given.
+- [ ] Fusion modules/parents resolve through `model.module_plan()` with no HF
+      class-path allowlist; preamble/fallback ordering is tested.
+- [ ] Composed fusion configs preserve target identity and source immutability;
+      merge conflicts, explicit resolution, scoped policy and printed provenance
+      have unit coverage.
+- [ ] New fusion qualifications pass real-model planner coverage and native
+      GPTQ/AWQ FP16/BF16 forward/oracle tests; skipped tests are not counted as validation.
 - [ ] Registry and model-specific tests passed; any dependency skips and their
       precise coverage limits are listed below.
 
@@ -68,6 +78,11 @@ I or an AI agent (such as Codex or Claude) have:
 ## Kernel Accuracy Requirements
 
 - [ ] For kernel-related changes, accuracy drift was measured against an applicable independent Torch FP32/FP64 oracle, or the reason this is not applicable is documented.
+- [ ] Fusion support changes preserve AUTO's native class and add actual-device
+      FP16/BF16 tests where supported, native shape/workspace/descriptor checks,
+      mutation, direct source calls, exact restoration and packed-storage checks.
+- [ ] The complete kernel inventory/device report lists unavailable dependencies,
+      architecture restrictions and unqualified formats; skips are not validation.
 
 ## Notes
 

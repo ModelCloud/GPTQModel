@@ -9,4 +9,6 @@ from . import LlamaQModel
 # MiMo is based on Qwen2
 # https://huggingface.co/XiaomiMiMo/MiMo-7B-RL/blob/main/modeling_mimo.py
 class MimoQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_trust_remote_code = True

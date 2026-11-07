@@ -4,10 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MixtralQModel(BaseQModel):
+    fusable = FusableConfig("mixtral").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     shared_input_verified_model_types = frozenset({"mixtral"})
 
     pre_lm_head_norm_module = "model.norm"

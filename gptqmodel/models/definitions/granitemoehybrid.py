@@ -6,11 +6,14 @@
 from inspect import signature
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class GraniteMoeHybridQModel(BaseQModel):
     # Quantized Granite Mamba layers must use the eager path because the fast kernels
     # expect dense projections instead of GPTQ quantized linear modules.
+    fusable = FusableConfig("granitemoehybrid").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "model.norm"
     require_monkeypatch = True
 

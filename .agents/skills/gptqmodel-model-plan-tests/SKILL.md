@@ -46,3 +46,32 @@ Run the registry contract, the new model-specific test, and affected consumer
 tests. Record the exact commands, pass/skip counts, dependency limitations,
 and model-test nodes in the PR. New model support is not complete with only an
 E2E generation test or a registry entry.
+
+## Fusion eligibility
+
+Every model type/alias also needs an entry in
+`tests/module_tree/fixtures/fusable_models.json`: either an explicitly qualified
+definition-owned `fusable` config or a precise reason the current executor is
+not applicable or remains unqualified. Keep `docs/fusion-model-coverage.md` in
+sync. Eligibility never enables fusion by default.
+
+Compose immutable role profiles through `FusableConfig("target").merge(...)`;
+merges preserve target identity and source immutability; use `profiles=("qkv",)` for a family subset.
+Concrete sibling paths and live parents must resolve from `model.module_plan()`.
+Do not add HF parent-class import paths, class allowlists, or name heuristics to
+fusion declarations. Inventory class names are independently observed test
+facts and never runtime admission rules. Keep native-forward/shared-input
+checks and verify preamble work runs once on both fused and fallback paths.
+Test multiple-source/diamond deduplication, explicit profile replacement, policy
+conflicts, scoped overrides and failure before changing an installed plan.
+Printed/extracted decisions must include origins and winning policy. Definitions
+may use `model_profiles` for per-model role policies. MoE expert
+paths remain excluded by the current planner.
+
+Before adding a qualification, run the real-model topology/planner test and
+the native parent tests in `tests/module_tree/test_fusable_models.py`. Cover
+GPTQ/AWQ and FP16/BF16 against separate native forwards and independent packed
+integer-weight oracles. A skipped native test or a missing implementation is
+not a validated profile. Full-model performance claims additionally need
+measurements on that architecture; shared parent qualification does not imply
+the Llama benchmark numbers apply to it.

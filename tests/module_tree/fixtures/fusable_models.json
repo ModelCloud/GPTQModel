@@ -1,0 +1,5887 @@
+{
+  "schema": 2,
+  "models": {
+    "afmoe": {
+      "definition": "AfMoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.afmoe.modeling_afmoe.AfmoeAttention"
+        }
+      ]
+    },
+    "agnes": {
+      "definition": "AgnesQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "apertus": {
+      "definition": "ApertusQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.apertus.modeling_apertus.ApertusAttention"
+        }
+      ]
+    },
+    "apertus1p5": {
+      "definition": "Apertus1p5QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "apertus1p5_text": {
+      "definition": "Apertus1p5TextQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "axk2": {
+      "definition": "AXK2QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "baichuan": {
+      "definition": "BaiChuanQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "bailing_hybrid": {
+      "definition": "BailingMoeQModel",
+      "reason": "No compatible native projection forward: projections already combined, conditional, or preprocessed."
+    },
+    "bailing_moe": {
+      "definition": "BailingMoeQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "bloom": {
+      "definition": "BloomQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "brumby": {
+      "definition": "BrumbyQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "chatglm": {
+      "definition": "ChatGLMQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "codegen": {
+      "definition": "CodeGenQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "cohere": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.cohere.modeling_cohere.CohereAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.cohere.modeling_cohere.CohereMLP"
+        }
+      ]
+    },
+    "cohere2": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
+        }
+      ]
+    },
+    "cohere2_moe": {
+      "definition": "Cohere2MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "mlp_layer_types": [
+          "sparse",
+          "sparse"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.cohere2_moe.modeling_cohere2_moe.Cohere2MoeAttention"
+        }
+      ]
+    },
+    "cohere_compass": {
+      "definition": "CohereCompassQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "rope_parameters": {
+            "sliding_attention": {
+              "rope_type": "default",
+              "rope_theta": 10000.0
+            },
+            "full_attention": {
+              "rope_type": "default",
+              "rope_theta": 10000.0
+            }
+          },
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ],
+          "head_dim": 32
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.cohere_compass.modeling_cohere_compass.CohereCompassAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.cohere_compass.modeling_cohere_compass.CohereCompassMLP"
+        }
+      ]
+    },
+    "dbrx": {
+      "definition": "DbrxQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "dbrx_converted": {
+      "definition": "DbrxConvertedQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "deci": {
+      "definition": "DeciLMQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "deepseek_ocr2": {
+      "definition": "DeepSeekOCR2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "sam_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "hidden_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "image_size": 32,
+            "patch_size": 8
+          },
+          "encoder_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "vocab_size": 64,
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 128,
+            "layer_types": [
+              "full_attention",
+              "full_attention"
+            ],
+            "pad_token_id": 0
+          }
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "head_dim": 32,
+          "n_group": 1,
+          "n_routed_experts": 2,
+          "n_shared_experts": 1,
+          "topk_group": 1,
+          "num_experts_per_tok": 1,
+          "moe_intermediate_size": 128,
+          "mlp_layer_types": [
+            "dense",
+            "dense"
+          ],
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.deepseek_ocr2.modeling_deepseek_ocr2.DeepseekOcr2TextAttention"
+        }
+      ]
+    },
+    "deepseek_v2": {
+      "definition": "DeepSeekV2QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "deepseek_v3": {
+      "definition": "DeepSeekV3QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "deepseek_v32": {
+      "definition": "DeepSeekV32QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "deepseek_v4": {
+      "definition": "DeepSeekV4QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "deepseek_vl": {
+      "definition": "DeepSeekVLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "head_dim": 32
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaMLP"
+        }
+      ]
+    },
+    "deepseek_vl_v2": {
+      "definition": "DeepSeekVLV2QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "diffusion_gemma": {
+      "definition": "DiffusionGemmaQModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForMultimodalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ],
+          "num_experts": 2,
+          "moe_intermediate_size": 128
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.diffusion_gemma.modeling_diffusion_gemma.DiffusionGemmaText4MLP"
+        }
+      ]
+    },
+    "dots1": {
+      "definition": "Dots1QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "n_shared_experts": 1,
+        "n_routed_experts": 2,
+        "num_experts_per_tok": 1,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.dots1.modeling_dots1.Dots1Attention"
+        }
+      ]
+    },
+    "dream": {
+      "definition": "DreamQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ernie4_5": {
+      "definition": "Ernie4_5QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.ernie4_5.modeling_ernie4_5.Ernie4_5Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.ernie4_5.modeling_ernie4_5.Ernie4_5MLP"
+        }
+      ]
+    },
+    "ernie4_5_moe": {
+      "definition": "Ernie4_5_MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "moe_k": 1,
+        "moe_num_experts": 2
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.ernie4_5_moe.modeling_ernie4_5_moe.Ernie4_5_MoeAttention"
+        }
+      ]
+    },
+    "ernie4_5_moe_vl": {
+      "definition": "Ernie4_5_VLMoeQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ernie4_5_vl_moe": {
+      "definition": "Ernie4_5_VLMoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "pad_token_id": 0,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "rope_parameters": {
+            "mrope_section": [
+              6,
+              6,
+              4
+            ],
+            "rope_3d": false
+          },
+          "mlp_layer_types": [
+            "dense",
+            "sparse"
+          ]
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_heads": 4,
+          "patch_size": 8,
+          "intermediate_size": 256
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe.Ernie4_5_VLMoeTextAttention"
+        }
+      ]
+    },
+    "exaone": {
+      "definition": "ExaOneQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "exaone4": {
+      "definition": "Exaone4QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.exaone4.modeling_exaone4.Exaone4Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.exaone4.modeling_exaone4.Exaone4MLP"
+        }
+      ]
+    },
+    "exaone4_5": {
+      "definition": "Exaone4_5QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ]
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8,
+          "num_key_value_heads": 2
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.exaone4.modeling_exaone4.Exaone4Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.exaone4.modeling_exaone4.Exaone4MLP"
+        }
+      ]
+    },
+    "exaone4_5_text": {
+      "definition": "Exaone4QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "falcon": {
+      "definition": "RwgQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "falcon_h1": {
+      "definition": "FalconH1QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1Attention"
+        },
+        {
+          "parent": "feed_forward",
+          "family": "gate_up",
+          "paths": [
+            "feed_forward.gate_proj",
+            "feed_forward.up_proj"
+          ],
+          "parent_type": "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1MLP"
+        }
+      ]
+    },
+    "falcon_mamba": {
+      "definition": "FalconMambaQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "flint": {
+      "definition": "FlintQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "full_attention",
+          "sliding_attention"
+        ],
+        "pad_token_id": 0,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.flint.modeling_flint.FlintAttention"
+        }
+      ]
+    },
+    "gemma": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gemma.modeling_gemma.GemmaAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma.modeling_gemma.GemmaMLP"
+        }
+      ]
+    },
+    "gemma2": {
+      "definition": "Gemma2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gemma2.modeling_gemma2.Gemma2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma2.modeling_gemma2.Gemma2MLP"
+        }
+      ]
+    },
+    "gemma3": {
+      "definition": "Gemma3ForConditionalGenerationGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ]
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gemma3.modeling_gemma3.Gemma3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma3.modeling_gemma3.Gemma3MLP"
+        }
+      ]
+    },
+    "gemma3_text": {
+      "definition": "Gemma3QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gemma3.modeling_gemma3.Gemma3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma3.modeling_gemma3.Gemma3MLP"
+        }
+      ]
+    },
+    "gemma3n": {
+      "definition": "Gemma3nForConditionalGenerationGPTQ",
+      "reason": "Multimodal constructor needs optional timm/torchvision; text-only MLP is qualified separately."
+    },
+    "gemma3n_text": {
+      "definition": "Gemma3nTextQModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "hidden_size_per_layer_input": 0,
+        "num_kv_shared_layers": 0
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma3n.modeling_gemma3n.Gemma3nTextMLP"
+        }
+      ]
+    },
+    "gemma4": {
+      "definition": "Gemma4ForConditionalGenerationGPTQ",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ],
+          "hidden_size_per_layer_input": 0,
+          "num_experts": 2,
+          "moe_intermediate_size": 128
+        }
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP"
+        }
+      ]
+    },
+    "gemma4_text": {
+      "definition": "Gemma4TextQModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "hidden_size_per_layer_input": 0,
+        "num_experts": 2,
+        "moe_intermediate_size": 128
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP"
+        }
+      ]
+    },
+    "gemma4_unified": {
+      "definition": "Gemma4UnifiedForConditionalGenerationGPTQ",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma4_unified.modeling_gemma4_unified.Gemma4UnifiedTextMLP"
+        }
+      ]
+    },
+    "gemma4_unified_text": {
+      "definition": "Gemma4UnifiedTextQModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.gemma4_unified.modeling_gemma4_unified.Gemma4UnifiedTextMLP"
+        }
+      ]
+    },
+    "glm": {
+      "definition": "GlmQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm.modeling_glm.GlmAttention"
+        }
+      ]
+    },
+    "glm4": {
+      "definition": "GlmQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm4.modeling_glm4.Glm4Attention"
+        }
+      ]
+    },
+    "glm4_moe": {
+      "definition": "GLM4MoEGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "n_routed_experts": 2,
+        "first_k_dense_replace": 0,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm4_moe.modeling_glm4_moe.Glm4MoeAttention"
+        }
+      ]
+    },
+    "glm4_moe_lite": {
+      "definition": "Glm4MoeLiteQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "glm4v": {
+      "definition": "Glm4vGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "intermediate_size": 256
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm4v.modeling_glm4v.Glm4vTextAttention"
+        }
+      ]
+    },
+    "glm4v_moe": {
+      "definition": "Glm4vMoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "moe_intermediate_size": 128,
+          "num_experts_per_tok": 1,
+          "n_routed_experts": 2,
+          "first_k_dense_replace": 0,
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "intermediate_size": 256
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm4v_moe.modeling_glm4v_moe.Glm4vMoeTextAttention"
+        }
+      ]
+    },
+    "glm4v_moe_text": {
+      "definition": "Glm4vMoeTextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModel",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "n_routed_experts": 2,
+        "first_k_dense_replace": 0,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm4v_moe.modeling_glm4v_moe.Glm4vMoeTextAttention"
+        }
+      ]
+    },
+    "glm5_next": {
+      "definition": "Glm5NextQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "glm_moe_dsa": {
+      "definition": "GlmMoeDsaQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "glm_ocr": {
+      "definition": "GlmOCRGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "intermediate_size": 256
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.glm_ocr.modeling_glm_ocr.GlmOcrTextAttention"
+        }
+      ]
+    },
+    "glmasr": {
+      "definition": "GlmASRGPTQ",
+      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+    },
+    "gpt2": {
+      "definition": "GPT2QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "gpt_bigcode": {
+      "definition": "GptBigCodeQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "gpt_neo": {
+      "definition": "GptNeoQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "max_position_embeddings": 128,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "num_heads": 4,
+        "intermediate_size": 256,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "attn.attention",
+          "family": "qkv",
+          "paths": [
+            "attn.attention.q_proj",
+            "attn.attention.k_proj",
+            "attn.attention.v_proj"
+          ],
+          "parent_type": "transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoSelfAttention"
+        }
+      ]
+    },
+    "gpt_neox": {
+      "definition": "GPTNeoXQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "gpt_oss": {
+      "definition": "GPTOSSGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "num_hidden_layers": 2,
+        "num_local_experts": 2,
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "head_dim": 32,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "num_experts_per_tok": 1,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gpt_oss.modeling_gpt_oss.GptOssAttention"
+        }
+      ]
+    },
+    "gpt_pangu": {
+      "definition": "PanguAlphaQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "gptj": {
+      "definition": "GptJQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "n_positions": 128,
+        "n_embd": 128,
+        "n_layer": 2,
+        "n_head": 4,
+        "n_inner": 256,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "attn",
+          "family": "qkv",
+          "paths": [
+            "attn.q_proj",
+            "attn.k_proj",
+            "attn.v_proj"
+          ],
+          "parent_type": "transformers.models.gptj.modeling_gptj.GPTJAttention"
+        }
+      ]
+    },
+    "granite": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.granite.modeling_granite.GraniteAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.granite.modeling_granite.GraniteMLP"
+        }
+      ]
+    },
+    "granitemoe": {
+      "definition": "GraniteMoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_local_experts": 2,
+        "num_experts_per_tok": 1
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.granitemoe.modeling_granitemoe.GraniteMoeAttention"
+        }
+      ]
+    },
+    "granitemoehybrid": {
+      "definition": "GraniteMoeHybridQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_local_experts": 2,
+        "num_experts_per_tok": 1,
+        "layer_types": [
+          "linear_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.granitemoehybrid.modeling_granitemoehybrid.GraniteMoeHybridAttention"
+        }
+      ]
+    },
+    "grinmoe": {
+      "definition": "GrinMoeQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "helium": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.helium.modeling_helium.HeliumAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.helium.modeling_helium.HeliumMLP"
+        }
+      ]
+    },
+    "hrm_text": {
+      "definition": "HrmTextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.hrm_text.modeling_hrm_text.HrmTextAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.hrm_text.modeling_hrm_text.HrmTextMLP"
+        }
+      ]
+    },
+    "hunyuan_v1_dense": {
+      "definition": "HunYuanDenseV1QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense.HunYuanDenseV1MLP"
+        }
+      ]
+    },
+    "hunyuan_v1_moe": {
+      "definition": "HunYuanMoEV1QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "num_experts": 2,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.hunyuan_v1_moe.modeling_hunyuan_v1_moe.HunYuanMoEV1Attention"
+        }
+      ]
+    },
+    "hunyuan_vl": {
+      "definition": "HunYuanVLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "head_dim": 32
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "num_hidden_layers": 2,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLDenseV1Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLMLP"
+        }
+      ]
+    },
+    "hy_v3": {
+      "definition": "HYV3QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "moe_intermediate_size": 128,
+        "mlp_layer_types": [
+          "dense",
+          "sparse"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.hy_v3.modeling_hy_v3.HYV3Attention"
+        }
+      ]
+    },
+    "hymba": {
+      "definition": "HymbaQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "inkling_mm_model": {
+      "definition": "InklingMMQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForMultimodalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "layer_types": [
+            "hybrid_sliding",
+            "hybrid"
+          ],
+          "max_position_embeddings": 128,
+          "mlp_layer_types": [
+            "sparse",
+            "sparse"
+          ],
+          "intermediate_size": 256,
+          "moe_intermediate_size": 128,
+          "n_routed_experts": 2,
+          "num_experts_per_tok": 1,
+          "n_shared_experts": 1,
+          "pad_token_id": 0
+        },
+        "audio_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          }
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "patch_size": 8,
+          "hidden_size": 128,
+          "num_attention_heads": 4
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.inkling.modeling_inkling.InklingAttention"
+        }
+      ]
+    },
+    "instella": {
+      "definition": "InstellaQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "intern_s2_preview": {
+      "definition": "InternS2PreviewQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "internlm": {
+      "definition": "InternLMQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "internlm2": {
+      "definition": "InternLM2QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "interns1": {
+      "definition": "InternS1QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "internvl": {
+      "definition": "InternVLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "intermediate_size": 256
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+        }
+      ]
+    },
+    "internvl_chat": {
+      "definition": "InternVLChatQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "jamba": {
+      "definition": "JambaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "attn_layer_period": 1,
+        "attn_layer_offset": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.jamba.modeling_jamba.JambaAttention"
+        },
+        {
+          "parent": "feed_forward",
+          "family": "gate_up",
+          "paths": [
+            "feed_forward.gate_proj",
+            "feed_forward.up_proj"
+          ],
+          "parent_type": "transformers.models.jamba.modeling_jamba.JambaMLP"
+        }
+      ]
+    },
+    "k2_horizon": {
+      "definition": "K2HorizonQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "kimi_k2": {
+      "definition": "DeepSeekV3QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "kimi_k25": {
+      "definition": "KimiK25QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "klear": {
+      "definition": "KlearQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "laguna": {
+      "definition": "LagunaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0,
+        "head_dim": 32,
+        "mlp_layer_types": [
+          "dense",
+          "sparse"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.laguna.modeling_laguna.LagunaAttention"
+        }
+      ]
+    },
+    "lfm2": {
+      "definition": "LFM2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.lfm2.modeling_lfm2.Lfm2Attention"
+        },
+        {
+          "parent": "feed_forward",
+          "family": "gate_up",
+          "paths": [
+            "feed_forward.w1",
+            "feed_forward.w3"
+          ],
+          "parent_type": "transformers.models.lfm2.modeling_lfm2.Lfm2MLP"
+        }
+      ]
+    },
+    "lfm2_moe": {
+      "definition": "LFM2MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "max_position_embeddings": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "mlp_layer_types": [
+          "dense",
+          "dense"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.lfm2_moe.modeling_lfm2_moe.Lfm2MoeAttention"
+        }
+      ]
+    },
+    "lfm2_vl": {
+      "definition": "LFM2VLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "patch_size": 8
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.lfm2.modeling_lfm2.Lfm2Attention"
+        },
+        {
+          "parent": "feed_forward",
+          "family": "gate_up",
+          "paths": [
+            "feed_forward.w1",
+            "feed_forward.w3"
+          ],
+          "parent_type": "transformers.models.lfm2.modeling_lfm2.Lfm2MLP"
+        }
+      ]
+    },
+    "lfm3": {
+      "definition": "LFM3QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "lfm3_omni": {
+      "definition": "LFM3OmniQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "lfm3_vl": {
+      "definition": "LFM3VLQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "llada2_moe": {
+      "definition": "LLaDA2MoeQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "llama": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaMLP"
+        }
+      ]
+    },
+    "llama4": {
+      "definition": "Llama4QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "intermediate_size": 256,
+          "image_size": 32,
+          "patch_size": 8
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "num_local_experts": 2,
+          "layer_types": [
+            "chunked_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama4.modeling_llama4.Llama4TextAttention"
+        }
+      ]
+    },
+    "llama4_text": {
+      "definition": "Llama4TextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_local_experts": 2,
+        "layer_types": [
+          "chunked_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama4.modeling_llama4.Llama4TextAttention"
+        }
+      ]
+    },
+    "llava": {
+      "definition": "LlavaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "projection_dim": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "vocab_size": 64
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "head_dim": 32
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaMLP"
+        }
+      ]
+    },
+    "llava_qwen2": {
+      "definition": "LlavaQwen2QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "locateanything": {
+      "definition": "LocateAnythingQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "longcat_flash": {
+      "definition": "LongCatFlashQModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "ffn_hidden_size": 256,
+        "q_lora_rank": 32,
+        "kv_lora_rank": 32,
+        "qk_nope_head_dim": 16,
+        "qk_rope_head_dim": 16,
+        "head_dim": 32,
+        "v_head_dim": 32,
+        "moe_topk": 1,
+        "n_routed_experts": 2,
+        "expert_ffn_hidden_size": 128
+      },
+      "groups": [
+        {
+          "parent": "mlps.0",
+          "family": "gate_up",
+          "paths": [
+            "mlps.0.gate_proj",
+            "mlps.0.up_proj"
+          ],
+          "parent_type": "transformers.models.longcat_flash.modeling_longcat_flash.LongcatFlashMLP"
+        },
+        {
+          "parent": "mlps.1",
+          "family": "gate_up",
+          "paths": [
+            "mlps.1.gate_proj",
+            "mlps.1.up_proj"
+          ],
+          "parent_type": "transformers.models.longcat_flash.modeling_longcat_flash.LongcatFlashMLP"
+        }
+      ]
+    },
+    "longllama": {
+      "definition": "LlamaQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "mage_vl": {
+      "definition": "MageVLQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "marin": {
+      "definition": "Qwen3QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "mimo": {
+      "definition": "MimoQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "mimo_v2": {
+      "definition": "MimoV2QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "minicpm": {
+      "definition": "MiniCPMGPTQ",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "minicpm3": {
+      "definition": "MiniCpm3QModel",
+      "profiles": {
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "kv_lora_rank": 32,
+        "q_lora_rank": 32,
+        "qk_nope_head_dim": 16,
+        "qk_rope_head_dim": 16,
+        "v_head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.minicpm3.modeling_minicpm3.MiniCPM3MLP"
+        }
+      ]
+    },
+    "minicpmo": {
+      "definition": "MiniCPMOQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "minicpmv": {
+      "definition": "MiniCPMVQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "minicpmv4_6": {
+      "definition": "MiniCPMV4_6QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "head_dim": 32,
+          "layer_types": [
+            "linear_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8
+        },
+        "image_size": 32,
+        "patch_size": 8
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+        }
+      ]
+    },
+    "minimax": {
+      "definition": "MiniMaxQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts_per_tok": 1,
+        "num_local_experts": 2,
+        "layer_types": [
+          "full_attention",
+          "linear_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.minimax.modeling_minimax.MiniMaxAttention"
+        }
+      ]
+    },
+    "minimax_m2": {
+      "definition": "MiniMaxM2GPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts_per_tok": 1,
+        "num_local_experts": 2
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.minimax_m2.modeling_minimax_m2.MiniMaxM2Attention"
+        }
+      ]
+    },
+    "minimax_m3_vl": {
+      "definition": "MiniMaxM3VLGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "num_experts_per_tok": 1,
+          "num_local_experts": 2,
+          "mlp_layer_types": [
+            "sparse",
+            "sparse"
+          ],
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.minimax_m3_vl.modeling_minimax_m3_vl.MiniMaxM3VLAttention"
+        }
+      ]
+    },
+    "ministral3": {
+      "definition": "Ministral3GPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.ministral3.modeling_ministral3.Ministral3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.ministral3.modeling_ministral3.Ministral3MLP"
+        }
+      ]
+    },
+    "mistral": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.mistral.modeling_mistral.MistralAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.mistral.modeling_mistral.MistralMLP"
+        }
+      ]
+    },
+    "mistral3": {
+      "definition": "Mistral3GPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForPreTraining",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "head_dim": 32,
+          "vocab_size": 64
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.mistral.modeling_mistral.MistralAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.mistral.modeling_mistral.MistralMLP"
+        }
+      ]
+    },
+    "mixtral": {
+      "definition": "MixtralQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts_per_tok": 1,
+        "num_local_experts": 2
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.mixtral.modeling_mixtral.MixtralAttention"
+        }
+      ]
+    },
+    "mllama": {
+      "definition": "MLlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForPreTraining",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "attention_heads": 4,
+          "intermediate_size": 256,
+          "image_size": 32,
+          "patch_size": 8
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "intermediate_size": 256,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.mllama.modeling_mllama.MllamaTextSelfAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.mllama.modeling_mllama.MllamaTextMLP"
+        }
+      ]
+    },
+    "mllama_text_model": {
+      "definition": "MLlamaTextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "MllamaForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "intermediate_size": 256,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.mllama.modeling_mllama.MllamaTextSelfAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.mllama.modeling_mllama.MllamaTextMLP"
+        }
+      ]
+    },
+    "mobilellm": {
+      "definition": "MobileLLMQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "moss": {
+      "definition": "MossQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "mpt": {
+      "definition": "MptQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "muse_glimmer": {
+      "definition": "MuseGlimmerQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "layer_types": [
+            "sliding_attention",
+            "full_attention"
+          ]
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "patch_size": 8,
+          "num_attention_heads": 4,
+          "num_hidden_layers": 2,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "window_attention",
+            "full_attention"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerTextMLP"
+        }
+      ]
+    },
+    "nanbeige": {
+      "definition": "NanbeigeQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "nemotron-nas": {
+      "definition": "DeciLMQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "nemotron_h": {
+      "definition": "NemotronHQModel",
+      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+    },
+    "nemotron_h_puzzle": {
+      "definition": "NemotronHPuzzleQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "nemotron_labs_diffusion": {
+      "definition": "NemotronLabsDiffusionQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "nemotronh_nano_omni_reasoning_v3": {
+      "definition": "NemotronOmniQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "olmo": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.olmo.modeling_olmo.OlmoAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.olmo.modeling_olmo.OlmoMLP"
+        }
+      ]
+    },
+    "olmo2": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
+        }
+      ]
+    },
+    "olmo3": {
+      "definition": "Olmo3QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "layer_types": [
+          "sliding_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.olmo3.modeling_olmo3.Olmo3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.olmo3.modeling_olmo3.Olmo3MLP"
+        }
+      ]
+    },
+    "olmoe": {
+      "definition": "OlmoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts_per_tok": 1,
+        "num_experts": 2
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.olmoe.modeling_olmoe.OlmoeAttention"
+        }
+      ]
+    },
+    "openvla": {
+      "definition": "OpenVLAQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "opt": {
+      "definition": "OptQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "ffn_dim": 256,
+        "max_position_embeddings": 128,
+        "num_attention_heads": 4,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.opt.modeling_opt.OPTAttention"
+        }
+      ]
+    },
+    "ouro": {
+      "definition": "OuroQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ovis": {
+      "definition": "OvisQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ovis2": {
+      "definition": "Ovis2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8,
+          "vocab_size": 64
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vocab_size": 64,
+        "hidden_size": 128
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+        }
+      ]
+    },
+    "ovis2_5": {
+      "definition": "Ovis2_5QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ovis2_6_moe": {
+      "definition": "Ovis2_6_MoeQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "ovis2_6_next": {
+      "definition": "Ovis2_6_NextQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "phi": {
+      "definition": "PhiQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.phi.modeling_phi.PhiAttention"
+        }
+      ]
+    },
+    "phi3": {
+      "definition": "Phi3QModel",
+      "reason": "No compatible native projection forward: projections already combined, conditional, or preprocessed."
+    },
+    "phi4mm": {
+      "definition": "Phi4MMGPTQ",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "phimoe": {
+      "definition": "PhiMoEGPTQForCausalLM",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "num_experts_per_tok": 1,
+        "num_local_experts": 2
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.phimoe.modeling_phimoe.PhimoeAttention"
+        }
+      ]
+    },
+    "qwen": {
+      "definition": "QwenQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "qwen2": {
+      "definition": "Qwen2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+        }
+      ]
+    },
+    "qwen2_5_omni": {
+      "definition": "Qwen2_5_OmniGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForTextToWaveform",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "thinker_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "audio_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "encoder_layers": 2,
+            "encoder_attention_heads": 4,
+            "encoder_ffn_dim": 256,
+            "d_model": 128
+          },
+          "vision_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_heads": 4,
+            "patch_size": 8
+          },
+          "text_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "vocab_size": 64,
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 128,
+            "layer_types": [
+              "full_attention",
+              "full_attention"
+            ],
+            "pad_token_id": 0
+          }
+        },
+        "talker_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "head_dim": 32,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "token2wav_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "dit_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "hidden_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "head_dim": 32,
+            "max_position_embeddings": 128
+          },
+          "bigvgan_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            }
+          }
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2MLP"
+        }
+      ]
+    },
+    "qwen2_5_vl": {
+      "definition": "Qwen2_5_VLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2MLP"
+        }
+      ]
+    },
+    "qwen2_5_vl_text": {
+      "definition": "Qwen2_5_VLQModel",
+      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+    },
+    "qwen2_audio": {
+      "definition": "Qwen2AudioGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForPreTraining",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "audio_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "encoder_layers": 2,
+          "encoder_attention_heads": 4,
+          "encoder_ffn_dim": 256,
+          "d_model": 128
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2.modeling_qwen2.Qwen2MLP"
+        }
+      ]
+    },
+    "qwen2_moe": {
+      "definition": "Qwen2MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeAttention"
+        }
+      ]
+    },
+    "qwen2_vl": {
+      "definition": "Qwen2VLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "layer_types": [
+            "full_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "embed_dim": 128,
+          "hidden_size": 128,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2MLP"
+        }
+      ]
+    },
+    "qwen2_vl_text": {
+      "definition": "Qwen2VLQModel",
+      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+    },
+    "qwen3": {
+      "definition": "Qwen3QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "max_position_embeddings": 128,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3.modeling_qwen3.Qwen3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen3.modeling_qwen3.Qwen3MLP"
+        }
+      ]
+    },
+    "qwen3_5": {
+      "definition": "Qwen3_5QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "head_dim": 32,
+          "layer_types": [
+            "linear_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+        }
+      ]
+    },
+    "qwen3_5_moe": {
+      "definition": "Qwen3_5_MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "max_position_embeddings": 128,
+          "head_dim": 32,
+          "moe_intermediate_size": 128,
+          "shared_expert_intermediate_size": 128,
+          "num_experts_per_tok": 1,
+          "num_experts": 2,
+          "layer_types": [
+            "linear_attention",
+            "full_attention"
+          ],
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention"
+        }
+      ]
+    },
+    "qwen3_5_moe_text": {
+      "definition": "Qwen3_5_MoeTextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "head_dim": 32,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "linear_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention"
+        }
+      ]
+    },
+    "qwen3_5_text": {
+      "definition": "Qwen3_5TextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "head_dim": 32,
+        "layer_types": [
+          "linear_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5MLP"
+        }
+      ]
+    },
+    "qwen3_moe": {
+      "definition": "Qwen3MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_local_experts": 2,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention"
+        }
+      ]
+    },
+    "qwen3_next": {
+      "definition": "Qwen3NextGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "head_dim": 32,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "linear_attention",
+          "full_attention"
+        ],
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_next.modeling_qwen3_next.Qwen3NextAttention"
+        }
+      ]
+    },
+    "qwen3_omni_moe": {
+      "definition": "Qwen3OmniMoeGPTQ",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForTextToWaveform",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "thinker_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "audio_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "encoder_layers": 2,
+            "encoder_attention_heads": 4,
+            "d_model": 128
+          },
+          "vision_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_heads": 4,
+            "patch_size": 8
+          },
+          "text_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "vocab_size": 64,
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 128,
+            "moe_intermediate_size": 128,
+            "num_experts_per_tok": 1,
+            "num_experts": 2,
+            "pad_token_id": 0
+          }
+        },
+        "talker_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "code_predictor_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "vocab_size": 64,
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "max_position_embeddings": 128,
+            "layer_types": [
+              "full_attention",
+              "full_attention"
+            ],
+            "pad_token_id": 0
+          },
+          "text_config": {
+            "id2label": {
+              "0": "LABEL_0",
+              "1": "LABEL_1"
+            },
+            "vocab_size": 64,
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "max_position_embeddings": 128,
+            "moe_intermediate_size": 128,
+            "num_experts_per_tok": 1,
+            "num_local_experts": 2,
+            "pad_token_id": 0,
+            "shared_expert_intermediate_size": 128
+          },
+          "spatial_merge_size": 2
+        },
+        "code2wav_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "max_position_embeddings": 128,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe.Qwen3OmniMoeThinkerTextAttention"
+        }
+      ]
+    },
+    "qwen3_vl": {
+      "definition": "Qwen3_VLQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "head_dim": 32,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextMLP"
+        }
+      ]
+    },
+    "qwen3_vl_moe": {
+      "definition": "Qwen3_VL_MoeQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "moe_intermediate_size": 128,
+          "num_experts_per_tok": 1,
+          "num_local_experts": 2,
+          "pad_token_id": 0,
+          "head_dim": 32
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe.Qwen3VLMoeTextAttention"
+        }
+      ]
+    },
+    "qwen4_exp": {
+      "definition": "Qwen4ExpQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "max_position_embeddings": 128,
+          "head_dim": 32,
+          "moe_intermediate_size": 128,
+          "shared_expert_intermediate_size": 128,
+          "num_experts_per_tok": 1,
+          "num_experts": 2,
+          "layer_types": [
+            "linear_attention",
+            "indexed_attention"
+          ],
+          "pad_token_id": 0,
+          "indexer_n_heads": 4,
+          "indexer_kv_heads": 1,
+          "indexer_head_dim": 32,
+          "indexer_budget": 8,
+          "indexer_compress_ratio": 1,
+          "indexer_token_budget": 8,
+          "qsa_token_budget": 8,
+          "token_budget": 8,
+          "qsa_compress_ratio": 1,
+          "compress_ratio": 1
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_heads": 4,
+          "patch_size": 8
+        }
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen4_exp.modeling_qwen4_exp.Qwen4ExpTextAttention"
+        }
+      ]
+    },
+    "qwen4_exp_text": {
+      "definition": "Qwen4ExpTextQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "head_dim": 32,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "num_experts": 2,
+        "layer_types": [
+          "linear_attention",
+          "indexed_attention"
+        ],
+        "pad_token_id": 0,
+        "indexer_n_heads": 4,
+        "indexer_kv_heads": 1,
+        "indexer_head_dim": 32,
+        "indexer_budget": 8,
+        "indexer_compress_ratio": 1,
+        "indexer_token_budget": 8,
+        "qsa_token_budget": 8,
+        "token_budget": 8,
+        "qsa_compress_ratio": 1,
+        "compress_ratio": 1
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.qwen4_exp.modeling_qwen4_exp.Qwen4ExpTextAttention"
+        }
+      ]
+    },
+    "qwen_drive": {
+      "definition": "QwenDriveQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "raon1_mini": {
+      "definition": "Raon1MiniQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "refinedWeb": {
+      "definition": "RwgQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "refinedWebModel": {
+      "definition": "RwgQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "ricursive": {
+      "definition": "RicursiveQModel",
+      "reason": "Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable."
+    },
+    "seed_oss": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
+        }
+      ]
+    },
+    "smollm3": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0,
+        "layer_types": [
+          "full_attention",
+          "full_attention"
+        ]
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
+        }
+      ]
+    },
+    "smolvlm": {
+      "definition": "SmolVLMQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForImageTextToText",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vision_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "image_size": 32,
+          "patch_size": 8
+        },
+        "text_config": {
+          "id2label": {
+            "0": "LABEL_0",
+            "1": "LABEL_1"
+          },
+          "vocab_size": 64,
+          "hidden_size": 128,
+          "intermediate_size": 256,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 2,
+          "max_position_embeddings": 128,
+          "pad_token_id": 0,
+          "head_dim": 32
+        },
+        "_pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.llama.modeling_llama.LlamaMLP"
+        }
+      ]
+    },
+    "solar_open": {
+      "definition": "SolarOpenQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "moe_intermediate_size": 128,
+        "num_experts_per_tok": 1,
+        "n_routed_experts": 2,
+        "pad_token_id": 0,
+        "head_dim": 32
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.solar_open.modeling_solar_open.SolarOpenAttention"
+        }
+      ]
+    },
+    "solar_open2": {
+      "definition": "SolarOpen2QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "spark2_5": {
+      "definition": "Spark2_5QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "stablelm": {
+      "definition": "LlamaQModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ],
+        "gate_up": [
+          "gate",
+          "up"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "intermediate_size": 256,
+        "hidden_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
+        },
+        {
+          "parent": "mlp",
+          "family": "gate_up",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "parent_type": "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
+        }
+      ]
+    },
+    "stablelm_epoch": {
+      "definition": "LlamaQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "starcoder2": {
+      "definition": "Starcoder2QModel",
+      "profiles": {
+        "qkv": [
+          "q",
+          "k",
+          "v"
+        ]
+      },
+      "loader": "AutoModelForCausalLM",
+      "config": {
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "vocab_size": 64,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "max_position_embeddings": 128,
+        "pad_token_id": 0
+      },
+      "groups": [
+        {
+          "parent": "self_attn",
+          "family": "qkv",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "parent_type": "transformers.models.starcoder2.modeling_starcoder2.Starcoder2Attention"
+        }
+      ]
+    },
+    "telechat": {
+      "definition": "TeleChat2QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "unlimited-ocr": {
+      "definition": "UnlimitedOCRQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "voxtral": {
+      "definition": "VoxtralGPTQ",
+      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+    },
+    "xing4_0": {
+      "definition": "Xing4_0QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "xverse": {
+      "definition": "XverseQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "yi": {
+      "definition": "LlamaQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "zamba": {
+      "definition": "ZambaQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "zamba2": {
+      "definition": "Zamba2QModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
+    "zdtaichu5_0": {
+      "definition": "ZDTaichu5QModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    }
+  }
+}

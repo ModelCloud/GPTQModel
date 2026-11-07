@@ -12,11 +12,14 @@ from ...utils.model import get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
 class MLlamaQModel(BaseQModel):
     # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
+    fusable = FusableConfig("mllama").merge(LlamaFusableConfig())
+
     loader = AutoModelForPreTraining
     _cross_attention_decoder_layer = "MllamaCrossAttentionDecoderLayer"
 
@@ -213,6 +216,8 @@ class MLlamaQModel(BaseQModel):
 
 
 class MLlamaTextQModel(MLlamaQModel):
+    fusable = FusableConfig("mllama_text_model").merge(MLlamaQModel.fusable)
+
     loader = AutoModelForCausalLM
 
     pre_lm_head_norm_module = "model.norm"

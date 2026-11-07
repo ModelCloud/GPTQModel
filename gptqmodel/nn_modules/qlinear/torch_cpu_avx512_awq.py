@@ -193,11 +193,13 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             raise RuntimeError(
                 f"{self.__class__.__name__} requires bfloat16 activations, got {x.dtype}."
             )
+        zeros = self.qzeros if self.qzeros.is_contiguous() else self.qzeros.contiguous()
+        scales = self.scales if self.scales.is_contiguous() else self.scales.contiguous()
         out = self.gemm_int4_qzero_group_scaled_cpu_kernel(
             x,
             self.qweight,
-            self.qzeros,
-            self.scales,
+            zeros,
+            scales,
             self.group_size,
             self.bias,
         )

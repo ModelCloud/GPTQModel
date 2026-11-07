@@ -4,9 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class LFM2QModel(BaseQModel):
+    fusable = FusableConfig("lfm2").merge(LlamaFusableConfig())
+
     pre_lm_head_norm_module = "model.embedding_norm"
 
     layer_modules_strict = False

@@ -178,12 +178,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         self._ensure_runtime_buffers(device=inputs.device, dtype=inputs.dtype)
 
-        zeros = self._runtime_zeros()
+        zeros = self._runtime_zeros().contiguous()
+        scales = self.scales.contiguous()
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_fast_gemv_forward_decode(
                 inputs,
                 self.qweight,
-                self.scales,
+                scales,
                 zeros,
                 inputs.numel() // inputs.shape[-1],
                 self.out_features,
@@ -192,7 +193,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
             )
         else:
             out = awq_fast_gemm_forward_prefill(
-                inputs, self.qweight, self.scales, zeros
+                inputs, self.qweight, scales, zeros
             )
 
         if self.bias is not None:
@@ -211,7 +212,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
             self.qweight = self.qweight.to(device=device).contiguous()
 
         zeros = self._runtime_zeros()
-        if zeros.device != device or zeros.dtype != dtype or not zeros.is_contiguous():
+        if zeros.device != device or zeros.dtype != dtype:
             zeros = zeros.to(device=device, dtype=dtype).contiguous()
             if self.zeros_name == "qzeros":
                 self.qzeros = zeros
@@ -220,7 +221,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
             else:
                 raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
 
-        if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
+        if self.scales.device != device or self.scales.dtype != dtype:
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
 
         if self.bias is not None and (

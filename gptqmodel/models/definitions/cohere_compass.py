@@ -15,6 +15,7 @@ from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 _RAW_ATTENTION_MASK = "__gptqmodel_cohere_compass_attention_mask"
@@ -30,6 +31,8 @@ class CohereCompassQModel(BaseQModel):
     The vision tower stays in its native dtype. Quantization targets the text
     decoder, whose attention and MLP consume the same normalized layer input.
     """
+    fusable = FusableConfig("cohere_compass").merge(LlamaFusableConfig())
+
 
     loader = AutoModelForImageTextToText
 

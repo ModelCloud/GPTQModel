@@ -186,6 +186,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
     @torch.no_grad()
     def _fused_op_forward(self, x):
+        self._refresh_fused_state()
         if x.device.type != "cpu":
             raise NotImplementedError
 
@@ -201,6 +202,14 @@ class TorchAtenAwqLinear(AWQuantLinear):
             self.scales_and_zeros,
         )
         return out.to(x.dtype)
+
+    # The native affine operand is derived metadata, shared with GPTQ's ATen
+    # implementation. Rebuild it after loads, moves or source mutations.
+    _refresh_fused_state = TorchAtenLinear._refresh_fused_state
+
+    def clear_weight_cache(self):
+        self._fused_state_key = None
+        self._refresh_fused_state()
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)

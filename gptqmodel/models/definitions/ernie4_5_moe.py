@@ -4,9 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Ernie4_5_MoeQModel(BaseQModel):
+    fusable = FusableConfig("ernie4_5_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True

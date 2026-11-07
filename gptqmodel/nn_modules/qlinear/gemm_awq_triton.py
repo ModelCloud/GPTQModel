@@ -57,6 +57,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
     ):
         # Only quantized weights and input metadata are needed for the
         # input-gradient backward; input and bias values are not retained.
+        qweight, qzeros, scales = qweight.contiguous(), qzeros.contiguous(), scales.contiguous()
         ctx.save_for_backward(qweight, qzeros, scales)
         ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features

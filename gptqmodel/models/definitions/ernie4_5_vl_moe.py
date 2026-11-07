@@ -18,9 +18,12 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
+    fusable = FusableConfig("ernie4_5_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     loader = AutoModelForImageTextToText
 
     require_load_processor = True

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -14,6 +15,8 @@ class OlmoeQModel(BaseQModel):
     them into numbered expert modules before GPTQModel builds this tree, so the
     quantizable leaves are the standard gate/up/down projections below.
     """
+    fusable = FusableConfig("olmoe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
 
     dynamic_expert_index = "num_experts"
 

@@ -17,6 +17,7 @@ from ...utils.device import get_device
 from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_move_to
 from ...utils.torch import torch_empty_cache
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 _DIFFUSION_GEMMA_MASKS = "__gptqmodel_diffusion_gemma_attention_masks"
@@ -156,6 +157,8 @@ def _refresh_tied_weight_metadata(model, include_layer_ties: bool = False) -> No
 
 class DiffusionGemmaQModel(BaseQModel):
     """Quantization definition for native Transformers DiffusionGemma checkpoints."""
+    fusable = FusableConfig("diffusion_gemma").merge(LlamaFusableConfig(), profiles=("gate_up",))
+
 
     loader = AutoModelForMultimodalLM
     require_load_processor = True

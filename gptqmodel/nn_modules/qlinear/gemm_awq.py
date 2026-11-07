@@ -55,6 +55,7 @@ class AwqGemmFn(torch.autograd.Function):
     ):
         # Input and bias values are not needed for the input-gradient backward;
         # retain only input metadata and the quantized weight tensors.
+        qweight, qzeros, scales = qweight.contiguous(), qzeros.contiguous(), scales.contiguous()
         ctx.save_for_backward(qweight, qzeros, scales)
         ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features
@@ -182,7 +183,7 @@ class AwqGEMMLinear(AWQuantLinear):
         self.fp32_accum = bool(fp32_accum)
 
     def _ensure_runtime_dtype(self, dtype: torch.dtype):
-        if self.scales is not None and (self.scales.dtype != dtype or not self.scales.is_contiguous()):
+        if self.scales is not None and self.scales.dtype != dtype:
             self.scales = self.scales.to(dtype=dtype).contiguous()
         if self.bias is not None and (self.bias.dtype != dtype or not self.bias.is_contiguous()):
             self.bias = self.bias.to(dtype=dtype).contiguous()

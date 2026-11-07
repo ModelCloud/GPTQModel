@@ -12,10 +12,13 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MiniMaxM3VLGPTQ(BaseQModel):
+    fusable = FusableConfig("minimax_m3_vl").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     loader = AutoModelForImageTextToText
 
     # The language tower consumes image embeddings at inference time, so the

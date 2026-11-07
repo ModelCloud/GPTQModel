@@ -7,4 +7,6 @@ from . import LlamaQModel
 
 
 class XverseQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_pkgs = ["transformers<=4.38.2", "tokenizers<=0.15.2"]

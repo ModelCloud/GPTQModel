@@ -21,6 +21,7 @@ from ...utils.model import (
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -38,6 +39,8 @@ _THINKER_LAYER_MODULES = {
 
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
+    fusable = FusableConfig("qwen3_omni_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
 

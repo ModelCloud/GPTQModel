@@ -13,9 +13,12 @@ from ...utils.attn_mask import normalize_seq_mask
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class MuseGlimmerQModel(BaseQModel):
+    fusable = FusableConfig("muse_glimmer").merge(LlamaFusableConfig())
+
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = "model.language_model.norm"

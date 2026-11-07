@@ -139,7 +139,7 @@ def _exllamav2_awq_extra_cuda_cflags() -> list[str]:
 _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_exllamav2_ops",
     namespace="gptqmodel_exllamav2",
-    required_ops=("make_q_matrix", "gemm_half_q_half"),
+    required_ops=("make_q_matrix", "gemm_half_q_half", "clone_q_matrix", "free_q_matrix"),
     sources=_exllamav2_gptq_sources,
     build_root_env="GPTQMODEL_EXLLAMAV2_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("exllamav2"),
@@ -159,7 +159,7 @@ _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_exllamav2_awq_ops",
     namespace="gptqmodel_exllamav2_awq",
-    required_ops=("make_q_matrix_awq", "gemm_half_q_half_awq"),
+    required_ops=("make_q_matrix_awq", "gemm_half_q_half_awq", "clone_q_matrix_awq", "free_q_matrix_awq"),
     sources=lambda: [
         str(_exllamav2_root() / "ext_awq.cpp"),
         str(_exllamav2_root() / "cuda" / "q_matrix_awq.cu"),
@@ -317,3 +317,21 @@ def exllamav2_awq_make_q_matrix(
 
 def exllamav2_awq_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
     _extension_api().op("exllamav2_awq", "gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))
+
+
+def exllamav2_clone_q_matrix(module, *, awq=False, compact=False):
+    """Bind already-shuffled native words, retaining permutation ownership in Python."""
+    name, suffix = ("exllamav2_awq", "_awq") if awq else ("exllamav2", "")
+    tensors = [getattr(module, field) for field in ("qweight", "qzeros", "scales")]
+    if compact:
+        tensors = [tensor.contiguous() for tensor in tensors]
+    metadata = getattr(module, "q_tensors", None) or {}
+    handle = _extension_api().op(name, "clone_q_matrix" + suffix)(
+        int(module.q_handle), *tensors, metadata.get("q_perm"), metadata.get("q_invperm"))
+    return int(handle), tensors  # Keep compact temporaries alive until the consuming launch returns.
+
+
+def exllamav2_free_q_matrix(handle, *, awq=False):
+    name, suffix = ("exllamav2_awq", "_awq") if awq else ("exllamav2", "")
+    if handle is not None:
+        _extension_api().op(name, "free_q_matrix" + suffix)(int(handle))
