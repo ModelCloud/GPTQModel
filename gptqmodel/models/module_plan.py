@@ -441,7 +441,7 @@ class ModulePlan:
         return () if spec is None else spec.roles
 
     def is_expert(self, path: str) -> bool:
-        if not isinstance(path, str) or not path:
+        if not isinstance(path, str) or not path or self.find(path) is None:
             return False
         for container in self.expert_containers():
             prefix = container.split(f".{_EXPERT_PLACEHOLDER}", 1)[0]
@@ -462,6 +462,17 @@ class ModulePlan:
             for spec in self._specs.values()
             if spec.is_expert_placeholder
         }
+        # A fixed numeric index under a MoE root is an expert too. Hymba, for
+        # example, declares only `moe.experts.0` rather than a `#` placeholder.
+        moe_roots = tuple(spec.template for spec in self.moe_roots())
+        projection_parents = {spec.parent for spec in self._specs.values() if spec.roles}
+        for spec in self._specs.values():
+            if not spec.name.isdigit() or not any(
+                _path_has_segment(spec.template, root) for root in moe_roots
+            ):
+                continue
+            if spec.template in projection_parents:
+                containers.add(spec.parent)
         return tuple(sorted(containers))
 
     def shared_expert_containers(self) -> Tuple[str, ...]:
@@ -472,7 +483,7 @@ class ModulePlan:
         a shared/parallel expert family (for example ``shared_experts`` or
         ``shared_mlp``). Router gates have no projection roles and are excluded.
         """
-        expert_containers = set(self.expert_containers())
+        expert_containers = self.expert_containers()
         containers = set()
         for moe in self.moe_roots():
             for spec in self._specs.values():
@@ -481,7 +492,7 @@ class ModulePlan:
                 if not _path_has_segment(spec.template, moe.template):
                     continue
                 container = spec.parent
-                if container in expert_containers or _EXPERT_PLACEHOLDER in container:
+                if any(_path_has_segment(container, expert) for expert in expert_containers):
                     continue
                 containers.add(container)
         return tuple(sorted(containers))
@@ -531,6 +542,8 @@ class ModulePlan:
 
     def expert_root(self, path: str) -> Optional[str]:
         """Return the expert family path containing a concrete expert leaf."""
+        if not isinstance(path, str) or self.find(path) is None:
+            return None
         for container in self.expert_containers():
             prefix = container.split(f".{_EXPERT_PLACEHOLDER}", 1)[0]
             if not _path_has_segment(path, prefix):

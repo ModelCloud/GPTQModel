@@ -8,7 +8,10 @@ import pytest
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.module_plan import ModulePlan, _model_module_plan
+from gptqmodel.models.moe_lifecycle import MoELifecycleHooks
+from gptqmodel.models.moe_lifecycle import _module_plan as _hook_module_plan
 from gptqmodel.utils.model import get_module_by_name_prefix, get_module_by_name_suffix
 
 
@@ -78,6 +81,60 @@ def test_module_plan_resolves_roles_without_live_name_heuristics():
     assert not plan.is_moe("mlp_extra.gate_proj")
     assert plan.expert_container_leaf("mlp") == "experts"
     assert plan.shared_container_leaf("mlp") == "shared_mlp"
+
+
+def test_expert_queries_reject_undeclared_descendants():
+    plan = ModulePlan.from_tree([
+        "model", "layers", "#",
+        {"mlp:moe": {"experts": {"#": ("gate_proj:0",)}}},
+    ])
+    assert plan.is_expert("mlp.experts.3.gate_proj")
+    assert plan.expert_root("mlp.experts.3.gate_proj") == "mlp.experts.3"
+    assert plan.find("mlp.experts.3.undeclared") is None
+    assert not plan.is_expert("mlp.experts.3.undeclared")
+    assert plan.expert_root("mlp.experts.3.undeclared") is None
+
+
+def test_fixed_index_expert_definition_is_not_a_shared_expert():
+    plan = ModulePlan.from_tree(HymbaQModel.module_tree)
+    assert plan.expert_containers() == ("moe.experts",)
+    assert plan.shared_expert_containers() == ()
+    assert plan.expert_container_leaf("moe") == "experts"
+    assert plan.is_expert("moe.experts.0.gate_proj")
+    assert plan.expert_root("moe.experts.0.down_proj") == "moe.experts.0"
+    assert not plan.is_expert("moe.experts.1.gate_proj")
+
+    block = nn.Module()
+    block.experts = nn.ModuleList([nn.Linear(2, 2)])
+    assert MoELifecycleHooks().get_experts_module(block, HymbaQModel) is block.experts
+
+
+def test_unbound_moe_hook_compiles_definition_plan_instead_of_using_method():
+    class ToyDefinition(BaseQModel):
+        module_tree = [
+            "model", "layers", "#",
+            {"mlp:moe": {
+                "experts": {"#": ("gate_proj:0",)},
+                "shared_experts": ("gate_proj:0",),
+            }},
+        ]
+
+    block = nn.Module()
+    block.experts = nn.ModuleList([nn.Linear(2, 2)])
+    block.shared_experts = nn.Module()
+    block.shared_experts.gate_proj = nn.Linear(2, 2)
+    hooks = MoELifecycleHooks()
+    assert isinstance(_hook_module_plan(ToyDefinition), ModulePlan)
+    assert hooks.get_experts_module(block, ToyDefinition) is block.experts
+    assert hooks.get_shared_experts_module(block, ToyDefinition) is block.shared_experts
+
+    compiled = ModulePlan.from_tree(ToyDefinition.module_tree)
+
+    class LiveModel:
+        def module_plan(self):
+            return compiled
+
+    assert _hook_module_plan(LiveModel()) is compiled
 
 
 def test_module_plan_shared_containers_do_not_depend_on_expert_spelling():

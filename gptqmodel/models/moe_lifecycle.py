@@ -32,13 +32,22 @@ def _module_plan(model_class) -> Optional["ModulePlan"]:
     """Return the exact tree plan for a live wrapper or definition class."""
     if model_class is None:
         return None
+    from .module_plan import ModulePlan
+
     plan = getattr(model_class, "module_plan", None)
-    if plan is not None:
+    if isinstance(plan, ModulePlan):
         return plan
+    if callable(plan) and not isinstance(model_class, type):
+        try:
+            resolved = plan()
+        except RuntimeError:
+            pass
+        else:
+            if isinstance(resolved, ModulePlan):
+                return resolved
     module_tree = getattr(model_class, "module_tree", None)
     if module_tree is None:
         return None
-    from .module_plan import ModulePlan
     return ModulePlan.from_tree(module_tree)
 
 
@@ -250,7 +259,15 @@ class MoELifecycleHooks:
         Example:
             Returns moe_block.shared_experts or moe_block.shared_expert if either exists
         """
-        # Use the helper to get the attribute name
+        plan = getattr(self, "module_plan", None) or _module_plan(model_class)
+        if plan is not None:
+            for root in plan.moe_roots():
+                container = plan.shared_container_leaf(root.template)
+                if container and hasattr(moe_block, container):
+                    return getattr(moe_block, container)
+            return None
+
+        # Legacy hooks without a tree plan may explicitly declare a name.
         name = self.get_shared_experts_module_name(moe_block)
         if name:
             shared_experts_module = getattr(moe_block, name)

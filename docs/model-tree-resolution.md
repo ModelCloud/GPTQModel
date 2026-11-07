@@ -175,6 +175,24 @@ routed `#` container and carries no router-only role. Definitions therefore do
 not need to spell `shared_experts`, `shared_expert`, or `shared_mlp`; declaring
 the branch is enough.
 
+An explicitly numbered expert also belongs to the routed container. For example,
+Hymba declares `moe.experts.0` instead of a `#` placeholder. Its projection
+children make `moe.experts` an expert container, and the numbered branch is not
+classified as a shared expert. Expert-family queries still require the full
+path to be declared in the tree.
+
+```mermaid
+flowchart TD
+    ROOT["declared MoE root"] --> CHILD{"declared child structure"}
+    CHILD -->|"# placeholder"| ROUTED["expert_containers()"]
+    CHILD -->|"numeric child with projection leaves"| ROUTED
+    CHILD -->|"other projection family"| SHARED["shared_expert_containers()"]
+    ROUTED --> FIND{"ModulePlan.find(path)"}
+    FIND -->|"declared"| GROUP["is_expert() / expert_root()"]
+    FIND -->|"undeclared"| REJECT["False / None"]
+    style REJECT fill:#ffa39e,stroke:#a8071a
+```
+
 ## What each subsystem asks
 
 ```mermaid
