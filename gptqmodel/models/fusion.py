@@ -4,16 +4,19 @@
 """Post-quantization projection fusion, selected exclusively from ModulePlan.
 
 The original registered leaves remain the checkpoint owners. A parent invocation
-scopes the split outputs; only concatenated *packed* operands may be cached.
+consumes split outputs directly; only concatenated *packed* operands may be cached.
 """
 
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
 import math
-from contextvars import ContextVar
+import textwrap
 from dataclasses import dataclass
-from functools import wraps
+from functools import lru_cache
+from types import FunctionType, MethodType
 
 import torch
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
@@ -32,6 +35,120 @@ _FIELDS = (
     "backend", "format", "_qzeros_format", "compute_dtype", "in_features",
     "fp32", "weight_type", "is_k_full", "_marlin_tile_padding",
 )
+_TENSORS = ("qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")
+
+
+@lru_cache(maxsize=32)
+def _parent_template(original, names):
+    """Replace only declared projection calls in the installed native forward.
+
+    Everything after projection -- RoPE, cache updates, attention selection,
+    activation, multiplication and output projection -- remains upstream code.
+    An unfamiliar/decorated forward fails closed instead of guessing its flow.
+    """
+    if original.__closure__ or hasattr(original, "__wrapped__"):
+        return None
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(original)))
+    except (OSError, TypeError, SyntaxError):
+        return None
+    node = tree.body[0]
+    if not isinstance(node, ast.FunctionDef) or node.decorator_list or len(node.args.args) < 2:
+        return None
+    if any(isinstance(n, ast.Name) and n.id.startswith("__gptq_") for n in ast.walk(node)):
+        return None
+    owner, input_name = node.args.args[0].arg, node.args.args[1].arg
+    counts = [0] * len(names)
+    valid = True
+
+    class Projections(ast.NodeTransformer):
+        def visit_Call(self, call):
+            nonlocal valid
+            target = call.func
+            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == owner and target.attr in names):
+                index = names.index(target.attr)
+                if (len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Name)
+                        or call.args[0].id != input_name):
+                    valid = False
+                    return call
+                counts[index] += 1
+                return ast.copy_location(ast.Subscript(
+                    value=ast.Name(id="__gptq_outputs", ctx=ast.Load()),
+                    slice=ast.Constant(index), ctx=ast.Load()), call)
+            return self.generic_visit(call)
+
+    node = Projections().visit(node)
+    if not valid or counts != [1] * len(names):
+        return None
+    if any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+           and n.value.id == owner and n.attr in names for n in ast.walk(node)):
+        return None  # An additional weight/metadata use needs a separate proof.
+    args = [ast.Name(id=a.arg, ctx=ast.Load()) for a in (*node.args.posonlyargs, *node.args.args)[1:]]
+    if node.args.vararg:
+        args.append(ast.Starred(value=ast.Name(id=node.args.vararg.arg, ctx=ast.Load()), ctx=ast.Load()))
+    keywords = [ast.keyword(arg=a.arg, value=ast.Name(id=a.arg, ctx=ast.Load())) for a in node.args.kwonlyargs]
+    if node.args.kwarg:
+        keywords.append(ast.keyword(arg=None, value=ast.Name(id=node.args.kwarg.arg, ctx=ast.Load())))
+    prelude = ast.parse(f"__gptq_outputs = __gptq_execute({input_name})\nif __gptq_outputs is None:\n    return None").body
+    prelude[1].body[0].value = ast.Call(func=ast.Name(id="__gptq_fallback", ctx=ast.Load()), args=args, keywords=keywords)
+    node.body = prelude + node.body
+    node.name = "__gptq_direct_forward"
+    # Resolve annotations lazily, as upstream modules using future annotations do.
+    import __future__
+
+    namespace = original.__globals__.copy()
+    exec(compile(ast.fix_missing_locations(tree), original.__code__.co_filename,
+                 "exec", flags=__future__.annotations.compiler_flag), namespace)
+    return namespace[node.name].__code__
+
+
+def _mutation_guard(parent, modules, names):
+    """Compile direct dictionary bindings and tensor version/storage checks.
+
+    The guard creates no metadata tuples and performs no nn.Module attribute
+    searches. Inference tensors keep the explicit-clear contract for writes
+    without a version counter, as in other packed operand caches.
+    """
+    namespace = {}
+    checks = []
+
+    def bind(value):
+        key = f"v{len(namespace)}"
+        namespace[key] = value
+        return key
+
+    parent_state = bind(vars(parent))
+    children = bind(parent._modules)
+    checks.append(f"{parent_state}['_modules'] is {children}")
+    checks.append(f"{parent_state}.get('_hf_hook') is None")
+    for name, module in zip(names, modules):
+        state = bind(vars(module))
+        checks.append(f"{children}.get({name!r}) is {bind(module)}")
+        for field in (*_FIELDS, "out_features", "adapter", "online_full_had", "online_partial_had", "training", "forward"):
+            checks.append(f"{state}.get({field!r}) is {bind(vars(module).get(field))}")
+        checks.extend((f"not {state}['_forward_hooks']", f"not {state}['_forward_pre_hooks']",
+                       f"not {state}['_backward_hooks']", f"not {state}['_backward_pre_hooks']",
+                       f"{state}.get('_hf_hook') is None"))
+        for mapping_name in ("_parameters", "_buffers"):
+            checks.append(f"{state}[{mapping_name!r}] is {bind(vars(module)[mapping_name])}")
+        for name in _TENSORS:
+            mapping = module._parameters if name in module._parameters else module._buffers if name in module._buffers else vars(module)
+            tensor = mapping.get(name)
+            ref = bind(tensor)
+            checks.append(f"{bind(mapping)}.get({name!r}) is {ref}")
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if not tensor.is_inference():
+                checks.append(f"{ref}._version == {tensor._version}")
+            checks.extend((f"{ref}.data_ptr() == {tensor.data_ptr()}",
+                           f"{ref}.dtype is {bind(tensor.dtype)}",
+                           f"{ref}.device == {bind(tensor.device)}",
+                           f"{ref}.shape == {tuple(tensor.shape)!r}"))
+            if tensor.is_floating_point():
+                checks.append(f"not {ref}.requires_grad")
+    exec("def valid():\n    return " + " and ".join(checks), namespace)
+    return namespace["valid"]
 
 
 @dataclass(frozen=True)
@@ -84,9 +201,12 @@ def _incompatible(modules):
     for module in modules:
         if signature != tuple(getattr(module, field, None) for field in _FIELDS):
             return "quantized kernel settings differ"
+        if getattr(module.forward, "__func__", None) is not type(module).forward:
+            return "projection forward is outside the validated kernel executor"
         if module.adapter is not None or module.online_full_had or module.online_partial_had:
             return "adapters and online rotation are not supported by this executor"
-        if module._forward_hooks or module._forward_pre_hooks or hasattr(module, "_hf_hook"):
+        if (module._forward_hooks or module._forward_pre_hooks or module._backward_hooks
+                or module._backward_pre_hooks or hasattr(module, "_hf_hook")):
             return "projection has runtime hooks"
         if module.out_features * module.bits % module.pack_dtype_bits:
             return "projection output is not packed-word aligned"
@@ -147,7 +267,14 @@ class _FusionGroup:
         self.originals = [m.forward for m in modules]
         self.original_clears = [getattr(m, "clear_weight_cache", None) for m in modules]
         self.parent_forward = parent.forward
-        self.context = ContextVar(f"fusion_{decision.parent}", default=None)
+        self.native_forward = self.parent_forward
+        self.names = tuple(path.rsplit(".", 1)[-1] for path in decision.paths)
+        self.widths = tuple(module.out_features for module in modules)
+        self.guard = None
+        self.packed_forward = None
+        self.parent_state = vars(parent)
+        self.active = False
+        self.installed_clears = []
         self.packed = None
         self.packed_key = None
         self.calls = 0
@@ -212,59 +339,80 @@ class _FusionGroup:
         self.packed, self.packed_key = fused, key
         return fused
 
-    def install(self):
-        @wraps(self.parent_forward)
-        def parent_forward(*args, **kwargs):
-            token = self.context.set({})
-            try:
-                return self.parent_forward(*args, **kwargs)
-            finally:
-                self.context.reset(token)
+    def invalidate(self):
+        self.guard = self.packed_forward = None
+        self.packed = self.packed_key = None
 
-        self.parent.forward = parent_forward
-        for index, (module, original, clear) in enumerate(zip(self.modules, self.originals, self.original_clears)):
+    def _refresh(self):
+        """Cold path: validate the live owners, rebuild operands and descriptors."""
+        if (any(self.parent._modules.get(name) is not module for name, module in zip(self.names, self.modules))
+                or any(module.training for module in self.modules) or hasattr(self.parent, "_hf_hook")
+                or _incompatible(self.modules)):
+            self.invalidate()
+            return False
+        self._operand(self._key())
+        self.packed_forward = self.packed.forward
+        self.input_dtype = self.modules[0].scales.dtype
+        self.input_device = self.modules[0].scales.device
+        self.widths = tuple(module.out_features for module in self.modules)
+        self.guard = _mutation_guard(self.parent, self.modules, self.names)
+        return True
+
+    def execute(self, x):
+        if (not self.active or self.parent_state["training"] or x.requires_grad or torch.compiler.is_compiling()
+                or self.parent_forward is not self.native_forward
+                or torch.nn.modules.module._global_forward_pre_hooks
+                or torch.nn.modules.module._global_forward_hooks):
+            return None
+        if self.guard is None or not self.guard():
+            if not self._refresh():
+                return None
+        if x.dtype != self.input_dtype or x.device != self.input_device:
+            return None
+        output = self.packed_forward(x)
+        self.calls += 1
+        return output.split(self.widths, dim=-1)
+
+    def _fallback(self, *args, **kwargs):
+        return self.parent_forward(*args, **kwargs)
+
+    def install(self):
+        original = self.native_forward.__func__
+        code = _parent_template(original, self.names)
+        namespace = original.__globals__.copy()
+        namespace.update(__gptq_execute=self.execute, __gptq_fallback=self._fallback)
+        direct = FunctionType(code, namespace, original.__name__, original.__defaults__)
+        direct.__kwdefaults__ = original.__kwdefaults__
+        direct.__annotations__ = original.__annotations__.copy()
+        direct.__doc__ = original.__doc__
+        direct.__qualname__ = original.__qualname__
+        self.installed_forward = MethodType(direct, self.parent)
+        self.parent.forward = self.installed_forward
+        self.active = True
+        self.installed_clears = []
+        for module, clear in zip(self.modules, self.original_clears):
             def clear_weight_cache(_clear=clear):
-                self.packed = self.packed_key = None
-                state = self.context.get()
-                if state is not None:
-                    state.clear()
+                self.invalidate()
                 if _clear is not None:
                     _clear()
-
             module.clear_weight_cache = clear_weight_cache
-            def forward(x, _index=index, _original=original):
-                state = self.context.get()
-                if state is None or self.parent.training or x.requires_grad or torch.compiler.is_compiling():
-                    return _original(x)
-                if (torch.nn.modules.module._global_forward_pre_hooks
-                        or torch.nn.modules.module._global_forward_hooks):
-                    return _original(x)
-                if "outputs" not in state:
-                    key = self._key()
-                    if (any(m.training for m in self.modules) or hasattr(self.parent, "_hf_hook")
-                            or ((self.packed is None or key != self.packed_key) and _incompatible(self.modules))):
-                        self.packed = self.packed_key = None
-                        return _original(x)
-                    operand = self._operand(key)
-                    output = operand(x)
-                    state.update(input=x, version=None if x.is_inference() else x._version, key=key,
-                                 outputs=output.split([m.out_features for m in self.modules], dim=-1))
-                    self.calls += 1
-                version = None if x.is_inference() else x._version
-                if state["input"] is not x or state["version"] != version:
-                    return _original(x)
-                return state["outputs"][_index]
-            module.forward = forward
+            self.installed_clears.append(clear_weight_cache)
+        # Build before serving tokens. Training/offloaded/partial models keep
+        # the original path until their operands become eligible.
+        self._refresh()
 
     def remove(self):
-        self.parent.forward = self.parent_forward
-        for module, original, clear in zip(self.modules, self.originals, self.original_clears):
-            module.forward = original
+        self.active = False
+        if self.parent.forward is self.installed_forward:
+            self.parent.forward = self.native_forward
+        for module, clear, installed in zip(self.modules, self.original_clears, self.installed_clears):
+            if vars(module).get("clear_weight_cache") is not installed:
+                continue
             if clear is None:
                 module.__dict__.pop("clear_weight_cache", None)
             else:
                 module.clear_weight_cache = clear
-        self.packed = self.packed_key = None
+        self.invalidate()
 
 
 class FusionPlanner:
@@ -319,6 +467,12 @@ class FusionPlanner:
                                 reason = "parent has offload hooks"
                             else:
                                 reason = _incompatible(modules)
+                                forward = owner.forward
+                                if not reason and (
+                                    getattr(forward, "__func__", None) is not type(owner).forward
+                                    or _parent_template(forward.__func__, tuple(path.rsplit(".", 1)[-1] for path in paths)) is None
+                                ):
+                                    reason = "native forward cannot be safely rewritten from declared projection calls"
                         decision = FusionDecision(family, full_parent, paths, reason)
                         self.decisions.append(decision)
                         if decision.enabled:

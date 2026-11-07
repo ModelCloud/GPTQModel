@@ -138,6 +138,8 @@ def benchmark(method, path, args):
                 "prefill_tokens_per_second": args.prefill_tokens / statistics.median(prefill_times),
                 "decode_ms_per_token": statistics.median(decode_times) * 1000 / args.decode_steps,
                 "decode_tokens_per_second": args.decode_steps / statistics.median(decode_times),
+                "prefill_samples_ms": [seconds * 1000 for seconds in prefill_times],
+                "decode_samples_ms_per_token": [seconds * 1000 / args.decode_steps for seconds in decode_times],
             }
             if not enabled:
                 reference = {"prefill": prefill_logits.cpu(), "decode": decode_logits.cpu()}

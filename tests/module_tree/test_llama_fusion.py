@@ -4,6 +4,8 @@
 """Real Llama shells, independently constructed integer weights, and consumers."""
 
 import copy
+import gc
+import inspect
 import weakref
 
 import pytest
@@ -149,8 +151,6 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
     torch.testing.assert_close(fused, baseline, rtol=2e-3, atol=2e-3)
     assert torch.equal(tokens, generated)
     assert planner.to_dict()["fused_calls"] > 0
-    for group in planner.groups:
-        assert group.context.get() is None  # No activation survives its parent.
     assert state_before.keys() == model.model.state_dict().keys()
     for name, tensor in model.model.state_dict().items():
         assert torch.equal(tensor, state_before[name]), name
@@ -251,7 +251,6 @@ def test_state_load_mutation_dtype_and_no_retained_dense_weights(monkeypatch, me
         model.model(ids)
     assert group.packed is not changed
     assert group.packed.scales.dtype == torch.bfloat16
-    assert group.context.get() is None
 
 
 def test_awq_mha_qkv_remains_eligible():
@@ -309,24 +308,23 @@ def test_parent_exception_clears_activations_and_other_inputs_fall_back(monkeypa
     group = model.fusion_plan().groups[0]
     x = torch.randn(1, 2, 64, dtype=torch.float16)
 
-    def different_inputs():
+    def different_inputs(_x, *args, **kwargs):
         return group.modules[0](x), group.modules[1](x + 1), group.modules[2](x)
 
     monkeypatch.setattr(group, "parent_forward", different_inputs)
     with torch.no_grad():
-        actual = group.parent()
+        actual = group.parent(x)
         expected = (group.originals[0](x), group.originals[1](x + 1), group.originals[2](x))
     for a, e in zip(actual, expected):
         torch.testing.assert_close(a, e, rtol=0, atol=0)
 
-    def failure():
+    def failure(_x, *args, **kwargs):
         group.modules[0](x)
         raise RuntimeError("parent failure")
 
     monkeypatch.setattr(group, "parent_forward", failure)
     with pytest.raises(RuntimeError, match="parent failure"), torch.no_grad():
-        group.parent()
-    assert group.context.get() is None
+        group.parent(x)
 
 
 def test_training_and_direct_projection_calls_use_original_execution():
@@ -340,3 +338,206 @@ def test_training_and_direct_projection_calls_use_original_execution():
     model.train()
     model.model(torch.tensor([[1, 2]]))
     assert all(g.calls == 0 for g in model.fusion_plan().groups)
+
+
+def test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards(monkeypatch):
+    import gptqmodel.models.fusion as fusion
+
+    model, _ = _wrapper()
+    leaves = list(model.model.model.layers[0].self_attn.children())
+    original_forwards = [leaf.forward for leaf in leaves]
+    signature = inspect.signature(model.model.model.layers[0].self_attn.forward)
+    model.fuse()
+    assert [leaf.forward for leaf in leaves] == original_forwards
+    assert inspect.signature(model.model.model.layers[0].self_attn.forward) == signature
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("full metadata inspection reached the token loop")
+
+    for group in model.fusion_plan().groups:
+        assert group.packed is not None
+        monkeypatch.setattr(group, "_key", forbidden)
+    monkeypatch.setattr(fusion, "_incompatible", forbidden)
+    with torch.inference_mode():
+        for _ in range(3):
+            model.model(torch.tensor([[1, 2, 3]]))
+    assert all(group.calls == 3 for group in model.fusion_plan().groups)
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("mutation", ["inplace", "replacement", "data", "load", "dtype"])
+def test_compiled_guard_invalidates_changed_weights(native, mutation):
+    if native and (not torch.cuda.is_available() or torch.version.hip):
+        pytest.skip("Native mutation guard test requires NVIDIA CUDA")
+    device = "cuda:0" if native else "cpu"
+    model, _ = _wrapper(native=native, device=device, automatic=True)
+    group = model.fusion_plan().groups[0]
+    module = group.modules[0]
+    old = group.packed
+    if mutation == "inplace":
+        module.scales.mul_(0.5)
+    elif mutation == "replacement":
+        replacement = module.scales.clone() * 0.5
+        module.scales = torch.nn.Parameter(replacement, requires_grad=False) if native else replacement
+    elif mutation == "data":
+        module.scales.data = module.scales.data * 0.5
+    elif mutation == "load":
+        model.model.load_state_dict(copy.deepcopy(model.model.state_dict()))
+    else:
+        model.to(torch.bfloat16)
+    ids = torch.tensor([[1, 2]], device=device)
+    with torch.inference_mode():
+        actual = model.model(ids).logits
+        assert group.packed is not old
+        model.fuse(False)
+        expected = model.model(ids).logits
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+def test_runtime_hooks_and_replaced_modules_use_original_parent():
+    model, _ = _wrapper(automatic=True)
+    group = model.fusion_plan().groups[0]
+    ids = torch.tensor([[1, 2]])
+    handle = group.modules[1].register_forward_pre_hook(lambda _m, args: (args[0] + 0.25,))
+    with torch.inference_mode():
+        actual = model.model(ids).logits
+        assert group.packed is None
+        model.fuse(False)
+        expected = model.model(ids).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    handle.remove()
+    model.fuse()
+    group = model.fusion_plan().groups[0]
+    group.parent.k_proj = torch.nn.Linear(64, 32, bias=True, dtype=torch.float16)
+    with torch.inference_mode():
+        actual = model.model(ids).logits
+        assert group.packed is None
+        model.fuse(False)
+        expected = model.model(ids).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_direct_parent_releases_activations_on_success_and_exception(monkeypatch):
+    model, _ = _wrapper(automatic=True)
+    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    references = []
+    original = group.packed_forward
+
+    def tracked(x):
+        result = original(x)
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(group, "packed_forward", tracked)
+    x = torch.randn(1, 2, 64, dtype=torch.float16)
+    with torch.no_grad():
+        for _ in range(3):
+            group.parent(x)
+    assert references and all(ref() is None for ref in references)
+
+    def failure(*args, **kwargs):
+        raise RuntimeError("output projection failed")
+
+    monkeypatch.setattr(group.parent.down_proj, "forward", failure)
+    with pytest.raises(RuntimeError, match="output projection failed"), torch.no_grad():
+        group.parent(x)
+    gc.collect()
+    assert all(ref() is None for ref in references)
+
+
+def test_weight_gradient_and_global_hook_fallbacks():
+    model, _ = _wrapper(automatic=True)
+    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    group.modules[0].scales.requires_grad_(True)
+    x = torch.randn(1, 2, 64, dtype=torch.float16)
+    group.parent(x).sum().backward()
+    assert group.modules[0].scales.grad is not None
+    assert group.calls == 0
+    model, _ = _wrapper(automatic=True)
+    handle = torch.nn.modules.module.register_module_forward_hook(lambda *_args: None)
+    try:
+        with torch.no_grad():
+            model.model(torch.tensor([[1, 2]]))
+        assert all(g.calls == 0 for g in model.fusion_plan().groups)
+    finally:
+        handle.remove()
+
+
+def test_stale_parent_forward_cannot_reenable_removed_fusion():
+    model, _ = _wrapper(automatic=True)
+    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    wrapped = group.parent.forward
+    # A third-party wrapper installed later may still reference our old method.
+    group.parent.forward = lambda *args, **kwargs: wrapped(*args, **kwargs)
+    model.fuse(False)
+    with torch.no_grad():
+        group.parent(torch.randn(1, 2, 64, dtype=torch.float16))
+    assert group.calls == 0
+    assert group.packed is None
+
+
+def _different_inputs(self, x):
+    return self.gate_proj(x) * self.up_proj(x + 1)
+
+
+def _repeated_projection(self, x):
+    return self.gate_proj(x) + self.gate_proj(x) + self.up_proj(x)
+
+
+def _projection_weight_access(self, x):
+    return self.gate_proj(x) * self.up_proj(x) + self.gate_proj.weight.sum()
+
+
+@pytest.mark.parametrize("forward", [_different_inputs, _repeated_projection, _projection_weight_access])
+def test_unfamiliar_forward_fails_closed(forward):
+    from gptqmodel.models.fusion import _parent_template
+
+    assert _parent_template(forward, ("gate_proj", "up_proj")) is None
+
+
+def test_same_storage_dtype_and_shape_changes_are_detected():
+    model, _ = _wrapper(automatic=True)
+    group = model.fusion_plan().groups[0]
+    scales = group.modules[0].scales
+    pointer = scales.data_ptr()
+    scales.data = scales.data.view(torch.bfloat16)
+    assert scales.data_ptr() == pointer
+    assert not group.guard()
+    model.fuse(False)
+    model, _ = _wrapper(automatic=True)
+    group = model.fusion_plan().groups[0]
+    scales = group.modules[0].scales
+    pointer = scales.data_ptr()
+    scales.data = scales.data.flatten()
+    assert scales.data_ptr() == pointer
+    assert not group.guard()
+
+
+def test_runtime_projection_forward_override_uses_original_parent():
+    model, _ = _wrapper(automatic=True)
+    group = model.fusion_plan().groups[0]
+    module = group.modules[0]
+    original = module.forward
+    module.forward = lambda x: original(x) * 0.75
+    ids = torch.tensor([[1, 2]])
+    with torch.no_grad():
+        actual = model.model(ids).logits
+        assert group.packed is None
+        model.fuse(False)
+        expected = model.model(ids).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_compiled_parent_uses_original_path():
+    model, _ = _wrapper(automatic=True)
+    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    x = torch.randn(1, 2, 64, dtype=torch.float16)
+    compiled = torch.compile(group.parent, backend="eager")
+    try:
+        with torch.inference_mode():
+            actual = compiled(x)
+            expected = group.parent_forward(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert group.calls == 0
+    finally:
+        torch._dynamo.reset()
