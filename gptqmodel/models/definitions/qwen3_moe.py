@@ -6,9 +6,16 @@
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Qwen3MoeQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("qwen3_moe", parent_types={
+        "qkv": (
+            "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention",
+        ),
+    })
+
     shared_input_verified_model_types = frozenset({"qwen3_moe"})
 
     require_monkeypatch = False

@@ -2348,7 +2348,10 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
                 key = ("meta", id(tensor))
             else:
                 try:
-                    key = ("storage", id_tensor_storage(tensor))
+                    # Distinct checkpoint weights may be views into one fused
+                    # allocation. Only identical views are duplicate keys.
+                    key = ("storage", id_tensor_storage(tensor), tensor.dtype, tensor.storage_offset(),
+                           tuple(tensor.shape), tuple(tensor.stride()))
                 except Exception:
                     key = ("tensor", id(tensor))
         else:

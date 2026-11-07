@@ -3,16 +3,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Qwen3_VLQModel(BaseQwen3VLGPTQ):
+    fusable = LlamaFusableConfig().derive("qwen3_vl", parent_types={
+        "qkv": (
+            "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention",
+        ),
+        "gate_up": (
+            "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextMLP",
+        ),
+    })
+
     pass
 
 
 class Qwen3_VL_MoeQModel(BaseQwen3VLGPTQ):
     """Qwen3-VL MoE decoder with defused per-expert linear projections."""
+    fusable = LlamaFusableConfig().derive("qwen3_vl_moe", parent_types={
+        "qkv": (
+            "transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe.Qwen3VLMoeTextAttention",
+        ),
+    })
+
 
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"

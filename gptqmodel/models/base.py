@@ -105,6 +105,7 @@ from ._const import (
     META,
     normalize_device,
 )
+from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
 from .module_plan import ModulePlan
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -339,6 +340,9 @@ class BaseQModel(nn.Module):
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
 
+    # No profile means this definition cannot opt into projection fusion.
+    fusable: Optional[FusableConfig] = None
+
     # `model_type`s whose `:in=<tag>` shared-input metadata was verified against a real (tiny, CPU)
     # forward in tests/module_tree/test_shared_input_cpu_forward.py. Not inherited: every concrete
     # definition (and every extra model_type mapped onto it) must list itself or its `:in=` tags
@@ -468,8 +472,15 @@ class BaseQModel(nn.Module):
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
+        fusion_enabled: bool = False,
     ):
         super().__init__()
+        if type(fusion_enabled) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        if fusion_enabled:
+            require_fusable_config(type(self), getattr(model.config, "model_type", None))
+        self._auto_fusion = fusion_enabled
+        self._fusion_plan = None
 
         # Resolve per-instance module structure without ever changing the
         # declaration owned by the model definition class.  ``module_tree`` is
@@ -599,6 +610,8 @@ class BaseQModel(nn.Module):
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
         self._auto_configure_lookahead()
+        if self.quantized and self._auto_fusion:
+            self.fuse()
 
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
@@ -665,6 +678,43 @@ class BaseQModel(nn.Module):
                 "construct the quantized model before inspecting it"
             )
         return plan
+
+    def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None):
+        """Enable optional post-quantization QKV/gate-up fusion; return self.
+
+        Fusion is disabled by default. Enabling it rebinds checkpoint operands
+        to shared packed storage views. ``enabled=False`` restores independent
+        contiguous operands and ordinary execution. Definition and per-call
+        overrides can disable a family (``qkv``/``gate_up``) or exact parent path.
+        The definition must declare a matching ``FusableConfig``; otherwise
+        enabling fusion raises. Disabling never requires a profile.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        if enabled and not self.quantized:
+            raise RuntimeError("Fusion requires a post-quantized model")
+        if enabled:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
+        from .fusion import FusionPlanner
+
+        previous = self._fusion_plan
+        # Build before changing installed execution so invalid requests leave
+        # the previous plan in place. Temporarily unwrap for hook inspection.
+        if previous is not None:
+            previous.remove()
+        try:
+            plan = FusionPlanner(self, overrides=overrides) if enabled else None
+        except Exception:
+            if previous is not None:
+                previous.apply()
+            raise
+        self._fusion_plan = plan.apply() if plan is not None else None
+        self._auto_fusion = enabled
+        return self
+
+    def fusion_plan(self):
+        """Return the applied FusionPlanner, or None when fusion is disabled."""
+        return self._fusion_plan
 
     @classmethod
     def extract_layers_node(cls):
@@ -1444,7 +1494,17 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
+        fuse: Optional[bool] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        if fuse is not None and type(fuse) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
+        if fusion_requested:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
+        if fuse is not None:
+            self._auto_fusion = fuse
+            if not fuse and self.fusion_plan() is not None:
+                self.fuse(False)
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
             embed_quant_mode=embed_quant_mode,
@@ -1498,6 +1558,8 @@ class BaseQModel(nn.Module):
                     },
                 )
                 self.after_quantize()
+                if self._auto_fusion:
+                    self.fuse()
                 if timer is not None:
                     timer.flush()
                 return result
@@ -1791,6 +1853,8 @@ class BaseQModel(nn.Module):
         )
         if self.quantize_config.dynamic:
             log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
+        if self._auto_fusion:
+            self.fuse()
         return result
 
     @staticmethod

@@ -8,9 +8,16 @@ import torch
 
 from ...utils.model import get_module_by_name_prefix
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class OptQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("opt", parent_types={
+        "qkv": (
+            "transformers.models.opt.modeling_opt.OPTAttention",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
     module_tree = [

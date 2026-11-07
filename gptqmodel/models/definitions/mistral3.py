@@ -3,9 +3,12 @@
 from transformers import AutoModelForPreTraining
 
 from ..base import BaseQModel
+from .llama import LlamaQModel
 
 
 class Mistral3GPTQ(BaseQModel):
+    fusable = LlamaQModel.fusable.derive("mistral3", source_model_type="mistral")
+
     loader = AutoModelForPreTraining
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.norm"]

@@ -14,10 +14,13 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from .qwen2 import Qwen2QModel
 
 
 class InternVLQModel(BaseQModel):
     """Quantization definition for the Transformers-native InternVL model."""
+    fusable = Qwen2QModel.fusable.derive("internvl")
+
 
     # InternVL checkpoints keep the text model under ``language_model.model``
     # while the Transformers runtime exposes it as ``model.language_model``.

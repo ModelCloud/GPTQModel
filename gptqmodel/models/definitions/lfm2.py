@@ -4,9 +4,19 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class LFM2QModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("lfm2", parent_types={
+        "qkv": (
+            "transformers.models.lfm2.modeling_lfm2.Lfm2Attention",
+        ),
+        "gate_up": (
+            "transformers.models.lfm2.modeling_lfm2.Lfm2MLP",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.embedding_norm"
 
     layer_modules_strict = False

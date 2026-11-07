@@ -4,9 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Starcoder2QModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("starcoder2", parent_types={
+        "qkv": (
+            "transformers.models.starcoder2.modeling_starcoder2.Starcoder2Attention",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

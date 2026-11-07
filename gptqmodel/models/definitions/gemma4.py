@@ -10,6 +10,7 @@ import torch
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -183,6 +184,12 @@ def _restore_gemma4_per_layer_input_capture(model_def):
 
 class Gemma4TextQModel(LlamaQModel):
     """Quantization definition for text-only Gemma 4 checkpoints."""
+    fusable = LlamaFusableConfig().derive("gemma4_text", parent_types={
+        "gate_up": (
+            "transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP",
+        ),
+    })
+
 
     # Gemma 4 mixes optional KV projections and per-layer residual adapters across variants.
     layer_modules_strict = False
@@ -223,6 +230,8 @@ class Gemma4TextQModel(LlamaQModel):
 
 class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
     """Quantization definition for composite Gemma 4 checkpoints."""
+    fusable = Gemma4TextQModel.fusable.derive("gemma4")
+
 
     # Gemma 4 composite checkpoints share the same decoder quirks as the text-only model.
     layer_modules_strict = False

@@ -1,0 +1,598 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Post-quantization projection fusion, selected exclusively from ModulePlan.
+
+The original registered leaves remain the checkpoint owners. A parent invocation
+consumes split outputs directly; only concatenated *packed* operands may be cached.
+"""
+
+from __future__ import annotations
+
+import ast
+import copy
+import inspect
+import math
+import textwrap
+from dataclasses import dataclass
+from functools import lru_cache
+from types import FunctionType, MethodType
+
+import torch
+
+from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+from ..nn_modules.qlinear.marlin import MarlinLinear
+from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from ..nn_modules.qlinear.torch import TorchLinear
+from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
+from ..utils.marlin import replace_parameter
+from ..utils.model import get_layers_with_prefixes
+from .fusable import require_fusable_config
+
+
+_FIELDS = (
+    "bits", "requested_group_size", "group_size", "sym", "desc_act", "pack_dtype",
+    "backend", "format", "_qzeros_format", "compute_dtype", "in_features",
+    "fp32", "weight_type", "is_k_full", "_marlin_tile_padding",
+)
+_TENSORS = ("qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")
+_SHARED_OPERANDS = (("qweight", 1), ("qzeros", 1), ("scales", 1), ("bias", 0))
+
+
+def _set_operand(module, name, tensor):
+    """Retain the checkpoint registration kind when rebinding packed storage."""
+    if name in module._parameters:
+        tensor = torch.nn.Parameter(tensor, requires_grad=module._parameters[name].requires_grad)
+    setattr(module, name, tensor)
+
+
+def _retired_guard():
+    return False
+
+
+@lru_cache(maxsize=32)
+def _parent_template(original, names):
+    """Replace only declared projection calls in the installed native forward.
+
+    Everything after projection -- RoPE, cache updates, attention selection,
+    activation, multiplication and output projection -- remains upstream code.
+    An unfamiliar/decorated forward fails closed instead of guessing its flow.
+    """
+    if original.__closure__ or hasattr(original, "__wrapped__"):
+        return None
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(original)))
+    except (OSError, TypeError, SyntaxError):
+        return None
+    node = tree.body[0]
+    if not isinstance(node, ast.FunctionDef) or node.decorator_list or len(node.args.args) < 2:
+        return None
+    if any(isinstance(n, ast.Name) and n.id.startswith("__gptq_") for n in ast.walk(node)):
+        return None
+    if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not node for n in ast.walk(node)):
+        return None
+    owner, input_name = node.args.args[0].arg, node.args.args[1].arg
+    if any(isinstance(n, ast.Name) and n.id == input_name and isinstance(n.ctx, (ast.Store, ast.Del))
+           for n in ast.walk(node)):
+        return None
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+           and isinstance(n.func.value, ast.Name) and n.func.value.id == input_name
+           and n.func.attr.endswith("_") for n in ast.walk(node)):
+        return None
+    counts = [0] * len(names)
+    valid = True
+
+    class Projections(ast.NodeTransformer):
+        conditional = 0
+
+        def generic_visit(self, child):
+            guarded = isinstance(child, (ast.If, ast.IfExp, ast.BoolOp, ast.For, ast.AsyncFor, ast.While,
+                                         ast.Try, getattr(ast, "TryStar", ast.Try), ast.Match,
+                                         ast.With, ast.AsyncWith, ast.comprehension,
+                                         ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+                                         ast.GeneratorExp))
+            self.conditional += guarded
+            result = super().generic_visit(child)
+            self.conditional -= guarded
+            return result
+
+        def visit_Call(self, call):
+            nonlocal valid
+            target = call.func
+            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == owner and target.attr in names):
+                index = names.index(target.attr)
+                if (self.conditional or len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Name)
+                        or call.args[0].id != input_name):
+                    valid = False
+                    return call
+                counts[index] += 1
+                return ast.copy_location(ast.Subscript(
+                    value=ast.Name(id="__gptq_outputs", ctx=ast.Load()),
+                    slice=ast.Constant(index), ctx=ast.Load()), call)
+            return self.generic_visit(call)
+
+    node = Projections().visit(node)
+    if not valid or counts != [1] * len(names):
+        return None
+    if any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+           and n.value.id == owner and n.attr in names for n in ast.walk(node)):
+        return None  # An additional weight/metadata use needs a separate proof.
+    args = [ast.Name(id=a.arg, ctx=ast.Load()) for a in (*node.args.posonlyargs, *node.args.args)[1:]]
+    if node.args.vararg:
+        args.append(ast.Starred(value=ast.Name(id=node.args.vararg.arg, ctx=ast.Load()), ctx=ast.Load()))
+    keywords = [ast.keyword(arg=a.arg, value=ast.Name(id=a.arg, ctx=ast.Load())) for a in node.args.kwonlyargs]
+    if node.args.kwarg:
+        keywords.append(ast.keyword(arg=None, value=ast.Name(id=node.args.kwarg.arg, ctx=ast.Load())))
+    prelude = ast.parse(f"__gptq_outputs = __gptq_execute({input_name})\nif __gptq_outputs is None:\n    return None").body
+    prelude[1].body[0].value = ast.Call(func=ast.Name(id="__gptq_fallback", ctx=ast.Load()), args=args, keywords=keywords)
+    node.body = prelude + node.body
+    node.name = "__gptq_direct_forward"
+    # Resolve annotations lazily, as upstream modules using future annotations do.
+    import __future__
+
+    namespace = original.__globals__.copy()
+    exec(compile(ast.fix_missing_locations(tree), original.__code__.co_filename,
+                 "exec", flags=__future__.annotations.compiler_flag), namespace)
+    return namespace[node.name].__code__
+
+
+def _mutation_guard(parent, modules, names, packed=None):
+    """Compile direct dictionary bindings and tensor version/storage checks.
+
+    The guard creates no metadata tuples and performs no nn.Module attribute
+    searches. Inference tensors keep the explicit-clear contract for writes
+    without a version counter, as in other packed operand caches.
+    """
+    namespace = {}
+    checks = []
+    versioned = set()
+
+    def bind(value):
+        key = f"v{len(namespace)}"
+        namespace[key] = value
+        return key
+
+    parent_state = bind(vars(parent))
+    children = bind(parent._modules)
+    checks.append(f"{parent_state}['_modules'] is {children}")
+    checks.append(f"{parent_state}.get('_hf_hook') is None")
+    for name, module in zip(names, modules):
+        state = bind(vars(module))
+        checks.append(f"{children}.get({name!r}) is {bind(module)}")
+        for field in (*_FIELDS, "out_features", "adapter", "online_full_had", "online_partial_had", "training", "forward"):
+            checks.append(f"{state}.get({field!r}) is {bind(vars(module).get(field))}")
+        checks.extend((f"not {state}['_forward_hooks']", f"not {state}['_forward_pre_hooks']",
+                       f"not {state}['_backward_hooks']", f"not {state}['_backward_pre_hooks']",
+                       f"{state}.get('_hf_hook') is None"))
+        for mapping_name in ("_parameters", "_buffers"):
+            checks.append(f"{state}[{mapping_name!r}] is {bind(vars(module)[mapping_name])}")
+        for name in _TENSORS:
+            mapping = module._parameters if name in module._parameters else module._buffers if name in module._buffers else vars(module)
+            tensor = mapping.get(name)
+            ref = bind(tensor)
+            checks.append(f"{bind(mapping)}.get({name!r}) is {ref}")
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if not tensor.is_inference():
+                # _share_operands constructs sibling views with the packed
+                # tensor's version counter. One check covers writes through
+                # every slice; all binding/storage/metadata checks stay per leaf.
+                version = (getattr(packed, name) if packed is not None and tensor.numel()
+                           and name in dict(_SHARED_OPERANDS) else tensor)
+                if id(version) not in versioned:
+                    checks.append(f"{bind(version)}._version == {version._version}")
+                    versioned.add(id(version))
+            checks.extend((f"{ref}.data_ptr() == {tensor.data_ptr()}",
+                           f"{ref}.dtype is {bind(tensor.dtype)}",
+                           f"{ref}.device == {bind(tensor.device)}",
+                           f"{ref}.shape == {tuple(tensor.shape)!r}"))
+            if tensor.is_floating_point():
+                checks.append(f"not {ref}.requires_grad")
+    exec("def valid():\n    return " + " and ".join(checks), namespace)
+    # Avoid a function -> globals -> function cycle retaining old operand views
+    # after invalidation; packed GPU storage must be released immediately.
+    return namespace.pop("valid")
+
+
+@dataclass(frozen=True)
+class FusionDecision:
+    family: str
+    parent: str
+    paths: tuple[str, ...]
+    reason: str = ""
+
+    @property
+    def enabled(self):
+        return not self.reason
+
+
+def _effective_config(config, path):
+    values = copy.deepcopy(config.to_dict())
+    values.pop("dynamic", None)
+    override = config.dynamic_get(path)
+    if override is False:
+        return None
+
+    def merge(base, patch):
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                merge(base[key], value)
+            else:
+                base[key] = value
+
+    merge(values, override or {})
+    return values
+
+
+def _incompatible(modules):
+    first = modules[0]
+    if type(first) not in (TorchLinear, AwqTorchLinear, MarlinLinear, AwqMarlinLinear) or any(type(m) is not type(first) for m in modules):
+        return "executor requires identical supported Torch or Marlin kernels"
+    marlin = type(first) in (MarlinLinear, AwqMarlinLinear)
+    if marlin and (first.bits != 4 or first.requested_group_size != 128 or not first.sym or first.desc_act):
+        return "Marlin fusion requires symmetric INT4, group 128, no activation order"
+    if first.bits not in (2, 4, 8):
+        return "executor requires 2, 4 or 8-bit word-aligned storage"
+    if first.pack_dtype != torch.int32:
+        return "executor requires int32 packed words"
+    if type(first) is AwqTorchLinear and len(modules) == 3 and len({m.out_features for m in modules}) > 1:
+        # The packed weights concatenate exactly, but changing this GEMM's N
+        # changes CUDA reduction rounding. Real Llama 3.2 1B exceeded the logits
+        # drift gate; keep its separate QKV calls until a validated executor exists.
+        return "AWQ GQA QKV fusion requires a numerically validated executor"
+    signature = tuple(getattr(first, field, None) for field in _FIELDS)
+    for module in modules:
+        if signature != tuple(getattr(module, field, None) for field in _FIELDS):
+            return "quantized kernel settings differ"
+        if getattr(module.forward, "__func__", None) is not type(module).forward:
+            return "projection forward is outside the validated kernel executor"
+        if module.adapter is not None or module.online_full_had or module.online_partial_had:
+            return "adapters and online rotation are not supported by this executor"
+        if (module._forward_hooks or module._forward_pre_hooks or module._backward_hooks
+                or module._backward_pre_hooks or hasattr(module, "_hf_hook")):
+            return "projection has runtime hooks"
+        if module.out_features * module.bits % module.pack_dtype_bits:
+            return "projection output is not packed-word aligned"
+        for name in ("qweight", "qzeros", "scales"):
+            tensor = getattr(module, name, None)
+            reference = getattr(first, name, None)
+            if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+                return "quantized operands are not materialized"
+            if tensor.device != reference.device or tensor.dtype != reference.dtype or tensor.device != module.qweight.device:
+                return "operand devices or dtypes differ"
+            if tensor.requires_grad:
+                return "trainable quantized operands"
+        if module.scales.dtype not in module.SUPPORTS_DTYPES:
+            return "operand dtype is unsupported by the executor"
+        if (module.bias is None) != (first.bias is None):
+            return "bias layouts differ"
+        if module.bias is not None and (
+            module.bias.device != first.scales.device or module.bias.dtype != first.scales.dtype
+            or module.bias.requires_grad
+        ):
+            return "bias device, dtype or gradient policy differs"
+        columns = module.out_features * module.bits // module.pack_dtype_bits
+        rows = math.ceil(module.in_features / module.group_size)
+        if marlin:
+            if (getattr(module, "_marlin_tile_padding", True) is not None or module.out_features % 64
+                    or module.g_idx.numel() or module.g_idx_sort_indices.numel() or module.workspace.numel() == 0):
+                return "Marlin fusion requires finalized aligned operands without activation reordering"
+            if (tuple(module.qweight.shape) != (module.in_features // 16, module.out_features * 2)
+                    or tuple(module.scales.shape) != (rows, module.out_features)
+                    or (type(first) is AwqMarlinLinear and tuple(module.qzeros.shape) != (rows, columns))):
+                return "Marlin packed operand shapes differ from the validated layout"
+            if type(first) is MarlinLinear and module.qzeros.numel():
+                return "symmetric GPTQ Marlin requires implicit zero points"
+            continue
+        weight_shape = ((math.ceil(module.in_features * module.bits / module.pack_dtype_bits), module.out_features)
+                        if isinstance(first, TorchLinear) else (module.in_features, columns))
+        if (tuple(module.qweight.shape) != weight_shape or tuple(module.qzeros.shape) != (rows, columns)
+                or tuple(module.scales.shape) != (rows, module.out_features)):
+            return "packed operand shapes require padding or a different layout"
+        if isinstance(first, TorchLinear) and (
+            not isinstance(module.g_idx, torch.Tensor)
+            or module.g_idx.device.type == "meta"
+            or module.g_idx.shape != first.g_idx.shape
+            or module.g_idx.numel() != module.in_features
+            or not torch.equal(module.g_idx, first.g_idx)
+        ):
+            return "activation-order group indices differ"
+    if len({id(m) for m in modules}) != len(modules):
+        return "projections alias the same module"
+    return ""
+
+
+class _FusionGroup:
+    def __init__(self, decision, parent, modules):
+        self.decision = decision
+        self.parent = parent
+        self.modules = modules
+        self.originals = [m.forward for m in modules]
+        self.original_clears = [getattr(m, "clear_weight_cache", None) for m in modules]
+        self.parent_forward = parent.forward
+        self.native_forward = self.parent_forward
+        self.names = tuple(path.rsplit(".", 1)[-1] for path in decision.paths)
+        self.widths = tuple(module.out_features for module in modules)
+        self.guard = None
+        self.packed_forward = None
+        self.parent_state = vars(parent)
+        self.active = False
+        self.installed_clears = []
+        self.packed = None
+        self.packed_key = None
+        self.calls = 0
+
+    def _key(self):
+        return (id(getattr(self.parent, "_hf_hook", None)), tuple(
+            (tuple(getattr(m, field, None) for field in _FIELDS), m.training, m.out_features,
+             id(m.adapter), m.online_full_had, m.online_partial_had,
+             tuple(m._forward_hooks), tuple(m._forward_pre_hooks), id(getattr(m, "_hf_hook", None)),
+             tuple(tensor_cache_key(getattr(m, name, None)) for name in (
+                 "qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")))
+            for m in self.modules
+        ))
+
+    def _share_operands(self, fused):
+        for name, dim in _SHARED_OPERANDS:
+            tensor = getattr(fused, name)
+            if tensor is None or not tensor.numel():
+                continue
+            sizes = [getattr(module, name).shape[dim] for module in self.modules]
+            for module, view in zip(self.modules, tensor.split(sizes, dim=dim)):
+                _set_operand(module, name, view)
+        for clear in self.original_clears:
+            if clear is not None:
+                clear()
+        self.invalidate()
+        self.packed = fused
+        self.packed_key = self._key()
+
+    @torch.inference_mode(False)
+    @torch.no_grad()
+    def _operand(self, key):
+        # Inference tensors use the kernels' explicit clear_weight_cache contract
+        # for writes without version counters (installed on every source below).
+        if self.packed is not None and key == self.packed_key:
+            return self.packed
+        first = self.modules[0]
+        if type(first) in (MarlinLinear, AwqMarlinLinear):
+            # Marlin permutes within aligned N=64 tiles. Concatenating whole
+            # tiles preserves the native weight/scale/zero-point permutations.
+            # Clone the finalized shell, never run post_init/repack a second time.
+            fused = copy.copy(first)
+            fused._parameters = first._parameters.copy()
+            fused._buffers = first._buffers.copy()
+            fused._modules = first._modules.copy()
+            fused._forward_hooks = first._forward_hooks.copy()
+            fused._forward_pre_hooks = first._forward_pre_hooks.copy()
+            fused.__dict__.pop("forward", None)
+            fused.__dict__.pop("clear_weight_cache", None)
+            fused.out_features = sum(m.out_features for m in self.modules)
+            for name in ("qweight", "scales"):
+                replace_parameter(fused, name, torch.cat([getattr(m, name) for m in self.modules], dim=1))
+            if first.qzeros.numel():
+                replace_parameter(fused, "qzeros", torch.cat([m.qzeros for m in self.modules], dim=1))
+            if first.bias is not None:
+                fused.bias = torch.cat([m.bias for m in self.modules])
+            # Marlin's reduction barriers require zero-initialized scratch.
+            fused.workspace = torch.zeros_like(first.workspace)
+            self._share_operands(fused)
+            return fused
+        kwargs = {
+            "bits": first.bits, "group_size": first.requested_group_size, "sym": first.sym,
+            "desc_act": first.desc_act, "in_features": first.in_features,
+            "out_features": sum(m.out_features for m in self.modules), "bias": first.bias is not None,
+            "pack_dtype": first.pack_dtype, "register_buffers": False, "dtype": first.scales.dtype,
+            "backend": first.backend,
+        }
+        if isinstance(first, TorchLinear):
+            kwargs["format"] = first.format
+        fused = type(first)(**kwargs)
+        for name in ("qweight", "qzeros", "scales"):
+            fused.register_buffer(name, torch.cat([getattr(m, name) for m in self.modules], dim=1))
+        fused.register_buffer("bias", None if first.bias is None else torch.cat([m.bias for m in self.modules]))
+        if isinstance(first, TorchLinear):
+            fused.register_buffer("g_idx", first.g_idx)
+            fused._qzeros_format = first._qzeros_format
+            fused._init_wf_unsqueeze_buffers()
+        fused.training = False
+        self._share_operands(fused)
+        return fused
+
+    def invalidate(self):
+        if self.guard is not None:
+            # Free-threaded Python may defer destroying a function even after
+            # its final reference is dropped. Release generated operand bindings
+            # explicitly; retained callers see a safely retired guard.
+            self.guard.__code__ = _retired_guard.__code__
+            self.guard.__globals__.clear()
+        self.guard = self.packed_forward = None
+        if self.packed is not None:
+            clear = getattr(self.packed, "clear_weight_cache", None)
+            if clear is not None:
+                clear()
+            # nn.Module hooks can form cycles. Drop storage bindings eagerly
+            # rather than waiting for cyclic GC to release a retired executor.
+            self.packed._parameters.clear()
+            self.packed._buffers.clear()
+            self.packed.__dict__.pop("workspace", None)
+        self.packed = self.packed_key = None
+
+    def _refresh(self):
+        """Cold path: validate the live owners, rebuild operands and descriptors."""
+        if (any(self.parent._modules.get(name) is not module for name, module in zip(self.names, self.modules))
+                or any(module.training for module in self.modules) or hasattr(self.parent, "_hf_hook")
+                or _incompatible(self.modules)):
+            self.invalidate()
+            return False
+        self._operand(self._key())
+        self.packed_forward = self.packed.forward
+        self.input_dtype = self.modules[0].scales.dtype
+        self.input_device = self.modules[0].scales.device
+        self.widths = tuple(module.out_features for module in self.modules)
+        self.guard = _mutation_guard(self.parent, self.modules, self.names, self.packed)
+        return True
+
+    def execute(self, x):
+        if (not self.active or self.parent_state["training"] or x.requires_grad or torch.compiler.is_compiling()
+                or self.parent_forward is not self.native_forward
+                or torch.nn.modules.module._global_forward_pre_hooks
+                or torch.nn.modules.module._global_forward_hooks):
+            return None
+        if self.guard is None or not self.guard():
+            if not self._refresh():
+                return None
+        if x.dtype != self.input_dtype or x.device != self.input_device:
+            return None
+        output = self.packed_forward(x)
+        self.calls += 1
+        return output.split(self.widths, dim=-1)
+
+    def _fallback(self, *args, **kwargs):
+        return self.parent_forward(*args, **kwargs)
+
+    def install(self):
+        original = self.native_forward.__func__
+        code = _parent_template(original, self.names)
+        namespace = original.__globals__.copy()
+        namespace.update(__gptq_execute=self.execute, __gptq_fallback=self._fallback)
+        direct = FunctionType(code, namespace, original.__name__, original.__defaults__)
+        direct.__kwdefaults__ = original.__kwdefaults__
+        direct.__annotations__ = original.__annotations__.copy()
+        direct.__doc__ = original.__doc__
+        direct.__qualname__ = original.__qualname__
+        self.installed_forward = MethodType(direct, self.parent)
+        self.parent.forward = self.installed_forward
+        self.active = True
+        self.installed_clears = []
+        for module, clear in zip(self.modules, self.original_clears):
+            def clear_weight_cache(_clear=clear):
+                self.invalidate()
+                if _clear is not None:
+                    _clear()
+            module.clear_weight_cache = clear_weight_cache
+            self.installed_clears.append(clear_weight_cache)
+        # Build before serving tokens. Training/offloaded/partial models keep
+        # the original path until their operands become eligible.
+        self._refresh()
+
+    def remove(self):
+        self.active = False
+        if self.parent.forward is self.installed_forward:
+            self.parent.forward = self.native_forward
+        for module, clear, installed in zip(self.modules, self.original_clears, self.installed_clears):
+            if vars(module).get("clear_weight_cache") is not installed:
+                continue
+            if clear is None:
+                module.__dict__.pop("clear_weight_cache", None)
+            else:
+                module.clear_weight_cache = clear
+        # Separate kernels regain independent contiguous checkpoint operands.
+        # Cloning also releases an entire fused allocation held by small views.
+        with torch.inference_mode(False), torch.no_grad():
+            for module in self.modules:
+                for name, _dim in _SHARED_OPERANDS:
+                    tensor = getattr(module, name)
+                    if tensor is not None and tensor.numel():
+                        _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+            for clear in self.original_clears:
+                if clear is not None:
+                    clear()
+        self.invalidate()
+
+
+class FusionPlanner:
+    """Inspectable decisions and optional execution for a quantized wrapper."""
+
+    def __init__(self, model, overrides=None):
+        self.decisions = []
+        self.groups = []
+        if not model.quantized:
+            raise RuntimeError("Fusion requires a post-quantized model")
+        self.config = require_fusable_config(type(model), getattr(model.model.config, "model_type", None))
+        if not isinstance(model.model, torch.nn.Module):
+            return
+        policy = {**self.config.overrides, **(overrides or {})}
+        if any(type(value) is not bool for value in policy.values()):
+            raise TypeError("Fusion overrides must map family or parent paths to bool")
+        plan = model.module_plan()
+        profiles = [(profile, profile.resolve_parent_types()) for profile in
+                    self.config.profiles_for(getattr(model.model.config, "model_type", None))]
+        claimed_parents = {}
+        layers, layer_names = get_layers_with_prefixes(model.model, model.extract_layers_node())
+        if not layers:
+            raise ValueError("No declared decoder layers resolved for fusion")
+        for layer_name, layer in zip(layer_names, layers):
+            for parent in dict.fromkeys(spec.parent for spec in plan.specs if spec.roles):
+                if not parent or plan.is_moe(parent) or "{expert_index}" in parent:
+                    continue
+                for profile, parent_types in profiles:
+                    family, roles = profile.name, profile.roles
+                    candidates = [plan.role_paths_in_parent(parent, role) for role in roles]
+                    if not any(candidates):
+                        continue
+                    full_parent = f"{layer_name}.{parent}"
+                    paths = tuple(paths[0] for paths in candidates if len(paths) == 1)
+                    reason = ""
+                    if not policy.get(full_parent, policy.get(parent, policy.get(family, True))):
+                        reason = "disabled by fusion override"
+                    elif any(len(paths) != 1 for paths in candidates) or len(set(paths)) != len(roles):
+                        reason = "requires exactly one distinct declared projection per role"
+                    elif any(not plan.find(path).quantize for path in paths):
+                        reason = "projection is excluded or capture-only"
+                    try:
+                        owner = layer.get_submodule(parent)
+                        modules = [layer.get_submodule(path) for path in paths]
+                    except AttributeError:
+                        reason = reason or "declared projections are absent on this layer"
+                        modules = []
+                    if not reason:
+                        configs = [_effective_config(model.quantize_config, f"{layer_name}.{p}") for p in paths]
+                        if configs[0] is None or any(c != configs[0] for c in configs[1:]):
+                            reason = "effective quantization configurations differ or exclude a projection"
+                        elif type(owner) not in parent_types:
+                            reason = f"parent forward is outside the declared {family} executor types"
+                        elif hasattr(owner, "_hf_hook"):
+                            reason = "parent has offload hooks"
+                        else:
+                            reason = _incompatible(modules)
+                            forward = owner.forward
+                            if not reason and (
+                                getattr(forward, "__func__", None) is not type(owner).forward
+                                or _parent_template(forward.__func__, tuple(path.rsplit(".", 1)[-1] for path in paths)) is None
+                            ):
+                                reason = "native forward cannot be safely rewritten from declared projection calls"
+                    decision = FusionDecision(family, full_parent, paths, reason)
+                    self.decisions.append(decision)
+                    if decision.enabled:
+                        if id(owner) in claimed_parents:
+                            raise ValueError(f"Multiple fusion profiles match {full_parent}: "
+                                             f"{claimed_parents[id(owner)]!r} and {family!r}; "
+                                             "declare only one profile per parent")
+                        claimed_parents[id(owner)] = family
+                        self.groups.append(_FusionGroup(decision, owner, modules))
+    def apply(self):
+        for group in self.groups:
+            group.install()
+        return self
+
+    def remove(self):
+        for group in reversed(self.groups):
+            group.remove()
+
+    def to_dict(self):
+        return {"fusable": self.config.to_dict(),
+                "groups": [{"family": d.family, "parent": d.parent, "paths": list(d.paths),
+                                "enabled": d.enabled, "reason": d.reason} for d in self.decisions],
+                "fused_calls": sum(g.calls for g in self.groups)}
+
+    def render(self):
+        lines = [f"FusionPlanner: {len(self.groups)} eligible / {len(self.decisions)} declared groups"]
+        for decision in self.decisions:
+            status = "eligible" if decision.enabled else f"skip: {decision.reason}"
+            lines.append(f"  {decision.parent} [{decision.family}] [{status}]")
+        return "\n".join(lines)
+
+    def print(self, *, file=None):
+        print(self.render(), file=file)

@@ -2,9 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Ministral3GPTQ(BaseQModel):
+    fusable = LlamaFusableConfig().derive("ministral3", parent_types={
+        "qkv": (
+            "transformers.models.ministral3.modeling_ministral3.Ministral3Attention",
+        ),
+        "gate_up": (
+            "transformers.models.ministral3.modeling_ministral3.Ministral3MLP",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

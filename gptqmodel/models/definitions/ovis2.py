@@ -14,9 +14,12 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from .qwen2 import Qwen2QModel
 
 
 class Ovis2QModel(BaseQModel):
+    fusable = Qwen2QModel.fusable.derive("ovis2")
+
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.language_model.model.norm"]

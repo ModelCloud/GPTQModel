@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
+from ..fusable import LlamaFusableConfig
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
@@ -11,6 +12,12 @@ class Qwen3_5_MoeQModel(BaseQwen3VLGPTQ):
     # Qwen3.5 computes multimodal RoPE from this processor-produced field.
     # Keep it opt-in on the shared VL base because Mage-VL's processor does
     # not emit mm_token_type_ids and remains compatible without it.
+    fusable = LlamaFusableConfig().derive("qwen3_5_moe", parent_types={
+        "qkv": (
+            "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeAttention",
+        ),
+    })
+
     require_mm_token_type_ids = True
 
     layer_modules_strict = False

@@ -6,10 +6,17 @@
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Dots1QModel(BaseQModel):
     # allow missing expert modules on dense layers and support MoE expansion via config
+    fusable = LlamaFusableConfig().derive("dots1", parent_types={
+        "qkv": (
+            "transformers.models.dots1.modeling_dots1.Dots1Attention",
+        ),
+    })
+
     layer_modules_strict = False
 
     dynamic_expert_index = "n_routed_experts"

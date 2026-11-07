@@ -15,6 +15,8 @@ from .qwen3_5 import Qwen3_5QModel
 
 class QwenDriveQModel(Qwen3_5QModel):
     """Quantization definition for the ``vlm.*`` part of Qwen-Drive."""
+    fusable = None  # No qualified executor for this definition.
+
 
     loader = AutoModel
 

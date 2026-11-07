@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from .qwen3 import Qwen3QModel
+from .qwen3_5 import Qwen3_5QModel
 
 
 class Qwen3_5TextQModel(Qwen3QModel):
@@ -9,6 +10,8 @@ class Qwen3_5TextQModel(Qwen3QModel):
     Text-only Qwen 3.5 shells use the standard causal LM loader and keep their
     decoder stack directly under `model.layers`.
     """
+    fusable = Qwen3_5QModel.fusable.derive("qwen3_5_text")
+
 
     shared_input_verified_model_types = frozenset({"qwen3_5_text"})
 

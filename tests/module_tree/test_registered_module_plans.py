@@ -19,6 +19,7 @@ from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.fusable import FusableConfig, require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.shared_input import collect_leaf_specs
 
@@ -37,6 +38,18 @@ def test_every_registered_model_has_an_explicit_plan_case():
         assert INVENTORY["models"][model_type] == definition.__name__
         for method in _methods(definition):
             assert f"{definition.__name__}/{method}" in INVENTORY["cases"]
+
+
+def test_every_registered_definition_has_explicit_fusion_admission():
+    for model_type, definition in MODEL_MAP.items():
+        config = definition.fusable
+        assert config is None or isinstance(config, FusableConfig)
+        if config is None or model_type not in config.model_types:
+            with pytest.raises(ValueError):
+                require_fusable_config(definition, model_type)
+        else:
+            assert require_fusable_config(definition, model_type) is config
+            assert config.profiles
 
 
 @pytest.mark.parametrize("model_type", sorted(MODEL_MAP))

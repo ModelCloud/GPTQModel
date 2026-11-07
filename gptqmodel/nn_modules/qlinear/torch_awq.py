@@ -143,7 +143,7 @@ class AwqTorchLinear(AWQuantLinear):
         self.register_buffer("qzeros", qzeros)
 
     def _ensure_runtime_dtype(self, *, device: torch.device, dtype: torch.dtype) -> None:
-        if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
+        if self.scales.device != device or self.scales.dtype != dtype:
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
         if self.bias is not None and (
             self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()

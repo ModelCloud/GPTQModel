@@ -13,9 +13,12 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from .llama import LlamaQModel
 
 
 class DeepSeekVLQModel(BaseQModel):
+    fusable = LlamaQModel.fusable.derive("deepseek_vl")
+
     loader = AutoModelForImageTextToText
     require_load_processor = True
     support_batch_quantize = False

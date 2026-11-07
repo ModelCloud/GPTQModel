@@ -3,9 +3,16 @@
 from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Glm4vGPTQ(BaseQModel):
+    fusable = LlamaFusableConfig().derive("glm4v", parent_types={
+        "qkv": (
+            "transformers.models.glm4v.modeling_glm4v.Glm4vTextAttention",
+        ),
+    })
+
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.norm"]
