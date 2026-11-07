@@ -315,6 +315,63 @@ contiguous combined tensors directly; source views introduce no extra GEMM or
 weight copy there. Direct source calls/fallbacks may need temporary contiguous
 packed copies; `fuse(False)` restores independent contiguous source tensors.
 
+### Actual kernel inputs: views versus contiguous concat
+
+The fused executor consumes a real contiguous `torch.cat` allocation. Only the
+original Q/K/V or gate/up checkpoint leaves are views of that allocation. For
+first-layer Llama QKV, the packed fused weight has shape `(128, 6144)`, stride
+`(6144, 1)`, and offset zero. Its Q view has shape `(128, 4096)` and the same
+stride `(6144, 1)`, so that source view is strided. K/V views begin at offsets
+4096/5120. The gate/up fused weight is `(128, 32768)` with stride `(32768, 1)`;
+its two source views are `(128, 16384)`. These are measured packed layouts for
+both native GPTQ and AWQ, not dense PyTorch linear-weight shapes.
+
+`tests/benchmark_fusion_weight_layout.py` checks all nonempty packed operands:
+the production fused tensor is contiguous, a fresh concat reconstructed from
+source views is contiguous in a different allocation, and their values and
+outputs match bitwise. Separate source-view calls also match separate
+contiguous-source calls bitwise. Fused/separate outputs meet combined
+`rtol=atol=2e-3`.
+
+Below are **CUDA-event microseconds per projection group**, not whole-model
+latency. Same RTX 4090, symmetric INT4/g128/no-act-order, AUTO Marlin, FP16, one
+pinned CPU core. Twenty warmups, 31 samples per mode, 16 calls per sample; mode
+order rotates each repeat. Construction is excluded, and operands remain GPU
+resident. Separate calls return separate outputs without a timed output concat.
+
+| Method | Family | Rows | Current fused concat | Fresh contiguous concat | Separate source views | Separate contiguous sources |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| GPTQ | qkv | 1 | 16.13 | 16.01 | 83.97 | 49.92 |
+| GPTQ | qkv | 128 | 26.30 | 26.36 | 126.53 | 111.81 |
+| GPTQ | gate_up | 1 | 16.81 | 16.88 | 56.19 | 32.45 |
+| GPTQ | gate_up | 128 | 34.05 | 34.06 | 60.33 | 42.88 |
+| AWQ | qkv | 1 | 16.58 | 16.64 | 90.49 | 49.54 |
+| AWQ | qkv | 128 | 25.41 | 25.41 | 121.41 | 50.11 |
+| AWQ | gate_up | 1 | 16.70 | 16.70 | 76.62 | 33.34 |
+| AWQ | gate_up | 128 | 34.11 | 34.18 | 66.30 | 44.91 |
+
+Both fused columns perform one GEMM with the same contiguous layout; their
+measured difference is within 1% across these cases. Both separate columns
+perform three QKV or two gate/up GEMMs. The strided-source case additionally
+materializes temporary contiguous packed operands. That fallback cost does
+not occur in the normal fused path. Comparing fused versus separate columns
+therefore includes a different GEMM count; comparing the two separate columns
+isolates source-layout/copy overhead. This is a first-layer microbenchmark and
+does not replace the full-model wall-clock tables above.
+
+The source-ownership A/B control above keeps the same contiguous fused tensors
+in both modes; its 1.05% GPTQ decode difference is not evidence of a strided
+fused-kernel layout. Raw layouts, offsets, strides, equality assertions and all
+samples: [llama32-fusion-weight-layout.json](benchmarks/llama32-fusion-weight-layout.json).
+Reproduce with:
+
+```bash
+TORCHDYNAMO_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. taskset -c 17 python tests/benchmark_fusion_weight_layout.py \
+  --gptq-path /path/to/symmetric-llama32-gptq \
+  --awq-path /path/to/symmetric-llama32-awq \
+  --output-json /tmp/fusion-weight-layout.json
+```
+
 ### Retained weight storage
 
 | Method | Packed storage off | Packed storage on | Additional packed storage | Additional model workspace |

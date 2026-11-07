@@ -231,6 +231,10 @@ def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method,
             operand = getattr(group.packed, name)
             if operand is None or not operand.numel():
                 continue
+            assert operand.is_contiguous()
+            dim = 0 if name == "bias" else 1
+            torch.testing.assert_close(operand, torch.cat([getattr(m, name) for m in group.modules], dim=dim),
+                                       rtol=0, atol=0)
             for module in group.modules:
                 tensor = getattr(module, name)
                 assert tensor.untyped_storage().data_ptr() == operand.untyped_storage().data_ptr()
