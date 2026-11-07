@@ -19,7 +19,6 @@ from functools import lru_cache
 from types import FunctionType, MethodType
 
 import torch
-from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
 
 from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
 from ..nn_modules.qlinear.marlin import MarlinLinear
@@ -27,9 +26,9 @@ from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..utils.marlin import replace_parameter
+from .fusable import require_fusable_config
 
 
-_FAMILIES = {"qkv": ("q", "k", "v"), "gate_up": ("gate", "up")}
 _FIELDS = (
     "bits", "requested_group_size", "group_size", "sym", "desc_act", "pack_dtype",
     "backend", "format", "_qzeros_format", "compute_dtype", "in_features",
@@ -478,22 +477,23 @@ class FusionPlanner:
         self.groups = []
         if not model.quantized:
             raise RuntimeError("Fusion requires a post-quantized model")
+        self.config = require_fusable_config(type(model), getattr(model.model.config, "model_type", None))
         if not isinstance(model.model, torch.nn.Module):
             return
-        config = model.model.config
-        if getattr(config, "model_type", None) not in model.fusion_model_types:
-            return
-        policy = {**model.fusion_overrides, **(overrides or {})}
+        policy = {**self.config.overrides, **(overrides or {})}
         if any(type(value) is not bool for value in policy.values()):
             raise TypeError("Fusion overrides must map family or parent paths to bool")
         plan = model.module_plan()
+        profiles = [(profile, profile.resolve_parent_types()) for profile in self.config.profiles]
+        claimed_parents = {}
         for prefix in model.extract_layers_node():
             layers = model.model.get_submodule(prefix)
             for index, layer in enumerate(layers):
                 for parent in dict.fromkeys(spec.parent for spec in plan.specs if spec.roles):
                     if not parent or plan.is_moe(parent) or "{expert_index}" in parent:
                         continue
-                    for family, roles in _FAMILIES.items():
+                    for profile, parent_types in profiles:
+                        family, roles = profile.name, profile.roles
                         candidates = [plan.role_paths_in_parent(parent, role) for role in roles]
                         if not any(candidates):
                             continue
@@ -516,8 +516,8 @@ class FusionPlanner:
                             configs = [_effective_config(model.quantize_config, f"{prefix}.{index}.{p}") for p in paths]
                             if configs[0] is None or any(c != configs[0] for c in configs[1:]):
                                 reason = "effective quantization configurations differ or exclude a projection"
-                            elif type(owner) not in (LlamaAttention, LlamaMLP):
-                                reason = "parent forward is outside the validated Llama executor"
+                            elif type(owner) not in parent_types:
+                                reason = f"parent forward is outside the declared {family} executor types"
                             elif hasattr(owner, "_hf_hook"):
                                 reason = "parent has offload hooks"
                             else:
@@ -531,6 +531,11 @@ class FusionPlanner:
                         decision = FusionDecision(family, full_parent, paths, reason)
                         self.decisions.append(decision)
                         if decision.enabled:
+                            if id(owner) in claimed_parents:
+                                raise ValueError(f"Multiple fusion profiles match {full_parent}: "
+                                                 f"{claimed_parents[id(owner)]!r} and {family!r}; "
+                                                 "declare only one profile per parent")
+                            claimed_parents[id(owner)] = family
                             self.groups.append(_FusionGroup(decision, owner, modules))
 
     def apply(self):
@@ -543,7 +548,8 @@ class FusionPlanner:
             group.remove()
 
     def to_dict(self):
-        return {"groups": [{"family": d.family, "parent": d.parent, "paths": list(d.paths),
+        return {"fusable_config": self.config.to_dict(),
+                "groups": [{"family": d.family, "parent": d.parent, "paths": list(d.paths),
                                 "enabled": d.enabled, "reason": d.reason} for d in self.decisions],
                 "fused_calls": sum(g.calls for g in self.groups)}
 

@@ -105,6 +105,7 @@ from ._const import (
     META,
     normalize_device,
 )
+from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
 from .module_plan import ModulePlan
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -339,9 +340,8 @@ class BaseQModel(nn.Module):
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
 
-    # Each architecture opts into the post-quantization fusion executor.
-    fusion_model_types: frozenset[str] = frozenset()
-    fusion_overrides: dict[str, bool] = {}
+    # No profile means this definition cannot opt into projection fusion.
+    fusable_config: Optional[FusableConfig] = None
 
     # `model_type`s whose `:in=<tag>` shared-input metadata was verified against a real (tiny, CPU)
     # forward in tests/module_tree/test_shared_input_cpu_forward.py. Not inherited: every concrete
@@ -477,6 +477,8 @@ class BaseQModel(nn.Module):
         super().__init__()
         if type(fusion_enabled) is not bool:
             raise TypeError("Fusion enabled must be bool")
+        if fusion_enabled:
+            require_fusable_config(type(self), getattr(model.config, "model_type", None))
         self._auto_fusion = fusion_enabled
         self._fusion_plan = None
 
@@ -684,11 +686,15 @@ class BaseQModel(nn.Module):
         to shared packed storage views. ``enabled=False`` restores independent
         contiguous operands and ordinary execution. Definition and per-call
         overrides can disable a family (``qkv``/``gate_up``) or exact parent path.
+        The definition must declare a matching ``FusableConfig``; otherwise
+        enabling fusion raises. Disabling never requires a profile.
         """
         if type(enabled) is not bool:
             raise TypeError("Fusion enabled must be bool")
         if enabled and not self.quantized:
             raise RuntimeError("Fusion requires a post-quantized model")
+        if enabled:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
         from .fusion import FusionPlanner
 
         previous = self._fusion_plan
@@ -1492,6 +1498,9 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, List[Dict[str, str]]]:
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
+        fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
+        if fusion_requested:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
         if fuse is not None:
             self._auto_fusion = fuse
             if not fuse and self.fusion_plan() is not None:

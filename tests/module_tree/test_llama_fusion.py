@@ -7,12 +7,14 @@ import copy
 import gc
 import inspect
 import weakref
+from dataclasses import replace
 
 import pytest
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
 
 from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.models.fusable import LlamaFusableConfig
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -22,7 +24,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 
 
 def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=None, dynamic=None,
-             kv_heads=2, bits=4, native=False):
+             kv_heads=2, bits=4, native=False, definition=LlamaQModel):
     torch.manual_seed(912)
     config = LlamaConfig(hidden_size=128 if native else 64, intermediate_size=256 if native else 128, num_hidden_layers=2,
                          num_attention_heads=4, num_key_value_heads=kv_heads, vocab_size=64,
@@ -80,7 +82,7 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
     qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=128 if native else 16,
                                                            sym=native, dynamic=dynamic)
     kwargs = {} if automatic is None else {"fusion_enabled": automatic}
-    wrapper = LlamaQModel(model, quantized=quantized, quantize_config=qcfg, **kwargs)
+    wrapper = definition(model, quantized=quantized, quantize_config=qcfg, **kwargs)
     return wrapper, weights
 
 
@@ -165,7 +167,7 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
 def test_automatic_opt_out_and_definition_overrides(monkeypatch):
     model, _ = _wrapper(automatic=True)
     assert len(model.fusion_plan().groups) == 4
-    monkeypatch.setattr(LlamaQModel, "fusion_overrides", {"qkv": False})
+    monkeypatch.setattr(LlamaQModel, "fusable_config", replace(LlamaFusableConfig(), overrides={"qkv": False}))
     model.fuse(overrides={"model.layers.0.mlp": False})
     assert len(model.fusion_plan().groups) == 1
     assert model.fusion_plan().groups[0].decision.parent == "model.layers.1.mlp"

@@ -5,7 +5,8 @@ Q/K/V or gate/up projections for inference. Initial architecture coverage is
 Llama, including Llama 3.2 1B. MoE fusion is outside this first implementation.
 Introduced in [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567).
 
-Fusion is disabled by default for loading and quantization. Enable it explicitly:
+Fusion requires a definition-owned `FusableConfig` and is disabled by default
+for loading and quantization. Enable it explicitly:
 
 ```python
 from gptqmodel import GPTQModel
@@ -31,7 +32,9 @@ model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
 `FusionPlanner`, or `None` when disabled. An enabled plan may have zero eligible
 groups; inspect its decisions for per-group skip reasons. The planner
 does not convert unsupported backends into a different kernel. A direct
-`fuse()` call on an unquantized wrapper raises.
+`fuse()` call on an unquantized wrapper raises. A definition without
+`fusable_config` is not fusable: enabling fusion raises `ValueError` rather than
+returning an empty plan. `fuse(False)` remains valid for every definition.
 
 ## Selection and execution
 
@@ -39,15 +42,20 @@ does not convert unsupported backends into a different kernel. A direct
 flowchart TD
     DONE["Quantized checkpoint loaded<br/>or quantize finished"] --> AUTO{"Explicit fusion opt-in?"}
     AUTO -->|"no"| OLD["Original projection forwards"]
-    AUTO -->|"yes"| PLAN["FusionPlanner reads model.module_plan()"]
+    AUTO -->|"yes"| ADMIT["require_fusable_config<br/>definition instance, model_type, parent types"]
+    ADMIT --> VALIDPROFILE{"Valid declared FusableConfig?"}
+    VALIDPROFILE -->|"no"| ERROR["Raise before mutation<br/>or before calibration when quantize opts in"]
+    VALIDPROFILE -->|"yes"| PLAN["FusionPlanner reads model.module_plan()"]
     PLAN --> ROLES["Group exact sibling roles<br/>q+k+v or gate+up"]
-    ROLES --> POLICY{"Architecture and family/path overrides allow?"}
+    ROLES --> POLICY{"Configured profile and family/path overrides allow?"}
     POLICY -->|"no"| SKIP["Decision records skip reason"]
     POLICY -->|"yes"| CONFIG{"All effective configs and packed operands compatible?"}
     CONFIG -->|"no"| SKIP
     CONFIG -->|"yes"| TEMPLATE{"_parent_template validates native forward?"}
     TEMPLATE -->|"no"| SKIP
-    TEMPLATE -->|"yes"| INSTALL["_FusionGroup.install<br/>compile direct parent forward"]
+    TEMPLATE -->|"yes"| UNIQUE{"Only one eligible profile per parent?"}
+    UNIQUE -->|"no"| ERROR
+    UNIQUE -->|"yes"| INSTALL["_FusionGroup.install<br/>compile direct parent forward"]
     INSTALL --> PREPARE["_refresh before serving tokens<br/>one packed allocation, source views, executor and guard"]
     PREPARE --> CALL["Parent invocation calls execute once"]
     CALL --> RUNTIME{"Inference, input and hooks allow fusion?"}
@@ -59,6 +67,7 @@ flowchart TD
     GUARD -->|"yes"| GEMM["Bound packed.forward<br/>split Q/K/V or gate/up outputs"]
     GEMM --> END["Upstream parent math consumes local outputs<br/>no projection interception or activation context"]
     style SKIP fill:#fff1f0,stroke:#cf1322
+    style ERROR fill:#fff1f0,stroke:#cf1322
     style OLD fill:#e6f7ff,stroke:#096dd9
     style GEMM fill:#d9f7be,stroke:#237804
 ```
@@ -120,29 +129,106 @@ conservatively excluded; that restriction does not apply to the validated native
 Marlin executor. Adapters, projection/offload hooks, and online projection
 rotation are excluded.
 
-The definition owns architecture enablement and policy:
+## Definition-owned FusableConfig
+
+`BaseQModel.fusable_config` defaults to `None`. The definition must declare a
+`FusableConfig` instance before the caller can enable fusion. Llama declares:
 
 ```python
-# Attributes on a BaseQModel definition. Llama currently opts in to "llama".
-fusion_model_types = frozenset({"llama"})
-fusion_overrides = {
-    "qkv": False,
-    "model.layers.0.mlp": False,
-}
+from gptqmodel import LlamaFusableConfig
+from gptqmodel.models.base import BaseQModel
+
+class LlamaQModel(BaseQModel):
+    fusable_config = LlamaFusableConfig()
 ```
 
-The concrete runtime model type must be opted in. The initial parent-forward
-validation is limited to native `LlamaAttention`/`LlamaMLP`. Policy lookup prefers
-the exact full parent path, then the layer-relative parent path, then the family
-(`qkv` or `gate_up`), then `True`. Per-call overrides replace definition values
-for the same key. Enabling a policy cannot bypass compatibility checks.
+```mermaid
+classDiagram
+    class FusableConfig {
+        +tuple model_types
+        +tuple profiles
+        +Mapping overrides
+        +to_dict()
+    }
+    class FusableProfile {
+        +str name
+        +tuple roles
+        +tuple parent_types
+        +resolve_parent_types()
+    }
+    class LlamaFusableConfig
+    class LlamaQModel
+    FusableConfig <|-- LlamaFusableConfig
+    FusableConfig "0..*" o-- "1..*" FusableProfile : profiles
+    LlamaQModel --> LlamaFusableConfig : fusable_config
+```
+
+| Field | Meaning | Llama default |
+| --- | --- | --- |
+| `model_types` | Explicit runtime HF architecture names admitted by the profile | `("llama",)` |
+| `profiles` | Ordered `FusableProfile` instances; each declares a name, distinct sibling roles, and allowed native parent types | `qkv`: `q/k/v` under `LlamaAttention`; `gate_up`: `gate/up` under `LlamaMLP` |
+| `overrides` | Immutable family/relative-parent/full-parent boolean policy | Empty |
+
+These configuration objects are frozen. Constructor inputs are copied to
+immutable tuples/mappings; extensions cannot mutate the shared Llama defaults.
+Parent types may be actual classes or dotted type names resolved on explicit
+opt-in. They identify allowed executors; weight paths and roles still come only
+from `model.module_plan()`. `model.fusion_plan().to_dict()["fusable_config"]`
+exposes the effective definition contract.
+
+Policy lookup prefers the exact full parent path, then the layer-relative
+parent path, then the family name, then `True`. Per-call overrides replace
+configuration overrides for the same key. A profile cannot bypass quantization,
+packed-layout, native-source, input-sharing, or runtime safety checks.
+
+### Inherit and extend
+
+Use frozen dataclass inheritance and `dataclasses.replace()` to select or extend
+profiles. This example keeps only the validated Llama gate/up profile:
+
+```python
+from dataclasses import dataclass
+from gptqmodel import FusableProfile, LlamaFusableConfig
+from gptqmodel.models.definitions.llama import LlamaQModel
+
+@dataclass(frozen=True)
+class GateOnlyFusableConfig(LlamaFusableConfig):
+    profiles: tuple[FusableProfile, ...] = (LlamaFusableConfig().profiles[1],)
+
+class MyLlamaQModel(LlamaQModel):
+    fusable_config = GateOnlyFusableConfig(overrides={"model.layers.0.mlp": False})
+```
+
+A different architecture must also declare its own `model_types` and compatible
+`parent_types`. Inheriting Llama's config does not admit a new HF model type or
+its parent classes automatically. An inherited definition can set
+`fusable_config = None` to reject fusion entirely. The real tiny Qwen2 test in
+`tests/module_tree/test_fusable_config.py` demonstrates an extended test-only
+config and verifies tree consumption, native parent selection, fused parity,
+and restoration. It does not enable Qwen2 fusion in `MODEL_MAP`.
+
+### Admission and failure contract
+
+| Situation | Behavior |
+| --- | --- |
+| No definition config | Enabling fusion raises `ValueError`; disabling is allowed |
+| Config has the wrong type | `TypeError`; a `FusableConfig` instance is required |
+| Runtime model type absent from config | `ValueError`, including for inherited profiles |
+| Invalid parent type declaration | Preflight raises before touching installed fusion |
+| Two eligible profiles target the same parent | `ValueError` before installing new execution; no ambiguous overlapping groups |
+| Valid profile, incompatible layer/config/kernel | Record a skipped group and its reason |
+
+Admission runs before changing an installed plan. Constructor opt-in and
+`quantize(..., fuse=True)` also preflight the definition so missing/mismatched
+profiles fail before calibration. The profile grants eligibility; caller opt-in
+still controls activation, and fusion remains off by default.
 
 Runtime checks preserve separate execution for training, inputs requiring
 gradients, direct projection calls outside the parent, global/projection hooks,
 and Torch compilation. Trainable operand tensors also fall back. Runtime
 projection replacement, forward overrides, and offload hooks invalidate the
-descriptor and preserve the original parent path. Only the validated Llama
-parent flow is enabled; arbitrary custom forwards require new evidence.
+descriptor and preserve the original parent path. Every configured parent
+forward must pass source validation; custom forwards require dedicated tests.
 
 ## Operand and activation lifetime
 
