@@ -81,14 +81,14 @@ def test_ricursive_module_tree_covers_perinorm_and_gated_attention():
 
     assert set(layer) == {
         "input_layernorm",
-        "self_attn",
+        "self_attn:!",
         "post_attention_layernorm",
         "pre_feedforward_layernorm",
         "mlp",
         "post_feedforward_layernorm",
     }
 
-    attn = layer["self_attn"]
+    attn = layer["self_attn:!"]
     # Per-head Q/K RMSNorm must stay dense.
     assert "q_norm:!:norm" in attn
     assert "k_norm:!:norm" in attn

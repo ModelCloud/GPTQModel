@@ -38,22 +38,36 @@ class Glm5NextQModel(BaseQModel):
         "layers",
         "#",
         {
+            "attn_hc:!": ("input_norm:!",),
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 # KDA (linear-attention) layers.
+                "b_proj:!",
+                "conv1d:!",
+                "forget_gate:!",
+                "forget_gate.f_a_proj:!",
+                "forget_gate.f_b_proj:!",
+                "g_a_proj:!",
+                "g_b_proj:!",
+                "o_norm:!",
                 "q_proj:0:q",
                 "k_proj:0:k",
                 "v_proj:0:v",
                 # DSA layers. The low-rank input and sparse indexer stay dense.
                 "q_a_proj:!",
+                "q_a_layernorm:!",
                 "kv_a_proj_with_mqa:!",
+                "kv_a_layernorm:!",
+                "indexer:!",
                 "indexer.wq_b:!",
                 "indexer.wk:!",
+                "indexer.k_norm:!",
                 "indexer.weights_proj:!",
                 "q_b_proj:0:q:in=q_a",
                 "kv_b_proj:0:k:v:in=kv_a",
                 "o_proj:1",
             ),
+            "ffn_hc:!": ("input_norm:!",),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 # Dense fallback used by the first three decoder layers.

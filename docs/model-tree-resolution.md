@@ -189,6 +189,49 @@ flowchart TD
     style SKIP fill:#ffa39e
 ```
 
+### Checkpoint weight coverage
+
+The tree is also the oracle for every checkpoint-owned weight inside a decoder
+layer, not only for modules that the current quantization pipeline replaces.
+This prevents a non-quantized projection, router, hyper-connection, compressor,
+or norm from disappearing between the model definition and the live model.
+
+```mermaid
+flowchart TD
+    SD["layer.state_dict()<br/>parameters + persistent buffers"] --> OWN["deepest owning module<br/>for each entry"]
+    OWN --> FIND["plan.find(owner)"]
+    FIND -->|None| FAIL["test failure:<br/>undeclared weight owner"]
+    FIND -->|spec| Q{"owner in<br/>simple_layer_modules?"}
+    Q -->|yes| DECL["quantized by declaration"]
+    Q -->|no| TAG{"spec.quantize == False?"}
+    TAG -->|yes| EXCLUDED["explicit :! / :? exclusion"]
+    TAG -->|no| FAIL2["test failure:<br/>untagged non-quantized weight"]
+    style FAIL fill:#ffa39e,stroke:#a8071a
+    style FAIL2 fill:#ffa39e,stroke:#a8071a
+    style EXCLUDED fill:#d9f7be,stroke:#237804
+```
+
+`state_dict()` is the source of truth for this check. Non-persistent buffers
+created at runtime are excluded by Torch and are not model-definition
+obligations. The owning-module rule also covers direct parameters and buffers on
+containers, such as Qwen `linear_attn.A_log`, DeepSeek `self_attn.sinks`, and
+Ripple `self_attn.value_res_lambda`.
+
+Measured Flash-family coverage at this revision:
+
+| Model family | Decoder layers | Quantizable specs | Unique weight owners |
+| --- | ---: | ---: | ---: |
+| Qwen3.5 / Qwen3.8 | 32 | 10 | 19 |
+| GLM-5.3-Flash | 45 | 873 | 37 |
+| MiniMax-M3.1-Flash | 60 | 394 | 20 |
+| DeepSeek-V4-Flash | 43 | 775 | 29 |
+| Ripple | 5 (fixture) | 8 | 15 |
+
+DeepSeek-V4.1-Flash is not included: its checkpoint declares
+`model_type=deepseek_v41`, but Transformers 5.22.2 and its main branch expose no
+native `deepseek_v41` config or model class. The test activates automatically
+when upstream support lands instead of relabeling V4-Flash as V4.1.
+
 ### Rotation
 
 Rotation needs the two layer norms, one attention parent, and one MLP parent.
@@ -292,3 +335,4 @@ tagging every definition would allow the map to be deleted.
 | `tests/module_tree/test_module_tree_variants.py` | tree variants produce identical declared paths |
 | `tests/module_tree/test_auto_detect.py` | auto-detection stays diagnostic-only |
 | `tests/test_afmoe_support.py`, `tests/test_k2_horizon_support.py` | real MoE definitions resolve without name overrides |
+| `tests/module_tree/test_flash_model_tree_consumption.py` | real Flash-family meta models: quantizable specs, every checkpoint weight owner, roles, MoE hooks, looper helpers, Ripple custom code |

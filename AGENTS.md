@@ -83,3 +83,23 @@ Diagrams must use real symbol names and measured numbers. Do not draw intended
 design, estimate test results, or include follow-up work as if implemented. Keep
 diagrams in sync with the code: a later change to the same flow updates the page
 in the same pull request.
+
+## Model-definition weight coverage
+
+`module_tree` is the oracle for checkpoint-owned weights, including
+non-quantized weights. Derive coverage from `state_dict()` (parameters and
+persistent buffers), not from `named_modules()`, `named_parameters()`, or
+`named_buffers()` alone: runtime-created non-persistent buffers are not
+checkpoint weights and must not become definition obligations.
+
+For every decoder-layer `state_dict()` entry:
+
+- The deepest owning module must resolve through `ModulePlan.find()`.
+- A quantized owner must be declared by `simple_layer_modules()`.
+- A non-quantized owner must carry an explicit `:!` or `:?` tag.
+
+Add real-model regression coverage for new or changed definitions. The Flash
+family reference is
+`tests/module_tree/test_flash_model_tree_consumption.py`; it builds the actual
+meta model and checks quantizable paths, weight owners, roles, MoE hooks, and
+looper consumers.

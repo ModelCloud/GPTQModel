@@ -37,7 +37,9 @@ class RicursiveQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!:norm",),
-            "self_attn": (
+            # `value_res_lambda` is a direct parameter on the attention
+            # container when value residuals are enabled.
+            "self_attn:!": (
                 "q_norm:!:norm",
                 "k_norm:!:norm",
                 # `q_proj`, `k_proj` and `g_proj` all read the raw hidden states. `v_proj`
