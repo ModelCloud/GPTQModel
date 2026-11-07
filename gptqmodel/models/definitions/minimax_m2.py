@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -14,6 +15,12 @@ class MiniMaxM2GPTQ(BaseQModel):
       - Standard attention with q/k normalization parameters
       - Sparse MoE block (MiniMaxM2SparseMoeBlock) with up to 256 experts
     """
+    fusable = LlamaFusableConfig().derive("minimax_m2", parent_types={
+        "qkv": (
+            "transformers.models.minimax_m2.modeling_minimax_m2.MiniMaxM2Attention",
+        ),
+    })
+
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -59,6 +66,12 @@ class MiniMaxQModel(BaseQModel):
     ``mlp.experts`` with per-expert ``gate_proj``/``up_proj``/``down_proj``
     leaves after Defuser expansion.
     """
+    fusable = LlamaFusableConfig().derive("minimax", parent_types={
+        "qkv": (
+            "transformers.models.minimax.modeling_minimax.MiniMaxAttention",
+        ),
+    })
+
 
     pre_lm_head_norm_module = "model.norm"
 

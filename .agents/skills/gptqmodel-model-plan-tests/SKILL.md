@@ -46,3 +46,25 @@ Run the registry contract, the new model-specific test, and affected consumer
 tests. Record the exact commands, pass/skip counts, dependency limitations,
 and model-test nodes in the PR. New model support is not complete with only an
 E2E generation test or a registry entry.
+
+## Fusion eligibility
+
+Every model type/alias also needs an entry in
+`tests/module_tree/fixtures/fusable_models.json`: either an explicitly qualified
+definition-owned `fusable` config or a precise reason the current executor is
+not applicable or remains unqualified. Keep `docs/fusion-model-coverage.md` in
+sync. Eligibility never enables fusion by default.
+
+Reuse immutable profiles through `FusableConfig.derive()` when the real native
+parent classes are identical. Rebind explicit parent types for other models;
+do not grant eligibility from inherited paths or familiar projection names.
+Definitions shared by native architectures use `model_profiles` to isolate
+their parent imports. MoE expert paths remain excluded by the current planner.
+
+Before adding a qualification, run the real-model topology/planner test and
+the native parent tests in `tests/module_tree/test_fusable_models.py`. Cover
+GPTQ/AWQ and FP16/BF16 against separate native forwards and independent packed
+integer-weight oracles. A skipped native test or a missing implementation is
+not a validated profile. Full-model performance claims additionally need
+measurements on that architecture; shared parent qualification does not imply
+the Llama benchmark numbers apply to it.

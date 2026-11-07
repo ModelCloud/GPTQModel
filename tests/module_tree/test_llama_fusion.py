@@ -582,7 +582,24 @@ def _projection_weight_access(self, x):
     return self.gate_proj(x) * self.up_proj(x) + self.gate_proj.weight.sum()
 
 
-@pytest.mark.parametrize("forward", [_different_inputs, _repeated_projection, _projection_weight_access])
+def _preprocess_input(self, x):
+    x = x * 2
+    return self.gate_proj(x) * self.up_proj(x)
+
+
+def _mutate_input(self, x):
+    x.mul_(2)
+    return self.gate_proj(x) * self.up_proj(x)
+
+
+def _conditional_projection(self, x):
+    if self.training:
+        return self.gate_proj(x) * self.up_proj(x)
+    return x
+
+
+@pytest.mark.parametrize("forward", [_different_inputs, _repeated_projection, _projection_weight_access,
+                                     _preprocess_input, _mutate_input, _conditional_projection])
 def test_unfamiliar_forward_fails_closed(forward):
     from gptqmodel.models.fusion import _parent_template
 

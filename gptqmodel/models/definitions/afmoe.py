@@ -6,11 +6,18 @@
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class AfMoeQModel(BaseQModel):
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
+    fusable = LlamaFusableConfig().derive("afmoe", parent_types={
+        "qkv": (
+            "transformers.models.afmoe.modeling_afmoe.AfmoeAttention",
+        ),
+    })
+
     dynamic_expert_index = "num_experts"
 
     require_trust_remote_code = True

@@ -4,9 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class PhiQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("phi", parent_types={
+        "qkv": (
+            "transformers.models.phi.modeling_phi.PhiAttention",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.final_layernorm"
 
     module_tree = [

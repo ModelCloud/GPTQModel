@@ -1,8 +1,10 @@
 # Post-quantization fusion planner
 
 The fusion planner consumes `model.module_plan()` and combines compatible
-Q/K/V or gate/up projections for inference. Initial architecture coverage is
-Llama, including Llama 3.2 1B. MoE fusion is outside this first implementation.
+Q/K/V or gate/up projections for inference. Definition-owned contracts qualify
+101 registered model types, with per-model profiles listed in the
+[qualification matrix](fusion-model-coverage.md). MoE expert paths remain
+excluded; compatible attention in MoE models can qualify independently.
 Introduced in [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567).
 
 Fusion requires a definition-owned `FusableConfig` and is disabled by default
@@ -85,14 +87,15 @@ by GPT-QModel before calling Transformers.
 | Each leaf owns its packed tensors | The same checkpoint leaves reference disjoint views of the combined packed tensors. |
 | Independent packed allocations | One combined allocation replaces the separate allocations; each group adds only reduction workspace. |
 
-The compiler reads the installed `LlamaAttention.forward` or `LlamaMLP.forward`
-source. Each declared projection must occur exactly once and take the same
+The compiler reads the installed native parent `forward` source named by the
+definition's selected profile. Each declared projection must occur exactly once and take the same
 parent input without extra arguments; extra weight/metadata references,
 decorated functions, instance forward overrides, unavailable source, and
-unsupported call shapes reject the group. It substitutes tuple selections for
+unsupported call shapes reject the group. Conditional projection calls and
+reassigned or in-place-mutated input arguments also reject the group. It substitutes tuple selections for
 those calls and retains upstream RoPE, cache updates, attention dispatch,
 activation, multiplication, output projection, and the public forward signature.
-It does not maintain a separately copied Llama attention implementation.
+It does not maintain separately copied architecture forward implementations.
 
 There is no suffix-based selection. Each requested role must resolve to exactly
 one distinct quantizable sibling in the compiled tree. Fused leaves carrying
@@ -132,7 +135,8 @@ rotation are excluded.
 ## Definition-owned FusableConfig
 
 `BaseQModel.fusable` defaults to `None`. The definition must declare a
-`FusableConfig` instance before the caller can enable fusion. Llama declares:
+`FusableConfig` instance before the caller can enable fusion. The llama-only
+default is:
 
 ```python
 from gptqmodel import LlamaFusableConfig
@@ -147,7 +151,10 @@ classDiagram
     class FusableConfig {
         +tuple model_types
         +tuple profiles
+        +Mapping model_profiles
         +Mapping overrides
+        +profiles_for(model_type)
+        +derive(model_types, parent_types)
         +to_dict()
     }
     class FusableProfile {
@@ -167,6 +174,7 @@ classDiagram
 | --- | --- | --- |
 | `model_types` | Explicit runtime HF architecture names admitted by the profile | `("llama",)` |
 | `profiles` | Ordered `FusableProfile` instances; each declares a name, distinct sibling roles, and allowed native parent types | `qkv`: `q/k/v` under `LlamaAttention`; `gate_up`: `gate/up` under `LlamaMLP` |
+| `model_profiles` | Optional explicit per-model profile tuples for definitions shared by native architectures; only the selected type is imported | Empty in `LlamaFusableConfig()`; `LlamaQModel` declares native aliases here |
 | `overrides` | Immutable family/relative-parent/full-parent boolean policy | Empty |
 
 These configuration objects are frozen. Constructor inputs are copied to
@@ -184,7 +192,8 @@ packed-layout, native-source, input-sharing, or runtime safety checks.
 ### Inherit and extend
 
 Use frozen dataclass inheritance and `dataclasses.replace()` to select or extend
-profiles. This example keeps only the validated Llama gate/up profile:
+profiles, or use `derive()` to reuse immutable profiles and select/rebind their
+native parent types. This example keeps only the validated Llama gate/up profile:
 
 ```python
 from dataclasses import dataclass
@@ -202,10 +211,10 @@ class MyLlamaQModel(LlamaQModel):
 A different architecture must also declare its own `model_types` and compatible
 `parent_types`. Inheriting Llama's config does not admit a new HF model type or
 its parent classes automatically. An inherited definition can set
-`fusable = None` to reject fusion entirely. The real tiny Qwen2 test in
-`tests/module_tree/test_fusable_config.py` demonstrates an extended test-only
-config and verifies tree consumption, native parent selection, fused parity,
-and restoration. It does not enable Qwen2 fusion in `MODEL_MAP`.
+`fusable = None` to reject fusion entirely. Qwen2 declares its own validated
+profiles, and Qwen2 audio reuses those immutable parent profiles through
+`Qwen2QModel.fusable.derive("qwen2_audio")`. The real-model matrix and declaration
+examples are in [fusion model qualification](fusion-model-coverage.md).
 
 ### Admission and failure contract
 
@@ -311,6 +320,10 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   FP16/BF16, CPU/CUDA, generation, configuration mismatches, overrides,
   invalidation, activation cleanup, gradient/training/hook/compiler fallbacks,
   and the absence of full compatibility work on the steady-state path.
+- `tests/module_tree/test_fusable_models.py` pins admission for all 198 aliases,
+  exercises 101 real native model definitions through the public module-plan API
+  and fusion planner, and checks 116 distinct native parent/family pairs in
+  GPTQ/AWQ and FP16/BF16 against separate forwards and integer-weight oracles.
 - `tests/models/test_llama3_2_fusion.py` exercises local Llama 3.2 1B GPTQ/AWQ
   checkpoints, logits, greedy tokens, opt-in after reload,
   and actual checkpoint save/reload. It asserts zero additional packed-weight
@@ -319,8 +332,9 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
 
 The planner is a correctness-gated execution option, not a guarantee of speedup
 for every batch size or device. Evaluate its packed-memory cost and measured
-latency on the target workload. Other architectures, MoE, additional backends, and
-compiled fused execution need dedicated implementation and validation.
+latency on the target workload. Full-model measurements below apply to Llama
+3.2 1B. Other models need their own workload measurements; expert fusion,
+additional backends and compiled fused execution need dedicated validation.
 
 ## Measured Llama 3.2 1B results
 

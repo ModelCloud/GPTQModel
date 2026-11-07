@@ -4,9 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Ernie4_5_MoeQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("ernie4_5_moe", parent_types={
+        "qkv": (
+            "transformers.models.ernie4_5_moe.modeling_ernie4_5_moe.Ernie4_5_MoeAttention",
+        ),
+    })
+
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True

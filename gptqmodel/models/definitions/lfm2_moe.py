@@ -4,10 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class LFM2MoeQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("lfm2_moe", parent_types={
+        "qkv": (
+            "transformers.models.lfm2_moe.modeling_lfm2_moe.Lfm2MoeAttention",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_experts"

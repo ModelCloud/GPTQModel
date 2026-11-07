@@ -26,6 +26,7 @@ from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..utils.marlin import replace_parameter
+from ..utils.model import get_layers_with_prefixes
 from .fusable import require_fusable_config
 
 
@@ -64,18 +65,40 @@ def _parent_template(original, names):
         return None
     if any(isinstance(n, ast.Name) and n.id.startswith("__gptq_") for n in ast.walk(node)):
         return None
+    if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not node for n in ast.walk(node)):
+        return None
     owner, input_name = node.args.args[0].arg, node.args.args[1].arg
+    if any(isinstance(n, ast.Name) and n.id == input_name and isinstance(n.ctx, (ast.Store, ast.Del))
+           for n in ast.walk(node)):
+        return None
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+           and isinstance(n.func.value, ast.Name) and n.func.value.id == input_name
+           and n.func.attr.endswith("_") for n in ast.walk(node)):
+        return None
     counts = [0] * len(names)
     valid = True
 
     class Projections(ast.NodeTransformer):
+        conditional = 0
+
+        def generic_visit(self, child):
+            guarded = isinstance(child, (ast.If, ast.IfExp, ast.BoolOp, ast.For, ast.AsyncFor, ast.While,
+                                         ast.Try, getattr(ast, "TryStar", ast.Try), ast.Match,
+                                         ast.With, ast.AsyncWith, ast.comprehension,
+                                         ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+                                         ast.GeneratorExp))
+            self.conditional += guarded
+            result = super().generic_visit(child)
+            self.conditional -= guarded
+            return result
+
         def visit_Call(self, call):
             nonlocal valid
             target = call.func
             if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
                     and target.value.id == owner and target.attr in names):
                 index = names.index(target.attr)
-                if (len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Name)
+                if (self.conditional or len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Name)
                         or call.args[0].id != input_name):
                     valid = False
                     return call
@@ -484,60 +507,61 @@ class FusionPlanner:
         if any(type(value) is not bool for value in policy.values()):
             raise TypeError("Fusion overrides must map family or parent paths to bool")
         plan = model.module_plan()
-        profiles = [(profile, profile.resolve_parent_types()) for profile in self.config.profiles]
+        profiles = [(profile, profile.resolve_parent_types()) for profile in
+                    self.config.profiles_for(getattr(model.model.config, "model_type", None))]
         claimed_parents = {}
-        for prefix in model.extract_layers_node():
-            layers = model.model.get_submodule(prefix)
-            for index, layer in enumerate(layers):
-                for parent in dict.fromkeys(spec.parent for spec in plan.specs if spec.roles):
-                    if not parent or plan.is_moe(parent) or "{expert_index}" in parent:
+        layers, layer_names = get_layers_with_prefixes(model.model, model.extract_layers_node())
+        if not layers:
+            raise ValueError("No declared decoder layers resolved for fusion")
+        for layer_name, layer in zip(layer_names, layers):
+            for parent in dict.fromkeys(spec.parent for spec in plan.specs if spec.roles):
+                if not parent or plan.is_moe(parent) or "{expert_index}" in parent:
+                    continue
+                for profile, parent_types in profiles:
+                    family, roles = profile.name, profile.roles
+                    candidates = [plan.role_paths_in_parent(parent, role) for role in roles]
+                    if not any(candidates):
                         continue
-                    for profile, parent_types in profiles:
-                        family, roles = profile.name, profile.roles
-                        candidates = [plan.role_paths_in_parent(parent, role) for role in roles]
-                        if not any(candidates):
-                            continue
-                        full_parent = f"{prefix}.{index}.{parent}"
-                        paths = tuple(paths[0] for paths in candidates if len(paths) == 1)
-                        reason = ""
-                        if not policy.get(full_parent, policy.get(parent, policy.get(family, True))):
-                            reason = "disabled by fusion override"
-                        elif any(len(paths) != 1 for paths in candidates) or len(set(paths)) != len(roles):
-                            reason = "requires exactly one distinct declared projection per role"
-                        elif any(not plan.find(path).quantize for path in paths):
-                            reason = "projection is excluded or capture-only"
-                        try:
-                            owner = layer.get_submodule(parent)
-                            modules = [layer.get_submodule(path) for path in paths]
-                        except AttributeError:
-                            reason = reason or "declared projections are absent on this layer"
-                            modules = []
-                        if not reason:
-                            configs = [_effective_config(model.quantize_config, f"{prefix}.{index}.{p}") for p in paths]
-                            if configs[0] is None or any(c != configs[0] for c in configs[1:]):
-                                reason = "effective quantization configurations differ or exclude a projection"
-                            elif type(owner) not in parent_types:
-                                reason = f"parent forward is outside the declared {family} executor types"
-                            elif hasattr(owner, "_hf_hook"):
-                                reason = "parent has offload hooks"
-                            else:
-                                reason = _incompatible(modules)
-                                forward = owner.forward
-                                if not reason and (
-                                    getattr(forward, "__func__", None) is not type(owner).forward
-                                    or _parent_template(forward.__func__, tuple(path.rsplit(".", 1)[-1] for path in paths)) is None
-                                ):
-                                    reason = "native forward cannot be safely rewritten from declared projection calls"
-                        decision = FusionDecision(family, full_parent, paths, reason)
-                        self.decisions.append(decision)
-                        if decision.enabled:
-                            if id(owner) in claimed_parents:
-                                raise ValueError(f"Multiple fusion profiles match {full_parent}: "
-                                                 f"{claimed_parents[id(owner)]!r} and {family!r}; "
-                                                 "declare only one profile per parent")
-                            claimed_parents[id(owner)] = family
-                            self.groups.append(_FusionGroup(decision, owner, modules))
-
+                    full_parent = f"{layer_name}.{parent}"
+                    paths = tuple(paths[0] for paths in candidates if len(paths) == 1)
+                    reason = ""
+                    if not policy.get(full_parent, policy.get(parent, policy.get(family, True))):
+                        reason = "disabled by fusion override"
+                    elif any(len(paths) != 1 for paths in candidates) or len(set(paths)) != len(roles):
+                        reason = "requires exactly one distinct declared projection per role"
+                    elif any(not plan.find(path).quantize for path in paths):
+                        reason = "projection is excluded or capture-only"
+                    try:
+                        owner = layer.get_submodule(parent)
+                        modules = [layer.get_submodule(path) for path in paths]
+                    except AttributeError:
+                        reason = reason or "declared projections are absent on this layer"
+                        modules = []
+                    if not reason:
+                        configs = [_effective_config(model.quantize_config, f"{layer_name}.{p}") for p in paths]
+                        if configs[0] is None or any(c != configs[0] for c in configs[1:]):
+                            reason = "effective quantization configurations differ or exclude a projection"
+                        elif type(owner) not in parent_types:
+                            reason = f"parent forward is outside the declared {family} executor types"
+                        elif hasattr(owner, "_hf_hook"):
+                            reason = "parent has offload hooks"
+                        else:
+                            reason = _incompatible(modules)
+                            forward = owner.forward
+                            if not reason and (
+                                getattr(forward, "__func__", None) is not type(owner).forward
+                                or _parent_template(forward.__func__, tuple(path.rsplit(".", 1)[-1] for path in paths)) is None
+                            ):
+                                reason = "native forward cannot be safely rewritten from declared projection calls"
+                    decision = FusionDecision(family, full_parent, paths, reason)
+                    self.decisions.append(decision)
+                    if decision.enabled:
+                        if id(owner) in claimed_parents:
+                            raise ValueError(f"Multiple fusion profiles match {full_parent}: "
+                                             f"{claimed_parents[id(owner)]!r} and {family!r}; "
+                                             "declare only one profile per parent")
+                        claimed_parents[id(owner)] = family
+                        self.groups.append(_FusionGroup(decision, owner, modules))
     def apply(self):
         for group in self.groups:
             group.install()

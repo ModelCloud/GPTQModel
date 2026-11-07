@@ -3,6 +3,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class GraniteMoeQModel(BaseQModel):
@@ -11,6 +12,12 @@ class GraniteMoeQModel(BaseQModel):
     Defuser expands Granite's packed expert projections into numbered expert
     containers exposing ``gate_proj``/``up_proj``/``down_proj`` leaves.
     """
+    fusable = LlamaFusableConfig().derive("granitemoe", parent_types={
+        "qkv": (
+            "transformers.models.granitemoe.modeling_granitemoe.GraniteMoeAttention",
+        ),
+    })
+
 
     layer_modules_strict = False
     dynamic_expert_index = "num_local_experts"

@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class HYV3QModel(BaseQModel):
     # HYV3 uses a dense first MLP layer and sparse MoE layers after it.
+    fusable = LlamaFusableConfig().derive("hy_v3", parent_types={
+        "qkv": (
+            "transformers.models.hy_v3.modeling_hy_v3.HYV3Attention",
+        ),
+    })
+
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"
 

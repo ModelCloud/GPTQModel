@@ -13,10 +13,20 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class HunYuanVLQModel(BaseQModel):
     """Quantization definition for native Transformers Hunyuan-VL checkpoints."""
+    fusable = LlamaFusableConfig().derive("hunyuan_vl", parent_types={
+        "qkv": (
+            "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLDenseV1Attention",
+        ),
+        "gate_up": (
+            "transformers.models.hunyuan_vl.modeling_hunyuan_vl.HunYuanVLMLP",
+        ),
+    })
+
 
     loader = AutoModelForImageTextToText
 

@@ -3,9 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class GPTOSSGPTQ(BaseQModel):
+    fusable = LlamaFusableConfig().derive("gpt_oss", parent_types={
+        "qkv": (
+            "transformers.models.gpt_oss.modeling_gpt_oss.GptOssAttention",
+        ),
+    })
+
     shared_input_verified_model_types = frozenset({"gpt_oss"})
 
     dynamic_expert_index = "num_local_experts"

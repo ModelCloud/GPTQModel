@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..fusable import LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -12,6 +13,15 @@ class Qwen3QModel(LlamaQModel):
     ahead of the attention projections. We mark those helper modules as
     non-quantized so the layer walker captures the complete structure.
     """
+    fusable = LlamaFusableConfig().derive("qwen3", parent_types={
+        "qkv": (
+            "transformers.models.qwen3.modeling_qwen3.Qwen3Attention",
+        ),
+        "gate_up": (
+            "transformers.models.qwen3.modeling_qwen3.Qwen3MLP",
+        ),
+    })
+
 
     shared_input_verified_model_types = frozenset({"qwen3"})
 

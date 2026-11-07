@@ -4,9 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class MiniCpm3QModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("minicpm3", parent_types={
+        "gate_up": (
+            "transformers.models.minicpm3.modeling_minicpm3.MiniCPM3MLP",
+        ),
+    })
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

@@ -3,8 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..fusable import LlamaFusableConfig
 from .base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 
 
 class Qwen2_5_OmniGPTQ(BaseQwen2_5_OmniGPTQ):
+    fusable = LlamaFusableConfig().derive("qwen2_5_omni", parent_types={
+        "qkv": (
+            "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniAttention",
+        ),
+        "gate_up": (
+            "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2MLP",
+        ),
+    })
+
     pass

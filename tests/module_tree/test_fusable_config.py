@@ -30,7 +30,8 @@ def test_llama_profile_is_immutable_and_public():
     overrides["qkv"] = True
     assert config.overrides["qkv"] is False
     assert isinstance(config, FusableConfig)
-    assert LlamaQModel.fusable.model_types == ("llama",)
+    assert config.model_types == ("llama",)
+    assert "llama" in LlamaQModel.fusable.model_types
     assert [(p.name, p.roles) for p in config.profiles] == [("qkv", ("q", "k", "v")),
                                                          ("gate_up", ("gate", "up"))]
     with pytest.raises(FrozenInstanceError):
@@ -172,7 +173,12 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
                 module.bias = None
             parent, leaf = path.rsplit(".", 1)
             setattr(layer.get_submodule(parent), leaf, module)
-    unsupported = Qwen2QModel(actual, quantized=True, quantize_config=source.quantize_config)
+    assert require_fusable_config(Qwen2QModel, "qwen2") is Qwen2QModel.fusable
+
+    class UnsupportedQwen2QModel(Qwen2QModel):
+        fusable = LlamaFusableConfig()
+
+    unsupported = UnsupportedQwen2QModel(actual, quantized=True, quantize_config=source.quantize_config)
     with pytest.raises(ValueError, match="does not support model_type='qwen2'"):
         unsupported.fuse()
 
@@ -200,3 +206,63 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
     with torch.no_grad():
         torch.testing.assert_close(model.model(ids).logits, before, rtol=0, atol=0)
     assert require_fusable_config(OptInQwen2QModel, "qwen2") is OptInQwen2QModel.fusable
+
+
+def test_derive_reuses_roles_and_inherited_profiles_without_mutation():
+    base = LlamaFusableConfig(overrides={"qkv": False})
+    derived = base.derive("qwen2", parent_types={"qkv": (Qwen2Attention,)}, overrides={"gate_up": False})
+    assert isinstance(derived, LlamaFusableConfig)
+    assert derived.profiles[0].roles is base.profiles[0].roles
+    assert derived.profiles[0].resolve_parent_types() == (Qwen2Attention,)
+    assert dict(derived.overrides) == {"qkv": False, "gate_up": False}
+    assert len(base.profiles) == 2 and dict(base.overrides) == {"qkv": False}
+    alias = derived.derive("wrapper")
+    assert alias.profiles is derived.profiles
+    assert alias.model_types == ("wrapper",)
+    with pytest.raises(ValueError, match="Unknown fusion profiles"):
+        base.derive("other", parent_types={"misspelled": (Qwen2Attention,)})
+    with pytest.raises(ValueError, match="FusableProfile"):
+        base.derive("other", parent_types={})
+    with pytest.raises(TypeError, match="mapping"):
+        base.derive("other", overrides=[])
+    with pytest.raises(TypeError, match="must map"):
+        base.derive("other", parent_types=["qkv"])
+
+
+def test_alias_profiles_are_immutable_and_import_only_the_selected_architecture():
+    other = FusableProfile("qkv", ("q", "k", "v"), ("unavailable_architecture.modeling.Parent",))
+    variants = {"other": [other]}
+    config = replace(LlamaFusableConfig(), model_types=("llama", "other"), model_profiles=variants)
+    variants["other"].clear()
+
+    class AliasedDefinition:
+        fusable = config
+
+    assert require_fusable_config(AliasedDefinition, "llama") is config
+    assert config.profiles_for("other") == (other,)
+    with pytest.raises(ModuleNotFoundError, match="unavailable_architecture"):
+        require_fusable_config(AliasedDefinition, "other")
+    with pytest.raises(TypeError):
+        config.model_profiles["other"] = ()
+    assert config.derive("wrapper", source_model_type="other").profiles == (other,)
+    assert not config.derive("wrapper", source_model_type="other").model_profiles
+    with pytest.raises(ValueError, match="does not support"):
+        config.derive("wrapper", source_model_type="typo")
+    with pytest.raises(ValueError, match="undeclared"):
+        replace(config, model_profiles={"typo": (other,)})
+    with pytest.raises(ValueError, match="distinct"):
+        replace(config, model_profiles={"other": (other, other)})
+    assert copy.deepcopy(config) is config
+    assert json.loads(json.dumps(config.to_dict()))["model_profiles"]["other"][0]["name"] == "qkv"
+
+
+def test_planner_resolves_alternative_and_duplicate_decoder_prefixes(monkeypatch):
+    model, _ = _wrapper()
+    monkeypatch.setattr(LlamaQModel, "extract_layers_node", classmethod(
+        lambda cls: ["absent.layers", "model.layers", "model.layers"]))
+    model.fuse()
+    assert len(model.fusion_plan().groups) == 4
+    assert {group.decision.parent for group in model.fusion_plan().groups} == {
+        "model.layers.0.self_attn", "model.layers.0.mlp", "model.layers.1.self_attn", "model.layers.1.mlp",
+    }
+    model.fuse(False)

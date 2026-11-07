@@ -30,6 +30,11 @@ See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
       and verifies declared paths, checkpoint weight ownership/tags, roles,
       and applicable consumers, including layout variants and method overrides.
 - [ ] Runtime-created tensors are distinguished from checkpoint-owned weights.
+- [ ] Fusion eligibility is recorded in `fusable_models.json`: a validated
+      definition-owned `fusable` config reuses compatible native profiles, or
+      an explicit non-applicability/qualification-gap reason is given.
+- [ ] New fusion qualifications pass real-model planner coverage and native
+      GPTQ/AWQ FP16/BF16 forward/oracle tests; skipped tests are not counted as validation.
 - [ ] Registry and model-specific tests passed; any dependency skips and their
       precise coverage limits are listed below.
 

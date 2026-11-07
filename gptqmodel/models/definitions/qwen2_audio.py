@@ -13,9 +13,12 @@ from ...utils.model import move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from .qwen2 import Qwen2QModel
 
 
 class Qwen2AudioGPTQ(BaseQModel):
+    fusable = Qwen2QModel.fusable.derive("qwen2_audio")
+
     loader = AutoModelForPreTraining
 
     # The audio tower and projector stay dense; only the Qwen2 text decoder is quantized.

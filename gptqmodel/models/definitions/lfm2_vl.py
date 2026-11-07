@@ -15,9 +15,19 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class LFM2VLQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("lfm2_vl", parent_types={
+        "qkv": (
+            "transformers.models.lfm2.modeling_lfm2.Lfm2Attention",
+        ),
+        "gate_up": (
+            "transformers.models.lfm2.modeling_lfm2.Lfm2MLP",
+        ),
+    })
+
     loader = AutoModelForImageTextToText
     HF_CONVERSION_MAP_REVERSED = (
         # LFM2-VL mounts `Siglip2VisionModel` directly at `model.vision_tower`.

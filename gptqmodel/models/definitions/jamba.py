@@ -5,9 +5,19 @@ import torch
 
 from ...utils.model import nested_move_to
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class JambaQModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("jamba", parent_types={
+        "qkv": (
+            "transformers.models.jamba.modeling_jamba.JambaAttention",
+        ),
+        "gate_up": (
+            "transformers.models.jamba.modeling_jamba.JambaMLP",
+        ),
+    })
+
     require_pkgs = ["mamba-ssm"]
 
     # Jamba interleaves Mamba and attention decoder layers inside one `layers`

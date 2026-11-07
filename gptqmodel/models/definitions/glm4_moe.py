@@ -4,10 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GLM4MoEGPTQ(BaseQModel):
+    fusable = LlamaFusableConfig().derive("glm4_moe", parent_types={
+        "qkv": (
+            "transformers.models.glm4_moe.modeling_glm4_moe.Glm4MoeAttention",
+        ),
+    })
+
     shared_input_verified_model_types = frozenset({"glm4_moe"})
 
     # GLM-4.5-Air MoE Model Structure:

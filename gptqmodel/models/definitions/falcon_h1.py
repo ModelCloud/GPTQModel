@@ -4,9 +4,19 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class FalconH1QModel(BaseQModel):
+    fusable = LlamaFusableConfig().derive("falcon_h1", parent_types={
+        "qkv": (
+            "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1Attention",
+        ),
+        "gate_up": (
+            "transformers.models.falcon_h1.modeling_falcon_h1.FalconH1MLP",
+        ),
+    })
+
     layers_node = "model.layers"
 
     module_tree= [

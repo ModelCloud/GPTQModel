@@ -12,10 +12,13 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from .llama import LlamaQModel
 
 
 class LlavaQModel(BaseQModel):
     """Hugging Face Transformers LLaVA (e.g. LLaVA-1.5) model definition."""
+    fusable = LlamaQModel.fusable.derive("llava")
+
 
     loader = AutoModelForImageTextToText
     require_load_processor = True

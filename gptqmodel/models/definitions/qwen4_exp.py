@@ -6,11 +6,18 @@
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen4ExpQModel(BaseQModel):
     """Qwen3.8-Flash-Next / Qwen4 experimental multimodal MoE."""
+    fusable = LlamaFusableConfig().derive("qwen4_exp", parent_types={
+        "qkv": (
+            "transformers.models.qwen4_exp.modeling_qwen4_exp.Qwen4ExpTextAttention",
+        ),
+    })
+
 
     loader = AutoModelForImageTextToText
     require_load_processor = True
@@ -74,6 +81,8 @@ class Qwen4ExpQModel(BaseQModel):
 
 class Qwen4ExpTextQModel(Qwen4ExpQModel):
     """Qwen4-Exp text-only checkpoints with the standalone decoder layout."""
+    fusable = Qwen4ExpQModel.fusable.derive("qwen4_exp_text")
+
 
     # Text-only checkpoints use the causal-LM loader and have no processor.
     loader = AutoModelForCausalLM

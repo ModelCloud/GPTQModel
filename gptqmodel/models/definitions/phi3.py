@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from ..base import BaseQModel
+from ..fusable import LlamaFusableConfig
 
 
 class Phi3QModel(BaseQModel):
@@ -21,6 +22,12 @@ class Phi3QModel(BaseQModel):
     ]
 
 class PhiMoEGPTQForCausalLM(BaseQModel):
+    fusable = LlamaFusableConfig().derive("phimoe", parent_types={
+        "qkv": (
+            "transformers.models.phimoe.modeling_phimoe.PhimoeAttention",
+        ),
+    })
+
     dynamic_expert_index = "num_local_experts"
 
     module_tree = [
