@@ -7,6 +7,11 @@ belongs to, and whether it should be quantized at all.
 The short version: **the architecture's declared `module_tree` is authoritative;
 runtime module names are not consulted.** Introduced in PR #3565.
 
+For a practical tutorial, the complete tag reference, terminal/JSON inspection,
+and new-model requirements, see the [module-plan guide](module-plan-guide.md).
+The [DeepSeek V4.1 Flash inventory](deepseek-v41-module-inventory.md) distinguishes
+verified checkpoint structure from remaining integration work.
+
 ## Why it is shaped this way
 
 Before this change the answer to "what is this module?" was derived from the
@@ -59,8 +64,8 @@ flowchart TD
     OVR -->|tree| FRZ["_freeze_module_tree()<br/>deep immutable"]
     FRZ --> ATTR["self.effective_module_tree = frozen<br/>self.module_tree = effective"]
     ATTR --> PLAN["ModulePlan.from_tree(effective)<br/>compiled once"]
-    PLAN --> USE["module_plan<br/>used by every subsystem"]
-    PLAN --> HOOK["moe_lifecycle_hooks.module_plan<br/>per-instance copy"]
+    PLAN --> USE["model.module_plan()<br/>public and internal accessor"]
+    USE --> HOOK["moe_lifecycle_hooks.module_plan<br/>same plan on per-instance hook copy"]
     PLAN --> MDL["model.gptqmodel_effective_module_tree<br/>handed to loader"]
     style PLAN fill:#d9f7be,stroke:#237804,stroke-width:2px
     style ERR fill:#ffa39e,stroke:#a8071a
@@ -143,9 +148,9 @@ The tree renderer marks:
 | --- | --- | --- |
 | `q_proj:0:q` | slot `0`, role `q` | `q` |
 | `w1:0:gate` | explicit tag wins over the name | `gate` |
-| `mlp:moe` | MoE root marker | `moe` |
+| `mlp:moe` | MoE root marker | `spec.is_moe`, not a projection role |
 | `x:!` / `x:?` | not quantized / capture-only | `quantize = False` |
-| `experts.#` | routed-expert expansion | `{expert_index}` → `\d+` |
+| `"experts": {"#": (...)}` | routed-expert expansion | `{expert_index}` → `\d+` |
 | `gate_up_proj` | fused projection | `("gate","up")` |
 
 ### Matching is exact
@@ -284,7 +289,7 @@ or norm from disappearing between the model definition and the live model.
 
 ```mermaid
 flowchart TD
-    SD["layer.state_dict()<br/>parameters + persistent buffers"] --> OWN["deepest owning module<br/>for each entry"]
+    SD["Checkpoint keys + conversion provenance<br/>state_dict for architecture fixtures"] --> OWN["deepest owning module<br/>for each entry"]
     OWN --> FIND["plan.find(owner)"]
     FIND -->|None| FAIL["test failure:<br/>undeclared weight owner"]
     FIND -->|spec| Q{"owner in<br/>simple_layer_modules?"}
@@ -297,13 +302,22 @@ flowchart TD
     style EXCLUDED fill:#d9f7be,stroke:#237804
 ```
 
-`state_dict()` is the source of truth for this check. Non-persistent buffers
-created at runtime are excluded by Torch and are not model-definition
-obligations. The owning-module rule also covers direct parameters and buffers on
+`state_dict()` supplies parameters and persistent buffers for architecture
+fixtures. Actual checkpoint ownership must be established from saved keys and
+explicit conversion mappings. Post-load tensors can be persistent too; appearing
+in `state_dict()` alone does not make them model-definition obligations.
+The owning-module rule also covers direct checkpoint parameters and buffers on
 containers, such as Qwen `linear_attn.A_log`, DeepSeek `self_attn.sinks`, and
 Ripple `self_attn.value_res_lambda`.
 
-Measured Flash-family coverage at this revision:
+The current plan compiles decoder-relative module owners, not a whole-model
+per-tensor manifest. Base embeddings, vision towers, heads, and auxiliary
+prediction modules outside declared decoder regions need separate coverage.
+Its summary counts declaration flags, including structural parents; those counts
+are not the number of live quantized tensors.
+
+Measured Flash-family architecture-fixture coverage at this revision (these are
+real model shells, not full checkpoint provenance audits):
 
 | Model family | Decoder layers | Quantizable specs | Unique weight owners |
 | --- | ---: | ---: | ---: |
@@ -314,9 +328,13 @@ Measured Flash-family coverage at this revision:
 | Ripple | 5 (fixture) | 8 | 15 |
 
 DeepSeek-V4.1-Flash is not included: its checkpoint declares
-`model_type=deepseek_v41`, but Transformers 5.22.2 and its main branch expose no
-native `deepseek_v41` config or model class. The test activates automatically
-when upstream support lands instead of relabeling V4-Flash as V4.1.
+`model_type=deepseek_v41`, but the verified Transformers 5.22.1 environment and
+GPT-QModel registry have no corresponding entry. Its checkpoint now provides
+reference inference code; that is not a registered Transformers/GPT-QModel
+loader. The test activates when upstream config support lands instead of
+relabeling V4-Flash as V4.1. See the pinned
+[V4.1 checkpoint inventory](deepseek-v41-module-inventory.md) for the current
+evidence and remaining work.
 
 ### Rotation
 
@@ -326,17 +344,19 @@ Llama layout:
 
 ```mermaid
 flowchart TD
-    R["rotate_model(plan=self.module_plan())"] --> N1["plan.child_roles('', 'norm')<br/>→ exactly 2 norms"]
-    R --> P1["_rotation_parents(plan)<br/>attention parent + MLP parent"]
-    P1 --> Q1["_resolve_role(layer, plan, parent, 'q'|'k'|'v'|'o')"]
-    P1 --> Q2["_resolve_role(layer, plan, parent, 'gate'|'up'|'down')"]
-    N1 --> F["fuse → reset"]
-    Q1 --> F
-    Q2 --> F
-    F --> EMB["get_embeddings()<br/>get_input_embeddings() / embedding_name"]
-    R -.->|no plan| DEF["_default_rotation_plan()<br/>Llama defaults for public callers"]
+    API["model.module_plan()"] --> FUSE["fuse_layer_norms(plan=...)<br/>then rotate_model(plan=...)"]
+    FUSE --> N1["Fusion: root specs with norm flag<br/>requires exactly 2 layer norms"]
+    FUSE --> P1["_rotation_parents(plan)<br/>attention parent + MLP parent"]
+    P1 --> Q1["_resolve_role()<br/>exactly one projection per requested role"]
+    Q1 -->|"missing or multiple"| ERR["ValueError: incompatible declaration or layout"]
+    N1 --> F["Fuse layer and final norms; reset norms"]
+    Q1 -->|"resolved"| F
+    F --> EMB["rotate_model: embeddings and head first<br/>then declared decoder projections"]
+    PUBLIC["Public helper called without a plan"] --> DEF["_default_rotation_plan()<br/>Llama defaults"]
+    DEF --> FUSE
     style DEF fill:#e6f7ff
     style P1 fill:#d9f7be
+    style ERR fill:#ffa39e,stroke:#a8071a
 ```
 
 `_resolve_role` requires exactly one match and raises with the offending path, so
@@ -373,11 +393,11 @@ flowchart LR
 ```mermaid
 flowchart TD
     S["resolve effective tree"] --> I{"model.gptqmodel_effective_module_tree?"}
-    I -->|yes| F["freeze deep-immutable"]
+    I -->|yes| O["apply module_tree_overrides()"]
     I -->|no| C{"cls.module_tree?"}
-    C -->|yes| O["apply module_tree_overrides()"]
+    C -->|yes| O
     C -->|no| X["ValueError:<br/>register a model definition"]
-    O --> F
+    O --> F["freeze deep-immutable"]
     F --> P["ModulePlan.from_tree()"]
     P --> R["load / quantize / rotate"]
     style X fill:#ffa39e,stroke:#a8071a
@@ -387,7 +407,7 @@ flowchart TD
 | Situation | Behavior |
 | --- | --- |
 | Unknown `model_type`, no definition | `ValueError`; never auto-guesses a tree |
-| Ambiguous `:q` / `:k` / … role | `ValueError` naming the candidate paths |
+| Multiple projections for a role in a single-role consumer | That consumer raises `ValueError`; the plan itself can represent multiple projections |
 | Ambiguous prefix or suffix lookup | `ValueError` naming the candidates |
 | Path not declared in the tree | treated as undeclared: not quantized, no role |
 | Custom architecture | inject `model.gptqmodel_effective_module_tree` |

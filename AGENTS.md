@@ -5,6 +5,13 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 This file governs the whole repository in addition to any parent agent instructions.
 
+## Product naming
+
+Use **GPT-QModel** in user-facing prose, UI labels, documentation headings, and
+release titles/notes. Keep `gptqmodel` for the package/import name and
+`GPTQModel` for the Python API class. Preserve actual identifiers, filenames,
+repository names, and URLs when editing display text.
+
 ## Explicit accelerator families
 
 For device selection, model loading/placement, accelerator checks, or kernel

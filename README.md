@@ -108,6 +108,8 @@ Every quantization method shares a common lifecycle—calibrate, quantize, valid
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts.
 
+Use the **[module-plan guide](docs/module-plan-guide.md)** for `model.module_plan()`, terminal/JSON inspection, model-definition tags, and the required new-model tests. The **[DeepSeek V4.1 Flash inventory](docs/deepseek-v41-module-inventory.md)** shows its verified checkpoint structure and remaining integration requirements.
+
 | Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
@@ -973,7 +975,7 @@ PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter sep
 
 ### How to Add Support for a New Model 🛠️
 
-Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
+Follow **[Add and validate a new model](docs/module-plan-guide.md#add-and-validate-a-new-model)** and the current [Llama definition](gptqmodel/models/definitions/llama.py). Every new model type or alias needs an explicit registry plan case and a real-model module-plan unit test, including non-quantized checkpoint-owned decoder weights. See the [module-plan wiki](https://github.com/ModelCloud/GPTQModel/wiki/Module-Plan-Guide) for the same guide online.
 
 #### Shared-input metadata (`:in=<tag>`) 🔗
 
