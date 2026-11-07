@@ -120,6 +120,9 @@ def test_registry_has_explicit_fusion_qualification_for_every_alias():
 @pytest.mark.parametrize("key", sorted(QUALIFIED))
 def test_actual_model_definition_reaches_fusion_planner(key, monkeypatch):
     model, layers, names = _build(key)
+    # The fixture installs FP16 quantized projections; admission validates the
+    # real model activation dtype along with the combined native output shape.
+    model.to(dtype=torch.float16)
     definition = MODEL_MAP[key]
     # Processor downloads and unrelated model-wide patches are loader concerns.
     monkeypatch.setattr(definition, "require_load_processor", False)

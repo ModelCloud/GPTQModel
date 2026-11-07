@@ -355,6 +355,10 @@ class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(device_type="xpu" if HAS_XPU else "cuda")
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
+        # Declared source leaves can be column views of a fused allocation.
+        # The raw-pointer decoder requires compact operands for direct/fallback
+        # calls. These packed temporaries live only for this computation.
+        qweight, scales, qzeros = qweight.contiguous(), scales.contiguous(), qzeros.contiguous()
         output = quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
         ctx.bits, ctx.maxq, ctx.pack_bits = bits, maxq, pack_bits

@@ -655,3 +655,44 @@ def test_compiled_parent_uses_original_path():
         assert group.calls == 0
     finally:
         torch._dynamo.reset()
+
+
+@pytest.mark.parametrize("previously_fused", [False, True])
+def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, previously_fused):
+    from gptqmodel.models.fusion import _FusionGroup
+
+    model, _ = _wrapper(automatic=previously_fused)
+    previous = model.fusion_plan()
+    original = _FusionGroup._operand
+    calls = 0
+
+    def fail_second(group, key):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("native descriptor construction failed")
+        return original(group, key)
+
+    monkeypatch.setattr(_FusionGroup, "_operand", fail_second)
+    with pytest.raises(RuntimeError, match="native descriptor construction failed"):
+        model.fuse()
+    assert model.fusion_plan() is previous
+    if previously_fused:
+        assert all(group.active and group.packed is not None for group in previous.groups)
+    else:
+        for layer in model.model.model.layers:
+            for parent in (layer.self_attn, layer.mlp):
+                assert parent.forward.__func__ is type(parent).forward
+            assert layer.mlp.gate_proj.qweight.is_contiguous()
+    model.fuse(False)
+
+
+def test_supported_dtype_move_rebuilds_and_keeps_fused_execution():
+    model, _ = _wrapper(automatic=True)
+    groups = model.fusion_plan().groups
+    model.model.to(dtype=torch.bfloat16)
+    with torch.inference_mode():
+        output = model.model(torch.tensor([[1, 2]])).logits
+    assert output.dtype == torch.bfloat16 and torch.isfinite(output).all()
+    assert all(group.calls > 0 and group.input_dtype == torch.bfloat16 for group in groups)
+    model.fuse(False)

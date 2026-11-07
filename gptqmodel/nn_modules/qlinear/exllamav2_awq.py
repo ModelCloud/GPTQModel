@@ -154,7 +154,18 @@ class AwqExllamaV2Linear(AWQuantLinear):
             dtype=x.dtype,
             device=x.device,
         )
-        exllamav2_awq_gemm_half_q_half(x, self.q_handle, out, False)
+        handle, temporaries = self.q_handle, None
+        if getattr(self, "_fusion_native_view", False):
+            from ...utils.exllamav2 import exllamav2_clone_q_matrix
+
+            handle, temporaries = exllamav2_clone_q_matrix(self, awq=True, compact=True)
+        try:
+            exllamav2_awq_gemm_half_q_half(x, handle, out, False)
+        finally:
+            if temporaries is not None:
+                from ...utils.exllamav2 import exllamav2_free_q_matrix
+
+                exllamav2_free_q_matrix(handle, awq=True)
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)

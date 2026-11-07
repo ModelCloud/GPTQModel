@@ -85,7 +85,7 @@ by GPT-QModel before calling Transformers.
 | Q, K, V execute three quantized linear calls | One wider quantized linear call, split in declared role order. GQA output widths may differ. |
 | Gate and up execute two quantized linear calls | One wider call; the existing parent still applies its activation and multiplication. |
 | Each leaf owns its packed tensors | The same checkpoint leaves reference disjoint views of the combined packed tensors. |
-| Independent packed allocations | One combined allocation replaces the separate allocations; each group adds only reduction workspace. |
+| Independent packed allocations | One combined allocation replaces separate weights; native metadata/workspace follows the backend contract. |
 
 The compiler reads the installed native parent `forward` source named by the
 definition's selected profile. Each declared projection must occur exactly once and take the same
@@ -131,6 +131,56 @@ compatible unpadded shapes. The portable Torch AWQ GQA QKV case remains
 conservatively excluded; that restriction does not apply to the validated native
 Marlin executor. Adapters, projection/offload hooks, and online projection
 rotation are excluded.
+
+### Native kernel contracts
+
+`fusion_kernels.kernel_specs()` qualifies exact kernel classes with a
+`FusionKernelSpec`. Backend selection happens before fusion. AUTO retains CPU
+ATen/AVX512, NVIDIA Marlin, and eligible AMD Torch/Triton implementations;
+fusion never substitutes a portable implementation to make a group eligible.
+The [kernel inventory](fusion-kernel-inventory.md) accounts for every registered
+backend, including architecture/dependency exclusions, other quantization
+formats, and the format-specific EXL3/FP4 loaders.
+
+```mermaid
+flowchart TD
+    SELECT["AUTO or explicit backend selects native class"] --> SPEC{"kernel_specs has this exact class?"}
+    SPEC -->|"no"| SKIP["Record unsupported native layout; preserve separate forwards"]
+    SPEC -->|"yes"| CHECK["_incompatible + combined_shape_error<br/>same settings, native tiles, total output width"]
+    CHECK --> VALID{"Native contract valid?"}
+    VALID -->|"no"| SKIP
+    VALID -->|"yes"| PREP["FusionKernelSpec.prepare<br/>finalize CPU packing once"]
+    PREP --> FINAL{"_incompatible validates finalized native operands?"}
+    FINAL -->|"no"| SKIP
+    FINAL -->|"yes"| CONCAT["combine / _operand<br/>concatenate finalized native output tiles"]
+    CONCAT --> ABI["Rebind native metadata and child operators<br/>clone ExLlamaV2 descriptor without reshuffling<br/>allocate zeroed Marlin workspace"]
+    ABI --> SHARE["_share_operands: checkpoint leaves become source views"]
+    SHARE --> GUARD["_mutation_guard<br/>source bindings and versions; native mappings;<br/>workspace identity, pointer, shape, dtype and device"]
+    GUARD --> RUN["One selected native kernel invocation"]
+    GUARD -->|"changed"| COLD["_refresh retires executor and rebuilds from live sources"]
+    COLD --> CHECK
+    ABI -->|"construction raises"| ROLLBACK["FusionPlanner.apply removes installed groups<br/>BaseQModel.fuse restores previous plan"]
+    style SKIP fill:#fff1f0,stroke:#cf1322
+    style ROLLBACK fill:#fff1f0,stroke:#cf1322
+```
+
+| Finalized layout | Output concatenation and lifecycle |
+| --- | --- |
+| Torch GPTQ/AWQ, TritonV2, AWQ GEMM/Triton GEMM | Native packed columns; direct source launches compact strided packed operands temporarily. |
+| Marlin GPTQ/AWQ | Complete N64 tiles; a new zero-initialized workspace sized for the device. Workspace rebinding/resizing/dtype changes force a cold rebuild. |
+| CPU ATen/AVX512/legacy int4pack | Finalized HF packed output rows; grouped scale/zero columns. Rebuild affine metadata and legacy child operators from current sources. |
+| AWQ GEMV/Triton GEMV | Native output rows, including scale/zero rows. |
+| AWQ fast GEMV/LLM-AWQ | Complete interleaved N4/K64 packed blocks; matching native scale/offset columns. |
+| ExLlamaV2 GPTQ/AWQ | Finalized shuffled columns; clone borrowed-pointer descriptors without rerunning the destructive shuffle. Direct source views use transient compact descriptors; unfusing restores independent descriptors. Canonical input order is required. |
+| AllSpark GPTQ/AWQ | Native eight-bit N32K16 blocks viewed as output rows; complete unpadded N32 tiles and native per-channel metadata. Scratch is allocated per call by the backend. |
+| CPU native INT8 | Output rows of native eight-bit codes and per-channel scales; rebuild the `Int8PackedModule` binding. Lower-bit expansion is prohibited. |
+| GPTQ W4AFP8 | Native INT4 columns; temporary E4M3 staging per call. Plain tensor inputs qualify; encoded W4A streams require a separate parent executor and are rejected. |
+
+All sibling settings, including AWQ reduction/scheduler options, must match.
+The kernel validates the **combined** output shape before installation and on
+cold refresh. Fused native buffers remain contiguous. Temporary compaction is
+only for direct source/fallback calls; it is never installed as another weight
+cache. `fuse(False)` restores contiguous independent source operands exactly.
 
 ## Definition-owned FusableConfig
 
@@ -282,6 +332,9 @@ not an additional checkpoint tensor.
 The compiled guard checks direct dictionary bindings and shared tensor versions,
 storage pointers, shapes, dtypes, devices, and gradient policy. It also checks
 source module identity, frozen kernel settings, hooks, and forward overrides.
+Native pointer mappings and executor workspace bindings are checked as well;
+workspace contents are scratch and do not participate in version checks.
+Scratch resizing/replacement causes a fresh zeroed native allocation.
 One version-counter check per packed operand covers writes through any sibling
 view; binding, storage, dtype, shape, device, and gradient checks remain per leaf.
 There are no full compatibility scans, tensor-key tuple construction, or
@@ -313,6 +366,10 @@ clears its private global bindings before releasing packed tensors. Retained
 guard references return `False` and hold no operand tensors. This also releases
 storage promptly on free-threaded Python builds that defer function destruction;
 it adds no checks to the token loop.
+Completed Torch compiler traces can leave unreachable cycles referencing packed
+inputs. For compiled source dequantizers, cold invalidation collects those cycles
+so retired allocations do not await automatic collection. Unchanged token
+execution performs neither collection nor compiler-cache resets.
 
 ## Checkpoint and test contract
 
@@ -349,11 +406,13 @@ RTX 4090 CUDA and Radeon AI PRO R9700 ROCm runs. It covers symmetric INT4,
 group 128, `desc_act=False`, FP16/BF16, prefill and cached decode, greedy tokens,
 mutation invalidation, storage ownership and independent projection oracles.
 
-CUDA `BACKEND.AUTO` selects Marlin for the canonical configuration. Portable
-CPU/ROCm fusion is validated with `BACKEND.GPTQ_TORCH` and `BACKEND.AWQ_TORCH`.
-Other backend classes can record skipped groups; fusion does not replace the
-selected backend. Portable AWQ GQA keeps QKV separate and fuses gate/up. AWQ
-MHA QKV and CUDA Marlin GQA QKV are covered separately.
+`BACKEND.AUTO` selects CPU ATen for FP16 and AVX512 for BF16, CUDA Marlin for
+both dtypes, ROCm GPTQ Torch, and ROCm AWQ Triton GEMM for FP16 / Torch for BF16.
+Full checkpoint tests assert those exact classes before and after fusion.
+Portable AWQ GQA keeps QKV separate and fuses gate/up. Native layout, shape,
+workspace, descriptor, mutation and source-restoration tests cover the other
+available GPTQ/AWQ kernels explicitly. Eligibility and exclusions are listed in
+the [complete host inventory](fusion-kernel-inventory.md).
 
 ## Measured Llama 3.2 1B results
 
@@ -361,24 +420,25 @@ MHA QKV and CUDA Marlin GQA QKV are covered separately.
 modes.** RTX 4090, Torch 2.15.0+cu132, FP16, batch 1, eager attention,
 `TORCHDYNAMO_DISABLE=1`. Ten warmups and fifteen measured repeats per mode;
 median synchronized wall-clock time. The process was pinned to CPU 17 with one
-Torch CPU thread, and other Torch test workloads were stopped. Modes are off
+Torch CPU thread. Other validation processes used different GPUs; host CPU
+activity was not isolated. Modes are off
 then on for each model, each separately warmed. Prefill is 128 tokens. Decode
 is 16 cached single-token forwards with fixed token 42; cache-building prefill,
 loading, packed construction, and source-view binding are outside timing.
 
 | Method | Phase | Kernel off / on | Off latency | On latency | Latency change | Off tok/s | On tok/s |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 9.646 ms | 9.078 ms | -5.90% | 13269.23 | 14100.51 |
-| GPTQ | Decode (per token) | `MarlinLinear` / same | 8.977 ms | 8.560 ms | -4.65% | 111.39 | 116.83 |
-| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 9.587 ms | 9.372 ms | -2.25% | 13350.90 | 13657.89 |
-| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 9.080 ms | 8.730 ms | -3.85% | 110.14 | 114.54 |
+| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 7.401 ms | 7.152 ms | -3.37% | 17295.10 | 17897.43 |
+| GPTQ | Decode (per token) | `MarlinLinear` / same | 6.763 ms | 6.462 ms | -4.45% | 147.87 | 154.76 |
+| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 7.599 ms | 7.446 ms | -2.01% | 16845.34 | 17191.13 |
+| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 6.932 ms | 6.769 ms | -2.36% | 144.25 | 147.73 |
 
 ```mermaid
 xychart-beta
     title "Fusion latency reduction: symmetric INT4 Llama 3.2 1B"
     x-axis ["GPTQ prefill", "GPTQ decode", "AWQ prefill", "AWQ decode"]
     y-axis "Latency reduction (%)" 0 --> 8
-    bar [5.90, 4.65, 2.25, 3.85]
+    bar [3.37, 4.45, 2.01, 2.36]
 ```
 
 | Method | Phase | Max absolute logit drift | RMS logit drift | Relative L2 | Top-1 agreement |
@@ -509,8 +569,10 @@ the transition. Source-call fallback copies are temporary packed tensors;
 native dequantization remains in kernel tiles. No dense/expanded weight cache
 persists. The portable Torch path can dequantize temporarily inside its call.
 
-Raw data, samples, guard timings, and memory counts:
-[llama32-fusion.json](benchmarks/llama32-fusion.json). Reproduce with an available
+Current off/on samples, drift and storage counts:
+[llama32-fusion-native-backends.json](benchmarks/llama32-fusion-native-backends.json).
+The separate shared-source A/B controls retain their original
+[llama32-fusion.json](benchmarks/llama32-fusion.json) measurements. Reproduce with an available
 CPU from `taskset -pc $$`:
 
 ```bash

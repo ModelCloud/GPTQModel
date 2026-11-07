@@ -51,6 +51,16 @@ requirements. Apply this rule when auditing existing inference kernels too.
 
 ## Numerical oracle validation
 
+Fusion backend changes must preserve AUTO's native kernel selection. Add an
+explicit native-layout contract and actual-device numerical tests for each
+newly admitted kernel; a portable substitution or mocked dispatch test does
+not qualify that backend. Cover supported activation dtypes, unequal QKV
+widths, gate/up, native shape boundaries, workspace/descriptor lifecycle,
+mutation, direct source calls, exact packed-weight restoration and persistent
+storage. Keep the complete kernel inventory and measured device report current;
+unavailable architectures/dependencies and other formats require explicit
+coverage reasons. See `tests/module_tree/test_fusion_kernel_backends.py`.
+
 For any new or changed quantization math, weight packer, or inference kernel,
 read and follow `$gptqmodel-torch-oracle-numerics` in
 `.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md` before editing.

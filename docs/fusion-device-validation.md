@@ -1,147 +1,176 @@
-# Fusion inference across CPU, CUDA and ROCm
+# Native fusion inference on CPU, CUDA and ROCm
 
-Fusion has been exercised on actual CPU, NVIDIA CUDA and AMD ROCm devices with
-GPTQ and AWQ. The tests use symmetric INT4, group size 128, `desc_act=False`
-and explicit model-definition profiles. Fusion remains off by default.
+Fusion preserves the optimized backend selected by AUTO. This report qualifies
+**23 exact native GPTQ/AWQ kernel classes** on Zen 5, RTX 4090 and Radeon AI PRO
+R9700. Fusion remains opt-in. [All 57 registry classes and the EXL3/FP4 loaders](fusion-kernel-inventory.md)
+are inventoried; unavailable kernels and other quantization formats are not
+reported as validated fusion implementations.
 
-[Raw results](benchmarks/fusion-device-validation.json) include every case,
-backend, dtype, output error, group count and retained-storage measurement.
-These are correctness and lifecycle checks, not latency measurements. The
-[existing Llama latency tables](fusion-planner.md#measured-llama-32-1b-results)
-remain separate from this report.
+[Raw per-case results](benchmarks/fusion-device-validation.json) include dtypes,
+native layouts, oracle errors, baseline variation, storage assertions, and
+checkpoint results. [Current Llama latency and drift tables](fusion-planner.md#measured-llama-32-1b-results)
+are separate synchronized wall-clock measurements.
 
-## Hardware and scope
+## AUTO selection on this host
 
-| Family | Actual hardware | Runtime | Validated fusion executor |
-| --- | --- | --- | --- |
-| CPU | AMD x86_64 Eng Sample 100-000001458-01 | Torch 2.15.0+cu132 and the ROCm build below | `TorchLinear`, `AwqTorchLinear` |
-| CUDA | NVIDIA RTX 4090, SM 8.9 | Torch 2.15.0+cu132 | `MarlinLinear`, `AwqMarlinLinear`, plus portable Torch |
-| ROCm | Radeon AI PRO R9700, gfx1201 | Torch 2.16.0.dev20261025+rocm10.1, HIP 7.16.26385, Python 3.14.10 free-threaded | `TorchLinear`, `AwqTorchLinear` |
+| Family | GPTQ FP16 | GPTQ BF16 | AWQ FP16 | AWQ BF16 |
+| --- | --- | --- | --- | --- |
+| Zen 5 CPU | ATen int4pack | AVX512-BF16 | ATen int4pack | AVX512-BF16 |
+| RTX 4090 CUDA | Marlin | Marlin | Marlin | Marlin |
+| R9700 ROCm | GPTQ Torch | GPTQ Torch | AWQ Triton GEMM | AWQ Torch |
 
-The 32 unique small-model cases cover two methods, two activation dtypes,
-GQA/MHA layouts and four executor/device combinations. CPU cases were also
-repeated in the ROCm Python build. They instantiate real tiny Llama models and
-consume their declared module plans. The six full-checkpoint cases load local
-Llama 3.2 1B models. This does not establish hardware qualification for every
-architecture in the [model matrix](fusion-model-coverage.md).
+`TorchLinear` on RDNA4 includes architecture-specific packed Triton execution;
+the class name does not imply an unaccelerated fallback. Every full-checkpoint
+case asserts the selected exact kernel class before and after fusion. No
+backend is changed to obtain an eligible fusion group.
 
-CPU and ROCm use explicit `BACKEND.GPTQ_TORCH` / `BACKEND.AWQ_TORCH` for these
-fusion checks. `BACKEND.AUTO` on CUDA must retain Marlin in both modes. CPU or
-ROCm AUTO can select a different backend class that is outside the current
-fusion executor; such groups are skipped with reasons. Fusion never switches
-the chosen backend to make a group eligible. This report does not claim fusion
-support for optimized CPU AVX512/ATen or other untested backend classes.
+CPU/CUDA runtime: Torch 2.15.0+cu132, Python 3.14.4. ROCm runtime: Torch
+2.16.0.dev20261025+rocm10.1, HIP 7.16.26385, Python 3.14.10 free-threaded.
+CPU is AMD x86_64 Eng Sample 100-000001458-01 with AVX512-BF16; NVIDIA is SM89
+and AMD is gfx1201. CPU cases are also executed in the ROCm build.
 
-Portable AWQ GQA currently fuses gate/up only: 2 groups in the tiny two-layer
-model, 16 in the 1B model. Its QKV decisions record the explicit numerical
-qualification restriction. AWQ MHA, GPTQ GQA/MHA and Marlin GQA/MHA exercise both
-QKV and gate/up: 4 groups in the tiny model, 32 in the 1B model. Routed expert
-fusion remains excluded.
+## Native projection evidence
 
-## Independent projection oracles and whole-model behavior
+The actual Llama parent modules use K=512, gate/up widths 1024+1024, GQA widths
+512+256+256, and MHA widths 512+512+512. Tests cover 0/1/8/33/257 rows, with
+1025 rows for gate/up to cross large-M/dequantization/reduction thresholds.
+Each projection starts from independently generated integer codes, logical
+zero points, and group/output-varying dyadic scales. FP32 matrix multiplication
+forms the oracle; no fused output is reused as an expectation. All elementwise
+comparisons use `rtol=atol=2e-3` and preserve the supported activation dtype.
 
-Each projection oracle starts from independently constructed integer codes,
-logical zero points and scales, performs its own FP32 matrix multiplication,
-rounds to the activation dtype and adds bias. All elementwise comparisons use
-`rtol=atol=2e-3`. Inputs have 1, 8 and 32 rows; FP16 and BF16 must be preserved.
-Eligible GPTQ Torch paths also assert packed GEMV dispatch on supported GPU
-architectures. The actual R9700 and RTX 4090 runs exercised packed GEMV and
-FP16 small-M GEMM; BF16 paths retain the existing architecture gates.
+W4AFP8 uses the specified per-token E4M3 quantize/dequantize rule, then FP32
+accumulation and FP32 bias before output rounding. A separate uniform-scale
+1025-row regression pins that bias-rounding order for both dtypes. CPU INT8
+is decoded independently from its finalized native eight-bit codes/scales;
+no INT4-to-INT8 expansion is admitted. AllSpark is tested as native eight-bit
+per-channel storage, and fast AWQ uses native int16 packing. These are separate
+native contracts, not substitutes for symmetric INT4/g128.
 
-The model checks compare a four-token prefill plus three cached decode steps,
-three greedy generated tokens, repeated forwards, scale mutation/invalidation,
-restoration and `fuse(False)`. The following maxima span both methods, dtypes
-and attention layouts:
+| Family | Exact kernel | Tested dtypes | Max projection/oracle difference | Max native-parent off/on difference |
+| --- | --- | --- | ---: | ---: |
+| cpu | `AwqTorchLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cpu | `TorchAtenAwqLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cpu | `TorchAtenLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cpu | `TorchCpuAvx512AwqLinear` | bfloat16 | 0.001953125 | 0 |
+| cpu | `TorchCpuAvx512Linear` | bfloat16 | 0.001953125 | 0 |
+| cpu | `TorchFusedAwqLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cpu | `TorchFusedLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cpu | `TorchInt8Linear` | bfloat16/float16 | 0.0009765625 | 0 |
+| cpu | `TorchLinear` | bfloat16/float16 | 0.000244140625 | 0 |
+| cuda | `AllSparkAwqLinear` | bfloat16/float16 | 0.0009765625 | 0 |
+| cuda | `AllSparkLinear` | bfloat16/float16 | 0.0009765625 | 0 |
+| cuda | `AwqExllamaV2Linear` | bfloat16/float16 | 0.000122070312 | 3.05175781e-05 |
+| cuda | `AwqGEMMLinear` | bfloat16/float16 | 0.00048828125 | 0 |
+| cuda | `AwqGEMMTritonLinear` | float16 | 0.000122070312 | 1.52587891e-05 |
+| cuda | `AwqGEMVFastLinear` | float16 | 0.000122070312 | 0 |
+| cuda | `AwqGEMVLinear` | float16 | 0.00048828125 | 0 |
+| cuda | `AwqGEMVTritonLinear` | float16 | 0.000122070312 | 0 |
+| cuda | `AwqMarlinLinear` | bfloat16/float16 | 0.000244140625 | 7.62939453e-06 |
+| cuda | `AwqTorchLinear` | bfloat16/float16 | 0.00048828125 | 7.62939453e-06 |
+| cuda | `ExllamaV2Linear` | bfloat16/float16 | 0.000122070312 | 3.05175781e-05 |
+| cuda | `LLMAwqLinear` | float16 | 0.000122070312 | 0 |
+| cuda | `MarlinLinear` | bfloat16/float16 | 0.000244140625 | 7.62939453e-06 |
+| cuda | `TorchLinear` | bfloat16/float16 | 0.00048828125 | 7.62939453e-06 |
+| cuda | `TritonV2Linear` | bfloat16/float16 | 0.00048828125 | 7.62939453e-06 |
+| cuda | `W4AFP8Linear` | bfloat16/float16 | 0.001953125 | 0 |
+| rocm | `AllSparkAwqLinear` | bfloat16/float16 | 0.00048828125 | 6.10351562e-05 |
+| rocm | `AllSparkLinear` | bfloat16/float16 | 0.00048828125 | 6.10351562e-05 |
+| rocm | `AwqGEMMTritonLinear` | float16 | 0.000122070312 | 7.62939453e-06 |
+| rocm | `AwqGEMVTritonLinear` | float16 | 0.000122070312 | 0 |
+| rocm | `AwqTorchLinear` | bfloat16/float16 | 0.00048828125 | 1.52587891e-05 |
+| rocm | `TorchLinear` | bfloat16/float16 | 0.00048828125 | 1.52587891e-05 |
 
-| Executor | Cases | Maximum projection error | Maximum prefill/decode logit difference | Extra packed-weight bytes |
-| --- | ---: | ---: | ---: | ---: |
-| `cpu_torch` | 8 | 0.0001220703125 | 0 | 0 |
-| `cuda_torch` | 8 | 0.0001220703125 | 0 | 0 |
-| `cuda_marlin` | 8 | 6.103515625e-05 | 0 | 0 |
-| `rocm_torch` | 8 | 3.051757812e-05 | 0 | 0 |
+Portable AWQ GQA QKV is an explicit rejection case; gate/up and MHA QKV are
+qualified. AWQ Triton/fast kernels declare FP16 only, CPU AVX512 declares BF16
+only. ExLlamaV2 requires canonical input order; W4AFP8 encoded activation
+streams remain ineligible. Those limits are not skipped positive qualifications.
 
-Greedy token IDs match in all cases. Source leaves share the contiguous fused
-packed allocations. The tests inspect owned tensors and containers after
-repeated forwards and reject persistent dense/expanded weight caches. Model
-storage accounting distinguishes packed weights from runtime metadata and
-Marlin workspace: the tiny model adds at most 128 metadata bytes for Torch and
-2,048 workspace bytes for Marlin, with zero extra checkpoint packed-weight
-bytes. Disabling fusion restores independent contiguous source tensors.
+## Shape, workspace, descriptor and storage contracts
+
+- Every source must match its finalized native tiles, and the kernel validates the combined output width before installation and cold refresh. A malformed output width is rejected before launch.
+- Marlin owns zero-initialized device-sized scratch. Replacement, resizing and dtype changes invalidate its cached executor and rebuild correctly sized zeroed workspace. Scratch contents are not version-guarded because kernels write them.
+- AllSpark, ExLlamaV2 and other backends allocate temporary scratch for the consuming launch as their row/output sizes change. ExLlamaV2 descriptors bind finalized shuffled words without a second destructive shuffle; transient direct-call descriptors are freed.
+- Group/output-varying scale metadata, in-place mutation through the final sibling, explicit clear, direct source calls while fused, repeated calls, empty inputs, and unfusing are executed for every admitted backend/dtype/profile.
+- Fused operands remain contiguous. Source views share those allocations, original native weight objects are released, and no dense/expanded weight cache may remain in owned modules/containers. Unfusing restores exact packed bytes and independent contiguous source allocations.
+- CPU affine metadata and legacy/INT8 child operators are rebuilt from current buffers. No separate source weight copies persist after fusion. Native source fallback compaction is temporary.
+- Guard invalidation explicitly retires generated namespaces, including on free-threaded Python. Completed compiled-source trace cycles are collected at cold storage boundaries. Native construction failures roll back installed groups and restore a previous plan.
 
 ## Real Llama 3.2 1B checkpoints
 
-The full-checkpoint checks compare prefill, three cached decode steps and four
-greedy generated tokens. CPU uses BF16; CUDA and ROCm use FP16. FP16 and BF16
-are both covered by the smaller CPU model tests above. Full-model reductions
-can compound rounding differences; projection-level oracle bounds remain
-separate from the following measured logit drift.
+All **12** AUTO cases pass: GPTQ/AWQ × FP16/BF16 × CPU/CUDA/ROCm. The prompt
+is “The capital of France is”; checks compare prefill plus three cached decode
+steps and four greedy new tokens at the same dtype in both modes. All cases
+retain zero additional packed-weight bytes, preserve top-1 IDs, and generate
+identical greedy token IDs. These are execution regressions, not dataset
+accuracy or perplexity measurements.
 
-| Family | Method | Dtype | Kernel | Fused groups | Max absolute logit difference | Relative L2 | Top-1 agreement | Extra packed bytes |
+| Family | Method | Dtype | Exact AUTO kernel | Groups | Max logit difference | Relative L2 | Baseline repeat max | Unfuse max |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| cpu | AWQ | bfloat16 | `AwqTorchLinear` | 16 | 0 | 0 | 100.0% | 0 |
-| cpu | GPTQ | bfloat16 | `TorchLinear` | 32 | 0 | 0 | 100.0% | 0 |
-| cuda | AWQ | float16 | `AwqMarlinLinear` | 32 | 0.036132812 | 0.0025260698 | 100.0% | 0 |
-| cuda | GPTQ | float16 | `MarlinLinear` | 32 | 0.02734375 | 0.0021759705 | 100.0% | 0 |
-| rocm | AWQ | float16 | `AwqTorchLinear` | 16 | 0 | 0 | 100.0% | 0 |
-| rocm | GPTQ | float16 | `TorchLinear` | 32 | 0 | 0 | 100.0% | 0 |
+| cpu | AWQ | bfloat16 | `TorchCpuAvx512AwqLinear` | 32 | 0 | 0 | 0 | 0 |
+| cpu | GPTQ | bfloat16 | `TorchCpuAvx512Linear` | 32 | 0 | 0 | 0 | 0 |
+| cpu | AWQ | float16 | `TorchAtenAwqLinear` | 32 | 0 | 0 | 0 | 0 |
+| cpu | GPTQ | float16 | `TorchAtenLinear` | 32 | 0 | 0 | 0 | 0 |
+| cuda | AWQ | bfloat16 | `AwqMarlinLinear` | 32 | 0.34375 | 0.0210424997 | 0 | 0 |
+| cuda | GPTQ | bfloat16 | `MarlinLinear` | 32 | 0.265625 | 0.0173433311 | 0 | 0 |
+| cuda | AWQ | float16 | `AwqMarlinLinear` | 32 | 0.0361328125 | 0.00252606976 | 0 | 0 |
+| cuda | GPTQ | float16 | `MarlinLinear` | 32 | 0.02734375 | 0.00217597047 | 0 | 0 |
+| rocm | AWQ | bfloat16 | `AwqTorchLinear` | 16 | 0 | 0 | 0 | 0 |
+| rocm | GPTQ | bfloat16 | `TorchLinear` | 32 | 0 | 0 | 0 | 0 |
+| rocm | AWQ | float16 | `AwqGEMMTritonLinear` | 32 | 0.056640625 | 0.00340095116 | 0.0375976562 | 0.044921875 |
+| rocm | GPTQ | float16 | `TorchLinear` | 32 | 0 | 0 | 0 | 0 |
 
-All six cases produce identical greedy token IDs and restore bitwise-identical
-baseline logits after disabling fusion. Whole-model comparisons use identical
-loaded weights and dtype in both modes; this is not a comparison between
-CPU BF16 and GPU FP16 outputs. Checkpoints are local and are not downloaded by
-the tests.
-
-## Explicit guard retirement
-
-The generated mutation guard owns references to packed operands in a private
-global namespace. Invalidation retires its code to `_retired_guard`, clears
-those bindings, then releases the executor's buffers and descriptor. A retained
-guard returns `False` and cannot retain weights or reactivate fusion. This
-works with free-threaded Python's deferred function destruction and does not
-add work to the token loop. The
-[operand-lifetime diagram](fusion-planner.md#operand-and-activation-lifetime)
-shows the same invalidation flow.
-
-`test_retired_guard_releases_weight_bindings_even_when_function_is_retained`
-keeps an external reference to the old guard and verifies the packed tensor's
-weak reference is dead without `gc.collect()`. The existing ownership and
-unfuse tests also pass in the ROCm free-threaded runtime.
+BF16 Marlin accumulates more whole-model logit drift than FP16 in this
+fixture; top-1 and generated IDs still agree. Projection oracle tolerances
+remain separate from compounded full-model differences. ROCm AWQ Triton
+split-K atomic reductions also vary between repeated unfused calls. The
+table reports that measured baseline variation separately; exact packed-byte
+restoration is checked independently, and restored logits must stay within
+the measured repeat-noise envelope with exact top-1 agreement. Every other
+checkpoint case restores bitwise-identical baseline logits.
 
 ## Commands and results
 
-| Run | Result |
-| --- | --- |
-| Device matrix, CUDA build | 25 passed, 8 other-vendor cases skipped |
-| Device matrix, ROCm build | 17 passed, 16 NVIDIA cases skipped |
-| Core fusion/config/device contracts, CUDA build | 478 passed |
-| Core fusion suite, ROCm build | 56 passed, 13 NVIDIA-only cases skipped |
-| Full checkpoints, CPU and CUDA | 4 passed, 2 ROCm cases skipped |
-| Full checkpoints, ROCm | 2 passed, 4 other-family cases deselected |
+| Run | Passed | Skipped |
+| --- | ---: | ---: |
+| Native backend matrix, cuda runtime | 146 | 34 |
+| Consumer/kernel regressions, cuda runtime | 2032 | 173 |
+| Llama AUTO checkpoints, cuda runtime | 8 | 4 |
+| Native backend matrix, rocm runtime | 87 | 93 |
+| Consumer/kernel regressions, rocm runtime | 583 | 13 |
+| Llama AUTO checkpoints, rocm runtime | 4 | 0 |
+| Final core/config contracts, CUDA runtime | 101 | 0 |
 
-Vendor skips are intentional: an inactive Torch runtime cannot address the
-other vendor's devices. Every requested family has actual numerical execution;
-no mocked ROCm result is reported as hardware validation.
+Matrix skips are the inactive vendor runtime; optional/model/hardware skips
+in the wider consumer regression suite are retained with precise pytest reasons.
+Other quantization formats are explicitly ineligible rather than counted as
+passed or numerically exercised. The [inventory](fusion-kernel-inventory.md)
+records BitBLAS construction/dependency gaps and architecture exclusions.
 
 ```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 \
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. /root/venv/bin/python -m pytest \
-  tests/module_tree/test_fusion_device_inference.py -q
-
-HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 PYTHON_GIL=0 PYTHONPATH=. \
-  /opt/venvs/rocm101t/bin/python -m pytest \
-  tests/module_tree/test_fusion_device_inference.py -q
+  tests/module_tree/test_fusion_kernel_backends.py -q
 
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 \
-  CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. \
-  GPTQMODEL_LLAMA32_FUSION_AWQ=/tmp/llama32-symmetric-awq \
-  /root/venv/bin/python -m pytest \
-  tests/models/test_llama3_2_fusion_devices.py -q
-
 HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 PYTHON_GIL=0 PYTHONPATH=. \
-  GPTQMODEL_LLAMA32_FUSION_AWQ=/tmp/llama32-symmetric-awq \
+  /opt/venvs/rocm101t/bin/python -m pytest \
+  tests/module_tree/test_fusion_kernel_backends.py -q
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 \
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. \
+GPTQMODEL_LLAMA32_FUSION_AWQ=/tmp/llama32-symmetric-awq \
+  /root/venv/bin/python -m pytest tests/models/test_llama3_2_fusion_devices.py -q
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 \
+HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 PYTHON_GIL=0 PYTHONPATH=. \
+GPTQMODEL_LLAMA32_FUSION_AWQ=/tmp/llama32-symmetric-awq \
   /opt/venvs/rocm101t/bin/python -m pytest \
   tests/models/test_llama3_2_fusion_devices.py -q -k rocm
 ```
 
-CPU/CUDA checkpoint inference uses eager execution with one CPU thread to
-avoid compilation startup dominating a numerical acceptance test. The compiler
-fallback contract is exercised separately by the core fusion suite.
+The backend matrix and checkpoint acceptance use eager execution and one CPU
+thread. Compiler fallback/source lifetime is checked separately with compilation
+enabled; source graphs cannot be installed as the fused native parent. Local
+checkpoints are not downloaded by these tests. Full hardware qualification of
+every model architecture is separate from this kernel/Llama report.

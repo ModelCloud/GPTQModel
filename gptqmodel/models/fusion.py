@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import gc
 import inspect
 import math
 import textwrap
@@ -27,7 +28,9 @@ from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..utils.marlin import replace_parameter
 from ..utils.model import get_layers_with_prefixes
+from ._const import DEVICE, normalize_device
 from .fusable import require_fusable_config
+from .fusion_kernels import kernel_spec
 
 
 _FIELDS = (
@@ -137,7 +140,8 @@ def _parent_template(original, names):
     return namespace[node.name].__code__
 
 
-def _mutation_guard(parent, modules, names, packed=None):
+def _mutation_guard(parent, modules, names, packed=None, *, fields=_FIELDS, tensors=_TENSORS,
+                    axes=_SHARED_OPERANDS, mappings=()):
     """Compile direct dictionary bindings and tensor version/storage checks.
 
     The guard creates no metadata tuples and performs no nn.Module attribute
@@ -160,14 +164,24 @@ def _mutation_guard(parent, modules, names, packed=None):
     for name, module in zip(names, modules):
         state = bind(vars(module))
         checks.append(f"{children}.get({name!r}) is {bind(module)}")
-        for field in (*_FIELDS, "out_features", "adapter", "online_full_had", "online_partial_had", "training", "forward"):
-            checks.append(f"{state}.get({field!r}) is {bind(vars(module).get(field))}")
+        for field in (*fields, "out_features", "adapter", "online_full_had", "online_partial_had", "training", "forward"):
+            value = vars(module).get(field)
+            if isinstance(value, (dict, list)):
+                checks.append(f"{state}.get({field!r}) == {bind(copy.deepcopy(value))}")
+            else:
+                checks.append(f"{state}.get({field!r}) is {bind(value)}")
         checks.extend((f"not {state}['_forward_hooks']", f"not {state}['_forward_pre_hooks']",
                        f"not {state}['_backward_hooks']", f"not {state}['_backward_pre_hooks']",
                        f"{state}.get('_hf_hook') is None"))
         for mapping_name in ("_parameters", "_buffers"):
             checks.append(f"{state}[{mapping_name!r}] is {bind(vars(module)[mapping_name])}")
-        for name in _TENSORS:
+        for mapping_name in mappings:
+            mapping = vars(module).get(mapping_name)
+            checks.append(f"{state}.get({mapping_name!r}) is {bind(mapping)}")
+            if mapping is not None:
+                for key, value in mapping.items():
+                    checks.append(f"{bind(mapping)}.get({key!r}) is {bind(value)}")
+        for name in tensors:
             mapping = module._parameters if name in module._parameters else module._buffers if name in module._buffers else vars(module)
             tensor = mapping.get(name)
             ref = bind(tensor)
@@ -179,7 +193,7 @@ def _mutation_guard(parent, modules, names, packed=None):
                 # tensor's version counter. One check covers writes through
                 # every slice; all binding/storage/metadata checks stay per leaf.
                 version = (getattr(packed, name) if packed is not None and tensor.numel()
-                           and name in dict(_SHARED_OPERANDS) else tensor)
+                           and name in dict(axes) else tensor)
                 if id(version) not in versioned:
                     checks.append(f"{bind(version)}._version == {version._version}")
                     versioned.add(id(version))
@@ -189,6 +203,18 @@ def _mutation_guard(parent, modules, names, packed=None):
                            f"{ref}.shape == {tuple(tensor.shape)!r}"))
             if tensor.is_floating_point():
                 checks.append(f"not {ref}.requires_grad")
+    # Native scratch is written by kernels, so its version is deliberately not
+    # checked. Rebinding/resizing/moving it must still retire the descriptor.
+    if packed is not None and isinstance(getattr(packed, "workspace", None), torch.Tensor):
+        workspace = packed.workspace
+        ref = bind(workspace)
+        mapping = packed._buffers if "workspace" in packed._buffers else vars(packed)
+        checks.extend((f"{bind(mapping)}.get('workspace') is {ref}",
+                       f"{ref}.data_ptr() == {workspace.data_ptr()}",
+                       f"{ref}.shape == {tuple(workspace.shape)!r}",
+                       f"{ref}.dtype is {bind(workspace.dtype)}",
+                       f"{ref}.device == {bind(workspace.device)}",
+                       f"{ref}.is_contiguous()"))
     exec("def valid():\n    return " + " and ".join(checks), namespace)
     # Avoid a function -> globals -> function cycle retaining old operand views
     # after invalidation; packed GPU storage must be released immediately.
@@ -227,23 +253,27 @@ def _effective_config(config, path):
 
 def _incompatible(modules):
     first = modules[0]
-    if type(first) not in (TorchLinear, AwqTorchLinear, MarlinLinear, AwqMarlinLinear) or any(type(m) is not type(first) for m in modules):
-        return "executor requires identical supported Torch or Marlin kernels"
+    spec = kernel_spec(first)
+    if spec is None or any(type(m) is not type(first) for m in modules):
+        return "executor requires identical kernels with an explicit native fusion layout"
+    if spec.layout == "gptq_fp8" and any(getattr(m, "_require_activation_stream", False) for m in modules):
+        return "encoded W4A activation streams require a separate parent executor"
     marlin = type(first) in (MarlinLinear, AwqMarlinLinear)
     if marlin and (first.bits != 4 or first.requested_group_size != 128 or not first.sym or first.desc_act):
         return "Marlin fusion requires symmetric INT4, group 128, no activation order"
     if first.bits not in (2, 4, 8):
         return "executor requires 2, 4 or 8-bit word-aligned storage"
-    if first.pack_dtype != torch.int32:
-        return "executor requires int32 packed words"
+    if first.pack_dtype != (torch.int16 if spec.layout == "awq_fast" else torch.int32):
+        return f"executor requires {'int16' if spec.layout == 'awq_fast' else 'int32'} packed words"
     if type(first) is AwqTorchLinear and len(modules) == 3 and len({m.out_features for m in modules}) > 1:
         # The packed weights concatenate exactly, but changing this GEMM's N
         # changes CUDA reduction rounding. Real Llama 3.2 1B exceeded the logits
         # drift gate; keep its separate QKV calls until a validated executor exists.
         return "AWQ GQA QKV fusion requires a numerically validated executor"
-    signature = tuple(getattr(first, field, None) for field in _FIELDS)
+    fields = (*_FIELDS, *spec.fields)
+    signature = tuple(getattr(first, field, None) for field in fields)
     for module in modules:
-        if signature != tuple(getattr(module, field, None) for field in _FIELDS):
+        if signature != tuple(getattr(module, field, None) for field in fields):
             return "quantized kernel settings differ"
         if getattr(module.forward, "__func__", None) is not type(module).forward:
             return "projection forward is outside the validated kernel executor"
@@ -254,29 +284,43 @@ def _incompatible(modules):
             return "projection has runtime hooks"
         if module.out_features * module.bits % module.pack_dtype_bits:
             return "projection output is not packed-word aligned"
-        for name in ("qweight", "qzeros", "scales"):
+        for name in (spec.weight_name, spec.zero_name, spec.scale_name):
+            if name is None:
+                continue
             tensor = getattr(module, name, None)
             reference = getattr(first, name, None)
             if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
                 return "quantized operands are not materialized"
-            if tensor.device != reference.device or tensor.dtype != reference.dtype or tensor.device != module.qweight.device:
+            if tensor.device != reference.device or tensor.dtype != reference.dtype or tensor.device != getattr(module, spec.weight_name).device:
                 return "operand devices or dtypes differ"
             if tensor.requires_grad:
                 return "trainable quantized operands"
-        if module.scales.dtype not in module.SUPPORTS_DTYPES:
+        if not spec.cpu and spec.layout not in ("allspark", "int8") and module.scales.dtype not in module.SUPPORTS_DTYPES:
             return "operand dtype is unsupported by the executor"
         if (module.bias is None) != (first.bias is None):
             return "bias layouts differ"
         if module.bias is not None and (
-            module.bias.device != first.scales.device or module.bias.dtype != first.scales.dtype
+            module.bias.device != getattr(first, spec.scale_name).device or module.bias.dtype != first.bias.dtype
             or module.bias.requires_grad
         ):
             return "bias device, dtype or gradient policy differs"
         columns = module.out_features * module.bits // module.pack_dtype_bits
         rows = math.ceil(module.in_features / module.group_size)
+        if spec.cpu or spec.layout in ("awq_gemv", "awq_fast", "exllamav2", "allspark", "int8"):
+            reason = spec.shape_error(module)
+            if reason:
+                return reason
+            if spec.gptq and spec.layout not in ("allspark", "int8") and (
+                    module.g_idx.shape != first.g_idx.shape or not torch.equal(module.g_idx, first.g_idx)):
+                return "activation-order group indices differ"
+            continue
         if marlin:
-            if (getattr(module, "_marlin_tile_padding", True) is not None or module.out_features % 64
-                    or module.g_idx.numel() or module.g_idx_sort_indices.numel() or module.workspace.numel() == 0):
+            if (normalize_device(module.qweight.device) != DEVICE.CUDA
+                    or getattr(module, "_marlin_tile_padding", True) is not None or module.out_features % 64
+                    or module.g_idx.numel() or module.g_idx_sort_indices.numel()
+                    or module.workspace.dtype != torch.int32 or module.workspace.device != module.qweight.device
+                    or not module.workspace.is_contiguous()
+                    or module.workspace.numel() < max(128, torch.cuda.get_device_properties(module.qweight.device).multi_processor_count)):
                 return "Marlin fusion requires finalized aligned operands without activation reordering"
             if (tuple(module.qweight.shape) != (module.in_features // 16, module.out_features * 2)
                     or tuple(module.scales.shape) != (rows, module.out_features)
@@ -286,11 +330,11 @@ def _incompatible(modules):
                 return "symmetric GPTQ Marlin requires implicit zero points"
             continue
         weight_shape = ((math.ceil(module.in_features * module.bits / module.pack_dtype_bits), module.out_features)
-                        if isinstance(first, TorchLinear) else (module.in_features, columns))
+                        if spec.gptq else (module.in_features, columns))
         if (tuple(module.qweight.shape) != weight_shape or tuple(module.qzeros.shape) != (rows, columns)
                 or tuple(module.scales.shape) != (rows, module.out_features)):
             return "packed operand shapes require padding or a different layout"
-        if isinstance(first, TorchLinear) and (
+        if spec.gptq and (
             not isinstance(module.g_idx, torch.Tensor)
             or module.g_idx.device.type == "meta"
             or module.g_idx.shape != first.g_idx.shape
@@ -304,10 +348,15 @@ def _incompatible(modules):
 
 
 class _FusionGroup:
-    def __init__(self, decision, parent, modules):
+    def __init__(self, decision, parent, modules, activation_dtype=None):
         self.decision = decision
         self.parent = parent
         self.modules = modules
+        self.kernel = kernel_spec(modules[0])
+        self.activation_dtype = activation_dtype
+        self.fields = (*_FIELDS, *self.kernel.fields, *self.kernel.private_fields)
+        self.tensors = tuple(dict.fromkeys((*_TENSORS, *self.kernel.extra_tensors)))
+        self.axes = self.kernel.axes
         self.originals = [m.forward for m in modules]
         self.original_clears = [getattr(m, "clear_weight_cache", None) for m in modules]
         self.parent_forward = parent.forward
@@ -325,16 +374,16 @@ class _FusionGroup:
 
     def _key(self):
         return (id(getattr(self.parent, "_hf_hook", None)), tuple(
-            (tuple(getattr(m, field, None) for field in _FIELDS), m.training, m.out_features,
+            (tuple(copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+                   for value in (getattr(m, field, None) for field in self.fields)), m.training, m.out_features,
              id(m.adapter), m.online_full_had, m.online_partial_had,
              tuple(m._forward_hooks), tuple(m._forward_pre_hooks), id(getattr(m, "_hf_hook", None)),
-             tuple(tensor_cache_key(getattr(m, name, None)) for name in (
-                 "qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")))
+             tuple(tensor_cache_key(getattr(m, name, None)) for name in self.tensors))
             for m in self.modules
         ))
 
     def _share_operands(self, fused):
-        for name, dim in _SHARED_OPERANDS:
+        for name, dim in self.axes:
             tensor = getattr(fused, name)
             if tensor is None or not tensor.numel():
                 continue
@@ -344,6 +393,8 @@ class _FusionGroup:
         for clear in self.original_clears:
             if clear is not None:
                 clear()
+        for module in self.modules:
+            self.kernel.rebind(module)
         self.invalidate()
         self.packed = fused
         self.packed_key = self._key()
@@ -356,6 +407,10 @@ class _FusionGroup:
         if self.packed is not None and key == self.packed_key:
             return self.packed
         first = self.modules[0]
+        if self.kernel.layout not in ("marlin", "gptq", "awq") or type(first) not in (TorchLinear, AwqTorchLinear, MarlinLinear, AwqMarlinLinear):
+            fused = self.kernel.combine(self.modules)
+            self._share_operands(fused)
+            return fused
         if type(first) in (MarlinLinear, AwqMarlinLinear):
             # Marlin permutes within aligned N=64 tiles. Concatenating whole
             # tiles preserves the native weight/scale/zero-point permutations.
@@ -396,6 +451,9 @@ class _FusionGroup:
             fused.register_buffer("g_idx", first.g_idx)
             fused._qzeros_format = first._qzeros_format
             fused._init_wf_unsqueeze_buffers()
+            # Constructors without registered operands initially create their
+            # unpacking shifts on CPU. Large-M fallback decoding uses them too.
+            fused.to(device=first.qweight.device)
         fused.training = False
         self._share_operands(fused)
         return fused
@@ -408,6 +466,12 @@ class _FusionGroup:
             self.guard.__code__ = _retired_guard.__code__
             self.guard.__globals__.clear()
         self.guard = self.packed_forward = None
+        # Completed Dynamo traces can leave unreachable LazyCache cycles with
+        # borrowed packed inputs. Collect at this cold storage-lifecycle boundary
+        # so retired allocations do not wait for the next automatic GC cycle.
+        if any(hasattr(getattr(module, "dequantize_weight", None), "_torchdynamo_orig_callable")
+               for module in self.modules):
+            gc.collect()
         if self.packed is not None:
             clear = getattr(self.packed, "clear_weight_cache", None)
             if clear is not None:
@@ -416,22 +480,38 @@ class _FusionGroup:
             # rather than waiting for cyclic GC to release a retired executor.
             self.packed._parameters.clear()
             self.packed._buffers.clear()
+            self.packed._modules.clear()
             self.packed.__dict__.pop("workspace", None)
+            self.kernel.release(self.packed)
         self.packed = self.packed_key = None
 
-    def _refresh(self):
+    def _refresh(self, activation_dtype=None):
         """Cold path: validate the live owners, rebuild operands and descriptors."""
         if (any(self.parent._modules.get(name) is not module for name, module in zip(self.names, self.modules))
                 or any(module.training for module in self.modules) or hasattr(self.parent, "_hf_hook")
                 or _incompatible(self.modules)):
             self.invalidate()
             return False
+        activation_dtype = activation_dtype or self.activation_dtype
+        self.kernel.prepare(self.modules, activation_dtype)
+        if _incompatible(self.modules):
+            self.invalidate()
+            return False
+        if self.kernel.combined_shape_error(self.modules, activation_dtype):
+            self.invalidate()
+            return False
+        # A failed guard may concern executor-owned scratch rather than source
+        # tensors. Rebuild even when the checkpoint key itself did not change.
+        self.invalidate()
         self._operand(self._key())
         self.packed_forward = self.packed.forward
-        self.input_dtype = self.modules[0].scales.dtype
-        self.input_device = self.modules[0].scales.device
+        self.activation_dtype = activation_dtype
+        self.input_dtype = activation_dtype or self.kernel.input_dtype(self.modules[0])
+        self.input_device = getattr(self.modules[0], self.kernel.scale_name).device
         self.widths = tuple(module.out_features for module in self.modules)
-        self.guard = _mutation_guard(self.parent, self.modules, self.names, self.packed)
+        self.guard = _mutation_guard(self.parent, self.modules, self.names, self.packed,
+                                     fields=self.fields, tensors=self.tensors, axes=self.axes,
+                                     mappings=self.kernel.private_mappings)
         return True
 
     def execute(self, x):
@@ -441,7 +521,7 @@ class _FusionGroup:
                 or torch.nn.modules.module._global_forward_hooks):
             return None
         if self.guard is None or not self.guard():
-            if not self._refresh():
+            if not self._refresh(x.dtype):
                 return None
         if x.dtype != self.input_dtype or x.device != self.input_device:
             return None
@@ -492,10 +572,11 @@ class _FusionGroup:
         # Cloning also releases an entire fused allocation held by small views.
         with torch.inference_mode(False), torch.no_grad():
             for module in self.modules:
-                for name, _dim in _SHARED_OPERANDS:
+                for name, _dim in self.axes:
                     tensor = getattr(module, name)
                     if tensor is not None and tensor.numel():
                         _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+                self.kernel.rebind(module)
             for clear in self.original_clears:
                 if clear is not None:
                     clear()
@@ -557,6 +638,9 @@ class FusionPlanner:
                             reason = "parent has offload hooks"
                         else:
                             reason = _incompatible(modules)
+                            if not reason:
+                                reason = kernel_spec(modules[0]).combined_shape_error(
+                                    modules, getattr(model.model, "dtype", None))
                             forward = owner.forward
                             if not reason and (
                                 getattr(forward, "__func__", None) is not type(owner).forward
@@ -571,10 +655,18 @@ class FusionPlanner:
                                              f"{claimed_parents[id(owner)]!r} and {family!r}; "
                                              "declare only one profile per parent")
                         claimed_parents[id(owner)] = family
-                        self.groups.append(_FusionGroup(decision, owner, modules))
+                        self.groups.append(_FusionGroup(decision, owner, modules,
+                                                        activation_dtype=getattr(model.model, "dtype", None)))
     def apply(self):
-        for group in self.groups:
-            group.install()
+        installed = []
+        try:
+            for group in self.groups:
+                installed.append(group)
+                group.install()
+        except Exception:
+            for group in reversed(installed):
+                group.remove()
+            raise
         return self
 
     def remove(self):

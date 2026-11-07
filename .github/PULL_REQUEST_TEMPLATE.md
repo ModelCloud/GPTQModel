@@ -73,6 +73,11 @@ I or an AI agent (such as Codex or Claude) have:
 ## Kernel Accuracy Requirements
 
 - [ ] For kernel-related changes, accuracy drift was measured against an applicable independent Torch FP32/FP64 oracle, or the reason this is not applicable is documented.
+- [ ] Fusion support changes preserve AUTO's native class and add actual-device
+      FP16/BF16 tests where supported, native shape/workspace/descriptor checks,
+      mutation, direct source calls, exact restoration and packed-storage checks.
+- [ ] The complete kernel inventory/device report lists unavailable dependencies,
+      architecture restrictions and unqualified formats; skips are not validation.
 
 ## Notes
 

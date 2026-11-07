@@ -1,0 +1,1606 @@
+{
+  "hardware": "NVIDIA GeForce RTX 4090",
+  "torch": "2.15.0+cu132",
+  "dtype": "float16",
+  "batch_size": 1,
+  "prefill_tokens": 128,
+  "decode_steps": 16,
+  "warmups": 10,
+  "repeats": 15,
+  "cpu_affinity": [
+    17
+  ],
+  "torch_num_threads": 1,
+  "gptq": {
+    "off": {
+      "kernel": "MarlinLinear",
+      "prefill_ms": 7.400938018690795,
+      "prefill_tokens_per_second": 17295.104982198303,
+      "decode_ms_per_token": 6.762719813195872,
+      "decode_tokens_per_second": 147.86950038189266,
+      "prefill_samples_ms": [
+        7.286978012416512,
+        7.437472988385707,
+        7.391374005237594,
+        7.309551991056651,
+        7.396339991828427,
+        7.400938018690795,
+        7.463692018063739,
+        7.327838015044108,
+        11.025122978026047,
+        7.328309991862625,
+        7.508707989472896,
+        7.350022002356127,
+        18.768261012155563,
+        7.533005002187565,
+        7.536920020356774
+      ],
+      "decode_samples_ms_per_token": [
+        6.718386812281096,
+        6.733874313795241,
+        6.762719813195872,
+        6.9058212502568495,
+        6.745693000993924,
+        6.775767873477889,
+        6.7345306888455525,
+        6.762539998817374,
+        6.757914312402136,
+        6.73187431129918,
+        6.784330062146182,
+        10.36988481246226,
+        6.856616437289631,
+        7.154545126468292,
+        6.953930313102319
+      ],
+      "storage": {
+        "model_tensor_storage_bytes": 1027272960,
+        "packed_operand_storage_bytes": 501743616,
+        "workspace_bytes": 57344
+      }
+    },
+    "on": {
+      "kernel": "MarlinLinear",
+      "prefill_ms": 7.151864992920309,
+      "prefill_tokens_per_second": 17897.4295693093,
+      "decode_ms_per_token": 6.461593624408124,
+      "decode_tokens_per_second": 154.76058355365842,
+      "prefill_samples_ms": [
+        7.201900996733457,
+        7.087158999638632,
+        7.872009999118745,
+        7.155290979426354,
+        7.482960005290806,
+        7.0912750088609755,
+        7.10451600025408,
+        7.063294004183263,
+        7.348938990617171,
+        7.067419996019453,
+        7.10926199099049,
+        7.113277999451384,
+        7.420735986670479,
+        7.151864992920309,
+        7.196392019977793
+      ],
+      "decode_samples_ms_per_token": [
+        6.4688096863392275,
+        6.967297375013004,
+        6.454128311816021,
+        6.485613999757334,
+        6.467159626481589,
+        6.4134739368455485,
+        6.432124873754219,
+        6.418724811737775,
+        6.456827937654452,
+        6.447954625400598,
+        6.461593624408124,
+        6.463623500167159,
+        6.482604374468792,
+        6.451987437685602,
+        6.475699625298148
+      ],
+      "storage": {
+        "model_tensor_storage_bytes": 1027289344,
+        "packed_operand_storage_bytes": 501743616,
+        "workspace_bytes": 73728
+      }
+    },
+    "drift": {
+      "prefill": {
+        "max_abs": 0.0390625,
+        "rms": 0.004950724542140961,
+        "relative_l2": 0.0014660012675449252,
+        "top1_agreement": 1.0
+      },
+      "decode": {
+        "max_abs": 0.029296875,
+        "rms": 0.0049821557477116585,
+        "relative_l2": 0.002316426020115614,
+        "top1_agreement": 1.0
+      }
+    },
+    "eligible_groups": 32,
+    "fused_operand_bytes": 328744960,
+    "extra_packed_bytes": 0,
+    "extra_retained_tensor_bytes": 16384,
+    "decisions": {
+      "fusable": {
+        "model_types": [
+          "llama",
+          "cohere",
+          "cohere2",
+          "gemma",
+          "granite",
+          "helium",
+          "mistral",
+          "olmo",
+          "olmo2",
+          "seed_oss",
+          "smollm3",
+          "stablelm"
+        ],
+        "overrides": {},
+        "profiles": [
+          {
+            "name": "qkv",
+            "roles": [
+              "q",
+              "k",
+              "v"
+            ],
+            "parent_types": [
+              "transformers.models.llama.modeling_llama.LlamaAttention"
+            ]
+          },
+          {
+            "name": "gate_up",
+            "roles": [
+              "gate",
+              "up"
+            ],
+            "parent_types": [
+              "transformers.models.llama.modeling_llama.LlamaMLP"
+            ]
+          }
+        ],
+        "model_profiles": {
+          "cohere": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.cohere.modeling_cohere.CohereAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.cohere.modeling_cohere.CohereMLP"
+              ]
+            }
+          ],
+          "cohere2": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
+              ]
+            }
+          ],
+          "gemma": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.gemma.modeling_gemma.GemmaAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.gemma.modeling_gemma.GemmaMLP"
+              ]
+            }
+          ],
+          "granite": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.granite.modeling_granite.GraniteAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.granite.modeling_granite.GraniteMLP"
+              ]
+            }
+          ],
+          "helium": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.helium.modeling_helium.HeliumAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.helium.modeling_helium.HeliumMLP"
+              ]
+            }
+          ],
+          "mistral": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.mistral.modeling_mistral.MistralAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.mistral.modeling_mistral.MistralMLP"
+              ]
+            }
+          ],
+          "olmo": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.olmo.modeling_olmo.OlmoAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.olmo.modeling_olmo.OlmoMLP"
+              ]
+            }
+          ],
+          "olmo2": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
+              ]
+            }
+          ],
+          "seed_oss": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
+              ]
+            }
+          ],
+          "smollm3": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
+              ]
+            }
+          ],
+          "stablelm": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
+              ]
+            }
+          ]
+        }
+      },
+      "groups": [
+        {
+          "family": "qkv",
+          "parent": "model.layers.0.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.0.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.1.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.1.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.2.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.2.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.3.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.3.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.4.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.4.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.5.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.5.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.6.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.6.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.7.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.7.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.8.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.8.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.9.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.9.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.10.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.10.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.11.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.11.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.12.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.12.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.13.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.13.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.14.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.14.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.15.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.15.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        }
+      ],
+      "fused_calls": 14400
+    },
+    "projection_rounding": [
+      {
+        "family": "qkv",
+        "parent": "model.layers.0.self_attn",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.00390625,
+          "rms": 1.784694177331403e-05,
+          "relative_l2": 1.1233711120439693e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 2.2091324353823438e-05,
+          "relative_l2": 1.390532088407781e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 2.593010685814079e-05,
+          "relative_l2": 1.6321631846949458e-05,
+          "top1_agreement": 1.0
+        }
+      },
+      {
+        "family": "gate_up",
+        "parent": "model.layers.0.mlp",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.001953125,
+          "rms": 2.042294727289118e-05,
+          "relative_l2": 2.456043876009062e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.001953125,
+          "rms": 2.043164386122953e-05,
+          "relative_l2": 2.457088339724578e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.001953125,
+          "rms": 2.7975247576250695e-05,
+          "relative_l2": 3.3642736525507644e-05,
+          "top1_agreement": 1.0
+        }
+      }
+    ]
+  },
+  "awq": {
+    "off": {
+      "kernel": "AwqMarlinLinear",
+      "prefill_ms": 7.598539988975972,
+      "prefill_tokens_per_second": 16845.341366328732,
+      "decode_ms_per_token": 6.932411937668803,
+      "decode_tokens_per_second": 144.24993912526713,
+      "prefill_samples_ms": [
+        7.764478999888524,
+        7.68842498655431,
+        7.562317012343556,
+        7.566262996988371,
+        7.571019988972694,
+        7.826790999388322,
+        7.564509985968471,
+        7.604179991176352,
+        7.654665008885786,
+        7.58200598647818,
+        7.64870599959977,
+        7.581344980280846,
+        7.689316000323743,
+        7.598539988975972,
+        7.546512992121279
+      ],
+      "decode_samples_ms_per_token": [
+        6.927624812306021,
+        6.915188751008827,
+        6.8973527504567755,
+        6.8893808747816365,
+        6.932411937668803,
+        6.914423125635949,
+        7.0695537488063565,
+        6.94129750081629,
+        6.952544938030769,
+        6.938403812455363,
+        6.9400888114614645,
+        6.901433687744429,
+        6.980579812079668,
+        6.934838374945684,
+        6.907883123858483
+      ],
+      "storage": {
+        "model_tensor_storage_bytes": 1031074048,
+        "packed_operand_storage_bytes": 505544704,
+        "workspace_bytes": 57344
+      }
+    },
+    "on": {
+      "kernel": "AwqMarlinLinear",
+      "prefill_ms": 7.445702009135857,
+      "prefill_tokens_per_second": 17191.125812306796,
+      "decode_ms_per_token": 6.768987375835422,
+      "decode_tokens_per_second": 147.73258457681507,
+      "prefill_samples_ms": [
+        7.385442004306242,
+        7.362428004853427,
+        7.594833994517103,
+        7.4461729964241385,
+        7.432442012941465,
+        7.462317007593811,
+        7.442508009262383,
+        7.532000978244469,
+        7.447244017384946,
+        7.445702009135857,
+        7.436318002874032,
+        7.505480985855684,
+        7.432251994032413,
+        7.513091986766085,
+        7.396608998533338
+      ],
+      "decode_samples_ms_per_token": [
+        6.725200562868849,
+        6.7270921244926285,
+        6.825600248703267,
+        6.755409249308286,
+        6.733466500008944,
+        6.768842375095119,
+        6.817911751568317,
+        6.764654874132248,
+        6.724690250848653,
+        7.154278311645612,
+        6.791245750719099,
+        6.775706811822602,
+        6.774995124942507,
+        6.768987375835422,
+        6.9682920639024815
+      ],
+      "storage": {
+        "model_tensor_storage_bytes": 1031090432,
+        "packed_operand_storage_bytes": 505544704,
+        "workspace_bytes": 73728
+      }
+    },
+    "drift": {
+      "prefill": {
+        "max_abs": 0.03125,
+        "rms": 0.004384720232337713,
+        "relative_l2": 0.0013525675749406219,
+        "top1_agreement": 1.0
+      },
+      "decode": {
+        "max_abs": 0.02490234375,
+        "rms": 0.003947597462683916,
+        "relative_l2": 0.0015666855033487082,
+        "top1_agreement": 1.0
+      }
+    },
+    "eligible_groups": 32,
+    "fused_operand_bytes": 331235328,
+    "extra_packed_bytes": 0,
+    "extra_retained_tensor_bytes": 16384,
+    "decisions": {
+      "fusable": {
+        "model_types": [
+          "llama",
+          "cohere",
+          "cohere2",
+          "gemma",
+          "granite",
+          "helium",
+          "mistral",
+          "olmo",
+          "olmo2",
+          "seed_oss",
+          "smollm3",
+          "stablelm"
+        ],
+        "overrides": {},
+        "profiles": [
+          {
+            "name": "qkv",
+            "roles": [
+              "q",
+              "k",
+              "v"
+            ],
+            "parent_types": [
+              "transformers.models.llama.modeling_llama.LlamaAttention"
+            ]
+          },
+          {
+            "name": "gate_up",
+            "roles": [
+              "gate",
+              "up"
+            ],
+            "parent_types": [
+              "transformers.models.llama.modeling_llama.LlamaMLP"
+            ]
+          }
+        ],
+        "model_profiles": {
+          "cohere": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.cohere.modeling_cohere.CohereAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.cohere.modeling_cohere.CohereMLP"
+              ]
+            }
+          ],
+          "cohere2": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.cohere2.modeling_cohere2.Cohere2Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.cohere2.modeling_cohere2.Cohere2MLP"
+              ]
+            }
+          ],
+          "gemma": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.gemma.modeling_gemma.GemmaAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.gemma.modeling_gemma.GemmaMLP"
+              ]
+            }
+          ],
+          "granite": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.granite.modeling_granite.GraniteAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.granite.modeling_granite.GraniteMLP"
+              ]
+            }
+          ],
+          "helium": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.helium.modeling_helium.HeliumAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.helium.modeling_helium.HeliumMLP"
+              ]
+            }
+          ],
+          "mistral": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.mistral.modeling_mistral.MistralAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.mistral.modeling_mistral.MistralMLP"
+              ]
+            }
+          ],
+          "olmo": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.olmo.modeling_olmo.OlmoAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.olmo.modeling_olmo.OlmoMLP"
+              ]
+            }
+          ],
+          "olmo2": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.olmo2.modeling_olmo2.Olmo2Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.olmo2.modeling_olmo2.Olmo2MLP"
+              ]
+            }
+          ],
+          "seed_oss": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.seed_oss.modeling_seed_oss.SeedOssAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.seed_oss.modeling_seed_oss.SeedOssMLP"
+              ]
+            }
+          ],
+          "smollm3": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.smollm3.modeling_smollm3.SmolLM3Attention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
+              ]
+            }
+          ],
+          "stablelm": [
+            {
+              "name": "qkv",
+              "roles": [
+                "q",
+                "k",
+                "v"
+              ],
+              "parent_types": [
+                "transformers.models.stablelm.modeling_stablelm.StableLmAttention"
+              ]
+            },
+            {
+              "name": "gate_up",
+              "roles": [
+                "gate",
+                "up"
+              ],
+              "parent_types": [
+                "transformers.models.stablelm.modeling_stablelm.StableLmMLP"
+              ]
+            }
+          ]
+        }
+      },
+      "groups": [
+        {
+          "family": "qkv",
+          "parent": "model.layers.0.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.0.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.1.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.1.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.2.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.2.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.3.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.3.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.4.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.4.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.5.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.5.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.6.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.6.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.7.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.7.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.8.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.8.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.9.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.9.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.10.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.10.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.11.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.11.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.12.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.12.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.13.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.13.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.14.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.14.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "qkv",
+          "parent": "model.layers.15.self_attn",
+          "paths": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        },
+        {
+          "family": "gate_up",
+          "parent": "model.layers.15.mlp",
+          "paths": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "enabled": true,
+          "reason": ""
+        }
+      ],
+      "fused_calls": 14400
+    },
+    "projection_rounding": [
+      {
+        "family": "qkv",
+        "parent": "model.layers.0.self_attn",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.015625,
+          "rms": 7.842729246476665e-05,
+          "relative_l2": 1.7775546439224854e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.015625,
+          "rms": 9.666037658462301e-05,
+          "relative_l2": 2.1908062990405597e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.0078125,
+          "rms": 6.644498353125528e-05,
+          "relative_l2": 1.5059747966006398e-05,
+          "top1_agreement": 1.0
+        }
+      },
+      {
+        "family": "gate_up",
+        "parent": "model.layers.0.mlp",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.00390625,
+          "rms": 2.817480890371371e-05,
+          "relative_l2": 2.3723940103081986e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 2.7511125153978355e-05,
+          "relative_l2": 2.3165088350651786e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 3.810078851529397e-05,
+          "relative_l2": 3.2081836252473295e-05,
+          "top1_agreement": 1.0
+        }
+      }
+    ]
+  }
+}

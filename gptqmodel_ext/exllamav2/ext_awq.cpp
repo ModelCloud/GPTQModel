@@ -5,6 +5,7 @@
 #include "cuda/q_matrix.cuh"
 #include "cuda/q_gemm.cuh"
 #include "config.h"
+#include "q_matrix_clone.h"
 
 int64_t make_q_matrix(
     torch::Tensor q_weight,
@@ -143,11 +144,14 @@ void gemm_half_q_half(
 TORCH_LIBRARY(gptqmodel_exllamav2_awq, m)
 {
     m.def("make_q_matrix_awq(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx) -> int");
+    m.def("clone_q_matrix_awq(int handle, Tensor weight, Tensor zeros, Tensor scales, Tensor? perm=None, Tensor? invperm=None) -> int");
+    m.def("free_q_matrix_awq(int handle) -> ()", &free_q_matrix);
     m.def("gemm_half_q_half_awq(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav2_awq, CUDA, m)
 {
     m.impl("make_q_matrix_awq", &make_q_matrix);
+    m.impl("clone_q_matrix_awq", &clone_q_matrix);
     m.impl("gemm_half_q_half_awq", &gemm_half_q_half);
 }

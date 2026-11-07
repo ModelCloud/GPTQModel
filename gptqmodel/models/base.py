@@ -704,11 +704,13 @@ class BaseQModel(nn.Module):
             previous.remove()
         try:
             plan = FusionPlanner(self, overrides=overrides) if enabled else None
+            if plan is not None:
+                plan.apply()
         except Exception:
             if previous is not None:
                 previous.apply()
             raise
-        self._fusion_plan = plan.apply() if plan is not None else None
+        self._fusion_plan = plan
         self._auto_fusion = enabled
         return self
 

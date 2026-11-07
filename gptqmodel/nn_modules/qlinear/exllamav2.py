@@ -167,7 +167,18 @@ class ExllamaV2Linear(GPTQQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
 
-        out = self.ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+        handle, temporaries = self.q_handle, None
+        if getattr(self, "_fusion_native_view", False):
+            from ...utils.exllamav2 import exllamav2_clone_q_matrix
+
+            handle, temporaries = exllamav2_clone_q_matrix(self, compact=True)
+        try:
+            out = self.ext_gemm_half_q_half(x, handle, self.out_features, force_cuda)
+        finally:
+            if temporaries is not None:
+                from ...utils.exllamav2 import exllamav2_free_q_matrix
+
+                exllamav2_free_q_matrix(handle)
 
         if self.bias is not None:
             out.add_(self.bias)

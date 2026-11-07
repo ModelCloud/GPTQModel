@@ -426,7 +426,7 @@ class W4AFP8Linear(PackableQuantLinear):
             from .w4a_triton import unpack_int4_to_e4m3
 
             return unpack_int4_to_e4m3(
-                self.qweight,
+                self.qweight.contiguous(),
                 torch.empty(
                     (self.in_features, self.out_features),
                     device=self.qweight.device,
@@ -458,7 +458,7 @@ class W4AFP8Linear(PackableQuantLinear):
                 x = pack_activation(rotated, "w4afp8", model_dtype=x.model_dtype)
             weight = self.fp8_weight_operand()
             result = fp8_linear_prepacked(
-                x.codes, x.scales, weight, self.scales, self.bias, torch.float32,
+                x.codes, x.scales, weight, self.scales.contiguous(), self.bias, torch.float32,
             )
             result = result.reshape(x.shape[:-1] + (self.out_features,))
             return result.to(x.model_dtype)
@@ -467,7 +467,7 @@ class W4AFP8Linear(PackableQuantLinear):
 
         x = self._apply_rotation_to_input(x)
         weight = self.fp8_weight_operand()
-        return fp8_linear(x, weight, self.scales, self.bias)
+        return fp8_linear(x, weight, self.scales.contiguous(), self.bias)
 
 
 def unpack_int4_codes(packed: torch.Tensor) -> torch.Tensor:
