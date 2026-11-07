@@ -87,6 +87,13 @@ by GPT-QModel before calling Transformers.
 | Each leaf owns its packed tensors | The same checkpoint leaves reference disjoint views of the combined packed tensors. |
 | Independent packed allocations | One combined allocation replaces separate weights; native metadata/workspace follows the backend contract. |
 
+Baseline evidence at main `de7db05`: sibling roles are declared in
+`gptqmodel/models/definitions/llama.py:25` (Q/K/V) and `:27` (gate/up).
+Each separate projection enters `gptqmodel/nn_modules/qlinear/marlin.py:434`
+or `marlin_awq.py:355`. Fusion moves grouping into `FusionPlanner` and the
+parent's `_FusionGroup.execute` call; the selected native linear kernel remains
+the computation boundary shown in the comparison above.
+
 The compiler reads the installed native parent `forward` source named by the
 definition's selected profile. Each declared projection must occur exactly once and take the same
 parent input without extra arguments; extra weight/metadata references,
