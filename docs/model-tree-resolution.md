@@ -195,6 +195,11 @@ flowchart TD
 
 ## What each subsystem asks
 
+Rotation reads normalization membership from explicit `norm` flags; projection
+roles remain `q/k/v/o/gate/up/down`. A supplied plan also makes online Hadamard
+setup reject paths outside the declared decoder layers. The public helper's
+legacy default applies only when no plan is supplied.
+
 ```mermaid
 flowchart TD
     PLAN["ModulePlan"] --> BASE["models/base.py<br/>is_moe_module() · AWQ roles<br/>stage-block classification"]
@@ -222,6 +227,39 @@ flowchart LR
 The expert family key used for device co-location is the declared family path, so
 `gate`/`up`/`down` of one expert stay together on one device regardless of what
 the projections are named.
+
+## Registry-wide module-plan unit tests
+
+`tests/module_tree/test_registered_module_plans.py` runs for every `MODEL_MAP`
+entry without an opt-in flag, including aliases and each method override. The
+committed `fixtures/registered_module_plans.json` records reviewed decoder
+prefixes and ordered quantization/capture/exclusion blocks. A new registered
+model without an explicit case fails the suite.
+
+The tested registry contains 198 model-type entries, 173 definition classes,
+and 175 definition/method cases. Original `dbrx` is a documented unsupported
+sentinel and receives a rejection test; `dbrx_converted` receives a positive
+contract test. This suite validates definitions and compiler/consumer agreement.
+Real model layout and checkpoint weight ownership are verified separately by
+model-specific tests such as `test_flash_model_tree_consumption.py`.
+
+```mermaid
+flowchart TD
+    REG["MODEL_MAP entry"] --> CASE{"explicit inventory case?"}
+    CASE -->|"missing"| FAIL["test failure: add model-plan case"]
+    CASE -->|"present"| TREE["definition and method override"]
+    TREE --> PLAN["ModulePlan.from_tree()"]
+    TREE --> SUB["build_layer_modules() / shared-input metadata"]
+    PLAN --> CHECK["compare paths, flags, norms, MoE and exact lookup"]
+    SUB --> CHECK
+    CHECK --> USE["ModuleLooper / WeightOnlyLooper via module_plan()"]
+    TREE --> REAL["separate real-model tests: actual layout and checkpoint owners"]
+    style FAIL fill:#ffa39e,stroke:#a8071a
+```
+
+New support must add both an explicit registry case and a real-model module-plan
+unit test. This requirement is maintained in `AGENTS.md`,
+`.agents/skills/gptqmodel-model-plan-tests/SKILL.md`, and the PR template.
 
 ### Quantizability (loader and writer)
 

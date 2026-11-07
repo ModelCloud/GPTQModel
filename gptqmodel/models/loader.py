@@ -683,8 +683,8 @@ def _setup_rotation_online_had(model, rotation: Optional[str], module_plan=None,
                 _, separator, remainder = relative.partition(".")
                 relative = remainder if separator and _.isdigit() else relative
         is_down_projection = (
-            "down" in module_plan.roles(relative)
-            if module_plan is not None and relative is not None
+            relative is not None and "down" in module_plan.roles(relative)
+            if module_plan is not None
             else name.endswith("mlp.down_proj")
         )
         if is_down_projection:

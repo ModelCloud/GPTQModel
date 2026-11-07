@@ -93,7 +93,7 @@ def fuse_layer_norms(model: PreTrainedModel, pre_lm_head_norm_module_name: str, 
                      plan: ModulePlan = None):
     layers , _ = get_module_by_name_prefix(model, layers_node)
     plan = plan or _default_rotation_plan()
-    norm_roles = plan.child_roles("", "norm")
+    norm_roles = tuple(spec.name for spec in plan.specs if not spec.parent and "norm" in spec.flags)
     if len(norm_roles) != 2:
         raise ValueError(f"Rotation requires two declared layer norms, found {list(norm_roles)}")
     input_norm, post_norm = norm_roles

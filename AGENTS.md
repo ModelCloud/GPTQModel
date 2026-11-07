@@ -86,13 +86,22 @@ in the same pull request.
 
 ## Model-definition weight coverage
 
-`module_tree` is the oracle for checkpoint-owned weights, including
-non-quantized weights. Derive coverage from `state_dict()` (parameters and
-persistent buffers), not from `named_modules()`, `named_parameters()`, or
-`named_buffers()` alone: runtime-created non-persistent buffers are not
-checkpoint weights and must not become definition obligations.
+For every new model type or alias in `MODEL_MAP`, and every change to a model
+definition or module-plan consumer, follow
+`.agents/skills/gptqmodel-model-plan-tests/SKILL.md`. New model support must add
+an explicit registry plan case and a model-specific module-plan unit test in
+the same PR. Cover its layout variants and method overrides. The registry
+contract runs without an opt-in flag and must not skip supported definitions.
 
-For every decoder-layer `state_dict()` entry:
+`module_tree` is the oracle for checkpoint-owned weights, including
+non-quantized weights. Use `state_dict()` (parameters and persistent buffers)
+for model architecture fixtures, not `named_modules()`, `named_parameters()`,
+or `named_buffers()` alone. For an actual checkpoint audit, verify ownership
+against checkpoint keys and declared conversion mappings: tensors created
+after loading must not become definition obligations solely because they
+appear in a runtime `state_dict()`.
+
+For every checkpoint-owned decoder-layer entry:
 
 - The deepest owning module must resolve through `ModulePlan.find()`.
 - A quantized owner must be declared by `simple_layer_modules()`.

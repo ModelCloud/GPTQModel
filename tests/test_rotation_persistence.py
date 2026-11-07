@@ -9,6 +9,34 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.config import QuantizeConfig
 
 
+@pytest.mark.parametrize("use_definition_plan", [True, False])
+def test_declared_norm_fusion_preserves_real_llama_forward(use_definition_plan):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.models.module_plan import ModulePlan
+    from gptqmodel.quantization.rotation.rotation import fuse_layer_norms
+
+    torch.manual_seed(42)
+    model = LlamaForCausalLM(LlamaConfig(
+        hidden_size=32, intermediate_size=64, num_attention_heads=4,
+        num_key_value_heads=2, num_hidden_layers=1, vocab_size=64,
+        tie_word_embeddings=False,
+    )).double().eval()
+    layer = model.model.layers[0]
+    with torch.no_grad():
+        for norm in (layer.input_layernorm, layer.post_attention_layernorm, model.model.norm):
+            norm.weight.uniform_(0.5, 1.5)
+        tokens = torch.tensor([[1, 4, 9, 12]])
+        expected = model(tokens).logits.clone()
+        plan = ModulePlan.from_tree(LlamaQModel.module_tree) if use_definition_plan else None
+        fuse_layer_norms(model, "model.norm", "model.layers", "lm_head", plan=plan)
+        actual = model(tokens).logits
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    for norm in (layer.input_layernorm, layer.post_attention_layernorm, model.model.norm):
+        assert torch.equal(norm.weight, torch.ones_like(norm.weight))
+
+
 def test_quantize_config_rotation_roundtrip():
     cfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard")
     d = cfg.to_dict()
@@ -52,6 +80,18 @@ class _DummyModel(torch.nn.Module):
     def __init__(self, intermediate_size, hidden_size):
         super().__init__()
         self.layers = torch.nn.ModuleList([_DummyLayer(intermediate_size, hidden_size)])
+
+
+def test_rotation_with_plan_ignores_undeclared_suffix_matches():
+    from gptqmodel.models.module_plan import ModulePlan
+
+    model = _DummyModel(128, 32)
+    model.extra = torch.nn.Module()
+    model.extra.mlp = _DummyMlp(128, 32)
+    plan = ModulePlan.from_tree(["layers", "#", {"mlp": ("down_proj:down",)}])
+    _setup_rotation_online_had(model, "hadamard", module_plan=plan, layer_prefixes=["layers"])
+    assert model.layers[0].mlp.down_proj.online_full_had
+    assert not model.extra.mlp.down_proj.online_full_had
 
 
 def test_setup_rotation_online_had_pow2_intermediate():

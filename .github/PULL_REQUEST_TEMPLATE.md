@@ -20,6 +20,21 @@ Paste the exact test commands and results here:
 ```bash
 ```
 
+## Model Support / Module Plan
+
+Required for new model support, model-type aliases, and definition changes.
+See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
+
+- [ ] Every new `MODEL_MAP` entry has an explicit registry plan case.
+- [ ] A new model-specific module-plan unit test builds the real model class
+      and verifies declared paths, checkpoint weight ownership/tags, roles,
+      and applicable consumers, including layout variants and method overrides.
+- [ ] Runtime-created tensors are distinguished from checkpoint-owned weights.
+- [ ] Registry and model-specific tests passed; any dependency skips and their
+      precise coverage limits are listed below.
+
+Model test node IDs and results (or "not applicable"):
+
 ## Logic Flow Documentation
 
 Required for changes that alter control flow, replace a decision mechanism
