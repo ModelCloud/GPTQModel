@@ -303,7 +303,8 @@ def test_marlin_rebuilds_native_workspace_after_binding_changes(method, mutation
     from tests.module_tree.test_llama_fusion import _wrapper
 
     model, _ = _wrapper(method, device=device, native=True, automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     previous = group.packed
     if mutation == "replace":
         group.packed.workspace = torch.empty(0, device=device, dtype=torch.int32)

@@ -114,6 +114,7 @@ from .writer import ModelWriter
 
 if TYPE_CHECKING:
     from ..looper.checkpoint_store import CheckpointConfig
+    from .fusion import FusionPlanner
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -679,13 +680,15 @@ class BaseQModel(nn.Module):
             )
         return plan
 
-    def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None):
-        """Enable optional post-quantization QKV/gate-up fusion; return self.
+    def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None) -> Optional[FusionPlanner]:
+        """Apply optional QKV/gate-up fusion and return its FusionPlanner.
 
         Fusion is disabled by default. Enabling it rebinds checkpoint operands
         to shared packed storage views. ``enabled=False`` restores independent
-        contiguous operands and ordinary execution. Definition and per-call
-        overrides can disable a family (``qkv``/``gate_up``) or exact parent path.
+        contiguous operands and ordinary execution, returning None. Inspect the
+        returned plan with its print(), render(), and to_dict() methods.
+        Definition and per-call overrides can disable a family (``qkv``/``gate_up``)
+        or exact parent path.
         The definition must declare a matching ``FusableConfig``; otherwise
         enabling fusion raises. Disabling never requires a profile.
         """
@@ -712,11 +715,7 @@ class BaseQModel(nn.Module):
             raise
         self._fusion_plan = plan
         self._auto_fusion = enabled
-        return self
-
-    def fusion_plan(self):
-        """Return the applied FusionPlanner, or None when fusion is disabled."""
-        return self._fusion_plan
+        return plan
 
     @classmethod
     def extract_layers_node(cls):
@@ -1505,7 +1504,7 @@ class BaseQModel(nn.Module):
             require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
         if fuse is not None:
             self._auto_fusion = fuse
-            if not fuse and self.fusion_plan() is not None:
+            if not fuse:
                 self.fuse(False)
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,

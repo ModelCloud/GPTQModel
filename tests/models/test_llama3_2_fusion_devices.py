@@ -41,7 +41,7 @@ def test_llama32_checkpoint_fusion_on_actual_device(family, method, dtype, recor
     assert {type(m).__name__ for m in model.model.modules() if isinstance(m, BaseQuantLinear)} == {kernel}
     assert model.quantize_config.bits == 4 and model.quantize_config.group_size == 128
     assert model.quantize_config.sym and not model.quantize_config.desc_act
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     inputs = model.tokenizer("The capital of France is", return_tensors="pt").to(device)
     with torch.inference_mode():
         before = _cached_decode(model.model, inputs["input_ids"])
@@ -49,8 +49,7 @@ def test_llama32_checkpoint_fusion_on_actual_device(family, method, dtype, recor
         tokens = model.model.generate(**inputs, max_new_tokens=4, do_sample=False)
     repeat_max = max(drift(value, before)["max_abs"] for value in repeats)
     storage = storage_footprint(model)
-    model.fuse()
-    planner = model.fusion_plan()
+    planner = model.fuse()
     groups = 16 if kernel == "AwqTorchLinear" else 32
     assert len(planner.groups) == groups
     if groups == 16:
@@ -62,7 +61,7 @@ def test_llama32_checkpoint_fusion_on_actual_device(family, method, dtype, recor
     assert torch.equal(generated, tokens)
     assert planner.to_dict()["fused_calls"] > 0
     assert {type(g.packed).__name__ for g in planner.groups} == {kernel}
-    fused_storage = storage_footprint(model)
+    fused_storage = storage_footprint(model, planner)
     assert fused_storage["packed_operand_storage_bytes"] == storage["packed_operand_storage_bytes"]
     for group in planner.groups:
         _assert_no_expanded_weight_cache(group.packed)

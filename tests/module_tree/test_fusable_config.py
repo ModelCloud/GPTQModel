@@ -80,8 +80,8 @@ def test_missing_definition_profile_rejects_without_mutation():
         model.fuse()
     assert [module.forward for module in leaves] == forwards
     assert all(module.qweight is weight for module, weight in zip(leaves, weights))
-    assert model.fusion_plan() is None and not model._auto_fusion
-    assert model.fuse(False) is model
+    assert model._fusion_plan is None and not model._auto_fusion
+    assert model.fuse(False) is None
 
 
 def test_explicit_load_and_quantization_opt_in_reject_before_work():
@@ -103,25 +103,25 @@ def test_definition_requires_a_config_instance(monkeypatch, value):
 
 def test_failed_admission_leaves_existing_fusion_installed(monkeypatch):
     model, _ = _wrapper(automatic=True)
-    plan = model.fusion_plan()
+    plan = model.fuse()
     packed = plan.groups[0].packed
     monkeypatch.setattr(LlamaQModel, "fusable", None)
     with pytest.raises(ValueError, match="not fusable"):
         model.fuse()
-    assert model.fusion_plan() is plan and plan.groups[0].packed is packed
+    assert model._fusion_plan is plan and plan.groups[0].packed is packed
     model.fuse(False)
-    assert model.fusion_plan() is None and plan.groups[0].packed is None
+    assert model._fusion_plan is None and plan.groups[0].packed is None
 
 
 def test_bad_executor_profile_rejects_before_removing_existing_fusion(monkeypatch):
     model, _ = _wrapper(automatic=True)
-    plan = model.fusion_plan()
+    plan = model.fuse()
     packed = plan.groups[0].packed
     bad = replace(LlamaFusableConfig(), profiles=(FusableProfile("qkv", ("q", "k", "v"), ("builtins.len",)),))
     monkeypatch.setattr(LlamaQModel, "fusable", bad)
     with pytest.raises(TypeError, match="parent must resolve to a class"):
         model.fuse()
-    assert model.fusion_plan() is plan and plan.groups[0].packed is packed
+    assert model._fusion_plan is plan and plan.groups[0].packed is packed
     model.fuse(False)
 
 
@@ -134,8 +134,7 @@ def test_inherited_config_can_restrict_profiles_and_override_paths():
         fusable = GateOnlyConfig(overrides={"model.layers.0.mlp": False})
 
     model, _ = _wrapper(definition=GateOnlyLlamaQModel)
-    model.fuse()
-    plan = model.fusion_plan()
+    plan = model.fuse()
     assert [group.decision.parent for group in plan.groups] == ["model.layers.1.mlp"]
     assert all(d.family == "gate_up" for d in plan.decisions)
     assert plan.to_dict()["fusable"] == GateOnlyLlamaQModel.fusable.to_dict()
@@ -155,7 +154,7 @@ def test_overlapping_profiles_reject_before_installing_execution():
     qweight = parent.q_proj.qweight
     with pytest.raises(ValueError, match="Multiple fusion profiles match"):
         model.fuse()
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     assert parent.forward == forward and parent.q_proj.qweight is qweight
 
 
@@ -197,10 +196,10 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         before = model.model(ids).logits
-        model.fuse()
+        plan = model.fuse()
         after = model.model(ids).logits
-    assert len(model.fusion_plan().groups) == 4
-    assert {group.decision.family for group in model.fusion_plan().groups} == {"qkv", "gate_up"}
+    assert len(plan.groups) == 4
+    assert {group.decision.family for group in plan.groups} == {"qkv", "gate_up"}
     torch.testing.assert_close(after, before, rtol=2e-3, atol=2e-3)
     model.fuse(False)
     with torch.no_grad():
@@ -260,9 +259,9 @@ def test_planner_resolves_alternative_and_duplicate_decoder_prefixes(monkeypatch
     model, _ = _wrapper()
     monkeypatch.setattr(LlamaQModel, "extract_layers_node", classmethod(
         lambda cls: ["absent.layers", "model.layers", "model.layers"]))
-    model.fuse()
-    assert len(model.fusion_plan().groups) == 4
-    assert {group.decision.parent for group in model.fusion_plan().groups} == {
+    plan = model.fuse()
+    assert len(plan.groups) == 4
+    assert {group.decision.parent for group in plan.groups} == {
         "model.layers.0.self_attn", "model.layers.0.mlp", "model.layers.1.self_attn", "model.layers.1.mlp",
     }
     model.fuse(False)

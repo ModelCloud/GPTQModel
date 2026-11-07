@@ -6,6 +6,7 @@
 import copy
 import gc
 import inspect
+import io
 import weakref
 from dataclasses import replace
 
@@ -15,6 +16,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
 
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.fusable import LlamaFusableConfig
+from gptqmodel.models.fusion import FusionPlanner
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -98,10 +100,10 @@ def test_symmetric_marlin_fusion_real_llama_oracle(method, dtype):
     ids = torch.tensor([[1, 2, 3]], device="cuda:0")
     with torch.inference_mode():
         before = model.model(ids).logits
-        model.fuse()
+        plan = model.fuse()
         after = model.model(ids).logits
-        assert len(model.fusion_plan().groups) == 4
-        for group in model.fusion_plan().groups:
+        assert len(plan.groups) == 4
+        for group in plan.groups:
             x = torch.randn(2, 3, 128, dtype=dtype, device="cuda:0")
             oracle = []
             for path in group.decision.paths:
@@ -110,7 +112,7 @@ def test_symmetric_marlin_fusion_real_llama_oracle(method, dtype):
             torch.testing.assert_close(group.packed(x), torch.cat(oracle, dim=-1), rtol=2e-3, atol=2e-3)
             assert torch.count_nonzero(group.packed.workspace) == 0
     torch.testing.assert_close(after, before, rtol=2e-3, atol=2e-3)
-    group = model.fusion_plan().groups[0]
+    group = plan.groups[0]
     cached = group.packed
     group.modules[0].clear_weight_cache()
     assert group.packed is None
@@ -134,8 +136,8 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
         baseline = model.model(ids).logits
         tokens = model.model.generate(ids, max_new_tokens=3, do_sample=False)
     state_before = {name: tensor.clone() for name, tensor in model.model.state_dict().items()}
-    assert model.fuse() is model
-    planner = model.fusion_plan()
+    planner = model.fuse()
+    assert planner is model._fusion_plan
     assert len(planner.groups) == (4 if method == "gptq" else 2)
     if method == "awq":
         assert all("AWQ GQA" in d.reason for d in planner.decisions if not d.enabled)
@@ -161,7 +163,7 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
     for name, tensor in model.model.state_dict().items():
         assert torch.equal(tensor, state_before[name]), name
     model.fuse(False)
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     assert all(group.packed is None for group in planner.groups)
     with torch.inference_mode():
         torch.testing.assert_close(model.model(ids).logits, baseline, rtol=0, atol=0)
@@ -169,16 +171,17 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
 
 def test_automatic_opt_out_and_definition_overrides(monkeypatch):
     model, _ = _wrapper(automatic=True)
-    assert len(model.fusion_plan().groups) == 4
+    plan = model.fuse()
+    assert len(plan.groups) == 4
     monkeypatch.setattr(LlamaQModel, "fusable", replace(LlamaFusableConfig(), overrides={"qkv": False}))
-    model.fuse(overrides={"model.layers.0.mlp": False})
-    assert len(model.fusion_plan().groups) == 1
-    assert model.fusion_plan().groups[0].decision.parent == "model.layers.1.mlp"
+    plan = model.fuse(overrides={"model.layers.0.mlp": False})
+    assert len(plan.groups) == 1
+    assert plan.groups[0].decision.parent == "model.layers.1.mlp"
     model.fuse(False)
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     with pytest.raises(TypeError):
         model.fuse(overrides={"qkv": "yes"})
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
 
 
 def test_fusion_is_opt_in_at_every_entry_point():
@@ -189,9 +192,25 @@ def test_fusion_is_opt_in_at_every_entry_point():
         assert inspect.signature(entry).parameters[option].default is False
     model, _ = _wrapper()
     assert not model._auto_fusion
-    assert model.fusion_plan() is None
-    model.fuse()
-    assert len(model.fusion_plan().groups) == 4
+    assert model._fusion_plan is None
+    plan = model.fuse()
+    assert len(plan.groups) == 4
+
+
+@pytest.mark.parametrize("overrides", [None, {"qkv": False, "gate_up": False}])
+def test_fuse_returns_inspectable_plan_and_disable_returns_none(overrides):
+    model, _ = _wrapper()
+    assert not hasattr(model, "fusion_plan")
+    plan = model.fuse(overrides=overrides)
+    assert isinstance(plan, FusionPlanner)
+    assert len(plan.groups) == (4 if overrides is None else 0)
+    output = io.StringIO()
+    plan.print(file=output)
+    assert output.getvalue() == plan.render() + "\n"
+    assert plan.to_dict()["groups"] and plan.to_dict()["fused_calls"] == 0
+    assert model.fuse(False) is None
+    assert all(not group.active and group.packed is None for group in plan.groups)
+    assert "FusionPlanner" in plan.render()
 
 
 @pytest.mark.parametrize("method", ["gptq", "awq"])
@@ -200,7 +219,8 @@ def test_shared_version_guard_covers_writes_through_every_sibling(method, native
     if native and (not torch.cuda.is_available() or torch.version.hip):
         pytest.skip("Native Marlin fusion requires NVIDIA CUDA hardware")
     model, _ = _wrapper(method, device="cuda:0" if native else "cpu", native=native, automatic=True)
-    for group in model.fusion_plan().groups:
+    plan = model.fuse()
+    for group in plan.groups:
         for index in range(len(group.modules)):
             for name in ("qweight", "qzeros", "scales", "bias"):
                 tensor = getattr(group.modules[index], name)
@@ -228,9 +248,9 @@ def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method,
     references = [weakref.ref(m.qweight) for layer in model.model.model.layers
                   for m in ((layer.self_attn.q_proj, layer.mlp.gate_proj)
                             if method == "gptq" or native else (layer.mlp.gate_proj,))]
-    model.fuse()
+    plan = model.fuse()
     assert all(ref() is None for ref in references)
-    groups = model.fusion_plan().groups
+    groups = plan.groups
     for group in groups:
         for name in ("qweight", "qzeros", "scales", "bias"):
             operand = getattr(group.packed, name)
@@ -276,8 +296,8 @@ def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method,
                                       {"desc_act": True}, {"mse": 0.2}, {"format": "gptq_v2"}])
 def test_dynamic_effective_config_must_match(override):
     model, _ = _wrapper(dynamic={r"model\.layers\.0\.self_attn\.q_proj$": override})
-    model.fuse()
-    decisions = {d.parent: d for d in model.fusion_plan().decisions}
+    plan = model.fuse()
+    decisions = {d.parent: d for d in plan.decisions}
     assert not decisions["model.layers.0.self_attn"].enabled
     assert "configurations differ" in decisions["model.layers.0.self_attn"].reason
     assert decisions["model.layers.1.self_attn"].enabled
@@ -288,8 +308,8 @@ def test_dynamic_effective_config_must_match(override):
 def test_actual_kernel_mismatch_rejects_fusion(field, value):
     model, _ = _wrapper()
     setattr(model.model.model.layers[0].self_attn.k_proj, field, value)
-    model.fuse()
-    assert not next(d for d in model.fusion_plan().decisions if d.parent == "model.layers.0.self_attn").enabled
+    plan = model.fuse()
+    assert not next(d for d in plan.decisions if d.parent == "model.layers.0.self_attn").enabled
 
 
 def test_group_indices_hooks_and_excluded_roles_fail_closed():
@@ -297,8 +317,8 @@ def test_group_indices_hooks_and_excluded_roles_fail_closed():
     layer = model.model.model.layers[0]
     layer.self_attn.k_proj.g_idx[0] = 1
     handle = layer.mlp.up_proj.register_forward_pre_hook(lambda *args: None)
-    model.fuse()
-    assert len(model.fusion_plan().groups) == 2
+    plan = model.fuse()
+    assert len(plan.groups) == 2
     handle.remove()
     model.fuse(False)
 
@@ -313,10 +333,11 @@ def test_prequantized_models_rejected_and_transformers_api_has_no_conflict():
 @pytest.mark.parametrize("method", ["gptq", "awq"])
 def test_state_load_mutation_dtype_and_no_retained_dense_weights(monkeypatch, method):
     model, _ = _wrapper(method, automatic=True)
+    plan = model.fuse()
     ids = torch.tensor([[1, 5, 8]])
     with torch.no_grad():
         model.model(ids)
-    group = model.fusion_plan().groups[0]
+    group = plan.groups[0]
     packed = group.packed
     references = []
     helper = "dequantize_weight" if method == "gptq" else "_dequantize_weight_for_inference"
@@ -352,7 +373,8 @@ def test_state_load_mutation_dtype_and_no_retained_dense_weights(monkeypatch, me
 
 def test_awq_mha_qkv_remains_eligible():
     model, _ = _wrapper("awq", kv_heads=4, automatic=True)
-    assert len(model.fusion_plan().groups) == 4
+    plan = model.fuse()
+    assert len(plan.groups) == 4
     with torch.no_grad():
         fused = model.model(torch.tensor([[1, 2]])).logits
         model.fuse(False)
@@ -367,12 +389,12 @@ def test_other_word_aligned_widths(method, bits):
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         expected = model.model(ids).logits
-        model.fuse()
+        plan = model.fuse()
         actual = model.model(ids).logits
-    assert model.fusion_plan().groups
+    assert plan.groups
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
     x = torch.randn(2, 3, 64, dtype=torch.float16)
-    for group in model.fusion_plan().groups:
+    for group in plan.groups:
         oracle = []
         for path in group.decision.paths:
             weight, bias = weights[f"{group.decision.parent}.{path.rsplit('.', 1)[-1]}"]
@@ -384,7 +406,8 @@ def test_other_word_aligned_widths(method, bits):
 
 def test_inference_tensor_explicit_clear_invalidates_packed_operand():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     with torch.inference_mode():
         group.modules[0].scales = group.modules[0].scales.clone()
         ids = torch.tensor([[1, 2]])
@@ -402,7 +425,8 @@ def test_inference_tensor_explicit_clear_invalidates_packed_operand():
 
 def test_parent_exception_clears_activations_and_other_inputs_fall_back(monkeypatch):
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     x = torch.randn(1, 2, 64, dtype=torch.float16)
 
     def different_inputs(_x, *args, **kwargs):
@@ -426,7 +450,8 @@ def test_parent_exception_clears_activations_and_other_inputs_fall_back(monkeypa
 
 def test_training_and_direct_projection_calls_use_original_execution():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     module = group.modules[0]
     x = torch.randn(1, 2, 64, dtype=torch.float16, requires_grad=True)
     module(x).sum().backward()
@@ -434,7 +459,7 @@ def test_training_and_direct_projection_calls_use_original_execution():
     assert group.calls == 0
     model.train()
     model.model(torch.tensor([[1, 2]]))
-    assert all(g.calls == 0 for g in model.fusion_plan().groups)
+    assert all(g.calls == 0 for g in plan.groups)
 
 
 def test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards(monkeypatch):
@@ -444,21 +469,21 @@ def test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards(monk
     leaves = list(model.model.model.layers[0].self_attn.children())
     original_forwards = [leaf.forward for leaf in leaves]
     signature = inspect.signature(model.model.model.layers[0].self_attn.forward)
-    model.fuse()
+    plan = model.fuse()
     assert [leaf.forward for leaf in leaves] == original_forwards
     assert inspect.signature(model.model.model.layers[0].self_attn.forward) == signature
 
     def forbidden(*args, **kwargs):
         raise AssertionError("full metadata inspection reached the token loop")
 
-    for group in model.fusion_plan().groups:
+    for group in plan.groups:
         assert group.packed is not None
         monkeypatch.setattr(group, "_key", forbidden)
     monkeypatch.setattr(fusion, "_incompatible", forbidden)
     with torch.inference_mode():
         for _ in range(3):
             model.model(torch.tensor([[1, 2, 3]]))
-    assert all(group.calls == 3 for group in model.fusion_plan().groups)
+    assert all(group.calls == 3 for group in plan.groups)
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -468,7 +493,8 @@ def test_compiled_guard_invalidates_changed_weights(native, mutation):
         pytest.skip("Native mutation guard test requires NVIDIA CUDA")
     device = "cuda:0" if native else "cpu"
     model, _ = _wrapper(native=native, device=device, automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     module = group.modules[0]
     old = group.packed
     if mutation == "inplace":
@@ -493,7 +519,8 @@ def test_compiled_guard_invalidates_changed_weights(native, mutation):
 
 def test_runtime_hooks_and_replaced_modules_use_original_parent():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     ids = torch.tensor([[1, 2]])
     handle = group.modules[1].register_forward_pre_hook(lambda _m, args: (args[0] + 0.25,))
     with torch.inference_mode():
@@ -503,8 +530,8 @@ def test_runtime_hooks_and_replaced_modules_use_original_parent():
         expected = model.model(ids).logits
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     handle.remove()
-    model.fuse()
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     group.parent.k_proj = torch.nn.Linear(64, 32, bias=True, dtype=torch.float16)
     with torch.inference_mode():
         actual = model.model(ids).logits
@@ -516,7 +543,8 @@ def test_runtime_hooks_and_replaced_modules_use_original_parent():
 
 def test_direct_parent_releases_activations_on_success_and_exception(monkeypatch):
     model, _ = _wrapper(automatic=True)
-    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    plan = model.fuse()
+    group = next(g for g in plan.groups if g.decision.family == "gate_up")
     references = []
     original = group.packed_forward
 
@@ -544,25 +572,28 @@ def test_direct_parent_releases_activations_on_success_and_exception(monkeypatch
 
 def test_weight_gradient_and_global_hook_fallbacks():
     model, _ = _wrapper(automatic=True)
-    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    plan = model.fuse()
+    group = next(g for g in plan.groups if g.decision.family == "gate_up")
     group.modules[0].scales.requires_grad_(True)
     x = torch.randn(1, 2, 64, dtype=torch.float16)
     group.parent(x).sum().backward()
     assert group.modules[0].scales.grad is not None
     assert group.calls == 0
     model, _ = _wrapper(automatic=True)
+    plan = model.fuse()
     handle = torch.nn.modules.module.register_module_forward_hook(lambda *_args: None)
     try:
         with torch.no_grad():
             model.model(torch.tensor([[1, 2]]))
-        assert all(g.calls == 0 for g in model.fusion_plan().groups)
+        assert all(g.calls == 0 for g in plan.groups)
     finally:
         handle.remove()
 
 
 def test_stale_parent_forward_cannot_reenable_removed_fusion():
     model, _ = _wrapper(automatic=True)
-    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    plan = model.fuse()
+    group = next(g for g in plan.groups if g.decision.family == "gate_up")
     wrapped = group.parent.forward
     # A third-party wrapper installed later may still reference our old method.
     group.parent.forward = lambda *args, **kwargs: wrapped(*args, **kwargs)
@@ -611,7 +642,8 @@ def test_unfamiliar_forward_fails_closed(forward):
 
 def test_same_storage_dtype_and_shape_changes_are_detected():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     scales = group.modules[0].scales
     pointer = scales.data_ptr()
     scales.data = scales.data.view(torch.bfloat16)
@@ -619,7 +651,8 @@ def test_same_storage_dtype_and_shape_changes_are_detected():
     assert not group.guard()
     model.fuse(False)
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     scales = group.modules[0].scales
     pointer = scales.data_ptr()
     scales.data = scales.data.as_strided((scales.numel(),), (1,))
@@ -629,7 +662,8 @@ def test_same_storage_dtype_and_shape_changes_are_detected():
 
 def test_runtime_projection_forward_override_uses_original_parent():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     module = group.modules[0]
     original = module.forward
     module.forward = lambda x: original(x) * 0.75
@@ -644,7 +678,8 @@ def test_runtime_projection_forward_override_uses_original_parent():
 
 def test_compiled_parent_uses_original_path():
     model, _ = _wrapper(automatic=True)
-    group = next(g for g in model.fusion_plan().groups if g.decision.family == "gate_up")
+    plan = model.fuse()
+    group = next(g for g in plan.groups if g.decision.family == "gate_up")
     x = torch.randn(1, 2, 64, dtype=torch.float16)
     compiled = torch.compile(group.parent, backend="eager")
     try:
@@ -662,7 +697,7 @@ def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, pr
     from gptqmodel.models.fusion import _FusionGroup
 
     model, _ = _wrapper(automatic=previously_fused)
-    previous = model.fusion_plan()
+    previous = model._fusion_plan
     original = _FusionGroup._operand
     calls = 0
 
@@ -676,7 +711,7 @@ def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, pr
     monkeypatch.setattr(_FusionGroup, "_operand", fail_second)
     with pytest.raises(RuntimeError, match="native descriptor construction failed"):
         model.fuse()
-    assert model.fusion_plan() is previous
+    assert model._fusion_plan is previous
     if previously_fused:
         assert all(group.active and group.packed is not None for group in previous.groups)
     else:
@@ -689,7 +724,8 @@ def test_native_construction_failure_rolls_back_installed_groups(monkeypatch, pr
 
 def test_supported_dtype_move_rebuilds_and_keeps_fused_execution():
     model, _ = _wrapper(automatic=True)
-    groups = model.fusion_plan().groups
+    plan = model.fuse()
+    groups = plan.groups
     model.model.to(dtype=torch.bfloat16)
     with torch.inference_mode():
         output = model.model(torch.tensor([[1, 2]])).logits

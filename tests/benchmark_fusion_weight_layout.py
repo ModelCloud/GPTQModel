@@ -41,8 +41,9 @@ def benchmark(method, path, args):
     assert model.quantize_config.sym and not model.quantize_config.desc_act
     kernel = "MarlinLinear" if method == "gptq" else "AwqMarlinLinear"
     results = []
+    plan = model.fuse()
     with torch.inference_mode():
-        for group in model.fusion_plan().groups[:2]:
+        for group in plan.groups[:2]:
             fused = group.packed
             assert type(fused).__name__ == kernel
             with torch.inference_mode(False), torch.no_grad():

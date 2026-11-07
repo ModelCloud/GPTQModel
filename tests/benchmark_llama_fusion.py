@@ -19,9 +19,9 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.backend import BACKEND
 
 
-def storage_footprint(model):
+def storage_footprint(model, plan=None):
     """Count storage once across registered leaves and unregistered executors."""
-    groups = model.fusion_plan().groups if model.fusion_plan() is not None else []
+    groups = plan.groups if plan is not None else []
     modules = [*model.model.modules(), *(g.packed for g in groups if g.packed is not None)]
     categories = {"model_tensor_storage_bytes": {}, "packed_operand_storage_bytes": {}, "workspace_bytes": {}}
 
@@ -51,7 +51,7 @@ def drift(actual, reference):
     }
 
 
-def storage_layout_comparison(model, args, prefill, decode):
+def storage_layout_comparison(model, plan, args, prefill, decode):
     """Benchmark storage bindings with the same already-prepared executor.
 
     Independent packed source copies are a benchmark control only. Production
@@ -60,7 +60,7 @@ def storage_layout_comparison(model, args, prefill, decode):
     """
     from gptqmodel.models.fusion import _SHARED_OPERANDS, _mutation_guard, _set_operand
 
-    groups = model.fusion_plan().groups
+    groups = plan.groups
     samples = {layout: {"prefill_samples_ms": [], "decode_samples_ms_per_token": []}
                for layout in ("copies", "views")}
 
@@ -99,7 +99,7 @@ def storage_layout_comparison(model, args, prefill, decode):
             else:
                 assert torch.equal(prefill_logits.cpu(), reference[0])
                 assert torch.equal(decode_logits.cpu(), reference[1])
-            samples[layout]["storage"] = storage_footprint(model)
+            samples[layout]["storage"] = storage_footprint(model, plan)
             guard_times = []
             guards = [group.guard for group in groups]
             for _ in range(3):
@@ -118,7 +118,7 @@ def storage_layout_comparison(model, args, prefill, decode):
             "warmups_per_block": args.warmups, "bitwise_logits_equal": True, **samples}
 
 
-def rounding_diagnostics(model):
+def rounding_diagnostics(model, plan):
     """Independent bit shifts + FP32 GEMM, separate from the inference kernel."""
     results = []
     source = Path(model.model_local_path)
@@ -131,7 +131,7 @@ def rounding_diagnostics(model):
             return reader.get_tensor(name).to("cuda:0")
 
     torch.manual_seed(431)
-    for group in model.fusion_plan().groups[:2]:
+    for group in plan.groups[:2]:
         first = group.modules[0]
         x = torch.randn(128, first.in_features, dtype=torch.float16, device=first.qweight.device)
         shifts = torch.arange(0, 32, 4, device=x.device)
@@ -212,7 +212,7 @@ def benchmark(method, path, args):
     reference = {}
     with torch.inference_mode():
         for enabled in (False, True):
-            model.fuse(enabled)
+            plan = model.fuse(enabled)
             for _ in range(args.warmups):
                 prefill(model)
                 decode(model)
@@ -231,16 +231,16 @@ def benchmark(method, path, args):
                 "decode_tokens_per_second": args.decode_steps / statistics.median(decode_times),
                 "prefill_samples_ms": [seconds * 1000 for seconds in prefill_times],
                 "decode_samples_ms_per_token": [seconds * 1000 / args.decode_steps for seconds in decode_times],
-                "storage": storage_footprint(model),
+                "storage": storage_footprint(model, plan),
             }
             if not enabled:
                 reference = {"prefill": prefill_logits.cpu(), "decode": decode_logits.cpu()}
             else:
                 results["drift"] = {"prefill": drift(prefill_logits.cpu(), reference["prefill"]),
                                     "decode": drift(decode_logits.cpu(), reference["decode"])}
-                results["eligible_groups"] = len(model.fusion_plan().groups)
+                results["eligible_groups"] = len(plan.groups)
                 results["fused_operand_bytes"] = sum(
-                    t.numel() * t.element_size() for g in model.fusion_plan().groups
+                    t.numel() * t.element_size() for g in plan.groups
                     for name, t in list(g.packed.named_parameters()) + list(g.packed.named_buffers())
                     if name not in ("g_idx", "g_idx_sort_indices")
                 )
@@ -249,11 +249,11 @@ def benchmark(method, path, args):
                 results["extra_retained_tensor_bytes"] = (results["on"]["storage"]["model_tensor_storage_bytes"]
                                                           - results["off"]["storage"]["model_tensor_storage_bytes"])
                 assert results["extra_packed_bytes"] == 0, "Fusion duplicated packed operand storage"
-                results["decisions"] = model.fusion_plan().to_dict()
-                results["projection_rounding"] = rounding_diagnostics(model)
+                results["decisions"] = plan.to_dict()
+                results["projection_rounding"] = rounding_diagnostics(model, plan)
         if args.compare_storage_layout:
-            results["storage_layout_comparison"] = storage_layout_comparison(model, args, prefill, decode)
-    del model, prefill_logits, decode_logits
+            results["storage_layout_comparison"] = storage_layout_comparison(model, plan, args, prefill, decode)
+    del model, plan, prefill_logits, decode_logits
     gc.collect()
     torch.cuda.empty_cache()
     print(method, json.dumps({key: value for key, value in results.items() if key != "decisions"}), flush=True)

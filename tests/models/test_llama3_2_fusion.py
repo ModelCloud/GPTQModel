@@ -30,7 +30,7 @@ def test_llama32_1b_fusion_save_reload(method, path, backend, tmp_path):
         pytest.skip("Real 1B acceptance test requires a CUDA accelerator")
     model = GPTQModel.load(path, backend=backend, device="cuda:0",
                           dtype=torch.float16, attn_implementation="eager")
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     assert model.quantize_config.bits == 4 and model.quantize_config.group_size == 128
     assert model.quantize_config.sym and not model.quantize_config.desc_act
     kernel = "MarlinLinear" if method == "gptq" else "AwqMarlinLinear"
@@ -53,9 +53,9 @@ def test_llama32_1b_fusion_save_reload(method, path, backend, tmp_path):
         baseline, separate_seconds = measure(model)
         separate_tokens = model.model.generate(**inputs, max_new_tokens=12, do_sample=False)
     original_storage = storage_footprint(model)
-    model.fuse()
+    plan = model.fuse()
     group_count = 32
-    assert len(model.fusion_plan().groups) == group_count
+    assert len(plan.groups) == group_count
     with torch.inference_mode():
         model.model(**inputs)  # Allocate packed fusion operands before timing.
         fused, fused_seconds = measure(model)
@@ -64,9 +64,9 @@ def test_llama32_1b_fusion_save_reload(method, path, backend, tmp_path):
     # elementwise bounds remain in the independent native projection tests.
     assert torch.equal(fused.argmax(-1), baseline.argmax(-1))
     assert torch.equal(fused_tokens, separate_tokens)
-    assert model.fusion_plan().to_dict()["fused_calls"] > 0
+    assert plan.to_dict()["fused_calls"] > 0
     assert set(model.model.state_dict()) == keys
-    fused_storage = storage_footprint(model)
+    fused_storage = storage_footprint(model, plan)
     extra_packed_bytes = fused_storage["packed_operand_storage_bytes"] - original_storage["packed_operand_storage_bytes"]
     assert extra_packed_bytes == 0
     print({"method": method, "max_logit_error": (fused - baseline).abs().max().item(),
@@ -76,17 +76,18 @@ def test_llama32_1b_fusion_save_reload(method, path, backend, tmp_path):
     destination = tmp_path / method
     model.save(str(destination))
     expected = fused.cpu()
-    del baseline, fused, model
+    del baseline, fused, model, plan
     gc.collect()
     torch.cuda.empty_cache()
     reloaded = GPTQModel.load(str(destination), backend=backend, device="cuda:0", fuse=True,
                              dtype=torch.float16, attn_implementation="eager")
-    assert len(reloaded.fusion_plan().groups) == group_count  # Explicit opt-in after load.
+    reloaded_plan = reloaded.fuse()
+    assert len(reloaded_plan.groups) == group_count  # Explicit opt-in after load.
     with torch.inference_mode():
         actual = reloaded.model(**inputs).logits.cpu()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     reloaded.fuse(False)
-    assert reloaded.fusion_plan() is None
+    assert reloaded._fusion_plan is None
 
 
 @pytest.mark.parametrize("automatic", [True, False])
@@ -114,15 +115,16 @@ def test_tiny_llama_fusion_after_fresh_quantization(tmp_path, automatic):
     model = GPTQModel.load(str(source), qcfg, device="cuda:0", dtype=torch.float16, **options,
                           attn_implementation="eager")
     assert not model.quantized
-    assert model.fusion_plan() is None
+    assert model._fusion_plan is None
     model.quantize(["a b c d " * 16, "d c b a " * 16], backend=BACKEND.GPTQ_TORCH)
     assert model.quantized
     if automatic:
-        assert len(model.fusion_plan().groups) == 2
+        plan = model.fuse()
+        assert len(plan.groups) == 2
     else:
-        assert model.fusion_plan() is None
-        model.fuse()
-        assert len(model.fusion_plan().groups) == 2
+        assert model._fusion_plan is None
+        plan = model.fuse()
+        assert len(plan.groups) == 2
     model.to("cuda:0").eval()
     ids = torch.tensor([[2, 4, 5, 6]], device="cuda:0")
     with torch.inference_mode():
@@ -132,8 +134,9 @@ def test_tiny_llama_fusion_after_fresh_quantization(tmp_path, automatic):
     model.save(str(destination))
     reloaded = GPTQModel.load(str(destination), backend=BACKEND.GPTQ_TORCH, device="cuda:0",
                              dtype=torch.float16, attn_implementation="eager")
-    assert reloaded.fusion_plan() is None
-    reloaded.fuse()
+    assert reloaded._fusion_plan is None
+    reloaded_plan = reloaded.fuse()
+    assert len(reloaded_plan.groups) == 2
     with torch.inference_mode():
         actual = reloaded.model(ids, use_cache=False).logits.cpu()
     from safetensors.torch import load_file

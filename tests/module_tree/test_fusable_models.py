@@ -157,7 +157,7 @@ def test_actual_model_definition_reaches_fusion_planner(key, monkeypatch):
             expected.add((layer_name + "." + group["parent"], group["family"]))
             found = True
         assert found, group
-    assert wrapper.fusion_plan() is None and not wrapper._auto_fusion
+    assert wrapper._fusion_plan is None and not wrapper._auto_fusion
     planner = FusionPlanner(wrapper)
     assert {(g.decision.parent, g.decision.family) for g in planner.groups} == expected
     # All alternatives, multiple stacks and aliases use the same public plan API.

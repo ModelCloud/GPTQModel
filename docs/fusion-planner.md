@@ -16,23 +16,29 @@ from gptqmodel.utils.backend import BACKEND
 
 # AUTO selects Marlin for the symmetric INT4/group-128/no-act-order case.
 model = GPTQModel.load("/path/to/quantized-llama", backend=BACKEND.AUTO)
-model.fuse()                               # Explicit post-load opt-in
-model.fusion_plan().print()
-decisions = model.fusion_plan().to_dict()
+plan = model.fuse()                        # Apply fusion and return its plan
+plan.print()
+decisions = plan.to_dict()
 
-model.fuse(False)                          # Restore separate execution
-model.fuse()                               # Rebuild and apply compatible groups
-model.fuse(overrides={"qkv": False})        # Fuse only gate/up
-model.fuse(overrides={"model.layers.0.mlp": False})
+model.fuse(False)                          # Restore separate execution; returns None
+plan = model.fuse()                        # Rebuild and return the applied plan
+plan = model.fuse(overrides={"qkv": False}) # Fuse only gate/up
+plan = model.fuse(overrides={"model.layers.0.mlp": False})
 
 # Optional opt-in at loading or quantization finalization.
 model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
 # source_model.quantize(calibration, fuse=True)
+# plan = model.fuse()                      # Reapply and receive the current plan
 ```
 
-`model.fuse()` returns the wrapper. `model.fusion_plan()` returns the applied
-`FusionPlanner`, or `None` when disabled. An enabled plan may have zero eligible
-groups; inspect its decisions for per-group skip reasons. The planner
+`model.fuse()` returns the applied `FusionPlanner`. Keep that object and call
+`plan.print()`, `plan.render()`, or `plan.to_dict()` to inspect it. Each enabled
+call rebuilds the plan using the current configuration and overrides;
+inspection through the retained object performs no model mutation.
+`model.fuse(False)` restores separate execution and returns `None`. Previously
+returned plans remain inspectable after disabling, with their executors released.
+An enabled plan may have zero eligible groups; inspect its decisions for
+per-group skip reasons. The planner
 does not convert unsupported backends into a different kernel. A direct
 `fuse()` call on an unquantized wrapper raises. A definition without
 `fusable` is not fusable: enabling fusion raises `ValueError` rather than
@@ -42,6 +48,9 @@ returning an empty plan. `fuse(False)` remains valid for every definition.
 
 ```mermaid
 flowchart TD
+    API["plan = model.fuse(enabled, overrides)"] --> ENABLED{"enabled?"}
+    ENABLED -->|"no"| DISABLE["Remove previous plan; restore source operands<br/>return None"]
+    ENABLED -->|"yes"| ADMIT
     DONE["Quantized checkpoint loaded<br/>or quantize finished"] --> AUTO{"Explicit fusion opt-in?"}
     AUTO -->|"no"| OLD["Original projection forwards"]
     AUTO -->|"yes"| ADMIT["require_fusable_config<br/>definition instance, model_type, parent types"]
@@ -59,6 +68,9 @@ flowchart TD
     UNIQUE -->|"no"| ERROR
     UNIQUE -->|"yes"| INSTALL["_FusionGroup.install<br/>compile direct parent forward"]
     INSTALL --> PREPARE["_refresh before serving tokens<br/>one packed allocation, source views, executor and guard"]
+    SKIP --> RETURN["BaseQModel.fuse returns the applied FusionPlanner<br/>including an empty plan when no groups qualify"]
+    PREPARE --> RETURN
+    RETURN --> INSPECT["Caller retains plan<br/>plan.print / render / to_dict"]
     PREPARE --> CALL["Parent invocation calls execute once"]
     CALL --> RUNTIME{"Inference, input and hooks allow fusion?"}
     RUNTIME -->|"no"| OLD
@@ -238,7 +250,8 @@ These configuration objects are frozen. Constructor inputs are copied to
 immutable tuples/mappings; extensions cannot mutate the shared Llama defaults.
 Parent types may be actual classes or dotted type names resolved on explicit
 opt-in. They identify allowed executors; weight paths and roles still come only
-from `model.module_plan()`. `model.fusion_plan().to_dict()["fusable"]`
+from `model.module_plan()`. `plan.to_dict()["fusable"]`, on the object returned
+by `model.fuse()`,
 exposes the effective definition contract.
 
 Policy lookup prefers the exact full parent path, then the layer-relative
@@ -390,6 +403,9 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   FP16/BF16, CPU/CUDA, generation, configuration mismatches, overrides,
   invalidation, activation cleanup, gradient/training/hook/compiler fallbacks,
   and the absence of full compatibility work on the steady-state path.
+  Its public API regression checks the returned `FusionPlanner`, terminal/JSON
+  inspection, empty eligible plans, and `None` on disable. Benchmarks retain
+  this return value and pass it to storage/diagnostic helpers explicitly.
 - `tests/module_tree/test_fusable_models.py` pins admission for all 198 aliases,
   exercises 101 real native model definitions through the public module-plan API
   and fusion planner, and checks 116 distinct native parent/family pairs in

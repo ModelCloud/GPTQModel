@@ -84,8 +84,7 @@ def test_symmetric_int4_fusion_inference_on_actual_device(executor, method, dtyp
         baseline = _cached_decode(model.model, ids)
         tokens = model.model.generate(ids, max_new_tokens=3, do_sample=False)
     original_storage = storage_footprint(model)
-    model.fuse()
-    planner = model.fusion_plan()
+    planner = model.fuse()
     expected_groups = 2 if method == "awq" and kv_heads == 2 and not native else 4
     assert len(planner.groups) == expected_groups
     if expected_groups == 2:
@@ -132,7 +131,7 @@ def test_symmetric_int4_fusion_inference_on_actual_device(executor, method, dtyp
         if packed._triton_dequant_enabled and packed._rocm_arch_is_fused(torch.empty(0, device=device)):
             assert "triton_packed_gemv" in packed_paths
     assert planner.to_dict()["fused_calls"] > 0
-    fused_storage = storage_footprint(model)
+    fused_storage = storage_footprint(model, planner)
     extra_packed_bytes = fused_storage["packed_operand_storage_bytes"] - original_storage["packed_operand_storage_bytes"]
     assert extra_packed_bytes == 0
     for group in planner.groups:
@@ -178,7 +177,8 @@ def test_symmetric_int4_fusion_inference_on_actual_device(executor, method, dtyp
 
 def test_retired_guard_releases_weight_bindings_even_when_function_is_retained():
     model, _ = _wrapper(automatic=True)
-    group = model.fusion_plan().groups[0]
+    plan = model.fuse()
+    group = plan.groups[0]
     guard = group.guard
     weight = weakref.ref(group.packed.qweight)
     assert guard()

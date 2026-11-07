@@ -174,3 +174,22 @@ thread. Compiler fallback/source lifetime is checked separately with compilation
 enabled; source graphs cannot be installed as the fused native parent. Local
 checkpoints are not downloaded by these tests. Full hardware qualification of
 every model architecture is separate from this kernel/Llama report.
+
+## Fusion return API validation
+
+`plan = model.fuse()` applies fusion and returns the `FusionPlanner` directly.
+Inspection uses `plan.print()`, `plan.render()`, and `plan.to_dict()`;
+`model.fuse(False)` returns `None`. Callers retain that plan, including benchmark
+storage/diagnostic helpers. The numerical kernel path is unchanged.
+
+| API/consumer regression run | Passed | Skipped |
+| --- | ---: | ---: |
+| Module-tree suite, CUDA runtime, excluding the separate native backend matrix | 1,562 | 142 |
+| Core/config/device suites, ROCm runtime | 107 | 29 |
+| Llama 1B GPTQ/AWQ save/reload and fresh quantization, CUDA | 4 | 0 |
+| Native Marlin workspace lifecycle with the returned plan | 6 | 0 |
+
+Both benchmark programs pass smoke runs for GPTQ and AWQ through the returned
+plan API, including storage-layout controls and independent projection oracles.
+Those short smoke runs do not replace the measured latency tables. Ruff and
+compileall pass; no public plan accessor is needed.
