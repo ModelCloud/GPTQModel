@@ -46,6 +46,10 @@ def _set_operand(module, name, tensor):
     setattr(module, name, tensor)
 
 
+def _retired_guard():
+    return False
+
+
 @lru_cache(maxsize=32)
 def _parent_template(original, names):
     """Replace only declared projection calls in the installed native forward.
@@ -397,6 +401,12 @@ class _FusionGroup:
         return fused
 
     def invalidate(self):
+        if self.guard is not None:
+            # Free-threaded Python may defer destroying a function even after
+            # its final reference is dropped. Release generated operand bindings
+            # explicitly; retained callers see a safely retired guard.
+            self.guard.__code__ = _retired_guard.__code__
+            self.guard.__globals__.clear()
         self.guard = self.packed_forward = None
         if self.packed is not None:
             clear = getattr(self.packed, "clear_weight_cache", None)

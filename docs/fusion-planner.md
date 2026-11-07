@@ -252,7 +252,7 @@ flowchart LR
     REFRESH -->|"incompatible"| FALLBACK["Original parent forward"]
     USE --> OUT["Split outputs: forward locals only"]
     OUT --> RELEASE["Return or exception releases activations"]
-    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: release operands and descriptor"]
+    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire guard and clear its bindings<br/>release operands and descriptor"]
     INVALID --> REFRESH
     DIRECT["Direct projection API or fallback parent"] --> LEAF["Original source kernel<br/>temporary contiguous packed copies when needed"]
     OFF["fuse(False)"] --> RESTORE["Clone source views to independent contiguous tensors<br/>release fused executor and workspace"]
@@ -308,6 +308,12 @@ operands, workspace, and descriptors. A third-party wrapper retaining an
 old parent method cannot reactivate the removed executor. Reapplying fusion
 builds fresh decisions.
 
+Invalidation replaces the generated guard's code with `_retired_guard` and
+clears its private global bindings before releasing packed tensors. Retained
+guard references return `False` and hold no operand tensors. This also releases
+storage promptly on free-threaded Python builds that defer function destruction;
+it adds no checks to the token loop.
+
 ## Checkpoint and test contract
 
 Fusion preserves registered state-dict keys and tensor values. Saving serializes
@@ -335,6 +341,19 @@ for every batch size or device. Evaluate its packed-memory cost and measured
 latency on the target workload. Full-model measurements below apply to Llama
 3.2 1B. Other models need their own workload measurements; expert fusion,
 additional backends and compiled fused execution need dedicated validation.
+
+## CPU, CUDA and ROCm validation
+
+The [device validation report](fusion-device-validation.md) records actual CPU,
+RTX 4090 CUDA and Radeon AI PRO R9700 ROCm runs. It covers symmetric INT4,
+group 128, `desc_act=False`, FP16/BF16, prefill and cached decode, greedy tokens,
+mutation invalidation, storage ownership and independent projection oracles.
+
+CUDA `BACKEND.AUTO` selects Marlin for the canonical configuration. Portable
+CPU/ROCm fusion is validated with `BACKEND.GPTQ_TORCH` and `BACKEND.AWQ_TORCH`.
+Other backend classes can record skipped groups; fusion does not replace the
+selected backend. Portable AWQ GQA keeps QKV separate and fuses gate/up. AWQ
+MHA QKV and CUDA Marlin GQA QKV are covered separately.
 
 ## Measured Llama 3.2 1B results
 

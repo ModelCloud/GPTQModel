@@ -24,9 +24,10 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 
 
 def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=None, dynamic=None,
-             kv_heads=2, bits=4, native=False, definition=LlamaQModel):
+             kv_heads=2, bits=4, native=False, canonical=False, definition=LlamaQModel):
     torch.manual_seed(912)
-    config = LlamaConfig(hidden_size=128 if native else 64, intermediate_size=256 if native else 128, num_hidden_layers=2,
+    aligned = native or canonical
+    config = LlamaConfig(hidden_size=128 if aligned else 64, intermediate_size=256 if aligned else 128, num_hidden_layers=2,
                          num_attention_heads=4, num_key_value_heads=kv_heads, vocab_size=64,
                          attention_bias=True, mlp_bias=True)
     config._attn_implementation = "eager"
@@ -37,7 +38,7 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
                      "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"):
             linear = layer.get_submodule(path)
             size_in, size_out = linear.in_features, linear.out_features
-            group_size = 128 if native else 16
+            group_size = 128 if aligned else 16
             codes = torch.randint(0, 1 << bits, (size_in, size_out))
             zeros = torch.full((size_in // group_size, size_out), 1 << (bits - 1), dtype=torch.int32)
             scales = torch.full(zeros.shape, 1 / (32 * (1 << bits)), dtype=dtype)
@@ -47,11 +48,13 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
             linear.bias.data.uniform_(-0.01, 0.01)
             cls = TorchLinear if method == "gptq" else AwqTorchLinear
             kwargs = {"format": FORMAT.GPTQ_V2} if method == "gptq" else {}
-            module = cls(bits=bits, group_size=group_size, sym=native, desc_act=False,
+            module = cls(bits=bits, group_size=group_size, sym=aligned, desc_act=False,
                          in_features=size_in, out_features=size_out, bias=True,
                          register_buffers=True, dtype=dtype, **kwargs)
             if method == "gptq":
                 module.pack_block(linear, scales.t(), zeros.t().float(), indices)
+                if canonical:
+                    module.qzero_format(format=2)
                 module._init_wf_unsqueeze_buffers()
             else:
                 qweight, qzeros = pack_awq(codes, zeros, bits)
@@ -79,8 +82,8 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
             setattr(layer.get_submodule(parent), leaf, module)
             weights[f"model.layers.{layer_index}.{path}"] = (weight.to(device), linear.bias.detach().to(device=device, dtype=dtype).clone())
     model.to(device)
-    qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=128 if native else 16,
-                                                           sym=native, dynamic=dynamic)
+    qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=128 if aligned else 16,
+                                                           sym=aligned, dynamic=dynamic)
     kwargs = {} if automatic is None else {"fusion_enabled": automatic}
     wrapper = definition(model, quantized=quantized, quantize_config=qcfg, **kwargs)
     return wrapper, weights
