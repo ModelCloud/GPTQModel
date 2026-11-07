@@ -20,6 +20,24 @@ Paste the exact test commands and results here:
 ```bash
 ```
 
+## Logic Flow Documentation
+
+Required for changes that alter control flow, replace a decision mechanism
+(for example name matching replaced by declared metadata), change resolution or
+selection order, change data or tensor lifecycle, or introduce a fail-closed
+contract. See `$gptqmodel-logic-flow-diagrams` in
+`.agents/skills/gptqmodel-logic-flow-diagrams/SKILL.md`.
+
+- [ ] This change does not alter a major logic flow, or the required diagrams
+      and docs page are included below.
+- [ ] New-flow Mermaid diagram(s) describe the shipped code using real symbol names.
+- [ ] The removed/replaced mechanism is shown or tabulated with `file:line` evidence.
+- [ ] Failure and ambiguity paths are marked and visually distinct from success.
+- [ ] A reference page under `docs/` repeats the diagrams, titled for the
+      mechanism, and is linked from `README.md`.
+
+Diagram summary (or "not applicable" with one sentence of justification):
+
 ## Review Requirements
 
 AI-assisted code is welcome. The PR must still be reviewed before it is opened as ready for review.

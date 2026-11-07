@@ -61,3 +61,25 @@ For tokenizer initialization, tokenization normalization, special-token compatib
 GPT-QModel depends on [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer). Put reusable corrective tokenizer and chat-template normalization in Tokenicer, add relevant tests, increment its version, run its complete test suite, then commit, push, and open a Tokenicer pull request. Do not leave model-loader patches in GPT-QModel merely to avoid fixing the dependency.
 
 Establish a non-quantized baseline before treating bad generation or evaluation scores as a quantization regression. Compare exact rendered prompts and input IDs as well as aggregate scores.
+
+## Logic-flow change documentation
+
+For any change that alters control flow, replaces a decision mechanism (for
+example name matching replaced by declared metadata), changes resolution or
+selection order, changes data or tensor lifecycle, or introduces a fail-closed
+contract, read and follow `$gptqmodel-logic-flow-diagrams` in
+`.agents/skills/gptqmodel-logic-flow-diagrams/SKILL.md` before opening the pull
+request.
+
+Such a change is not reviewable from the diff alone. The pull request
+description must contain, at minimum, a Mermaid diagram of the new flow drawn
+from the shipped code, a before/after view of the mechanism being removed with
+`file:line` evidence, and an explicitly marked failure/ambiguity path. The same
+diagrams must be committed as a reference page under `docs/`, titled for the
+mechanism rather than the pull request, and linked from `README.md` where the
+related feature is described.
+
+Diagrams must use real symbol names and measured numbers. Do not draw intended
+design, estimate test results, or include follow-up work as if implemented. Keep
+diagrams in sync with the code: a later change to the same flow updates the page
+in the same pull request.

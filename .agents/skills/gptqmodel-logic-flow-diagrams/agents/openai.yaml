@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Logic Flow Diagrams"
+  short_description: "Diagram major logic-flow changes in PR and docs"
+  default_prompt: "Use $gptqmodel-logic-flow-diagrams to document this logic-flow change with before/after diagrams and a committed docs/ reference page."
