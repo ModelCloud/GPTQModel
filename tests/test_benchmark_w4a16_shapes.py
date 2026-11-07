@@ -45,6 +45,28 @@ def test_qwen3_8b_matches_the_released_config(bench):
     assert shapes["down"] == bench.Shape("down", 12288, 4096)
 
 
+def test_fusion_bytes_match_the_sum_of_their_parts(bench):
+    """A fusion must move exactly the bytes its parts moved, or the speedup lies."""
+    for preset, groups in bench.FUSIONS.items():
+        for group in groups:
+            parts = sum(shape.k * shape.n for shape in group.parts)
+            fused = group.fused.k * group.fused.n
+            assert parts == fused, f"{preset}/{group.name}: {parts} != {fused}"
+
+
+def test_fusion_names_are_unique_per_preset(bench):
+    for preset, groups in bench.FUSIONS.items():
+        names = [group.name for group in groups]
+        assert len(names) == len(set(names)), f"duplicate fusion in {preset}"
+
+
+def test_fused_width_is_repack_aligned(bench):
+    """Marlin's repacked layout tiles N in blocks of 64; a fused width has to fit."""
+    for preset, groups in bench.FUSIONS.items():
+        for group in groups:
+            assert group.fused.n % 64 == 0, f"{preset}/{group.name}"
+
+
 def test_gbps_counts_weight_bytes_only(bench):
     """One millisecond means weight_bytes / 1e-3 seconds, reported in GB/s."""
     shape = bench.Shape("toy", 4096, 1024)

@@ -82,6 +82,58 @@ PRESETS: dict[str, tuple[Shape, ...]] = {
 }
 
 
+@dataclass(frozen=True)
+class Fusion:
+    """A set of projections that inference engines merge into one GEMM.
+
+    vLLM and sglang call these fused_qkv and merged gate/up. The point of
+    measuring them here is that the parts are small enough to lose bandwidth on
+    their own, so the fused shape can be much faster than the sum of its parts.
+    """
+
+    name: str
+    parts: tuple[Shape, ...]
+    fused: Shape
+
+
+FUSIONS: dict[str, tuple[Fusion, ...]] = {
+    "qwen3_8b": (
+        Fusion(
+            "qkv",
+            parts=(Shape("q_proj", 4096, 4096), Shape("kv_proj", 4096, 1024),
+                   Shape("kv_proj", 4096, 1024)),
+            fused=Shape("qkv_fused", 4096, 6144),
+        ),
+        Fusion(
+            "gate_up",
+            parts=(Shape("gate_up", 4096, 12288), Shape("gate_up", 4096, 12288)),
+            fused=Shape("gateup_fused", 4096, 24576),
+        ),
+    ),
+    "qwen3_4b": (
+        Fusion(
+            "qkv",
+            parts=(Shape("q_proj", 2560, 2560), Shape("kv_proj", 2560, 1024),
+                   Shape("kv_proj", 2560, 1024)),
+            fused=Shape("qkv_fused", 2560, 4608),
+        ),
+        Fusion(
+            "gate_up",
+            parts=(Shape("gate_up", 2560, 9728), Shape("gate_up", 2560, 9728)),
+            fused=Shape("gateup_fused", 2560, 19456),
+        ),
+    ),
+    "moe_proxy": (
+        Fusion(
+            "expert_gate_up",
+            parts=(Shape("expert_gate_up", 7168, 2048),
+                   Shape("expert_gate_up", 7168, 2048)),
+            fused=Shape("expert_gateup_fused", 7168, 4096),
+        ),
+    ),
+}
+
+
 def build_marlin(shape: Shape, device: str, dtype: torch.dtype):
     from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
     from gptqmodel.utils.backend import BACKEND
@@ -188,6 +240,36 @@ def gbps(shape: Shape, ms: float) -> float:
     return weight_bytes / (ms * 1e-3) / 1e9
 
 
+def _measure(shape: Shape, m: int, args, device: str, dtype) -> dict:
+    module = build_marlin(shape, device, dtype)
+    x = torch.randn(m, shape.k, dtype=dtype, device=device)
+    fn = functools.partial(marlin_call, module, x)
+    hot_min, hot_med, hot_spread = time_hot(fn, args.iters, args.warmup)
+    cold_min, cold_med, cold_spread = time_flushed(fn, args.iters, args.warmup, device)
+    del module
+    torch.cuda.empty_cache()
+    return {
+        "preset": args.preset,
+        "shape": shape.name,
+        "k": shape.k,
+        "n": shape.n,
+        "m": m,
+        "hot_min_ms": hot_min,
+        "hot_median_ms": hot_med,
+        "hot_spread": hot_spread,
+        "cold_min_ms": cold_min,
+        "cold_median_ms": cold_med,
+        "cold_spread": cold_spread,
+        "cold_gbps": gbps(shape, cold_min),
+    }
+
+
+def _best_of(best: dict, key, row: dict) -> None:
+    previous = best.get(key)
+    if previous is None or row["cold_min_ms"] < previous["cold_min_ms"]:
+        best[key] = row
+
+
 def run(args) -> list[dict]:
     device = args.device
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
@@ -198,50 +280,79 @@ def run(args) -> list[dict]:
             for name, k, n in (value.split(":") for value in args.shapes)
         )
 
-    rows = []
-    # Several passes, each config measured once per pass, so a config is not
+    # Round-robin passes: a config measured once per pass, so none of them is
     # permanently penalised by whatever ran before it (allocator state, clocks).
     best: dict[tuple[str, int], dict] = {}
     for _ in range(args.passes):
         for shape in shapes:
-            module = build_marlin(shape, device, dtype)
-            x = torch.randn(args.m_max, shape.k, dtype=dtype, device=device)
             for m in args.m:
-                xt = x[:m].contiguous()
-                fn = functools.partial(marlin_call, module, xt)
-                hot_min, hot_med, hot_spread = time_hot(fn, args.iters, args.warmup)
-                cold_min, cold_med, cold_spread = time_flushed(
-                    fn, args.iters, args.warmup, device
-                )
-                key = (shape.name, m)
-                previous = best.get(key)
-                if previous is None or cold_min < previous["cold_min_ms"]:
-                    best[key] = {
-                        "preset": args.preset,
-                        "shape": shape.name,
-                        "k": shape.k,
-                        "n": shape.n,
-                        "m": m,
-                        "hot_min_ms": hot_min,
-                        "hot_median_ms": hot_med,
-                        "hot_spread": hot_spread,
-                        "cold_min_ms": cold_min,
-                        "cold_median_ms": cold_med,
-                        "cold_spread": cold_spread,
-                        "cold_gbps": gbps(shape, cold_min),
-                    }
-            del module
-            torch.cuda.empty_cache()
+                _best_of(best, (shape.name, m), _measure(shape, m, args, device, dtype))
 
+    rows = []
     for shape in shapes:
         for m in args.m:
-            rows.append(best[(shape.name, m)])
             row = best[(shape.name, m)]
+            rows.append(row)
             print(
                 f"{row['shape']:16s} k={row['k']:5d} n={row['n']:5d} m={row['m']:2d} "
                 f"hot={row['hot_min_ms']*1000:6.1f}us cold={row['cold_min_ms']*1000:6.1f}us "
                 f"(median {row['cold_median_ms']*1000:6.1f}us)  {row['cold_gbps']:6.1f} GB/s "
                 f"spread {row['cold_spread']*100:4.1f}%",
+                flush=True,
+            )
+    return rows
+
+
+def run_fusions(args) -> list[dict]:
+    """Compare one fused GEMM against the separate calls it replaces.
+
+    The parts are timed individually and their times summed; inference engines
+    (vLLM, sglang) issue one GEMM over the concatenated weights instead.
+    """
+    device = args.device
+    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+    groups = FUSIONS[args.preset]
+    rows = []
+    for group in groups:
+        for m in args.m:
+            part_rows = []
+            for shape in group.parts:
+                best = None
+                for _ in range(args.passes):
+                    row = _measure(shape, m, args, device, dtype)
+                    if best is None or row["cold_min_ms"] < best["cold_min_ms"]:
+                        best = row
+                part_rows.append(best)
+            fused_rows = []
+            for _ in range(args.passes):
+                fused_rows.append(_measure(group.fused, m, args, device, dtype))
+            fused = min(fused_rows, key=lambda r: r["cold_min_ms"])
+
+            parts_ms = sum(r["cold_min_ms"] for r in part_rows)
+            parts_bytes = sum(r["k"] * r["n"] for r in part_rows) * BITS / 8
+            fused_bytes = group.fused.k * group.fused.n * BITS / 8
+            parts_gbps = parts_bytes / (parts_ms * 1e-3) / 1e9
+
+            row = {
+                "preset": args.preset,
+                "group": group.name,
+                "m": m,
+                "parts": [r["shape"] for r in part_rows],
+                "parts_calls": len(part_rows),
+                "parts_ms": parts_ms,
+                "parts_gbps": parts_gbps,
+                "fused_shape": fused["shape"],
+                "fused_ms": fused["cold_min_ms"],
+                "fused_gbps": fused["cold_gbps"],
+                "speedup": parts_ms / fused["cold_min_ms"],
+                "bytes_equal": abs(parts_bytes - fused_bytes) < 1e-6 * fused_bytes,
+            }
+            rows.append(row)
+            print(
+                f"{group.name:16s} m={m:2d}  parts {len(part_rows)} calls "
+                f"{parts_ms*1000:6.1f}us {parts_gbps:6.1f} GB/s   fused 1 call "
+                f"{fused['cold_min_ms']*1000:6.1f}us {fused['cold_gbps']:6.1f} GB/s   "
+                f"speedup {row['speedup']:4.2f}x",
                 flush=True,
             )
     return rows
@@ -258,6 +369,8 @@ def main() -> int:
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--passes", type=int, default=3, help="round-robin repeats")
     parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument("--fusion", action="store_true",
+                        help="compare fused qkv / gate_up against the separate calls")
     parser.add_argument("--json", default=None, help="write rows to this path")
     args = parser.parse_args()
     args.m_max = max(args.m) if args.m_max is None else args.m_max
@@ -266,7 +379,7 @@ def main() -> int:
         print("CUDA device required")
         return 1
 
-    rows = run(args)
+    rows = run_fusions(args) if args.fusion else run(args)
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2))
         print(f"wrote {len(rows)} rows to {args.json}")
