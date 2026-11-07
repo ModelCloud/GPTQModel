@@ -492,7 +492,7 @@ class BaseQModel(nn.Module):
         # class definitions remain reusable by later instances.
         self.effective_module_tree = _freeze_module_tree(effective_tree)
         self.module_tree = self.effective_module_tree
-        self.module_plan = ModulePlan.from_tree(self.effective_module_tree)
+        self._module_plan = ModulePlan.from_tree(self.effective_module_tree)
 
 
         # record configuration early so model lifecycle hooks can rely on them
@@ -528,7 +528,7 @@ class BaseQModel(nn.Module):
         if hooks is not None:
             hooks = copy.copy(hooks)
             self.moe_lifecycle_hooks = hooks
-            hooks.module_plan = self.module_plan
+            hooks.module_plan = self._module_plan
         if (getattr(quantize_config, "dynamic", None)
                 and hasattr(self.model, "named_modules")
                 and (not dynamic_cache_prepared or self.model is not model
@@ -651,6 +651,20 @@ class BaseQModel(nn.Module):
 
         invoke_with_effective_tree.__gptqmodel_tree_bound__ = True
         return invoke_with_effective_tree
+
+    def module_plan(self) -> ModulePlan:
+        """Return the immutable module plan compiled for this model instance."""
+
+        try:
+            plan = object.__getattribute__(self, "_module_plan")
+        except AttributeError:
+            plan = None
+        if not isinstance(plan, ModulePlan):
+            raise RuntimeError(
+                f"{type(self).__name__}: module plan is not compiled yet; "
+                "construct the quantized model before inspecting it"
+            )
+        return plan
 
     @classmethod
     def extract_layers_node(cls):
@@ -1671,7 +1685,7 @@ class BaseQModel(nn.Module):
             }
             self.model = fuse_layer_norms(model=self.model,
                                             pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
-                                            plan=self.module_plan,
+                                            plan=self._module_plan,
                                             **module_name_args)
 
             # MPS does not support float64.
@@ -1683,7 +1697,7 @@ class BaseQModel(nn.Module):
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                            device=rotation_device, plan=self.module_plan,
+                                            device=rotation_device, plan=self._module_plan,
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
 
@@ -1772,7 +1786,7 @@ class BaseQModel(nn.Module):
         _setup_rotation_online_had(
             self.model,
             self.quantize_config.rotation,
-            module_plan=self.module_plan,
+            module_plan=self._module_plan,
             layer_prefixes=self.extract_layers_node(),
         )
         if self.quantize_config.dynamic:
@@ -3790,7 +3804,7 @@ class BaseQModel(nn.Module):
         if not isinstance(module_name, str):
             return None
 
-        plan = getattr(cls, "module_plan", None) or ModulePlan.from_tree(_module_tree_for_class(cls))
+        plan = ModulePlan.from_tree(_module_tree_for_class(cls))
         for moe_root in (spec.template for spec in plan.moe_roots()) or cls.get_moe_module_name() or []:
             if module_name == moe_root:
                 return {
@@ -3882,7 +3896,9 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            plan = getattr(self, "module_plan", None) or ModulePlan.from_tree(_module_tree_for_class(type(self)))
+            plan = getattr(self, "_module_plan", None) or ModulePlan.from_tree(
+                _module_tree_for_class(type(self))
+            )
             block_roles = {
                 name: plan.roles(strip_non_quantize_flags(name))
                 for name in block

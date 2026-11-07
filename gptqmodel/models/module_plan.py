@@ -15,10 +15,13 @@ because it shares a prefix or suffix with a declared path.
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..utils.colors import ANSIColor, color_text
 from ._const import EXPERT_INDEX_PLACEHOLDER as _EXPERT_PLACEHOLDER
 
 
@@ -123,6 +126,14 @@ class ModuleSpec:
         return bool(self.pattern.match(path))
 
 
+@dataclass
+class _PlanNode:
+    name: str
+    path: str
+    spec: Optional[ModuleSpec] = None
+    children: Dict[str, "_PlanNode"] = field(default_factory=dict)
+
+
 def collect_module_specs(module_tree: Any) -> Dict[str, ModuleSpec]:
     """Collect every path declared under a tree's decoder ``#`` boundary."""
 
@@ -165,6 +176,25 @@ def collect_module_specs(module_tree: Any) -> Dict[str, ModuleSpec]:
     return specs
 
 
+def _model_module_plan(model: Any) -> Optional["ModulePlan"]:
+    """Resolve a live model's plan for internal consumers.
+
+    The public accessor is ``model.module_plan()``. Partial models used by
+    focused unit tests may not have a compiled plan; those callers receive
+    ``None`` and retain their existing fallback behavior.
+    """
+
+    accessor = getattr(model, "module_plan", None)
+    if callable(accessor):
+        try:
+            return accessor()
+        except RuntimeError:
+            return None
+    if isinstance(accessor, ModulePlan):
+        return accessor
+    return getattr(model, "_module_plan", None)
+
+
 class ModulePlan:
     """Layer-relative inventory and role queries for one effective model tree."""
 
@@ -181,6 +211,218 @@ class ModulePlan:
     @property
     def specs(self) -> Tuple[ModuleSpec, ...]:
         return tuple(self._specs.values())
+
+    def summary(self) -> Dict[str, Any]:
+        """Return a compact, JSON-friendly inventory summary."""
+
+        quantized = sum(1 for spec in self._specs.values() if spec.quantize)
+        capture_only = sum(1 for spec in self._specs.values() if spec.capture_only)
+        return {
+            "spec_count": len(self._specs),
+            "quantized_count": quantized,
+            "excluded_count": len(self._specs) - quantized - capture_only,
+            "capture_only_count": capture_only,
+            "moe_roots": [spec.template for spec in self.moe_roots()],
+            "expert_containers": list(self.expert_containers()),
+            "shared_expert_containers": list(self.shared_expert_containers()),
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the compiled plan as a JSON-serializable debug structure."""
+
+        containers = self._container_templates()
+        return {
+            "summary": self.summary(),
+            "specs": [
+                {
+                    "template": spec.template,
+                    "parent": spec.parent,
+                    "flags": list(spec.flags),
+                    "roles": list(spec.roles),
+                    "quantize": spec.quantize,
+                    "capture_only": spec.capture_only,
+                    "moe": spec.is_moe,
+                    "container": spec.template in containers,
+                    "expert_placeholder": spec.is_expert_placeholder,
+                }
+                for spec in self._specs.values()
+            ],
+        }
+
+    def to_json(self, *, indent: int = 2) -> str:
+        """Serialize ``to_dict()`` for logs, bug reports, or extraction tools."""
+
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def print(self, *, file: Any = None, **render_kwargs) -> None:
+        """Print the rendered plan. This is the debug/TUI entry point."""
+
+        print(self.render(**render_kwargs), file=file)
+
+    def render(
+        self,
+        *,
+        color: Optional[bool] = None,
+        max_depth: Optional[int] = None,
+        show_summary: bool = True,
+    ) -> str:
+        """Render the plan as a TUI-friendly tree.
+
+        ``color=None`` auto-detects a terminal. Pass ``color=False`` for logs
+        and tests, or ``color=True`` in a TUI that wants ANSI styling.
+        """
+
+        if color is None:
+            color = sys.stdout.isatty()
+
+        summary = self.summary()
+        lines = []
+        if show_summary:
+            lines.append(
+                "ModulePlan: "
+                f"{summary['spec_count']} specs | "
+                f"{summary['quantized_count']} quantized | "
+                f"{summary['excluded_count']} excluded | "
+                f"{summary['capture_only_count']} capture-only"
+            )
+            roots = ", ".join(summary["moe_roots"]) or "-"
+            expert_containers = ", ".join(summary["expert_containers"]) or "-"
+            shared_containers = ", ".join(summary["shared_expert_containers"]) or "-"
+            lines.append(f"MoE roots: {roots}")
+            lines.append(f"Experts: {expert_containers}")
+            lines.append(f"Shared experts: {shared_containers}")
+            lines.append("")
+
+        root = self._build_render_tree()
+        for index, child in enumerate(root.children.values()):
+            self._render_node(
+                child,
+                lines=lines,
+                prefix="",
+                is_last=index == len(root.children) - 1,
+                depth=1,
+                color=color,
+                max_depth=max_depth,
+            )
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.render()
+
+    def __repr__(self) -> str:
+        summary = self.summary()
+        return (
+            f"ModulePlan(specs={summary['spec_count']}, "
+            f"quantized={summary['quantized_count']}, "
+            f"excluded={summary['excluded_count']}, "
+            f"moe_roots={summary['moe_roots']})"
+        )
+
+    def _build_render_tree(self) -> _PlanNode:
+        root = _PlanNode(name="", path="")
+        for spec in self._specs.values():
+            node = root
+            path = []
+            for segment in spec.template.split("."):
+                path.append(segment)
+                child_path = ".".join(path)
+                node = node.children.setdefault(segment, _PlanNode(name=segment, path=child_path))
+            node.spec = spec
+        return root
+
+    def _container_templates(self) -> set[str]:
+        parents = {spec.parent for spec in self._specs.values() if spec.parent}
+        return {
+            spec.template
+            for spec in self._specs.values()
+            if any(parent == spec.template or parent.startswith(f"{spec.template}.") for parent in parents)
+        }
+
+    def _render_node(
+        self,
+        node: _PlanNode,
+        *,
+        lines: List[str],
+        prefix: str,
+        is_last: bool,
+        depth: int,
+        color: bool,
+        max_depth: Optional[int],
+    ) -> None:
+        connector = "└─ " if is_last else "├─ "
+        lines.append(f"{prefix}{connector}{self._format_node(node, color=color)}")
+        child_prefix = f"{prefix}{'   ' if is_last else '│  '}"
+
+        if max_depth is not None and depth >= max_depth and node.children:
+            remaining = self._descendant_count(node)
+            ellipsis = "└─ " if len(node.children) > 0 else ""
+            lines.append(f"{child_prefix}{ellipsis}… {remaining} descendant path(s)")
+            return
+
+        children = list(node.children.values())
+        for index, child in enumerate(children):
+            self._render_node(
+                child,
+                lines=lines,
+                prefix=child_prefix,
+                is_last=index == len(children) - 1,
+                depth=depth + 1,
+                color=color,
+                max_depth=max_depth,
+            )
+
+    def _format_node(self, node: _PlanNode, *, color: bool) -> str:
+        label = "{expert_index}" if node.name == _EXPERT_PLACEHOLDER else node.name
+        badges = []
+        spec = node.spec
+
+        if spec is None:
+            badges.append(self._badge("container", "\033[90m", color=color))
+        else:
+            is_container = bool(node.children)
+            if spec.is_moe:
+                badges.append(self._badge("moe", ANSIColor.ORANGE, color=color))
+            if is_container:
+                badges.append(self._badge("container", "\033[90m", color=color))
+                if not spec.quantize:
+                    badges.append(self._badge("excluded", ANSIColor.YELLOW, color=color))
+            elif spec.capture_only:
+                badges.append(self._badge("capture-only", ANSIColor.CYAN, color=color))
+            elif spec.quantize:
+                badges.append(self._badge("quantize", ANSIColor.BRIGHT_GREEN, color=color))
+            else:
+                badges.append(self._badge("excluded", ANSIColor.YELLOW, color=color))
+
+            for flag in spec.flags:
+                if flag.isdigit():
+                    badges.append(self._badge(f"group={flag}", ANSIColor.ORANGE, color=color))
+                elif flag.startswith("in="):
+                    badges.append(self._badge(flag, ANSIColor.CYAN, color=color))
+                elif flag == "norm":
+                    badges.append(self._badge("norm", ANSIColor.CYAN, color=color))
+
+            if spec.roles:
+                badges.append(
+                    self._badge(f"roles={','.join(spec.roles)}", ANSIColor.CYAN, color=color)
+                )
+
+        if node.path in self.expert_containers():
+            badges.append(self._badge("expert-container", ANSIColor.ORANGE, color=color))
+        if node.path in self.shared_expert_containers():
+            badges.append(self._badge("shared-expert", ANSIColor.ORANGE, color=color))
+        if node.name == _EXPERT_PLACEHOLDER:
+            badges.append(self._badge("expert", ANSIColor.ORANGE, color=color))
+
+        name = color_text(label, ANSIColor.CYAN) if color else label
+        return f"{name} {' '.join(badges)}" if badges else name
+
+    @staticmethod
+    def _badge(label: str, color_code: Any, *, color: bool) -> str:
+        text = f"[{label}]"
+        return color_text(text, color_code) if color else text
+
+    def _descendant_count(self, node: _PlanNode) -> int:
+        return sum(1 + self._descendant_count(child) for child in node.children.values())
 
     def find(self, path: str) -> Optional[ModuleSpec]:
         spec = self._specs.get(path)

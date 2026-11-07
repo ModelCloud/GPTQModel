@@ -31,6 +31,7 @@ from ..looper.named_module import NamedModule
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
+from ..models.module_plan import _model_module_plan
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
@@ -219,7 +220,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
         """Return the expert family key used to co-locate gate/up/down modules."""
 
-        plan = getattr(self.gptq_model, "module_plan", None)
+        plan = _model_module_plan(self.gptq_model)
         return plan.expert_root(module_name) if plan is not None and module_name else None
 
     def _collect_assignable_moe_group_keys(self, moe_groups: Dict[str, List[str]]) -> List[str]:
@@ -227,7 +228,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         assignable_group_keys: List[str] = []
         for group_key, module_names in moe_groups.items():
-            plan = getattr(self.gptq_model, "module_plan", None)
+            plan = _model_module_plan(self.gptq_model)
             if plan is None:
                 assignable_group_keys.append(group_key)
                 continue

@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import io
+import json
+
+import pytest
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
@@ -123,3 +127,100 @@ def test_unsupported_tree_fails_closed_without_auto_detection():
         config = Config()
 
     assert UndefinedTree._resolve_effective_module_tree(Model(), object()) is None
+
+
+def _render_plan() -> ModulePlan:
+    return ModulePlan.from_tree([
+        "model", "layers", "#",
+        {
+            "self_attn:!": (
+                "q_proj:0:q:in=x",
+                "k_proj:0:k:in=x",
+                "v_proj:0:v",
+                "o_proj:1:o",
+            ),
+            "mlp:moe": {
+                "gate": ("gate:!",),
+                "experts": {"#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down")},
+                "shared_experts": (
+                    "gate_proj:0:gate",
+                    "up_proj:0:up",
+                    "down_proj:1:down",
+                ),
+            },
+        },
+    ])
+
+
+def test_module_plan_renders_a_tui_tree():
+    plan = _render_plan()
+
+    rendered = plan.render(color=False)
+    assert "ModulePlan: 16 specs | 14 quantized | 2 excluded | 0 capture-only" in rendered
+    assert "MoE roots: mlp" in rendered
+    assert "├─ self_attn [container] [excluded]" in rendered
+    assert "q_proj [quantize] [group=0] [in=x] [roles=q]" in rendered
+    assert "{expert_index} [container] [expert]" in rendered
+    assert "shared_experts [container] [shared-expert]" in rendered
+    assert "… 4 descendant path(s)" in plan.render(color=False, max_depth=1, show_summary=False)
+
+
+def test_module_plan_print_and_extraction_payload():
+    plan = _render_plan()
+
+    output = io.StringIO()
+    plan.print(file=output, color=False)
+    assert output.getvalue() == plan.render(color=False) + "\n"
+
+    payload = plan.to_dict()
+    assert payload["summary"] == {
+        "spec_count": 16,
+        "quantized_count": 14,
+        "excluded_count": 2,
+        "capture_only_count": 0,
+        "moe_roots": ["mlp"],
+        "expert_containers": ["mlp.experts"],
+        "shared_expert_containers": ["mlp.shared_experts"],
+    }
+    q_proj = next(spec for spec in payload["specs"] if spec["template"] == "self_attn.q_proj")
+    assert q_proj == {
+        "template": "self_attn.q_proj",
+        "parent": "self_attn",
+        "flags": ["0", "q", "in=x"],
+        "roles": ["q"],
+        "quantize": True,
+        "capture_only": False,
+        "moe": False,
+        "container": False,
+        "expert_placeholder": False,
+    }
+    experts = next(spec for spec in payload["specs"] if spec["template"] == "mlp.experts")
+    assert experts["container"] is True
+    assert json.loads(plan.to_json()) == payload
+
+
+def test_model_plan_returns_the_compiled_plan(capsys):
+    plan = _render_plan()
+    model = object.__new__(BaseQModel)
+    model._module_plan = plan
+
+    assert model.module_plan() is plan
+    model.module_plan().print(color=False)
+    assert "ModulePlan: 16 specs" in capsys.readouterr().out
+
+
+def test_module_plan_is_exported_from_public_package_roots():
+    from gptqmodel import ModulePlan as public_module_plan
+    from gptqmodel.models import ModulePlan as models_module_plan
+    from gptqmodel.models import ModuleSpec as models_module_spec
+
+    assert public_module_plan is ModulePlan
+    assert models_module_plan is ModulePlan
+    assert models_module_spec is not None
+
+
+def test_model_plan_fails_loudly_without_a_compiled_plan():
+    model = object.__new__(BaseQModel)
+
+    with pytest.raises(RuntimeError, match="module plan is not compiled yet"):
+        model.module_plan()

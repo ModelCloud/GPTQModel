@@ -100,6 +100,35 @@ flowchart LR
     style S fill:#d9f7be,stroke:#237804
 ```
 
+### Inspection API
+
+The compiled plan is attached to every model instance and is retrieved through
+one public method:
+
+```python
+plan = model.module_plan()
+
+plan.print()                     # TUI tree, ANSI auto-detected
+plan.print(color=False)          # plain log-safe output
+plan.print(max_depth=2)          # cap very large trees
+text = plan.render(color=False)
+payload = plan.to_dict()         # JSON-friendly extraction/debug data
+json_text = plan.to_json()
+summary = plan.summary()
+```
+
+`ModulePlan` and `ModuleSpec` are exported from both `gptqmodel` and
+`gptqmodel.models`. `model.module_plan()` raises if called before the model has a
+compiled plan; it never guesses or recompiles a tree.
+
+The tree renderer marks:
+
+- `[quantize]` — declared as a quantization leaf.
+- `[excluded]` / `[capture-only]` — non-quantized declarations.
+- `[moe]`, `[expert-container]`, `[shared-expert]`, `[expert]` — MoE structure.
+- `[roles=q]`, `[in=x]`, `[group=0]` — projection roles, shared input, and group.
+- `[container]` — structural parent, not itself a quantization target.
+
 ### Declaration syntax
 
 ```
@@ -240,7 +269,7 @@ Llama layout:
 
 ```mermaid
 flowchart TD
-    R["rotate_model(plan=self.module_plan)"] --> N1["plan.child_roles('', 'norm')<br/>→ exactly 2 norms"]
+    R["rotate_model(plan=self.module_plan())"] --> N1["plan.child_roles('', 'norm')<br/>→ exactly 2 norms"]
     R --> P1["_rotation_parents(plan)<br/>attention parent + MLP parent"]
     P1 --> Q1["_resolve_role(layer, plan, parent, 'q'|'k'|'v'|'o')"]
     P1 --> Q2["_resolve_role(layer, plan, parent, 'gate'|'up'|'down')"]

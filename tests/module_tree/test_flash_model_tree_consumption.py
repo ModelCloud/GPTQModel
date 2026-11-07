@@ -533,7 +533,7 @@ def test_flash_moe_hooks_follow_the_declared_containers(flash_case):
 def test_flash_looper_consumers_use_the_module_plan(flash_case):
     case = next(item for item in CASES.values() if item.definition is flash_case.definition)
     looper = ModuleLooper.__new__(ModuleLooper)
-    looper.gptq_model = SimpleNamespace(module_plan=flash_case.plan)
+    looper.gptq_model = SimpleNamespace(module_plan=lambda: flash_case.plan)
 
     for path, roles in case.roles:
         assert looper._is_attention_module_name(path) == bool({"q", "k", "v"} & set(roles)), path
@@ -603,7 +603,7 @@ def test_ricursive_ripple_real_custom_model_matches_declared_tree(tmp_path):
     assert not RicursiveQModel.is_moe_module("model.layers.0.mlp.down_proj")
 
     looper = ModuleLooper.__new__(ModuleLooper)
-    looper.gptq_model = SimpleNamespace(module_plan=plan)
+    looper.gptq_model = SimpleNamespace(module_plan=lambda: plan)
     assert looper._is_attention_module_name("self_attn.q_proj")
     assert looper._is_attention_module_name("self_attn.k_proj")
     assert looper._is_attention_module_name("self_attn.v_proj")

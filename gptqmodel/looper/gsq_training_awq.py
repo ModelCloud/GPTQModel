@@ -7,6 +7,7 @@
 
 import torch
 
+from ..models.module_plan import _model_module_plan
 from .gsq_training_capture import prepare_llama_gsq_capture
 
 
@@ -52,7 +53,7 @@ def refine_awq_staged_layer(processor, teacher_capture, modules, *, layer_index)
                                      group_size=processor.qcfg.group_size, affine_initializers=True,
                                      reinitialize_mlp=False, projections=projections, **options)
         payloads = {}
-        plan = getattr(processor.gptq_model, "module_plan", None)
+        plan = _model_module_plan(processor.gptq_model)
         attention_parents = {spec.parent for spec in plan.specs if "q" in spec.roles} if plan else ()
         mlp_parents = {spec.parent for spec in plan.specs if "gate" in spec.roles} if plan else ()
 

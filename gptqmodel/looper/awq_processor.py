@@ -20,6 +20,7 @@ from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, Ex
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import DEVICE, SUPPORTS_MODULE_TYPES
+from ..models.module_plan import _model_module_plan
 from ..models.writer import (
     PROCESS_LOG_LAYER,
     PROCESS_LOG_MODULE,
@@ -1583,7 +1584,7 @@ class AWQProcessor(LoopProcessor):
         if staged_gsq is not None and staged_gsq.enabled:
             from .gsq_training_awq import capture_awq_staged_teacher
 
-            plan = getattr(self.gptq_model, "module_plan", None)
+            plan = _model_module_plan(self.gptq_model)
             projections = tuple(
                 name for name, named in named_childs.items()
                 if plan is None or plan.roles(name)

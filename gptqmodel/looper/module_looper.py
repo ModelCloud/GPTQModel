@@ -35,6 +35,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
+from ..models.module_plan import _model_module_plan
 from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import (
     METHOD,
@@ -921,7 +922,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if not module_name:
             return None
 
-        plan = getattr(self.gptq_model, "module_plan", None)
+        plan = _model_module_plan(self.gptq_model)
         if plan is None:
             return None
         return plan.expert_root(module_name)
@@ -929,7 +930,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _is_attention_module_name(self, module_name: str) -> bool:
         """Return whether the declared tree marks this path as attention."""
 
-        plan = getattr(self.gptq_model, "module_plan", None)
+        plan = _model_module_plan(self.gptq_model)
         if plan is None or not module_name:
             return False
         return "q" in plan.roles(module_name) or "k" in plan.roles(module_name) or "v" in plan.roles(module_name)

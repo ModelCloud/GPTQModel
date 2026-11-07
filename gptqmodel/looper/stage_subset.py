@@ -29,6 +29,7 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
+from ..models.module_plan import _model_module_plan
 from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy, normalize_bypass_batch_size
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
@@ -494,7 +495,7 @@ def build_subset_plan(
         if moe_strategy_active and moe_groups and moe_devices:
             assignable_group_keys = _collect_assignable_moe_group_keys(
                 moe_groups,
-                getattr(looper.gptq_model, "module_plan", None),
+                _model_module_plan(looper.gptq_model),
             )
             if assignable_group_keys:
                 if looper._moe_vram_strategy == VramStrategy.BALANCED and len(moe_devices) > 1:

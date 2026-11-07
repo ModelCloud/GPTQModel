@@ -2427,7 +2427,7 @@ def ModelLoader(cls):
         _setup_rotation_online_had(
             instance.model,
             qcfg.rotation,
-            module_plan=getattr(instance, "module_plan", None),
+            module_plan=instance.module_plan(),
             layer_prefixes=instance.extract_layers_node(),
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
