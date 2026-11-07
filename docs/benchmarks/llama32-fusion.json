@@ -1,0 +1,198 @@
+{
+  "hardware": "NVIDIA GeForce RTX 4090",
+  "torch": "2.15.0+cu132",
+  "dtype": "float16",
+  "batch_size": 1,
+  "prefill_tokens": 128,
+  "decode_steps": 16,
+  "warmups": 2,
+  "repeats": 5,
+  "gptq": {
+    "off": {
+      "prefill_ms": 16.207873995881528,
+      "prefill_tokens_per_second": 7897.396045436015,
+      "decode_ms_per_token": 11.288569312455365,
+      "decode_tokens_per_second": 88.5851849176883
+    },
+    "on": {
+      "prefill_ms": 16.63641899358481,
+      "prefill_tokens_per_second": 7693.963469503757,
+      "decode_ms_per_token": 12.951237999004661,
+      "decode_tokens_per_second": 77.21269581153962
+    },
+    "drift": {
+      "prefill": {
+        "max_abs": 0.03125,
+        "rms": 0.004665711894631386,
+        "relative_l2": 0.0013693224173039198,
+        "top1_agreement": 1.0
+      },
+      "decode": {
+        "max_abs": 0.02734375,
+        "rms": 0.004553108010441065,
+        "relative_l2": 0.001774232485331595,
+        "top1_agreement": 1.0
+      }
+    },
+    "eligible_groups": 32,
+    "extra_packed_bytes": 331220992,
+    "projection_rounding": [
+      {
+        "family": "qkv",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.0078125,
+          "rms": 6.394975207513198e-05,
+          "relative_l2": 4.0109243855113164e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 4.3551444832701236e-05,
+          "relative_l2": 2.731541644607205e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.0078125,
+          "rms": 7.547919085482135e-05,
+          "relative_l2": 4.7340450691990554e-05,
+          "top1_agreement": 1.0
+        },
+        "parent": "model.layers.0.self_attn"
+      },
+      {
+        "family": "gate_up",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.00390625,
+          "rms": 2.7723954190150835e-05,
+          "relative_l2": 3.324802310089581e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.00390625,
+          "rms": 3.8447633414762095e-05,
+          "relative_l2": 4.6108201786410064e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.001953125,
+          "rms": 2.6969652026309632e-05,
+          "relative_l2": 3.234332689316943e-05,
+          "top1_agreement": 1.0
+        },
+        "parent": "model.layers.0.mlp"
+      }
+    ],
+    "checkpoint": "Llama-3.2-1B-Instruct-GPTQ-bit4-g128-symFasle-descFalse",
+    "quantization": {
+      "bits": 4,
+      "group_size": 128,
+      "sym": false,
+      "desc_act": false,
+      "checkpoint_format": "gptq"
+    },
+    "decisions_summary": {
+      "eligible": 32,
+      "declared": 32
+    }
+  },
+  "awq": {
+    "off": {
+      "prefill_ms": 127.85762699786574,
+      "prefill_tokens_per_second": 1001.1135276438115,
+      "decode_ms_per_token": 127.48629818634072,
+      "decode_tokens_per_second": 7.843980209844568
+    },
+    "on": {
+      "prefill_ms": 127.88235099287704,
+      "prefill_tokens_per_second": 1000.9199784505801,
+      "decode_ms_per_token": 126.45883256300294,
+      "decode_tokens_per_second": 7.907711780446738
+    },
+    "drift": {
+      "prefill": {
+        "max_abs": 0.0390625,
+        "rms": 0.004610590171068907,
+        "relative_l2": 0.001408502459526062,
+        "top1_agreement": 1.0
+      },
+      "decode": {
+        "max_abs": 0.032470703125,
+        "rms": 0.006686302367597818,
+        "relative_l2": 0.0030240509659051895,
+        "top1_agreement": 1.0
+      }
+    },
+    "eligible_groups": 16,
+    "extra_packed_bytes": 278921216,
+    "projection_rounding": [
+      {
+        "family": "gate_up",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.0078125,
+          "rms": 6.179982301546261e-05,
+          "relative_l2": 3.0926141334930435e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.0078125,
+          "rms": 8.64437097334303e-05,
+          "relative_l2": 4.325835107010789e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.0078125,
+          "rms": 6.096853394410573e-05,
+          "relative_l2": 3.051006206078455e-05,
+          "top1_agreement": 1.0
+        },
+        "parent": "model.layers.0.mlp"
+      },
+      {
+        "family": "gate_up",
+        "packed_operands_equal": true,
+        "on_vs_off": {
+          "max_abs": 0.015625,
+          "rms": 0.00012171029084129259,
+          "relative_l2": 3.289612868684344e-05,
+          "top1_agreement": 1.0
+        },
+        "off_vs_independent_oracle": {
+          "max_abs": 0.015625,
+          "rms": 0.00016697142564225942,
+          "relative_l2": 4.512921441346407e-05,
+          "top1_agreement": 1.0
+        },
+        "on_vs_independent_oracle": {
+          "max_abs": 0.015625,
+          "rms": 0.00011538530816324055,
+          "relative_l2": 3.1186515116132796e-05,
+          "top1_agreement": 1.0
+        },
+        "parent": "model.layers.1.mlp"
+      }
+    ],
+    "checkpoint": "Llama-3.2-1B-Instruct-AWQ-bit4-g128-symFasle-descFalse",
+    "quantization": {
+      "bits": 4,
+      "group_size": 128,
+      "sym": false,
+      "desc_act": false,
+      "checkpoint_format": "gemm"
+    },
+    "decisions_summary": {
+      "eligible": 16,
+      "declared": 32
+    }
+  },
+  "measurement": {
+    "attention": "eager",
+    "torch_compile_disabled": true,
+    "latency": "median wall-clock with CUDA synchronization; excludes loading and packed-cache warmup",
+    "decode": "teacher-forced token 42, 16 cached single-token forwards; excludes cache prefill",
+    "projection_oracle": "independent integer bit shifts and FP32 matmul, with native FP16 weight/output rounding; 128 random input rows; seed 431",
+    "source_base": "de7db05cc7219371b401d3205065ac63e41e9478"
+  }
+}

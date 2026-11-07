@@ -12,6 +12,10 @@ and new-model requirements, see the [module-plan guide](module-plan-guide.md).
 The [DeepSeek V4.1 Flash inventory](deepseek-v41-module-inventory.md) distinguishes
 verified checkpoint structure from remaining integration work.
 
+The [post-quantization fusion planner](fusion-planner.md) consumes this same
+compiled plan to select compatible Llama QKV and gate/up groups, with optional
+automatic execution, model-specific overrides, and unchanged checkpoint owners.
+
 ## Why it is shaped this way
 
 Before this change the answer to "what is this module?" was derived from the

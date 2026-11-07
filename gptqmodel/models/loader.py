@@ -1099,6 +1099,7 @@ def ModelLoader(cls):
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
+            fuse: bool = True,
             **model_init_kwargs,
     ):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
@@ -1259,6 +1260,7 @@ def ModelLoader(cls):
                 model,
                 turtle_model=turtle_model,
                 quantized=False,
+                fusion_enabled=fuse,
                 quantize_config=quantize_config,
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
@@ -1436,6 +1438,7 @@ def ModelLoader(cls):
             model,
             turtle_model=turtle_model,
             quantized=False,
+            fusion_enabled=fuse,
             quantize_config=quantize_config,
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
@@ -1470,6 +1473,7 @@ def ModelLoader(cls):
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
+            fuse: bool = True,
             **kwargs,
     ):
 
@@ -1728,6 +1732,7 @@ def ModelLoader(cls):
             instance = cls(
                 model,
                 quantized=True,
+                fusion_enabled=fuse,
                 quantize_config=qcfg,
                 tokenizer=tokenizer,
                 qlinear_kernel=None,
@@ -2414,6 +2419,7 @@ def ModelLoader(cls):
         instance = cls(
             model,
             quantized=True,
+            fusion_enabled=fuse,
             quantize_config=qcfg,
             tokenizer=tokenizer,
             qlinear_kernel=qlinear_kernel,

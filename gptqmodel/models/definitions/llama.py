@@ -7,6 +7,7 @@ from ..base import BaseQModel
 
 
 class LlamaQModel(BaseQModel):
+    fusion_model_types = frozenset({"llama"})
     shared_input_verified_model_types = frozenset({"llama", "mistral", "gemma", "granite", "olmo2", "stablelm", "cohere", "cohere2"})
 
 

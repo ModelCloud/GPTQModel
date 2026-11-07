@@ -712,8 +712,12 @@ class GPTQModel:
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
+            fuse: bool = True,
             **kwargs,
     ):
+        if type(fuse) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        kwargs["fuse"] = fuse
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool()
