@@ -119,7 +119,8 @@ summary = plan.summary()
 
 `ModulePlan` and `ModuleSpec` are exported from both `gptqmodel` and
 `gptqmodel.models`. `model.module_plan()` raises if called before the model has a
-compiled plan; it never guesses or recompiles a tree.
+compiled plan; it never guesses or recompiles a tree. All internal consumers
+resolve the plan through this accessor rather than reading the backing field.
 
 The tree renderer marks:
 

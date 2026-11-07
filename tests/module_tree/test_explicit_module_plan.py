@@ -8,7 +8,7 @@ import pytest
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.module_plan import ModulePlan, _model_module_plan
 from gptqmodel.utils.model import get_module_by_name_prefix, get_module_by_name_suffix
 
 
@@ -224,3 +224,16 @@ def test_model_plan_fails_loudly_without_a_compiled_plan():
 
     with pytest.raises(RuntimeError, match="module plan is not compiled yet"):
         model.module_plan()
+
+
+def test_internal_consumers_resolve_the_plan_through_the_public_method():
+    plan = _render_plan()
+
+    class _Model:
+        _module_plan = object()
+
+        def module_plan(self):
+            return plan
+
+    assert _model_module_plan(_Model()) is plan
+    assert _model_module_plan(object()) is None

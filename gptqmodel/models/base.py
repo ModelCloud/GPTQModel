@@ -528,7 +528,7 @@ class BaseQModel(nn.Module):
         if hooks is not None:
             hooks = copy.copy(hooks)
             self.moe_lifecycle_hooks = hooks
-            hooks.module_plan = self._module_plan
+            hooks.module_plan = self.module_plan()
         if (getattr(quantize_config, "dynamic", None)
                 and hasattr(self.model, "named_modules")
                 and (not dynamic_cache_prepared or self.model is not model
@@ -1685,7 +1685,7 @@ class BaseQModel(nn.Module):
             }
             self.model = fuse_layer_norms(model=self.model,
                                             pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
-                                            plan=self._module_plan,
+                                            plan=self.module_plan(),
                                             **module_name_args)
 
             # MPS does not support float64.
@@ -1697,7 +1697,7 @@ class BaseQModel(nn.Module):
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                            device=rotation_device, plan=self._module_plan,
+                                            device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
 
@@ -1786,7 +1786,7 @@ class BaseQModel(nn.Module):
         _setup_rotation_online_had(
             self.model,
             self.quantize_config.rotation,
-            module_plan=self._module_plan,
+            module_plan=self.module_plan(),
             layer_prefixes=self.extract_layers_node(),
         )
         if self.quantize_config.dynamic:
@@ -3896,9 +3896,10 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            plan = getattr(self, "_module_plan", None) or ModulePlan.from_tree(
-                _module_tree_for_class(type(self))
-            )
+            try:
+                plan = self.module_plan()
+            except RuntimeError:
+                plan = ModulePlan.from_tree(_module_tree_for_class(type(self)))
             block_roles = {
                 name: plan.roles(strip_non_quantize_flags(name))
                 for name in block

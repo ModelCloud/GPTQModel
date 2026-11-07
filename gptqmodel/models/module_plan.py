@@ -190,9 +190,7 @@ def _model_module_plan(model: Any) -> Optional["ModulePlan"]:
             return accessor()
         except RuntimeError:
             return None
-    if isinstance(accessor, ModulePlan):
-        return accessor
-    return getattr(model, "_module_plan", None)
+    return None
 
 
 class ModulePlan:
