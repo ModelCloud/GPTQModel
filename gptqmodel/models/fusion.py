@@ -548,7 +548,7 @@ class FusionPlanner:
             group.remove()
 
     def to_dict(self):
-        return {"fusable_config": self.config.to_dict(),
+        return {"fusable": self.config.to_dict(),
                 "groups": [{"family": d.family, "parent": d.parent, "paths": list(d.paths),
                                 "enabled": d.enabled, "reason": d.reason} for d in self.decisions],
                 "fused_calls": sum(g.calls for g in self.groups)}

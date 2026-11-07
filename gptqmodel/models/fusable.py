@@ -105,13 +105,13 @@ class LlamaFusableConfig(FusableConfig):
 
 def require_fusable_config(definition, model_type):
     """Reject unsupported definitions/model types before any fusion mutation."""
-    config = getattr(definition, "fusable_config", None)
+    config = getattr(definition, "fusable", None)
     if config is None:
-        raise ValueError(f"{definition.__name__} is not fusable: its model definition must declare fusable_config")
+        raise ValueError(f"{definition.__name__} is not fusable: its model definition must declare fusable")
     if not isinstance(config, FusableConfig):
-        raise TypeError(f"{definition.__name__}.fusable_config must be a FusableConfig instance")
+        raise TypeError(f"{definition.__name__}.fusable must be a FusableConfig instance")
     if model_type not in config.model_types:
-        raise ValueError(f"{definition.__name__}.fusable_config does not support model_type={model_type!r}; "
+        raise ValueError(f"{definition.__name__}.fusable does not support model_type={model_type!r}; "
                          f"allowed model_types: {config.model_types}")
     for profile in config.profiles:
         profile.resolve_parent_types()

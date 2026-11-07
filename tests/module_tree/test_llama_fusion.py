@@ -167,7 +167,7 @@ def test_real_llama_fusion_oracle_logits_and_generation(method, dtype, device):
 def test_automatic_opt_out_and_definition_overrides(monkeypatch):
     model, _ = _wrapper(automatic=True)
     assert len(model.fusion_plan().groups) == 4
-    monkeypatch.setattr(LlamaQModel, "fusable_config", replace(LlamaFusableConfig(), overrides={"qkv": False}))
+    monkeypatch.setattr(LlamaQModel, "fusable", replace(LlamaFusableConfig(), overrides={"qkv": False}))
     model.fuse(overrides={"model.layers.0.mlp": False})
     assert len(model.fusion_plan().groups) == 1
     assert model.fusion_plan().groups[0].decision.parent == "model.layers.1.mlp"

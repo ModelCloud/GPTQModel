@@ -21,7 +21,7 @@ from tests.module_tree.test_llama_fusion import _wrapper
 
 
 class NonFusableLlamaQModel(LlamaQModel):
-    fusable_config = None
+    fusable = None
 
 
 def test_llama_profile_is_immutable_and_public():
@@ -30,7 +30,7 @@ def test_llama_profile_is_immutable_and_public():
     overrides["qkv"] = True
     assert config.overrides["qkv"] is False
     assert isinstance(config, FusableConfig)
-    assert LlamaQModel.fusable_config.model_types == ("llama",)
+    assert LlamaQModel.fusable.model_types == ("llama",)
     assert [(p.name, p.roles) for p in config.profiles] == [("qkv", ("q", "k", "v")),
                                                          ("gate_up", ("gate", "up"))]
     with pytest.raises(FrozenInstanceError):
@@ -69,12 +69,12 @@ def test_missing_definition_profile_rejects_without_mutation():
     leaves = list(model.model.model.layers[0].self_attn.children())
     forwards = [module.forward for module in leaves]
     weights = [module.qweight for module in leaves]
-    with pytest.raises(ValueError, match="not fusable.*fusable_config"):
+    with pytest.raises(ValueError, match="not fusable.*fusable"):
         model.fuse()
     with pytest.raises(ValueError, match="not fusable"):
         FusionPlanner(model)
     # Admission belongs to the definition, not a runtime instance attribute.
-    model.fusable_config = LlamaFusableConfig()
+    model.fusable = LlamaFusableConfig()
     with pytest.raises(ValueError, match="not fusable"):
         model.fuse()
     assert [module.forward for module in leaves] == forwards
@@ -95,7 +95,7 @@ def test_explicit_load_and_quantization_opt_in_reject_before_work():
 @pytest.mark.parametrize("value", [{}, LlamaFusableConfig])
 def test_definition_requires_a_config_instance(monkeypatch, value):
     model, _ = _wrapper()
-    monkeypatch.setattr(LlamaQModel, "fusable_config", value)
+    monkeypatch.setattr(LlamaQModel, "fusable", value)
     with pytest.raises(TypeError, match="FusableConfig instance"):
         model.fuse()
 
@@ -104,7 +104,7 @@ def test_failed_admission_leaves_existing_fusion_installed(monkeypatch):
     model, _ = _wrapper(automatic=True)
     plan = model.fusion_plan()
     packed = plan.groups[0].packed
-    monkeypatch.setattr(LlamaQModel, "fusable_config", None)
+    monkeypatch.setattr(LlamaQModel, "fusable", None)
     with pytest.raises(ValueError, match="not fusable"):
         model.fuse()
     assert model.fusion_plan() is plan and plan.groups[0].packed is packed
@@ -117,7 +117,7 @@ def test_bad_executor_profile_rejects_before_removing_existing_fusion(monkeypatc
     plan = model.fusion_plan()
     packed = plan.groups[0].packed
     bad = replace(LlamaFusableConfig(), profiles=(FusableProfile("qkv", ("q", "k", "v"), ("builtins.len",)),))
-    monkeypatch.setattr(LlamaQModel, "fusable_config", bad)
+    monkeypatch.setattr(LlamaQModel, "fusable", bad)
     with pytest.raises(TypeError, match="parent must resolve to a class"):
         model.fuse()
     assert model.fusion_plan() is plan and plan.groups[0].packed is packed
@@ -130,23 +130,23 @@ def test_inherited_config_can_restrict_profiles_and_override_paths():
         profiles: tuple[FusableProfile, ...] = (LlamaFusableConfig().profiles[1],)
 
     class GateOnlyLlamaQModel(LlamaQModel):
-        fusable_config = GateOnlyConfig(overrides={"model.layers.0.mlp": False})
+        fusable = GateOnlyConfig(overrides={"model.layers.0.mlp": False})
 
     model, _ = _wrapper(definition=GateOnlyLlamaQModel)
     model.fuse()
     plan = model.fusion_plan()
     assert [group.decision.parent for group in plan.groups] == ["model.layers.1.mlp"]
     assert all(d.family == "gate_up" for d in plan.decisions)
-    assert plan.to_dict()["fusable_config"] == GateOnlyLlamaQModel.fusable_config.to_dict()
-    assert len(LlamaQModel.fusable_config.profiles) == 2
-    assert not LlamaQModel.fusable_config.overrides
+    assert plan.to_dict()["fusable"] == GateOnlyLlamaQModel.fusable.to_dict()
+    assert len(LlamaQModel.fusable.profiles) == 2
+    assert not LlamaQModel.fusable.overrides
 
 
 def test_overlapping_profiles_reject_before_installing_execution():
     default = LlamaFusableConfig()
 
     class ConflictingLlamaQModel(LlamaQModel):
-        fusable_config = replace(default, profiles=(*default.profiles, replace(default.profiles[0], name="other_qkv")))
+        fusable = replace(default, profiles=(*default.profiles, replace(default.profiles[0], name="other_qkv")))
 
     model, _ = _wrapper(definition=ConflictingLlamaQModel)
     parent = model.model.model.layers[0].self_attn
@@ -185,7 +185,7 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
         )
 
     class OptInQwen2QModel(Qwen2QModel):
-        fusable_config = QwenFusableConfig()
+        fusable = QwenFusableConfig()
 
     model = OptInQwen2QModel(actual, quantized=True, quantize_config=source.quantize_config)
     ids = torch.tensor([[1, 2, 3]])
@@ -199,4 +199,4 @@ def test_extended_llama_config_consumes_real_qwen2_tree_and_parents():
     model.fuse(False)
     with torch.no_grad():
         torch.testing.assert_close(model.model(ids).logits, before, rtol=0, atol=0)
-    assert require_fusable_config(OptInQwen2QModel, "qwen2") is OptInQwen2QModel.fusable_config
+    assert require_fusable_config(OptInQwen2QModel, "qwen2") is OptInQwen2QModel.fusable

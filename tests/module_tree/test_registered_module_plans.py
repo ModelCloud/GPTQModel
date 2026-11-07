@@ -42,7 +42,7 @@ def test_every_registered_model_has_an_explicit_plan_case():
 
 def test_every_registered_definition_has_explicit_fusion_admission():
     for model_type, definition in MODEL_MAP.items():
-        config = definition.fusable_config
+        config = definition.fusable
         assert config is None or isinstance(config, FusableConfig)
         if config is None or model_type not in config.model_types:
             with pytest.raises(ValueError):

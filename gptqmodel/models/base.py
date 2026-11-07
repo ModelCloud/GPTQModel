@@ -341,7 +341,7 @@ class BaseQModel(nn.Module):
     module_tree_overrides: dict[METHOD, List[str]] = None
 
     # No profile means this definition cannot opt into projection fusion.
-    fusable_config: Optional[FusableConfig] = None
+    fusable: Optional[FusableConfig] = None
 
     # `model_type`s whose `:in=<tag>` shared-input metadata was verified against a real (tiny, CPU)
     # forward in tests/module_tree/test_shared_input_cpu_forward.py. Not inherited: every concrete

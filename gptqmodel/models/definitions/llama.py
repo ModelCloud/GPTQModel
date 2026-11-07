@@ -8,7 +8,7 @@ from ..fusable import LlamaFusableConfig
 
 
 class LlamaQModel(BaseQModel):
-    fusable_config = LlamaFusableConfig()
+    fusable = LlamaFusableConfig()
     shared_input_verified_model_types = frozenset({"llama", "mistral", "gemma", "granite", "olmo2", "stablelm", "cohere", "cohere2"})
 
 

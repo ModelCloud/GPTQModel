@@ -33,7 +33,7 @@ model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
 groups; inspect its decisions for per-group skip reasons. The planner
 does not convert unsupported backends into a different kernel. A direct
 `fuse()` call on an unquantized wrapper raises. A definition without
-`fusable_config` is not fusable: enabling fusion raises `ValueError` rather than
+`fusable` is not fusable: enabling fusion raises `ValueError` rather than
 returning an empty plan. `fuse(False)` remains valid for every definition.
 
 ## Selection and execution
@@ -131,7 +131,7 @@ rotation are excluded.
 
 ## Definition-owned FusableConfig
 
-`BaseQModel.fusable_config` defaults to `None`. The definition must declare a
+`BaseQModel.fusable` defaults to `None`. The definition must declare a
 `FusableConfig` instance before the caller can enable fusion. Llama declares:
 
 ```python
@@ -139,7 +139,7 @@ from gptqmodel import LlamaFusableConfig
 from gptqmodel.models.base import BaseQModel
 
 class LlamaQModel(BaseQModel):
-    fusable_config = LlamaFusableConfig()
+    fusable = LlamaFusableConfig()
 ```
 
 ```mermaid
@@ -160,7 +160,7 @@ classDiagram
     class LlamaQModel
     FusableConfig <|-- LlamaFusableConfig
     FusableConfig "0..*" o-- "1..*" FusableProfile : profiles
-    LlamaQModel --> LlamaFusableConfig : fusable_config
+    LlamaQModel --> LlamaFusableConfig : fusable
 ```
 
 | Field | Meaning | Llama default |
@@ -173,7 +173,7 @@ These configuration objects are frozen. Constructor inputs are copied to
 immutable tuples/mappings; extensions cannot mutate the shared Llama defaults.
 Parent types may be actual classes or dotted type names resolved on explicit
 opt-in. They identify allowed executors; weight paths and roles still come only
-from `model.module_plan()`. `model.fusion_plan().to_dict()["fusable_config"]`
+from `model.module_plan()`. `model.fusion_plan().to_dict()["fusable"]`
 exposes the effective definition contract.
 
 Policy lookup prefers the exact full parent path, then the layer-relative
@@ -196,13 +196,13 @@ class GateOnlyFusableConfig(LlamaFusableConfig):
     profiles: tuple[FusableProfile, ...] = (LlamaFusableConfig().profiles[1],)
 
 class MyLlamaQModel(LlamaQModel):
-    fusable_config = GateOnlyFusableConfig(overrides={"model.layers.0.mlp": False})
+    fusable = GateOnlyFusableConfig(overrides={"model.layers.0.mlp": False})
 ```
 
 A different architecture must also declare its own `model_types` and compatible
 `parent_types`. Inheriting Llama's config does not admit a new HF model type or
 its parent classes automatically. An inherited definition can set
-`fusable_config = None` to reject fusion entirely. The real tiny Qwen2 test in
+`fusable = None` to reject fusion entirely. The real tiny Qwen2 test in
 `tests/module_tree/test_fusable_config.py` demonstrates an extended test-only
 config and verifies tree consumption, native parent selection, fused parity,
 and restoration. It does not enable Qwen2 fusion in `MODEL_MAP`.
