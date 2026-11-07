@@ -129,7 +129,6 @@ class K2HorizonQModel(BaseQModel):
     }
 
     pre_lm_head_norm_module = "model.norm"
-    moe_expert_module_name_prefixes = [".expert", ".v_experts."]
     moe_lifecycle_hooks = K2HorizonMoELifecycleHooks()
 
     module_tree = [

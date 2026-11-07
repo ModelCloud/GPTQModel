@@ -61,3 +61,54 @@ For tokenizer initialization, tokenization normalization, special-token compatib
 GPT-QModel depends on [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer). Put reusable corrective tokenizer and chat-template normalization in Tokenicer, add relevant tests, increment its version, run its complete test suite, then commit, push, and open a Tokenicer pull request. Do not leave model-loader patches in GPT-QModel merely to avoid fixing the dependency.
 
 Establish a non-quantized baseline before treating bad generation or evaluation scores as a quantization regression. Compare exact rendered prompts and input IDs as well as aggregate scores.
+
+## Logic-flow change documentation
+
+For any change that alters control flow, replaces a decision mechanism (for
+example name matching replaced by declared metadata), changes resolution or
+selection order, changes data or tensor lifecycle, or introduces a fail-closed
+contract, read and follow `$gptqmodel-logic-flow-diagrams` in
+`.agents/skills/gptqmodel-logic-flow-diagrams/SKILL.md` before opening the pull
+request.
+
+Such a change is not reviewable from the diff alone. The pull request
+description must contain, at minimum, a Mermaid diagram of the new flow drawn
+from the shipped code, a before/after view of the mechanism being removed with
+`file:line` evidence, and an explicitly marked failure/ambiguity path. The same
+diagrams must be committed as a reference page under `docs/`, titled for the
+mechanism rather than the pull request, and linked from `README.md` where the
+related feature is described.
+
+Diagrams must use real symbol names and measured numbers. Do not draw intended
+design, estimate test results, or include follow-up work as if implemented. Keep
+diagrams in sync with the code: a later change to the same flow updates the page
+in the same pull request.
+
+## Model-definition weight coverage
+
+For every new model type or alias in `MODEL_MAP`, and every change to a model
+definition or module-plan consumer, follow
+`.agents/skills/gptqmodel-model-plan-tests/SKILL.md`. New model support must add
+an explicit registry plan case and a model-specific module-plan unit test in
+the same PR. Cover its layout variants and method overrides. The registry
+contract runs without an opt-in flag and must not skip supported definitions.
+
+`module_tree` is the oracle for checkpoint-owned weights, including
+non-quantized weights. Use `state_dict()` (parameters and persistent buffers)
+for model architecture fixtures, not `named_modules()`, `named_parameters()`,
+or `named_buffers()` alone. For an actual checkpoint audit, verify ownership
+against checkpoint keys and declared conversion mappings: tensors created
+after loading must not become definition obligations solely because they
+appear in a runtime `state_dict()`.
+
+For every checkpoint-owned decoder-layer entry:
+
+- The deepest owning module must resolve through `ModulePlan.find()`.
+- A quantized owner must be declared by `simple_layer_modules()`.
+- A non-quantized owner must carry an explicit `:!` or `:?` tag.
+
+Add real-model regression coverage for new or changed definitions. The Flash
+family reference is
+`tests/module_tree/test_flash_model_tree_consumption.py`; it builds the actual
+meta model and checks quantizable paths, weight owners, roles, MoE hooks, and
+looper consumers.

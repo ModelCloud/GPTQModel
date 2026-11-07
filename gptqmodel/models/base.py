@@ -106,6 +106,7 @@ from ._const import (
     normalize_device,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .module_plan import ModulePlan
 from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
@@ -436,8 +437,6 @@ class BaseQModel(nn.Module):
     # `WeightRenaming` entries; legacy runtime->checkpoint dicts are still accepted.
     HF_CONVERSION_MAP_REVERSED: Optional[Any] = None
 
-    moe_expert_module_name_prefixes = [".expert"]
-
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
@@ -484,12 +483,16 @@ class BaseQModel(nn.Module):
 
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if effective_tree is None:
-            raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
+            raise ValueError(
+                f"Unsupported model_type {model.config.model_type}: no explicit module_tree is registered. "
+                "Add a model definition instead of relying on name-based auto-detection."
+            )
 
         # Keep the selected tree stable for the lifetime of this instance;
         # class definitions remain reusable by later instances.
         self.effective_module_tree = _freeze_module_tree(effective_tree)
         self.module_tree = self.effective_module_tree
+        self._module_plan = ModulePlan.from_tree(self.effective_module_tree)
 
 
         # record configuration early so model lifecycle hooks can rely on them
@@ -521,6 +524,11 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        hooks = getattr(self, "moe_lifecycle_hooks", None)
+        if hooks is not None:
+            hooks = copy.copy(hooks)
+            self.moe_lifecycle_hooks = hooks
+            hooks.module_plan = self.module_plan()
         if (getattr(quantize_config, "dynamic", None)
                 and hasattr(self.model, "named_modules")
                 and (not dynamic_cache_prepared or self.model is not model
@@ -596,17 +604,14 @@ class BaseQModel(nn.Module):
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         """Resolve a model tree before a loader needs to plan against it."""
         quant_method = getattr(quantize_config, "method", None) if quantize_config else None
-        effective_tree = copy.deepcopy(cls.module_tree)
+        effective_tree = copy.deepcopy(getattr(model, "gptqmodel_effective_module_tree", None))
+        if effective_tree is None:
+            effective_tree = copy.deepcopy(cls.module_tree)
         if quant_method is not None:
             override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
             if override is not None and effective_tree is not None:
                 log.info(f"Module Tree: overridden by METHOD.{quant_method.upper()}")
                 effective_tree = apply_module_tree_override(effective_tree, override)
-
-            if effective_tree is None:
-                if detector is None:
-                    detector = cls.__new__(cls)
-                effective_tree = detector._auto_detect_module_tree(model, quant_method)
 
         return copy.deepcopy(effective_tree)
 
@@ -646,6 +651,20 @@ class BaseQModel(nn.Module):
 
         invoke_with_effective_tree.__gptqmodel_tree_bound__ = True
         return invoke_with_effective_tree
+
+    def module_plan(self) -> ModulePlan:
+        """Return the immutable module plan compiled for this model instance."""
+
+        try:
+            plan = object.__getattribute__(self, "_module_plan")
+        except AttributeError:
+            plan = None
+        if not isinstance(plan, ModulePlan):
+            raise RuntimeError(
+                f"{type(self).__name__}: module plan is not compiled yet; "
+                "construct the quantized model before inspecting it"
+            )
+        return plan
 
     @classmethod
     def extract_layers_node(cls):
@@ -828,21 +847,30 @@ class BaseQModel(nn.Module):
         Returns:
             True if any parent in the path is marked with :moe flag
         """
-        moe_modules = cls.get_moe_modules()
+        if not isinstance(module_path, str) or not module_path:
+            return False
 
-        # Check if any MoE module is a prefix of this path
-        for moe_module in moe_modules:
-            # Handle layer index in path (e.g., "model.layers.0.mlp" should match "mlp")
-            if f".{moe_module}" in module_path or module_path.endswith(moe_module):
-                return True
-            # Also check for patterns like "mlp.experts.5" matching "mlp.experts"
-            path_parts = module_path.split(".")
-            for i in range(len(path_parts)):
-                partial_path = ".".join(path_parts[i:])
-                if partial_path.startswith(moe_module + ".") or partial_path == moe_module:
-                    return True
+        layers = cls.extract_layers_node()
+        relative = None
+        for layer_path in layers:
+            prefix = f"{layer_path}."
+            if module_path.startswith(prefix):
+                relative = module_path[len(prefix):]
+                break
+            container_name = layer_path.rsplit(".", 1)[-1]
+            shorthand = f"{container_name}."
+            if module_path.startswith(shorthand):
+                layer_index, separator, remainder = module_path[len(shorthand):].partition(".")
+                if separator and layer_index.isdigit():
+                    relative = remainder
+                    break
+        if relative is None:
+            return False
 
-        return False
+        first, separator, remainder = relative.partition(".")
+        if separator and first.isdigit():
+            relative = remainder
+        return ModulePlan.from_tree(_module_tree_for_class(cls)).is_moe(relative)
 
     @classmethod
     def get_moe_module_name(cls) -> Optional[List[str]]:
@@ -1131,8 +1159,7 @@ class BaseQModel(nn.Module):
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
-                    add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
-                    if add_capture_only_module and capture_only_modules:
+                    if capture_only_modules and any(EXPERT_INDEX_PLACEHOLDER in n for n in names):
                         # Extend all elements in capture_only_modules
                         moe_simple[-1].extend(capture_only_modules)
                 else:
@@ -1658,6 +1685,7 @@ class BaseQModel(nn.Module):
             }
             self.model = fuse_layer_norms(model=self.model,
                                             pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
+                                            plan=self.module_plan(),
                                             **module_name_args)
 
             # MPS does not support float64.
@@ -1669,7 +1697,9 @@ class BaseQModel(nn.Module):
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                            device=rotation_device, **module_name_args)
+                                            device=rotation_device, plan=self.module_plan(),
+                                            embedding_name=self.get_input_embeddings_name(),
+                                            **module_name_args)
 
         if self.quantize_config.rotation:
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
@@ -1753,7 +1783,12 @@ class BaseQModel(nn.Module):
         if timer is not None:
             timer.flush()
 
-        _setup_rotation_online_had(self.model, self.quantize_config.rotation)
+        _setup_rotation_online_had(
+            self.model,
+            self.quantize_config.rotation,
+            module_plan=self.module_plan(),
+            layer_prefixes=self.extract_layers_node(),
+        )
         if self.quantize_config.dynamic:
             log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
         return result
@@ -3769,7 +3804,8 @@ class BaseQModel(nn.Module):
         if not isinstance(module_name, str):
             return None
 
-        for moe_root in cls.get_moe_module_name() or []:
+        plan = ModulePlan.from_tree(_module_tree_for_class(cls))
+        for moe_root in (spec.template for spec in plan.moe_roots()) or cls.get_moe_module_name() or []:
             if module_name == moe_root:
                 return {
                     "mode": "token_rows",
@@ -3860,9 +3896,22 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            is_moe_block = any(any(k in name for k in self.moe_expert_module_name_prefixes) for name in block)
-            is_moe_down_block = is_moe_block and any("down" in name for name in block)
-            is_moe_gate_up_block = is_moe_block and any("gate" in name for name in block) and any("up" in name for name in block)
+            try:
+                plan = self.module_plan()
+            except RuntimeError:
+                plan = ModulePlan.from_tree(_module_tree_for_class(type(self)))
+            block_roles = {
+                name: plan.roles(strip_non_quantize_flags(name))
+                for name in block
+            }
+            is_moe_block = any(
+                plan.is_expert(strip_non_quantize_flags(name))
+                for name in block
+            )
+            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
+            is_moe_gate_up_block = is_moe_block and any(
+                "gate" in roles or "up" in roles for roles in block_roles.values()
+            )
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
@@ -3960,7 +4009,8 @@ class BaseQModel(nn.Module):
                 # as the effective boundary for the expert segment in this block.
                 gate_up_proj_indices = [
                     i for i, name in enumerate(block)
-                    if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
+                    if plan.is_expert(strip_non_quantize_flags(name))
+                    and ({"gate", "up"} & set(block_roles[name]))
                 ]
 
                 # Use the last one if any exist
@@ -3968,7 +4018,7 @@ class BaseQModel(nn.Module):
                 last_up_proj_index = gate_up_proj_indices[-1]
 
                 candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
-                assert "gate" in candidate_name or "up" in candidate_name
+                assert {"gate", "up"} & set(block_roles[block[last_up_proj_index]])
             else:
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)

@@ -180,9 +180,7 @@ class EXL3Processor(LoopProcessor):
     def _is_lm_head(self, module: NamedModule) -> bool:
         """Returns whether the named module corresponds to the model lm_head."""
 
-        if module.full_name == self.lm_head_name:
-            return True
-        return module.full_name.endswith(f".{self.lm_head_name}")
+        return module.full_name == self.lm_head_name or module.name == self.lm_head_name
 
     def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int:
         """Chooses lm_head-specific bitwidth overrides when configured."""

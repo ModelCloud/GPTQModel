@@ -321,11 +321,31 @@ def get_module_by_name(module, child_name):
 
 
 def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
+    """Resolve the first path that is exactly ``prefix`` or a dotted descendant.
+
+    A plain ``startswith`` test treats ``mlp_extra`` as ``mlp`` and can silently
+    select a sibling instead of the declared module. Prefer an exact path, then
+    reject ambiguous descendant matches instead of choosing among them.
+    """
     module_name_list = module_name if isinstance(module_name, list) else [module_name]
-    for name, module in model.named_modules():
-        for prefix in module_name_list:
-            if name.startswith(prefix):
-                return module, prefix
+    modules = dict(model.named_modules())
+    for prefix in module_name_list:
+        if isinstance(prefix, str) and prefix in modules:
+            return modules[prefix], prefix
+    for prefix in module_name_list:
+        if not isinstance(prefix, str) or not prefix:
+            continue
+        matches = [
+            (name, module)
+            for name, module in modules.items()
+            if name.startswith(f"{prefix}.")
+        ]
+        if len(matches) == 1:
+            return matches[0][1], prefix
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous module prefix {prefix!r}: matches {[name for name, _ in matches[:8]]}"
+            )
 
     return None, ""
 
@@ -439,9 +459,28 @@ def get_layer_name(layer_names: Union[List[str], str, None], layer_index: int) -
 
 
 def get_module_by_name_suffix(model, module_name: str):
-    for name, module in model.named_modules():
-        if name.endswith(module_name):
-            return module
+    """Resolve a path suffix at a dotted segment boundary.
+
+    Exact paths win. Multiple suffix matches are an error: returning the first
+    one makes device placement and quantization depend on module registration
+    order.
+    """
+    modules = dict(model.named_modules())
+    exact = modules.get(module_name)
+    if exact is not None:
+        return exact
+    matches = [
+        (name, module)
+        for name, module in modules.items()
+        if name.endswith(f".{module_name}")
+    ]
+    if len(matches) == 1:
+        return matches[0][1]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous module suffix {module_name!r}: matches {[name for name, _ in matches[:8]]}"
+        )
+    return None
 
 def get_module(module, key):
     """Get module from model by key name.

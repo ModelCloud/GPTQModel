@@ -29,6 +29,7 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
+from ..models.module_plan import _model_module_plan
 from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy, normalize_bypass_batch_size
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
@@ -327,14 +328,17 @@ def _collect_layer_candidate_names(
 
 def _collect_assignable_moe_group_keys(
     moe_groups: Dict[str, List[str]],
+    plan,
 ) -> List[str]:
     """Return expert families that should stay co-located on one device."""
 
     assignable_group_keys: List[str] = []
     for group_key, module_names in moe_groups.items():
-        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-        # Some MoE families route pairs like gate/up or w1/w3 together.
-        if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+        if plan is None:
+            assignable_group_keys.append(group_key)
+            continue
+        roles = {role for name in module_names for role in plan.roles(name)}
+        if {"gate", "up"}.issubset(roles):
             assignable_group_keys.append(group_key)
     return assignable_group_keys
 
@@ -489,7 +493,10 @@ def build_subset_plan(
                         forward_device_map[module_name] = target_device
 
         if moe_strategy_active and moe_groups and moe_devices:
-            assignable_group_keys = _collect_assignable_moe_group_keys(moe_groups)
+            assignable_group_keys = _collect_assignable_moe_group_keys(
+                moe_groups,
+                _model_module_plan(looper.gptq_model),
+            )
             if assignable_group_keys:
                 if looper._moe_vram_strategy == VramStrategy.BALANCED and len(moe_devices) > 1:
                     for group_index, group_key in enumerate(assignable_group_keys):

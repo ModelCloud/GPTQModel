@@ -10,7 +10,7 @@ This module provides a base class for model-specific MoE lifecycle hooks that al
 customization of MoE forward passes and routing logic during quantization.
 """
 
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,42 @@ from ..utils.model import move_to
 
 
 log = setup_logger()
+
+
+if TYPE_CHECKING:
+    from .module_plan import ModulePlan
+
+
+def _module_plan(model_class) -> Optional["ModulePlan"]:
+    """Return the exact tree plan for a live wrapper or definition class."""
+    if model_class is None:
+        return None
+    from .module_plan import ModulePlan
+
+    plan = getattr(model_class, "module_plan", None)
+    if isinstance(plan, ModulePlan):
+        return plan
+    if callable(plan) and not isinstance(model_class, type):
+        try:
+            resolved = plan()
+        except RuntimeError:
+            pass
+        else:
+            if isinstance(resolved, ModulePlan):
+                return resolved
+    module_tree = getattr(model_class, "module_tree", None)
+    if module_tree is None:
+        return None
+    return ModulePlan.from_tree(module_tree)
+
+
+def _bind_hooks_plan(hooks, model_class):
+    """Bind a definition's tree plan to its lifecycle hook object."""
+    if hooks is None or model_class is None:
+        return
+    plan = _module_plan(model_class)
+    if plan is not None:
+        hooks.module_plan = plan
 
 
 def _get_module_by_relative_path(parent: nn.Module, relative_path: str) -> Optional[nn.Module]:
@@ -70,11 +106,11 @@ class MoELifecycleHooks:
     Main use case: Forward whole calibration dataset to all experts instead of only routed ones.
     """
 
-    # List of possible expert block names that models can override
-    expert_block_names = ['experts']
-
-    # List of possible shared expert block names that models can override
-    shared_expert_block_names = ['shared_experts', 'shared_expert']
+    # Legacy overrides for definitions whose tree predates explicit MoE
+    # container paths. New definitions should tag ``experts``/``shared_*``
+    # leaves so the module plan can resolve them exactly.
+    expert_block_names = ()
+    shared_expert_block_names = ()
 
     def get_moe_block(self, layer_module: nn.Module, model_class: type) -> Optional[nn.Module]:
         """
@@ -99,7 +135,11 @@ class MoELifecycleHooks:
             return None
 
         # Get the module by name
-        moe_block = getattr(layer_module, moe_module_name[0], None)
+        moe_block = layer_module
+        for part in moe_module_name[0].split("."):
+            moe_block = getattr(moe_block, part, None)
+            if moe_block is None:
+                return None
 
         return moe_block
 
@@ -131,7 +171,15 @@ class MoELifecycleHooks:
         Example:
             Returns moe_block.experts if it exists
         """
-        # Use the helper to get the attribute name
+        plan = getattr(self, "module_plan", None) or _module_plan(model_class)
+        if plan is not None:
+            for root in plan.moe_roots():
+                container = plan.expert_container_leaf(root.template)
+                if container and hasattr(moe_block, container):
+                    return getattr(moe_block, container)
+            return None
+
+        # Legacy hooks without a tree plan may explicitly declare container names.
         name = self.get_experts_module_name(moe_block)
         if name:
             experts_module = getattr(moe_block, name)
@@ -154,7 +202,15 @@ class MoELifecycleHooks:
             if name:
                 experts = getattr(moe_block, name)
         """
-        # Try expert container attribute names from the class attribute
+        plan = getattr(self, "module_plan", None)
+        if plan is not None:
+            for root in plan.moe_roots():
+                container = plan.expert_container_leaf(root.template)
+                if container and hasattr(moe_block, container):
+                    return container
+            return None
+
+        # Legacy hooks without a tree plan may explicitly declare container names.
         for name in self.expert_block_names:
             if hasattr(moe_block, name):
                 return name
@@ -175,7 +231,15 @@ class MoELifecycleHooks:
             if name:
                 shared_experts = getattr(moe_block, name)
         """
-        # Try shared expert container attribute names from the class attribute
+        plan = getattr(self, "module_plan", None) or _module_plan(self)
+        if plan is not None:
+            for root in plan.moe_roots():
+                container = plan.shared_container_leaf(root.template)
+                if container and hasattr(moe_block, container):
+                    return container
+            return None
+
+        # Legacy hooks without a tree plan may explicitly declare container names.
         for name in self.shared_expert_block_names:
             if hasattr(moe_block, name):
                 return name
@@ -195,7 +259,15 @@ class MoELifecycleHooks:
         Example:
             Returns moe_block.shared_experts or moe_block.shared_expert if either exists
         """
-        # Use the helper to get the attribute name
+        plan = getattr(self, "module_plan", None) or _module_plan(model_class)
+        if plan is not None:
+            for root in plan.moe_roots():
+                container = plan.shared_container_leaf(root.template)
+                if container and hasattr(moe_block, container):
+                    return getattr(moe_block, container)
+            return None
+
+        # Legacy hooks without a tree plan may explicitly declare a name.
         name = self.get_shared_experts_module_name(moe_block)
         if name:
             shared_experts_module = getattr(moe_block, name)

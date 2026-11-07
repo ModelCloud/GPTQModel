@@ -13,6 +13,10 @@ from gptqmodel.quantization.config import METHOD
 from gptqmodel.utils.model import get_layers_with_prefixes
 
 
+def _layer_paths(model_cls):
+    return model_cls.extract_layers_node()
+
+
 class _BranchALayer(nn.Module):
     def __init__(self):
         super().__init__()
@@ -93,13 +97,10 @@ class _LegacyPipePrefixQModel(BaseQModel):
 
 
 class _AutoDetectedTreeQModel(BaseQModel):
-    """Tiny unknown-architecture definition used to verify instance isolation."""
+    """Tiny definition used to verify explicit per-instance tree isolation."""
 
     module_tree = None
     shared_input_verified_model_types = frozenset({"unknown"})
-
-    def _auto_detect_module_tree(self, model, quant_method):
-        return model.config.selected_tree
 
     def _configure_modelopt_runtime(self):
         pass
@@ -134,13 +135,14 @@ def _init_tree_qmodel(qmodel_cls, selected_tree, method=METHOD.GPTQ):
     model.model = nn.Module()
     model.model.layers = nn.ModuleList([nn.Module()])
     qcfg = SimpleNamespace(method=method, adapter=None)
+    model.gptqmodel_effective_module_tree = selected_tree
     return qmodel_cls(model, quantized=False, quantize_config=qcfg)
 
 
 def test_single_module_tree_expands_layer_path_base_modules_and_layer_modules():
     model = _VariantTreeModel()
 
-    assert _SingleTreeQModel.extract_layers_node() == ["model.A_module.layers"]
+    assert ["model.A_module.layers"] == _layer_paths(_SingleTreeQModel)
     assert _SingleTreeQModel.get_base_modules(model) == [
         "model.shared",
         "model.B_module",
@@ -164,7 +166,7 @@ def test_module_tree_variant_normalization_accepts_single_and_multiple_trees():
 def test_variant_module_tree_expands_layer_paths_and_base_modules():
     model = _VariantTreeModel()
 
-    assert _VariantTreeQModel.extract_layers_node() == [
+    assert _layer_paths(_VariantTreeQModel) == [
         "model.A_module.layers",
         "model.B_module.layers",
     ]
@@ -178,7 +180,7 @@ def test_variant_module_tree_expands_layer_paths_and_base_modules():
 def test_variant_module_tree_merges_branch_specific_layer_modules():
     model = _VariantTreeModel()
 
-    layers, layer_names = get_layers_with_prefixes(model, _VariantTreeQModel.extract_layers_node())
+    layers, layer_names = get_layers_with_prefixes(model, _layer_paths(_VariantTreeQModel))
 
     assert len(layers) == 2
     assert layer_names == [
@@ -194,7 +196,7 @@ def test_variant_module_tree_merges_branch_specific_layer_modules():
 
 
 def test_pipe_separated_module_tree_prefix_is_not_expanded():
-    assert _LegacyPipePrefixQModel.extract_layers_node() == [
+    assert _layer_paths(_LegacyPipePrefixQModel) == [
         "model.A_module|B_module.layers",
     ]
 
@@ -211,8 +213,8 @@ def test_effective_module_tree_is_instance_local_and_deeply_immutable(order):
     assert _AutoDetectedTreeQModel.module_tree is None
     expected_paths = {"a": "model.layers", "b": "other.blocks"}
     expected_modules = {"a": [["mlp.a"]], "b": [["mixer.proj.b"]]}
-    assert first.extract_layers_node() == [expected_paths[first_key]]
-    assert second.extract_layers_node() == [expected_paths[second_key]]
+    assert _layer_paths(first) == [expected_paths[first_key]]
+    assert _layer_paths(second) == [expected_paths[second_key]]
     assert first.simple_layer_modules(first.model.config, SimpleNamespace(dynamic=None)) == expected_modules[first_key]
     assert second.full_layer_modules(second.model.config) == expected_modules[second_key]
     assert first.effective_module_tree[0] == trees[first_key][0]
@@ -222,7 +224,7 @@ def test_effective_module_tree_is_instance_local_and_deeply_immutable(order):
         pass
     else:
         raise AssertionError("effective_module_tree must be deeply immutable")
-    assert first.extract_layers_node() == [expected_paths[first_key]]
+    assert _layer_paths(first) == [expected_paths[first_key]]
 
 
 def test_effective_frozen_tree_preserves_shared_input_tags():
@@ -260,15 +262,15 @@ def test_effective_tree_context_only_binds_its_model_class():
     tree_b = ["alternate", "layers", "#", {"mlp": ("up_proj:0",)}]
 
     with _AutoDetectedTreeQModel._module_tree_context(tree_a):
-        assert _AutoDetectedTreeQModel.extract_layers_node() == ["other.blocks"]
-        assert _SingleTreeQModel.extract_layers_node() == ["model.A_module.layers"]
+        assert ["other.blocks"] == _layer_paths(_AutoDetectedTreeQModel)
+        assert ["model.A_module.layers"] == _layer_paths(_SingleTreeQModel)
         with _AutoDetectedTreeQModel._module_tree_context(tree_b):
-            assert _AutoDetectedTreeQModel.extract_layers_node() == ["alternate.layers"]
-            assert _SingleTreeQModel.extract_layers_node() == ["model.A_module.layers"]
-        assert _AutoDetectedTreeQModel.extract_layers_node() == ["other.blocks"]
+            assert ["alternate.layers"] == _layer_paths(_AutoDetectedTreeQModel)
+            assert ["model.A_module.layers"] == _layer_paths(_SingleTreeQModel)
+        assert ["other.blocks"] == _layer_paths(_AutoDetectedTreeQModel)
 
 
-def test_fresh_quantized_load_planning_binds_auto_detected_tree():
+def test_fresh_quantized_load_planning_requires_an_explicit_tree():
     selected_tree = [
         "model",
         "layers",
@@ -281,11 +283,11 @@ def test_fresh_quantized_load_planning_binds_auto_detected_tree():
     model.model.layers = nn.ModuleList([_BranchALayer()])
     qcfg = SimpleNamespace(method=METHOD.GPTQ, dynamic=None, adapter=None)
 
+    assert _AutoDetectedTreeQModel._resolve_effective_module_tree(model, qcfg) is None
+    model.gptqmodel_effective_module_tree = selected_tree
     effective_tree = _AutoDetectedTreeQModel._resolve_effective_module_tree(model, qcfg)
-
-    assert _AutoDetectedTreeQModel.module_tree is None
     with _AutoDetectedTreeQModel._module_tree_context(effective_tree):
-        assert _AutoDetectedTreeQModel.extract_layers_node() == ["model.layers"]
+        assert ["model.layers"] == _layer_paths(_AutoDetectedTreeQModel)
         assert _AutoDetectedTreeQModel.simple_layer_modules(model.config, qcfg) == [
             ["self_attn.q_proj"],
             ["self_attn.o_proj"],
@@ -299,7 +301,7 @@ def test_fresh_quantized_load_planning_binds_auto_detected_tree():
         quantize_config=qcfg,
         effective_module_tree=effective_tree,
     )
-    assert instance.extract_layers_node() == ["model.layers"]
+    assert ["model.layers"] == _layer_paths(instance)
 
 
 def test_module_tree_method_override_is_copy_on_write_for_dense_moe_tree():

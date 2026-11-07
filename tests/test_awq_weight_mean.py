@@ -342,7 +342,7 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         (MixtralQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3MoeQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3NextGPTQ, "mlp", "mlp.shared_expert.down_proj"),
-        (MiniMaxM2GPTQ, "block_sparse_moe", "block_sparse_moe.experts.0.w1"),
+        (MiniMaxM2GPTQ, "mlp", "mlp.experts.0.gate_proj"),
     ]
 
     for model_cls, root_name, child_name in cases:

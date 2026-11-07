@@ -96,8 +96,9 @@ def prepare_affine_export(codes, scales, zeros, group_index, *, bits, packing, s
     return {'weight': weight, 'scales': scales, 'zeros': zeros, 'g_idx': groups, 'codes': codes}
 
 
-def pack_llama_affine_stages(fitted, records, *, group_size, scale_dtype=torch.float16):
-    """Pack all seven fitted affine projections through the CPU AWQ GEMM path.
+def pack_llama_affine_stages(fitted, records, *, group_size, scale_dtype=torch.float16,
+                             projections=None, attention_projections=None):
+    """Pack fitted affine projections through the CPU AWQ GEMM path.
 
     Caller owns transformed teacher capture, AWQ initialization and replay.
     The supplied fitted block and records are never modified.
@@ -107,10 +108,13 @@ def pack_llama_affine_stages(fitted, records, *, group_size, scale_dtype=torch.f
     from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 
     exported = copy.deepcopy(fitted).cpu()
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
+    names = tuple(projections or (
+        'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+        'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj',
+    ))
+    attention = tuple(attention_projections or names[:4])
     for name in names:
-        stage = name if name in records else ('attention' if name.startswith('self_attn.') else 'mlp')
+        stage = name if name in records else ('attention' if name in attention else 'mlp')
         key = 'weight' if stage == name else name+'.weight'
         record = records[stage]
         linear = exported.get_submodule(name)

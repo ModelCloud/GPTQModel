@@ -65,7 +65,7 @@ from ..utils.model import (
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
 
 
 log = setup_logger()
@@ -1319,9 +1319,27 @@ def ModelWriter(cls):
                 if qcfg.lm_head and name == self.lm_head:
                     continue
 
-                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config, qcfg) for ignore_module in sublist
-                ):
+                declared = {
+                    item.split(":", 1)[0]
+                    for sublist in self.simple_layer_modules(config, qcfg)
+                    for item in sublist
+                }
+                layer_prefix = next(
+                    (f"{prefix}." for prefix in self.extract_layers_node() if name.startswith(f"{prefix}.")),
+                    None,
+                )
+                relative = name[len(layer_prefix):] if layer_prefix is not None else None
+                if relative is not None:
+                    layer_index, separator, remainder = relative.partition(".")
+                    relative = remainder if separator and layer_index.isdigit() else relative
+                relative_match = relative is not None and any(
+                    relative == leaf or (relative.startswith(f"{leaf}.") and EXPERT_INDEX_PLACEHOLDER in leaf)
+                    for leaf in declared
+                )
+                if any(
+                        name == ignore_module or name.startswith(f"{ignore_module}.")
+                        for ignore_module in ignore_modules
+                ) or not relative_match:
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         log.info(f"The layer {name} is not quantized.")

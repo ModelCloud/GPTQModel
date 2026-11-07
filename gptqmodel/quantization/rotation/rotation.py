@@ -9,6 +9,7 @@ import typing
 import torch
 from transformers import PreTrainedModel
 
+from ...models.module_plan import ModulePlan
 from ...utils.logger import setup_logger
 from ...utils.model import get_module_by_name_prefix
 from ...utils.torch import torch_empty_cache
@@ -47,25 +48,74 @@ def reset_ln(ln):
     ln.weight.data = torch.ones_like(W_norm)
 
 
-def fuse_layer_norms(model: PreTrainedModel, pre_lm_head_norm_module_name: str, layers_node: str, lm_head_name: str):
+def _relative_roles(plan: ModulePlan, parent: str, role: str) -> list[str]:
+    return list(plan.child_roles(parent, role))
+
+
+def _resolve_role(layer, plan: ModulePlan, parent: str, role: str):
+    names = _relative_roles(plan, parent, role)
+    if len(names) != 1:
+        raise ValueError(f"Rotation requires exactly one `:{role}` projection under {parent or '<layer>'}, found {names}")
+    path = f"{parent}.{names[0]}" if parent else names[0]
+    try:
+        return layer.get_submodule(path)
+    except AttributeError as exc:
+        raise ValueError(f"Rotation declared `:{role}` module is missing: {path}") from exc
+
+
+def _default_rotation_plan() -> ModulePlan:
+    return ModulePlan.from_tree([
+        "model", "layers", "#",
+        {
+            "input_layernorm": ("input_layernorm:!:norm",),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1:o"),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+        },
+    ])
+
+
+def _rotation_parents(plan: ModulePlan):
+    attn_parents = {
+        spec.parent for spec in plan.specs
+        if "q" in spec.roles and spec.parent and "." not in spec.parent
+    }
+    mlp_parents = {
+        spec.parent for spec in plan.specs
+        if "gate" in spec.roles and spec.parent and "." not in spec.parent
+    }
+    if len(attn_parents) != 1 or len(mlp_parents) != 1:
+        raise ValueError("Rotation requires one declared attention parent and one MLP parent in module_tree")
+    return next(iter(attn_parents)), next(iter(mlp_parents))
+
+
+def fuse_layer_norms(model: PreTrainedModel, pre_lm_head_norm_module_name: str, layers_node: str, lm_head_name: str,
+                     plan: ModulePlan = None):
     layers , _ = get_module_by_name_prefix(model, layers_node)
+    plan = plan or _default_rotation_plan()
+    norm_roles = tuple(spec.name for spec in plan.specs if not spec.parent and "norm" in spec.flags)
+    if len(norm_roles) != 2:
+        raise ValueError(f"Rotation requires two declared layer norms, found {list(norm_roles)}")
+    input_norm, post_norm = norm_roles
+    attn_parent, mlp_parent = _rotation_parents(plan)
 
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
     for layer in layers:
         # fuse the input layernorms into the linear layers
         fuse_ln_linear(
-            layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj]
+            layer.get_submodule(post_norm),
+            [_resolve_role(layer, plan, mlp_parent, "up"), _resolve_role(layer, plan, mlp_parent, "gate")],
         )
         fuse_ln_linear(
-            layer.input_layernorm,
+            layer.get_submodule(input_norm),
             [
-                layer.self_attn.q_proj,
-                layer.self_attn.k_proj,
-                layer.self_attn.v_proj,
+                _resolve_role(layer, plan, attn_parent, "q"),
+                _resolve_role(layer, plan, attn_parent, "k"),
+                _resolve_role(layer, plan, attn_parent, "v"),
             ],
         )
-        reset_ln(layer.post_attention_layernorm)
-        reset_ln(layer.input_layernorm)
+        reset_ln(layer.get_submodule(post_norm))
+        reset_ln(layer.get_submodule(input_norm))
 
     pre_head_layernorm, _ = get_module_by_name_prefix(model, pre_lm_head_norm_module_name)
     lm_head, _ = get_module_by_name_prefix(model, lm_head_name)
@@ -104,29 +154,37 @@ def get_orthogonal_matrix(size, mode, device):
         raise ValueError(f"Unknown mode {mode}")
 
 
-def get_embeddings(model) -> list[torch.nn.Module]:
-    return [model.model.embed_tokens]
+def get_embeddings(model, embedding_name: str = None) -> list[torch.nn.Module]:
+    if embedding_name is not None:
+        return [model.get_submodule(embedding_name)]
+    getter = getattr(model, "get_input_embeddings", None)
+    return [getter()] if callable(getter) else [model.model.embed_tokens]
 
 
-def rotate_embeddings(model, Q, device) -> None:
+def rotate_embeddings(model, Q, device, embedding_name: str = None) -> None:
     # Rotate the embeddings.
-    for W in get_embeddings(model):
+    for W in get_embeddings(model, embedding_name=embedding_name):
         dtype = W.weight.data.dtype
         W_ = W.weight.data.to(device=device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 
-def rotate_attention_inputs(layer, Q, device) -> None:
+def rotate_attention_inputs(layer, Q, device, plan: ModulePlan = None, attn_parent: str = None) -> None:
     # Rotate the WQ, WK and WV matrices of the self-attention layer.
-    for W in [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]:
+    if plan is None or attn_parent is None:
+        raise ValueError("Rotation requires an explicit attention parent from module_tree")
+    inputs = [_resolve_role(layer, plan, attn_parent, role) for role in ("q", "k", "v")]
+    for W in inputs:
         dtype = W.weight.dtype
         W_ = W.weight.to(device=device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 
-def rotate_attention_output(layer, Q, device) -> None:
+def rotate_attention_output(layer, Q, device, plan: ModulePlan = None, attn_parent: str = None) -> None:
     # Rotate output matrix of the self-attention layer.
-    W = layer.self_attn.o_proj
+    if plan is None or attn_parent is None:
+        raise ValueError("Rotation requires an explicit attention parent from module_tree")
+    W = _resolve_role(layer, plan, attn_parent, "o")
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=device, dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
@@ -135,18 +193,22 @@ def rotate_attention_output(layer, Q, device) -> None:
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)
 
 
-def rotate_mlp_input(layer, Q, device):
+def rotate_mlp_input(layer, Q, device, plan: ModulePlan = None, mlp_parent: str = None):
     # Rotate the MLP input weights.
-    mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+    if plan is None or mlp_parent is None:
+        raise ValueError("Rotation requires an explicit MLP parent from module_tree")
+    mlp_inputs = [_resolve_role(layer, plan, mlp_parent, role) for role in ("up", "gate")]
     for W in mlp_inputs:
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device=device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 
-def rotate_mlp_output(layer, Q, device):
+def rotate_mlp_output(layer, Q, device, plan: ModulePlan = None, mlp_parent: str = None):
     # Rotate the MLP output weights and bias.
-    W = layer.mlp.down_proj
+    if plan is None or mlp_parent is None:
+        raise ValueError("Rotation requires an explicit MLP parent from module_tree")
+    W = _resolve_role(layer, plan, mlp_parent, "down")
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=device, dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
@@ -175,9 +237,11 @@ def rotate_head(model, Q, device, lm_head_name) -> None:
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 
-def rotate_ov_proj(layer, head_num, head_dim):
-    v_proj = layer.self_attn.v_proj
-    o_proj = layer.self_attn.o_proj
+def rotate_ov_proj(layer, head_num, head_dim, plan: ModulePlan = None, attn_parent: str = None):
+    if plan is None or attn_parent is None:
+        raise ValueError("Rotation requires an explicit attention parent from module_tree")
+    v_proj = _resolve_role(layer, plan, attn_parent, "v")
+    o_proj = _resolve_role(layer, plan, attn_parent, "o")
     apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
     # apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
     apply_exact_had_to_linear(o_proj, had_dim=head_dim, output=False)
@@ -185,7 +249,7 @@ def rotate_ov_proj(layer, head_num, head_dim):
 
 @torch.inference_mode()
 def rotate_model(model: PreTrainedModel, rotate_mode: str, device: torch.device, lm_head_name: str,
-                 layers_node: str, Q=None):
+                 layers_node: str, Q=None, plan: ModulePlan = None, embedding_name: str = None):
     Q = (
         get_orthogonal_matrix(
             model.config.hidden_size, rotate_mode, device
@@ -198,14 +262,16 @@ def rotate_model(model: PreTrainedModel, rotate_mode: str, device: torch.device,
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
 
-    rotate_embeddings(model, Q, device)
+    rotate_embeddings(model, Q, device, embedding_name=embedding_name)
     rotate_head(model, Q, device, lm_head_name)
     torch_empty_cache()
     layers , _ = get_module_by_name_prefix(model, layers_node)
+    plan = plan or _default_rotation_plan()
+    attn_parent, mlp_parent = _rotation_parents(plan)
     for idx, layer in enumerate(log.pb(layers).title("Rotating")):
-        rotate_attention_inputs(layer, Q, device)
-        rotate_attention_output(layer, Q, device)
-        rotate_mlp_input(layer, Q, device)
-        rotate_mlp_output(layer, Q, device)
-        rotate_ov_proj(layer, num_heads, head_dim)
+        rotate_attention_inputs(layer, Q, device, plan=plan, attn_parent=attn_parent)
+        rotate_attention_output(layer, Q, device, plan=plan, attn_parent=attn_parent)
+        rotate_mlp_input(layer, Q, device, plan=plan, mlp_parent=mlp_parent)
+        rotate_mlp_output(layer, Q, device, plan=plan, mlp_parent=mlp_parent)
+        rotate_ov_proj(layer, num_heads, head_dim, plan=plan, attn_parent=attn_parent)
     return model, Q

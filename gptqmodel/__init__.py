@@ -341,7 +341,7 @@ import torch
 from . import extension
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
-from .models import GPTQModel, get_best_device
+from .models import GPTQModel, ModulePlan, ModuleSpec, get_best_device
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQConfig,

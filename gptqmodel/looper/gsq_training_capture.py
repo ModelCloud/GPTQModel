@@ -274,7 +274,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
 
 def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack=True, device=None,
                                 initialization_cache=None, validation_cache=None, distributed=None,
-                                target_cache='none', activation_checkpointing=False):
+                                target_cache='none', activation_checkpointing=False,
+                                projections=None, attention_projections=None, mlp_projections=None):
     """Train/export a shared captured block even when its caller uses inference mode.
 
     The shared looper still owns installing the result and replaying it before
@@ -294,7 +295,10 @@ def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack
                                         gsq=gsq, pack=pack,
                                         initialization_batches=initialization_batches,
                                         validation_batches=validation_batches, distributed=distributed,
-                                        target_cache=target_cache, activation_checkpointing=activation_checkpointing)
+                                        target_cache=target_cache, activation_checkpointing=activation_checkpointing,
+                                        projections=projections,
+                                        attention_projections=attention_projections,
+                                        mlp_projections=mlp_projections)
 
 
 def capture_llama_gsq_inputs(

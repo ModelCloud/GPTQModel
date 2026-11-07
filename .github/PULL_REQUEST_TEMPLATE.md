@@ -20,6 +20,39 @@ Paste the exact test commands and results here:
 ```bash
 ```
 
+## Model Support / Module Plan
+
+Required for new model support, model-type aliases, and definition changes.
+See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
+
+- [ ] Every new `MODEL_MAP` entry has an explicit registry plan case.
+- [ ] A new model-specific module-plan unit test builds the real model class
+      and verifies declared paths, checkpoint weight ownership/tags, roles,
+      and applicable consumers, including layout variants and method overrides.
+- [ ] Runtime-created tensors are distinguished from checkpoint-owned weights.
+- [ ] Registry and model-specific tests passed; any dependency skips and their
+      precise coverage limits are listed below.
+
+Model test node IDs and results (or "not applicable"):
+
+## Logic Flow Documentation
+
+Required for changes that alter control flow, replace a decision mechanism
+(for example name matching replaced by declared metadata), change resolution or
+selection order, change data or tensor lifecycle, or introduce a fail-closed
+contract. See `$gptqmodel-logic-flow-diagrams` in
+`.agents/skills/gptqmodel-logic-flow-diagrams/SKILL.md`.
+
+- [ ] This change does not alter a major logic flow, or the required diagrams
+      and docs page are included below.
+- [ ] New-flow Mermaid diagram(s) describe the shipped code using real symbol names.
+- [ ] The removed/replaced mechanism is shown or tabulated with `file:line` evidence.
+- [ ] Failure and ambiguity paths are marked and visually distinct from success.
+- [ ] A reference page under `docs/` repeats the diagrams, titled for the
+      mechanism, and is linked from `README.md`.
+
+Diagram summary (or "not applicable" with one sentence of justification):
+
 ## Review Requirements
 
 AI-assisted code is welcome. The PR must still be reviewed before it is opened as ready for review.

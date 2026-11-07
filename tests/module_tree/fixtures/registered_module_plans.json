@@ -1,0 +1,2461 @@
+{
+  "models": {
+    "afmoe": "AfMoeQModel",
+    "agnes": "AgnesQModel",
+    "apertus": "ApertusQModel",
+    "apertus1p5": "Apertus1p5QModel",
+    "apertus1p5_text": "Apertus1p5TextQModel",
+    "axk2": "AXK2QModel",
+    "baichuan": "BaiChuanQModel",
+    "bailing_hybrid": "BailingMoeQModel",
+    "bailing_moe": "BailingMoeQModel",
+    "bloom": "BloomQModel",
+    "brumby": "BrumbyQModel",
+    "chatglm": "ChatGLMQModel",
+    "codegen": "CodeGenQModel",
+    "cohere": "LlamaQModel",
+    "cohere2": "LlamaQModel",
+    "cohere2_moe": "Cohere2MoeQModel",
+    "cohere_compass": "CohereCompassQModel",
+    "dbrx": "DbrxQModel",
+    "dbrx_converted": "DbrxConvertedQModel",
+    "deci": "DeciLMQModel",
+    "deepseek_ocr2": "DeepSeekOCR2QModel",
+    "deepseek_v2": "DeepSeekV2QModel",
+    "deepseek_v3": "DeepSeekV3QModel",
+    "deepseek_v32": "DeepSeekV32QModel",
+    "deepseek_v4": "DeepSeekV4QModel",
+    "deepseek_vl": "DeepSeekVLQModel",
+    "deepseek_vl_v2": "DeepSeekVLV2QModel",
+    "diffusion_gemma": "DiffusionGemmaQModel",
+    "dots1": "Dots1QModel",
+    "dream": "DreamQModel",
+    "ernie4_5": "Ernie4_5QModel",
+    "ernie4_5_moe": "Ernie4_5_MoeQModel",
+    "ernie4_5_moe_vl": "Ernie4_5_VLMoeQModel",
+    "ernie4_5_vl_moe": "Ernie4_5_VLMoeQModel",
+    "exaone": "ExaOneQModel",
+    "exaone4": "Exaone4QModel",
+    "exaone4_5": "Exaone4_5QModel",
+    "exaone4_5_text": "Exaone4QModel",
+    "falcon": "RwgQModel",
+    "falcon_h1": "FalconH1QModel",
+    "falcon_mamba": "FalconMambaQModel",
+    "flint": "FlintQModel",
+    "gemma": "LlamaQModel",
+    "gemma2": "Gemma2QModel",
+    "gemma3": "Gemma3ForConditionalGenerationGPTQ",
+    "gemma3_text": "Gemma3QModel",
+    "gemma3n": "Gemma3nForConditionalGenerationGPTQ",
+    "gemma3n_text": "Gemma3nTextQModel",
+    "gemma4": "Gemma4ForConditionalGenerationGPTQ",
+    "gemma4_text": "Gemma4TextQModel",
+    "gemma4_unified": "Gemma4UnifiedForConditionalGenerationGPTQ",
+    "gemma4_unified_text": "Gemma4UnifiedTextQModel",
+    "glm": "GlmQModel",
+    "glm4": "GlmQModel",
+    "glm4_moe": "GLM4MoEGPTQ",
+    "glm4_moe_lite": "Glm4MoeLiteQModel",
+    "glm4v": "Glm4vGPTQ",
+    "glm4v_moe": "Glm4vMoeQModel",
+    "glm4v_moe_text": "Glm4vMoeTextQModel",
+    "glm5_next": "Glm5NextQModel",
+    "glm_moe_dsa": "GlmMoeDsaQModel",
+    "glm_ocr": "GlmOCRGPTQ",
+    "glmasr": "GlmASRGPTQ",
+    "gpt2": "GPT2QModel",
+    "gpt_bigcode": "GptBigCodeQModel",
+    "gpt_neo": "GptNeoQModel",
+    "gpt_neox": "GPTNeoXQModel",
+    "gpt_oss": "GPTOSSGPTQ",
+    "gpt_pangu": "PanguAlphaQModel",
+    "gptj": "GptJQModel",
+    "granite": "LlamaQModel",
+    "granitemoe": "GraniteMoeQModel",
+    "granitemoehybrid": "GraniteMoeHybridQModel",
+    "grinmoe": "GrinMoeQModel",
+    "helium": "LlamaQModel",
+    "hrm_text": "HrmTextQModel",
+    "hunyuan_v1_dense": "HunYuanDenseV1QModel",
+    "hunyuan_v1_moe": "HunYuanMoEV1QModel",
+    "hunyuan_vl": "HunYuanVLQModel",
+    "hy_v3": "HYV3QModel",
+    "hymba": "HymbaQModel",
+    "inkling_mm_model": "InklingMMQModel",
+    "instella": "InstellaQModel",
+    "intern_s2_preview": "InternS2PreviewQModel",
+    "internlm": "InternLMQModel",
+    "internlm2": "InternLM2QModel",
+    "interns1": "InternS1QModel",
+    "internvl": "InternVLQModel",
+    "internvl_chat": "InternVLChatQModel",
+    "jamba": "JambaQModel",
+    "k2_horizon": "K2HorizonQModel",
+    "kimi_k2": "DeepSeekV3QModel",
+    "kimi_k25": "KimiK25QModel",
+    "klear": "KlearQModel",
+    "laguna": "LagunaQModel",
+    "lfm2": "LFM2QModel",
+    "lfm2_moe": "LFM2MoeQModel",
+    "lfm2_vl": "LFM2VLQModel",
+    "lfm3": "LFM3QModel",
+    "lfm3_omni": "LFM3OmniQModel",
+    "lfm3_vl": "LFM3VLQModel",
+    "llada2_moe": "LLaDA2MoeQModel",
+    "llama": "LlamaQModel",
+    "llama4": "Llama4QModel",
+    "llama4_text": "Llama4TextQModel",
+    "llava": "LlavaQModel",
+    "llava_qwen2": "LlavaQwen2QModel",
+    "locateanything": "LocateAnythingQModel",
+    "longcat_flash": "LongCatFlashQModel",
+    "longllama": "LlamaQModel",
+    "mage_vl": "MageVLQModel",
+    "marin": "Qwen3QModel",
+    "mimo": "MimoQModel",
+    "mimo_v2": "MimoV2QModel",
+    "minicpm": "MiniCPMGPTQ",
+    "minicpm3": "MiniCpm3QModel",
+    "minicpmo": "MiniCPMOQModel",
+    "minicpmv": "MiniCPMVQModel",
+    "minicpmv4_6": "MiniCPMV4_6QModel",
+    "minimax": "MiniMaxQModel",
+    "minimax_m2": "MiniMaxM2GPTQ",
+    "minimax_m3_vl": "MiniMaxM3VLGPTQ",
+    "ministral3": "Ministral3GPTQ",
+    "mistral": "LlamaQModel",
+    "mistral3": "Mistral3GPTQ",
+    "mixtral": "MixtralQModel",
+    "mllama": "MLlamaQModel",
+    "mllama_text_model": "MLlamaTextQModel",
+    "mobilellm": "MobileLLMQModel",
+    "moss": "MossQModel",
+    "mpt": "MptQModel",
+    "muse_glimmer": "MuseGlimmerQModel",
+    "nanbeige": "NanbeigeQModel",
+    "nemotron-nas": "DeciLMQModel",
+    "nemotron_h": "NemotronHQModel",
+    "nemotron_h_puzzle": "NemotronHPuzzleQModel",
+    "nemotron_labs_diffusion": "NemotronLabsDiffusionQModel",
+    "nemotronh_nano_omni_reasoning_v3": "NemotronOmniQModel",
+    "olmo": "LlamaQModel",
+    "olmo2": "LlamaQModel",
+    "olmo3": "Olmo3QModel",
+    "olmoe": "OlmoeQModel",
+    "openvla": "OpenVLAQModel",
+    "opt": "OptQModel",
+    "ouro": "OuroQModel",
+    "ovis": "OvisQModel",
+    "ovis2": "Ovis2QModel",
+    "ovis2_5": "Ovis2_5QModel",
+    "ovis2_6_moe": "Ovis2_6_MoeQModel",
+    "ovis2_6_next": "Ovis2_6_NextQModel",
+    "phi": "PhiQModel",
+    "phi3": "Phi3QModel",
+    "phi4mm": "Phi4MMGPTQ",
+    "phimoe": "PhiMoEGPTQForCausalLM",
+    "qwen": "QwenQModel",
+    "qwen2": "Qwen2QModel",
+    "qwen2_5_omni": "Qwen2_5_OmniGPTQ",
+    "qwen2_5_vl": "Qwen2_5_VLQModel",
+    "qwen2_5_vl_text": "Qwen2_5_VLQModel",
+    "qwen2_audio": "Qwen2AudioGPTQ",
+    "qwen2_moe": "Qwen2MoeQModel",
+    "qwen2_vl": "Qwen2VLQModel",
+    "qwen2_vl_text": "Qwen2VLQModel",
+    "qwen3": "Qwen3QModel",
+    "qwen3_5": "Qwen3_5QModel",
+    "qwen3_5_moe": "Qwen3_5_MoeQModel",
+    "qwen3_5_moe_text": "Qwen3_5_MoeTextQModel",
+    "qwen3_5_text": "Qwen3_5TextQModel",
+    "qwen3_moe": "Qwen3MoeQModel",
+    "qwen3_next": "Qwen3NextGPTQ",
+    "qwen3_omni_moe": "Qwen3OmniMoeGPTQ",
+    "qwen3_vl": "Qwen3_VLQModel",
+    "qwen3_vl_moe": "Qwen3_VL_MoeQModel",
+    "qwen4_exp": "Qwen4ExpQModel",
+    "qwen4_exp_text": "Qwen4ExpTextQModel",
+    "qwen_drive": "QwenDriveQModel",
+    "raon1_mini": "Raon1MiniQModel",
+    "refinedWeb": "RwgQModel",
+    "refinedWebModel": "RwgQModel",
+    "ricursive": "RicursiveQModel",
+    "seed_oss": "LlamaQModel",
+    "smollm3": "LlamaQModel",
+    "smolvlm": "SmolVLMQModel",
+    "solar_open": "SolarOpenQModel",
+    "solar_open2": "SolarOpen2QModel",
+    "spark2_5": "Spark2_5QModel",
+    "stablelm": "LlamaQModel",
+    "stablelm_epoch": "LlamaQModel",
+    "starcoder2": "Starcoder2QModel",
+    "telechat": "TeleChat2QModel",
+    "unlimited-ocr": "UnlimitedOCRQModel",
+    "voxtral": "VoxtralGPTQ",
+    "xing4_0": "Xing4_0QModel",
+    "xverse": "XverseQModel",
+    "yi": "LlamaQModel",
+    "zamba": "ZambaQModel",
+    "zamba2": "Zamba2QModel",
+    "zdtaichu5_0": "ZDTaichu5QModel"
+  },
+  "cases": {
+    "AfMoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.router.gate:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj", "mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.shared_experts.down_proj", "mlp.experts.{expert_index}.down_proj", "mlp.down_proj"]
+      ]
+    },
+    "AgnesQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["delta_attn.norm:!", "delta_attn.conv1d:!", "delta_attn.in_proj_qkv"],
+        ["delta_attn.in_proj_z", "delta_attn.in_proj_b:!", "delta_attn.in_proj_a:!"],
+        ["delta_attn.out_proj"],
+        ["global_attn.q_norm:!", "global_attn.q_proj", "global_attn.k_norm:!", "global_attn.k_proj", "global_attn.v_proj"],
+        ["global_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.parallel_ffn.gate_proj", "mlp.parallel_ffn.up_proj"],
+        ["mlp.parallel_ffn.down_proj"]
+      ]
+    },
+    "ApertusQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Apertus1p5QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["attention_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["feedforward_layernorm:!"],
+        ["mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Apertus1p5TextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "AXK2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_gate_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "BaiChuanQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.W_pack"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "BailingMoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.forget_gate.f_proj", "self_attn.b_proj"],
+        ["self_attn.o_proj", "self_attn.kv_b_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "BloomQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attention.query_key_value"],
+        ["self_attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.dense_h_to_4h"],
+        ["mlp.dense_4h_to_h"]
+      ]
+    },
+    "BrumbyQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj:!", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "ChatGLMQModel/gptq": {
+      "layers": ["transformer.encoder.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attention.query_key_value"],
+        ["self_attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.dense_h_to_4h"],
+        ["mlp.dense_4h_to_h"]
+      ]
+    },
+    "CodeGenQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["attn.qkv_proj"],
+        ["attn.out_proj"],
+        ["mlp.fc_in"],
+        ["mlp.fc_out"]
+      ]
+    },
+    "LlamaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Cohere2MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "CohereCompassQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "DbrxQModel/gptq": {
+      "layers": [],
+      "blocks": [
+      ]
+    },
+    "DbrxConvertedQModel/gptq": {
+      "layers": ["transformer.blocks"],
+      "blocks": [
+        ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],
+        ["norm_attn_norm.attn.out_proj"],
+        ["ffn.experts.mlp.{expert_index}.w1", "ffn.experts.mlp.{expert_index}.v1"],
+        ["ffn.experts.mlp.{expert_index}.w2"]
+      ]
+    },
+    "DeciLMQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "DeepSeekOCR2QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "DeepSeekV2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekV3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekV32QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.indexer.wk", "self_attn.indexer.weights_proj:!"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj", "self_attn.indexer.wq_b"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekV4QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["attn_hc:!"],
+        ["attn_hc.input_norm:!"],
+        ["input_layernorm:!"],
+        ["self_attn:!"],
+        ["self_attn.q_a_norm:!", "self_attn.q_a_proj", "self_attn.q_b_norm:!", "self_attn.q_b_proj", "self_attn.o_a_proj:!", "self_attn.kv_norm:!", "self_attn.compressor:!", "self_attn.compressor.kv_norm:!", "self_attn.compressor.kv_proj:!", "self_attn.compressor.gate_proj:!", "self_attn.compressor.indexer:!", "self_attn.compressor.indexer.kv_norm:!", "self_attn.compressor.indexer.kv_proj:!", "self_attn.compressor.indexer.q_b_proj:!", "self_attn.compressor.indexer.gate_proj:!", "self_attn.compressor.indexer.scorer.weights_proj:!"],
+        ["self_attn.o_b_proj"],
+        ["self_attn.kv_proj"],
+        ["ffn_hc:!"],
+        ["ffn_hc.input_norm:!"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!", "mlp.gate.tid2eid:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekVLQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "DeepSeekVLV2QModel/gptq": {
+      "layers": ["language.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DiffusionGemmaQModel/gptq": {
+      "layers": ["model.encoder.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm_1:!"],
+        ["pre_feedforward_layernorm_2:!"],
+        ["router.proj:!"],
+        ["experts.{expert_index}.gate_proj", "experts.{expert_index}.up_proj"],
+        ["experts.{expert_index}.down_proj"],
+        ["post_feedforward_layernorm_2:!"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "Dots1QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DreamQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Ernie4_5QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Ernie4_5_MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj"],
+        ["mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Ernie4_5_VLMoeQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj"],
+        ["mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.text_moe.gate:!"],
+        ["mlp.text_moe.experts.{expert_index}.gate_proj", "mlp.text_moe.experts.{expert_index}.up_proj"],
+        ["mlp.text_moe.experts.{expert_index}.down_proj"],
+        ["mlp.vision_moe.gate:!"],
+        ["mlp.vision_moe.experts.{expert_index}.gate_proj", "mlp.vision_moe.experts.{expert_index}.up_proj"],
+        ["mlp.vision_moe.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "ExaOneQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.attention.q_proj", "attn.attention.k_proj", "attn.attention.v_proj"],
+        ["attn.attention.out_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc_0", "mlp.c_fc_1"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "Exaone4QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "Exaone4_5QModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "RwgQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["self_attention.query_key_value"],
+        ["self_attention.dense"],
+        ["ln_2:!"],
+        ["mlp.dense_h_to_4h"],
+        ["mlp.dense_4h_to_h"]
+      ]
+    },
+    "FalconH1QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
+        ["feed_forward.down_proj"]
+      ]
+    },
+    "FalconMambaQModel/gptq": {
+      "layers": ["backbone.layers"],
+      "blocks": [
+        ["norm:!"],
+        ["mixer.in_proj", "mixer.x_proj"],
+        ["mixer.out_proj"]
+      ]
+    },
+    "FlintQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.softmax_offset:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
+        ["mlp.shared_expert.down_proj"]
+      ]
+    },
+    "Gemma2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Gemma3ForConditionalGenerationGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Gemma3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Gemma3nForConditionalGenerationGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"],
+        ["per_layer_input_gate"],
+        ["post_per_layer_input_norm:!"],
+        ["per_layer_projection"]
+      ]
+    },
+    "Gemma3nTextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"],
+        ["per_layer_input_gate"],
+        ["post_per_layer_input_norm:!"],
+        ["per_layer_projection"]
+      ]
+    },
+    "Gemma4ForConditionalGenerationGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"],
+        ["per_layer_input_gate"],
+        ["post_per_layer_input_norm:!"],
+        ["per_layer_projection"]
+      ]
+    },
+    "Gemma4TextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"],
+        ["per_layer_input_gate"],
+        ["post_per_layer_input_norm:!"],
+        ["per_layer_projection"]
+      ]
+    },
+    "Gemma4UnifiedForConditionalGenerationGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "Gemma4UnifiedTextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "GlmQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "GLM4MoEGPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Glm4MoeLiteQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj", "mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj", "mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Glm4vGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Glm4vMoeQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Glm4vMoeTextQModel/gptq": {
+      "layers": ["layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Glm5NextQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["attn_hc:!"],
+        ["attn_hc.input_norm:!"],
+        ["input_layernorm:!"],
+        ["self_attn.b_proj:!", "self_attn.conv1d:!", "self_attn.forget_gate:!", "self_attn.forget_gate.f_a_proj:!", "self_attn.forget_gate.f_b_proj:!", "self_attn.g_a_proj:!", "self_attn.g_b_proj:!", "self_attn.o_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_a_proj:!", "self_attn.q_a_layernorm:!", "self_attn.kv_a_proj_with_mqa:!", "self_attn.kv_a_layernorm:!", "self_attn.indexer:!", "self_attn.indexer.wq_b:!", "self_attn.indexer.wk:!", "self_attn.indexer.k_norm:!", "self_attn.indexer.weights_proj:!", "self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["ffn_hc:!"],
+        ["ffn_hc.input_norm:!"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj:!", "mlp.shared_experts.up_proj:!", "mlp.shared_experts.down_proj:!"]
+      ]
+    },
+    "GlmMoeDsaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.indexer.wk"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj", "self_attn.indexer.wq_b"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "GlmOCRGPTQ/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "GlmASRGPTQ/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "GPT2QModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.c_attn"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "GptBigCodeQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.c_attn"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "GptNeoQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.attention.q_proj", "attn.attention.k_proj", "attn.attention.v_proj"],
+        ["attn.attention.out_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "GPTNeoXQModel/gptq": {
+      "layers": ["gpt_neox.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["attention.query_key_value"],
+        ["attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.dense_h_to_4h"],
+        ["mlp.dense_4h_to_h"]
+      ]
+    },
+    "GPTOSSGPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "PanguAlphaQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.q_proj", "attn.k_proj", "attn.v_proj"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "GptJQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.q_proj", "attn.k_proj", "attn.v_proj"],
+        ["attn.out_proj"],
+        ["mlp.fc_in"],
+        ["mlp.fc_out"]
+      ]
+    },
+    "GraniteMoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["block_sparse_moe:?"],
+        ["block_sparse_moe.experts.{expert_index}.gate_proj", "block_sparse_moe.experts.{expert_index}.up_proj"],
+        ["block_sparse_moe.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "GraniteMoeHybridQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["block_sparse_moe:?"],
+        ["block_sparse_moe.experts.{expert_index}.gate_proj", "block_sparse_moe.experts.{expert_index}.up_proj"],
+        ["block_sparse_moe.experts.{expert_index}.down_proj"],
+        ["shared_mlp.input_linear"],
+        ["shared_mlp.output_linear"]
+      ]
+    },
+    "GrinMoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["block_sparse_moe.experts.{expert_index}.w1", "block_sparse_moe.experts.{expert_index}.w3"],
+        ["block_sparse_moe.experts.{expert_index}.w2"]
+      ]
+    },
+    "HrmTextQModel/gptq": {
+      "layers": ["model.L_module.layers", "model.H_module.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "HunYuanDenseV1QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.query_layernorm:!", "self_attn.q_proj", "self_attn.key_layernorm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "HunYuanMoEV1QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.query_layernorm:!", "self_attn.key_layernorm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.shared_mlp.gate_proj", "mlp.shared_mlp.up_proj"],
+        ["mlp.shared_mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "HunYuanVLQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.query_layernorm:!", "self_attn.q_proj", "self_attn.key_layernorm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "HYV3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "HymbaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["moe.experts.0.gate_proj", "moe.experts.0.up_proj"],
+        ["moe.experts.0.down_proj"]
+      ]
+    },
+    "InklingMMQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.r_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "InstellaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "InternS2PreviewQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "InternLMQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "InternLM2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["attention_norm:!"],
+        ["attention.wqkv", "attention.wo"],
+        ["ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "InternS1QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "InternVLQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "InternVLChatQModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "JambaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["pre_ff_layernorm:!"],
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
+        ["feed_forward.down_proj"]
+      ]
+    },
+    "K2HorizonQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!"],
+        ["self_attn.k_norm:!"],
+        ["self_attn.q_proj"],
+        ["self_attn.k_proj"],
+        ["self_attn.v_proj"],
+        ["self_attn.gate_proj"],
+        ["self_attn.v_router:!"],
+        ["self_attn.v_experts.{expert_index}"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "KimiK25QModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "KlearQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "LagunaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
+        ["mlp.shared_expert.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "LFM2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["conv.in_proj", "conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.out_proj"],
+        ["ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "LFM2MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["conv.in_proj", "conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["ffn_norm:!"],
+        ["feed_forward.gate:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"],
+        ["feed_forward.experts.{expert_index}.w1", "feed_forward.experts.{expert_index}.w3"],
+        ["feed_forward.experts.{expert_index}.w2"]
+      ]
+    },
+    "LFM2VLQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["conv.in_proj"],
+        ["conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.q_layernorm:!", "self_attn.k_proj", "self_attn.k_layernorm:!", "self_attn.v_proj"],
+        ["self_attn.out_proj"],
+        ["ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "LFM3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["post_operator_norm:!"],
+        ["conv.in_proj"],
+        ["conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["self_attn.o_proj"],
+        ["ffn_norm:!"],
+        ["post_ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "LFM3OmniQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["post_operator_norm:!"],
+        ["conv.in_proj"],
+        ["conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["self_attn.o_proj"],
+        ["ffn_norm:!"],
+        ["post_ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "LFM3VLQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["operator_norm:!"],
+        ["post_operator_norm:!"],
+        ["conv.in_proj"],
+        ["conv.out_proj"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["self_attn.o_proj"],
+        ["ffn_norm:!"],
+        ["post_ffn_norm:!"],
+        ["feed_forward.w1", "feed_forward.w3"],
+        ["feed_forward.w2"]
+      ]
+    },
+    "LLaDA2MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["attention.query_key_value", "attention.query_layernorm:!", "attention.key_layernorm:!"],
+        ["attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Llama4QModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["feed_forward.router:!"],
+        ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj", "feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj"],
+        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"]
+      ]
+    },
+    "Llama4TextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["feed_forward.router:!"],
+        ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj", "feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj"],
+        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"]
+      ]
+    },
+    "LlavaQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "LlavaQwen2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "LocateAnythingQModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "LongCatFlashQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.0.q_a_proj", "self_attn.0.q_b_proj", "self_attn.0.kv_a_proj_with_mqa", "self_attn.0.kv_b_proj"],
+        ["self_attn.0.o_proj"],
+        ["self_attn.1.q_a_proj", "self_attn.1.q_b_proj", "self_attn.1.kv_a_proj_with_mqa", "self_attn.1.kv_b_proj"],
+        ["self_attn.1.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlps.0.gate_proj", "mlps.0.up_proj"],
+        ["mlps.0.down_proj"],
+        ["mlps.1.gate_proj", "mlps.1.up_proj"],
+        ["mlps.1.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "MageVLQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MimoQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MimoV2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.qkv_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "MiniCPMGPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj"],
+        ["self_attn.k_proj"],
+        ["self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+      ]
+    },
+    "MiniCpm3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MiniCPMOQModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj"],
+        ["self_attn.k_proj"],
+        ["self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+      ]
+    },
+    "MiniCPMVQModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj"],
+        ["self_attn.k_proj"],
+        ["self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+      ]
+    },
+    "MiniCPMV4_6QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MiniMaxQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj"],
+        ["self_attn.o_proj", "self_attn.out_proj", "self_attn.output_gate"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "MiniMaxM2GPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "MiniMaxM3VLGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.indexer.q_proj", "self_attn.indexer.q_norm:!", "self_attn.indexer.k_proj", "self_attn.indexer.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
+        ["mlp.shared_experts.gate_up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Ministral3GPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Mistral3GPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MixtralQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "MLlamaQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MLlamaTextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MobileLLMQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "MossQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.qkv_proj"],
+        ["attn.out_proj"],
+        ["mlp.fc_in"],
+        ["mlp.fc_out"]
+      ]
+    },
+    "MptQModel/gptq": {
+      "layers": ["transformer.blocks"],
+      "blocks": [
+        ["attn.Wqkv"],
+        ["attn.out_proj"],
+        ["ffn.up_proj"],
+        ["ffn.down_proj"]
+      ]
+    },
+    "MuseGlimmerQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "NanbeigeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "NemotronHQModel/gptq": {
+      "layers": ["backbone.layers"],
+      "blocks": [
+        ["norm:!"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"],
+        ["mixer.o_proj"],
+        ["mixer.in_proj", "mixer.out_proj"],
+        ["mixer.gate_proj", "mixer.up_proj"],
+        ["mixer.down_proj"]
+      ]
+    },
+    "NemotronHPuzzleQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["norm:!"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.in_proj"],
+        ["mixer.o_proj", "mixer.out_proj"],
+        ["mixer.fc1_latent_proj"],
+        ["mixer.experts.{expert_index}.up_proj"],
+        ["mixer.experts.{expert_index}.down_proj"],
+        ["mixer.fc2_latent_proj"],
+        ["mixer.shared_experts.up_proj"],
+        ["mixer.shared_experts.down_proj"]
+      ]
+    },
+    "NemotronLabsDiffusionQModel/gptq": {
+      "layers": ["encoder.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "NemotronOmniQModel/gptq": {
+      "layers": ["language_model.backbone.layers"],
+      "blocks": [
+        ["norm:!"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"],
+        ["mixer.o_proj"],
+        ["mixer.in_proj", "mixer.out_proj"],
+        ["mixer.gate_proj", "mixer.up_proj"],
+        ["mixer.down_proj"]
+      ]
+    },
+    "Olmo3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "OlmoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "OpenVLAQModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "OptQModel/gptq": {
+      "layers": ["model.decoder.layers"],
+      "blocks": [
+        ["final_layer_norm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.out_proj"],
+        ["fc1"],
+        ["fc2"]
+      ]
+    },
+    "OuroQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["input_layernorm_2:!"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_attention_layernorm_2:!"]
+      ]
+    },
+    "OvisQModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Ovis2QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Ovis2_5QModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Ovis2_6_MoeQModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Ovis2_6_NextQModel/gptq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Ovis2_6_NextQModel/awq": {
+      "layers": ["llm.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "PhiQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj"],
+        ["self_attn.k_proj"],
+        ["self_attn.v_proj"],
+        ["self_attn.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.fc1"],
+        ["mlp.fc2"]
+      ]
+    },
+    "Phi3QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.qkv_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Phi4MMGPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.qkv_proj.base_layer"],
+        ["self_attn.o_proj.base_layer"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_up_proj.base_layer"],
+        ["mlp.down_proj.base_layer"]
+      ]
+    },
+    "PhiMoEGPTQForCausalLM/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.router:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "QwenQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.c_attn"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.w1", "mlp.w2"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "Qwen2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen2_5_OmniGPTQ/gptq": {
+      "layers": ["thinker.model.layers", "thinker.model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen2_5_VLQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen2AudioGPTQ/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen2MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen2VLQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen3_5QModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn:!"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen3_5_MoeQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3_5_MoeTextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3_5TextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen3MoeQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3NextGPTQ/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3NextGPTQ/awq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate"],
+        ["mlp.shared_expert_gate:!"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.shared_expert.down_proj", "mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3OmniMoeGPTQ/gptq": {
+      "layers": ["thinker.model.layers", "thinker.model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen3_VLQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Qwen3_VL_MoeQModel/gptq": {
+      "layers": ["model.language_model.layers", "language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Qwen4ExpQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["self_attn.indexer.index_qk_proj:!", "self_attn.indexer.q_layernorm:!", "self_attn.indexer.k_layernorm:!", "self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.conv1d:!", "linear_attn.in_proj_qkv", "linear_attn.norm:!"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
+        ["mlp.shared_expert.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_expert_gate:!"]
+      ]
+    },
+    "Qwen4ExpTextQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.indexer.index_qk_proj:!", "self_attn.indexer.q_layernorm:!", "self_attn.indexer.k_layernorm:!", "self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.conv1d:!", "linear_attn.in_proj_qkv", "linear_attn.norm:!"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
+        ["mlp.shared_expert.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_expert_gate:!"]
+      ]
+    },
+    "QwenDriveQModel/gptq": {
+      "layers": ["vlm.model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Raon1MiniQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.f_a_proj", "self_attn.b_proj", "self_attn.rda_w_proj", "self_attn.g_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.f_b_proj", "self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["moe.gate:!", "moe.gate.e_score_correction_bias:!"],
+        ["moe.experts.{expert_index}.gate_proj", "moe.experts.{expert_index}.up_proj"],
+        ["moe.experts.{expert_index}.down_proj"],
+        ["moe.shared_experts.gate_proj", "moe.shared_experts.up_proj"],
+        ["moe.shared_experts.down_proj"]
+      ]
+    },
+    "RicursiveQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn:!"],
+        ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "SmolVLMQModel/gptq": {
+      "layers": ["model.text_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "SolarOpenQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "SolarOpen2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.g_proj", "self_attn.o_norm:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj", "mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.down_proj", "mlp.shared_experts.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "Spark2_5QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_k_v_proj", "self_attn.g_proj:!"],
+        ["self_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Starcoder2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
+      ]
+    },
+    "TeleChat2QModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "UnlimitedOCRQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
+      ]
+    },
+    "VoxtralGPTQ/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Xing4_0QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["attn_hc:!"],
+        ["attn_hc.input_norm:!", "attn_hc.hc_fn:!", "attn_hc.hc_base:!", "attn_hc.hc_scale:!"],
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.q_a_layernorm:!", "self_attn.kv_a_layernorm:!"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["ffn_hc:!"],
+        ["ffn_hc.input_norm:!", "ffn_hc.hc_fn:!", "ffn_hc.hc_base:!", "ffn_hc.hc_scale:!"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "XverseQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "ZambaQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["linear"],
+        ["mamba_decoder.input_layernorm:!"],
+        ["mamba_decoder.mamba.in_proj"],
+        ["mamba_decoder.mamba.out_proj"]
+      ]
+    },
+    "Zamba2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["mamba.in_proj"],
+        ["mamba.out_proj"],
+        ["linear"],
+        ["mamba_decoder.input_layernorm:!"],
+        ["mamba_decoder.mamba.in_proj"],
+        ["mamba_decoder.mamba.out_proj"]
+      ]
+    },
+    "ZDTaichu5QModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    }
+  }
+}

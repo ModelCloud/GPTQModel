@@ -102,7 +102,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ._const import DEVICE, HAS_NPU, normalize_device
+from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
 log = setup_logger()
@@ -649,7 +649,7 @@ def _set_paged_attention_safe_cuda_graphs(model) -> None:
         cb_config.use_cuda_graph = (False, False)
 
 
-def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
+def _setup_rotation_online_had(model, rotation: Optional[str], module_plan=None, layer_prefixes=None) -> None:
     """Attach online Hadamard transform state to QuantLinear modules for rotation inference.
 
     Rotation (QuaRot/SpinQuant/Hadamard) fuses an orthogonal ``Q`` and an exact
@@ -673,7 +673,21 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
         if not isinstance(module, BaseQuantLinear):
             continue
 
-        if name.endswith("mlp.down_proj"):
+        relative = None
+        if module_plan is not None:
+            for prefix in layer_prefixes or ():
+                if name.startswith(f"{prefix}."):
+                    relative = name[len(prefix) + 1:]
+                    break
+            if relative is not None:
+                _, separator, remainder = relative.partition(".")
+                relative = remainder if separator and _.isdigit() else relative
+        is_down_projection = (
+            relative is not None and "down" in module_plan.roles(relative)
+            if module_plan is not None
+            else name.endswith("mlp.down_proj")
+        )
+        if is_down_projection:
             intermediate_size = module.in_features
             had_K, K = get_hadK(intermediate_size)
             module.online_full_had = True
@@ -1879,8 +1893,9 @@ def ModelLoader(cls):
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
-                    f"Unsupport model_type {config.model_type}, and failed to auto-detect module tree for model {model}"
+                    f"Unsupported model_type {config.model_type}: no explicit module_tree is registered."
                 )
+            model.gptqmodel_effective_module_tree = copy.deepcopy(effective_module_tree)
 
             with cls._module_tree_context(effective_module_tree):
                 extract_layers_node = cls.extract_layers_node()
@@ -1923,9 +1938,31 @@ def ModelLoader(cls):
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if not any(name.startswith(prefix) for prefix in extract_layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in simple_layer_modules for ignore_module in sublist
-                ):
+                layer_prefix = next(
+                    (f"{prefix}." for prefix in extract_layers_node if name.startswith(f"{prefix}.")),
+                    None,
+                )
+                relative = name[len(layer_prefix):] if layer_prefix is not None else None
+                if relative is not None:
+                    layer_index, separator, remainder = relative.partition(".")
+                    relative = remainder if separator and layer_index.isdigit() else relative
+                declared = {
+                    item.split(":", 1)[0]
+                    for sublist in simple_layer_modules
+                    for item in sublist
+                }
+                relative_match = (
+                    relative is not None
+                    and any(
+                        relative == leaf
+                        or (relative.startswith(f"{leaf}.") and EXPERT_INDEX_PLACEHOLDER in leaf)
+                        for leaf in declared
+                    )
+                )
+                if layer_prefix is None or any(
+                        name == ignore_module or name.startswith(f"{ignore_module}.")
+                        for ignore_module in ignore_modules
+                ) or not relative_match:
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2387,7 +2424,12 @@ def ModelLoader(cls):
         )
         if backend == BACKEND.MLX:
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
-        _setup_rotation_online_had(instance.model, qcfg.rotation)
+        _setup_rotation_online_had(
+            instance.model,
+            qcfg.rotation,
+            module_plan=instance.module_plan(),
+            layer_prefixes=instance.extract_layers_node(),
+        )
         _set_paged_attention_safe_cuda_graphs(instance.model)
         if qcfg.dynamic:
             log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)

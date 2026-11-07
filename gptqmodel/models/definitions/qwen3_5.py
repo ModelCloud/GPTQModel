@@ -37,7 +37,7 @@ class Qwen3_5QModel(LlamaQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_norm:!", "q_proj:0:in=x", "k_norm:!", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
-            "linear_attn": (
+            "linear_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",
