@@ -712,7 +712,7 @@ class GPTQModel:
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
-            fuse: bool = True,
+            fuse: bool = False,
             **kwargs,
     ):
         if type(fuse) is not bool:

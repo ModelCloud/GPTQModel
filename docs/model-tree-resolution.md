@@ -13,8 +13,9 @@ The [DeepSeek V4.1 Flash inventory](deepseek-v41-module-inventory.md) distinguis
 verified checkpoint structure from remaining integration work.
 
 The [post-quantization fusion planner](fusion-planner.md) consumes this same
-compiled plan to select compatible Llama QKV and gate/up groups, with optional
-automatic execution, model-specific overrides, and unchanged checkpoint owners.
+compiled plan to select compatible Llama QKV and gate/up groups. Fusion is
+disabled by default, supports model-specific overrides, and preserves checkpoint
+owners as views into a single fused packed allocation.
 
 ## Why it is shaped this way
 

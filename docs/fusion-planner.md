@@ -5,8 +5,7 @@ Q/K/V or gate/up projections for inference. Initial architecture coverage is
 Llama, including Llama 3.2 1B. MoE fusion is outside this first implementation.
 Introduced in [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567).
 
-Fusion runs automatically after loading a quantized checkpoint or completing
-quantization. It is optional:
+Fusion is disabled by default for loading and quantization. Enable it explicitly:
 
 ```python
 from gptqmodel import GPTQModel
@@ -14,6 +13,7 @@ from gptqmodel.utils.backend import BACKEND
 
 # AUTO selects Marlin for the symmetric INT4/group-128/no-act-order case.
 model = GPTQModel.load("/path/to/quantized-llama", backend=BACKEND.AUTO)
+model.fuse()                               # Explicit post-load opt-in
 model.fusion_plan().print()
 decisions = model.fusion_plan().to_dict()
 
@@ -22,9 +22,9 @@ model.fuse()                               # Rebuild and apply compatible groups
 model.fuse(overrides={"qkv": False})        # Fuse only gate/up
 model.fuse(overrides={"model.layers.0.mlp": False})
 
-# Disable automatic fusion at loading or for a quantization operation.
-model = GPTQModel.load("/path/to/quantized-llama", fuse=False)
-# source_model.quantize(calibration, fuse=False)
+# Optional opt-in at loading or quantization finalization.
+model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
+# source_model.quantize(calibration, fuse=True)
 ```
 
 `model.fuse()` returns the wrapper. `model.fusion_plan()` returns the applied
@@ -37,7 +37,7 @@ does not convert unsupported backends into a different kernel. A direct
 
 ```mermaid
 flowchart TD
-    DONE["Quantized checkpoint loaded<br/>or quantize finished"] --> AUTO{"Automatic fusion enabled?"}
+    DONE["Quantized checkpoint loaded<br/>or quantize finished"] --> AUTO{"Explicit fusion opt-in?"}
     AUTO -->|"no"| OLD["Original projection forwards"]
     AUTO -->|"yes"| PLAN["FusionPlanner reads model.module_plan()"]
     PLAN --> ROLES["Group exact sibling roles<br/>q+k+v or gate+up"]
@@ -48,7 +48,7 @@ flowchart TD
     CONFIG -->|"yes"| TEMPLATE{"_parent_template validates native forward?"}
     TEMPLATE -->|"no"| SKIP
     TEMPLATE -->|"yes"| INSTALL["_FusionGroup.install<br/>compile direct parent forward"]
-    INSTALL --> PREPARE["_refresh before serving tokens<br/>packed operands, bound executor, widths, guard"]
+    INSTALL --> PREPARE["_refresh before serving tokens<br/>one packed allocation, source views, executor and guard"]
     PREPARE --> CALL["Parent invocation calls execute once"]
     CALL --> RUNTIME{"Inference, input and hooks allow fusion?"}
     RUNTIME -->|"no"| OLD
@@ -63,33 +63,18 @@ flowchart TD
     style GEMM fill:#d9f7be,stroke:#237804
 ```
 
-The original path called each projection's kernel independently. The planner
+Separate execution calls each projection's kernel independently. The planner
 changes the execution of declared projection calls while preserving the
 registered module tree. `BaseQModel.fuse()` installs/removes execution and
 `BaseQModel.quantize()` invokes it after finalization. Loader opt-out is consumed
 by GPT-QModel before calling Transformers.
 
-| Before | With an eligible fusion group |
+| Separate execution | With an eligible fusion group |
 | --- | --- |
 | Q, K, V execute three quantized linear calls | One wider quantized linear call, split in declared role order. GQA output widths may differ. |
 | Gate and up execute two quantized linear calls | One wider call; the existing parent still applies its activation and multiplication. |
-| Each leaf is a checkpoint owner | The same leaves and checkpoint keys remain registered. |
-| No derived group operand | An additional packed operand may be retained for the group. |
-
-The first fusion implementation wrapped each leaf and used a `ContextVar` to
-share outputs inside the parent. It rebuilt a full `_key()` fingerprint on
-every group invocation. The corrected dispatch compiles a direct parent
-forward and prepares its execution descriptor before serving tokens:
-
-Historical line references below are from
-[`gptqmodel/models/fusion.py` at `38145795`](https://github.com/ModelCloud/GPTQModel/blob/38145795234801cc341814d6e8ade05c513d8a8f/gptqmodel/models/fusion.py).
-
-| Mechanism | First implementation at `38145795` | Current implementation |
-| --- | --- | --- |
-| Operand validation | `fusion.py:155` built nested fingerprints; `fusion.py:243` called it for each parent invocation | `_refresh()` performs full validation and creates a compiled mutation guard; the warm path only checks the guard |
-| Projection dispatch | `fusion.py:235` installed a wrapper on every projection; `fusion.py:257` replaced its forward | `_parent_template()` replaces exactly the declared calls in the installed native parent source; source projection forwards stay intact |
-| Activation lifetime | `fusion.py:218` / `fusion.py:222` set/reset a `ContextVar` | Split outputs are ordinary forward locals, released on return or exception |
-| Preparation | `fusion.py:248` constructed the combined operand on the first projection call | `install()` calls `_refresh()` before serving tokens; subsequent changes rebuild on the cold path |
+| Each leaf owns its packed tensors | The same checkpoint leaves reference disjoint views of the combined packed tensors. |
+| Independent packed allocations | One combined allocation replaces the separate allocations; each group adds only reduction workspace. |
 
 The compiler reads the installed `LlamaAttention.forward` or `LlamaMLP.forward`
 source. Each declared projection must occur exactly once and take the same
@@ -126,7 +111,7 @@ packing permutations are local to those tiles, so whole-tile concatenation
 preserves the existing native layout. The finalized shell is copied without
 calling `post_init()` a second time, and owns a separate **zero-initialized**
 reduction workspace. Quantization metadata, kernel reduction settings, devices,
-dtypes, and bias policies must match. Original registered operands stay intact.
+dtypes, and bias policies must match. Original checkpoint leaves retain their tensor values through shared storage views.
 
 Portable `TorchLinear` / `AwqTorchLinear` executors also remain available for
 int32-packed 2/4/8-bit weights. They require equal GPTQ group indices and
@@ -164,8 +149,8 @@ parent flow is enabled; arbitrary custom forwards require new evidence.
 ```mermaid
 flowchart LR
     SOURCE["Original checkpoint-owned projections"] --> REFRESH["_refresh validates configuration and live tensors"]
-    REFRESH --> BUILD["Packed concatenation and separate Marlin workspace"]
-    BUILD --> DESCRIPTOR["Cached bound executor, widths, dtype/device, mutation guard"]
+    REFRESH --> BUILD["Packed concatenation and separate Marlin workspace"] --> VIEWS["_share_operands rebinds source weights to disjoint views<br/>release separate allocations"]
+    VIEWS --> DESCRIPTOR["Cached bound executor, widths, dtype/device, mutation guard"]
     DESCRIPTOR --> VALID{"execute: guard valid?"}
     VALID -->|"yes"| USE["One existing native kernel call"]
     VALID -->|"no"| REFRESH
@@ -174,19 +159,36 @@ flowchart LR
     OUT --> RELEASE["Return or exception releases activations"]
     MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: release operands and descriptor"]
     INVALID --> REFRESH
+    DIRECT["Direct projection API or fallback parent"] --> LEAF["Original source kernel<br/>temporary contiguous packed copies when needed"]
+    OFF["fuse(False)"] --> RESTORE["Clone source views to independent contiguous tensors<br/>release fused executor and workspace"]
     style FALLBACK fill:#fff1f0,stroke:#cf1322
 ```
 
-The retained group cache contains packed quantized weights and their associated
-metadata. It adds packed storage on top of the original checkpoint-owned
-weights; it does not replace or remove those owners. No dense or expanded weight
-is retained. Native Marlin dequantizes in its kernel tiles. The optional portable
-Torch executor can temporarily dequantize a wider matrix; account for that peak
-when using the Torch backend.
+Each compatible group owns one concatenated packed allocation. `_share_operands()`
+rebinds the original projections' weights, scales, zero points, and optional bias
+to disjoint views into that allocation. Their checkpoint names, shapes, and
+values remain intact; their former separate allocations are released. The wider
+native kernel consumes the contiguous fused tensors directly, so source views
+add no projection work to the normal fused token path.
 
-The compiled guard checks direct dictionary bindings and tensor versions,
+Direct source calls and fallback parents still work. Marlin creates temporary
+contiguous **packed** copies of strided source operands for that call and releases
+them afterward. The portable AWQ executor preserves strided scale views when
+its dtype/device already match. No dense or expanded weight is retained. Native
+Marlin uses tile scratch; the optional portable Torch executor temporarily
+dequantizes inside the consuming computation.
+
+The checkpoint writer distinguishes identical aliases from distinct offset,
+shape, stride, or dtype views. It saves every distinct checkpoint-owned weight
+under its original key, even when multiple keys share one allocation. Streaming
+serialization handles each view independently; the fused runtime allocation is
+not an additional checkpoint tensor.
+
+The compiled guard checks direct dictionary bindings and shared tensor versions,
 storage pointers, shapes, dtypes, devices, and gradient policy. It also checks
 source module identity, frozen kernel settings, hooks, and forward overrides.
+One version-counter check per packed operand covers writes through any sibling
+view; binding, storage, dtype, shape, device, and gradient checks remain per leaf.
 There are no full compatibility scans, tensor-key tuple construction, or
 projection wrappers on the unchanged token path. A failed guard invokes
 `_refresh()`, which revalidates the live owners and either rebuilds the packed
@@ -205,16 +207,17 @@ This is the existing explicit-clear contract used by runtime weight caches.
 
 Split activations are forward locals, with no persistent activation references
 in the planner or a context object. `fuse(False)` deactivates the executor,
-restores the parent and cache-clear methods when they are still ours, and
-releases packed fusion operands/descriptors. A third-party wrapper retaining an
+restores the parent and cache-clear methods when they are still ours, clones
+source views back to independent contiguous tensors, and releases the fused
+operands, workspace, and descriptors. A third-party wrapper retaining an
 old parent method cannot reactivate the removed executor. Reapplying fusion
 builds fresh decisions.
 
 ## Checkpoint and test contract
 
-Fusion preserves registered state-dict keys and tensor values. Saving uses the
-ordinary separate projection tensors; loading rebuilds the ordinary modules and
-then applies the optional planner. The fusion cache, native workspace, and
+Fusion preserves registered state-dict keys and tensor values. Saving serializes
+each projection view under its checkpoint key; loading rebuilds the ordinary modules and
+then applies the planner only when explicitly requested. The fusion cache, native workspace, and
 compiled descriptor are runtime state, not new model-definition weight obligations.
 
 - `tests/module_tree/test_llama_fusion.py` builds a real tiny GQA Llama shell,
@@ -223,9 +226,9 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   invalidation, activation cleanup, gradient/training/hook/compiler fallbacks,
   and the absence of full compatibility work on the steady-state path.
 - `tests/models/test_llama3_2_fusion.py` exercises local Llama 3.2 1B GPTQ/AWQ
-  checkpoints, logits, greedy tokens, opt-out, automatic fusion after reload,
-  and actual checkpoint save/reload. It reports timing and additional packed
-  bytes. Checkpoint paths can be supplied through
+  checkpoints, logits, greedy tokens, opt-in after reload,
+  and actual checkpoint save/reload. It asserts zero additional packed-weight
+  storage and reports retained tensor/workspace bytes. Checkpoint paths can be supplied through
   `GPTQMODEL_LLAMA32_FUSION_GPTQ` and `GPTQMODEL_LLAMA32_FUSION_AWQ`.
 
 The planner is a correctness-gated execution option, not a guarantee of speedup
@@ -237,26 +240,26 @@ compiled fused execution need dedicated implementation and validation.
 
 **Symmetric INT4, group size 128, `desc_act=False`, AUTO selects Marlin in both
 modes.** RTX 4090, Torch 2.15.0+cu132, FP16, batch 1, eager attention,
-`TORCHDYNAMO_DISABLE=1`. Three warmups and fifteen measured repeats per mode;
-median synchronized wall-clock time, with raw samples retained. Modes are
-measured off then on for each model, each separately warmed. Prefill is 128
-tokens. Decode is 16 cached single-token forwards with fixed token 42;
-cache-building prefill is excluded. Loading and packed-cache construction are
-outside timing. Other Torch test workloads were stopped during measurement.
+`TORCHDYNAMO_DISABLE=1`. Ten warmups and fifteen measured repeats per mode;
+median synchronized wall-clock time. The process was pinned to CPU 17 with one
+Torch CPU thread, and other Torch test workloads were stopped. Modes are off
+then on for each model, each separately warmed. Prefill is 128 tokens. Decode
+is 16 cached single-token forwards with fixed token 42; cache-building prefill,
+loading, packed construction, and source-view binding are outside timing.
 
 | Method | Phase | Kernel off / on | Off latency | On latency | Latency change | Off tok/s | On tok/s |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 10.193 ms | 9.304 ms | -8.71% | 12558.19 | 13757.11 |
-| GPTQ | Decode (per token) | `MarlinLinear` / same | 9.043 ms | 8.555 ms | -5.39% | 110.59 | 116.89 |
-| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 10.088 ms | 9.636 ms | -4.48% | 12688.29 | 13283.49 |
-| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 9.273 ms | 8.682 ms | -6.38% | 107.83 | 115.18 |
+| GPTQ | Prefill (128 tokens) | `MarlinLinear` / same | 9.646 ms | 9.078 ms | -5.90% | 13269.23 | 14100.51 |
+| GPTQ | Decode (per token) | `MarlinLinear` / same | 8.977 ms | 8.560 ms | -4.65% | 111.39 | 116.83 |
+| AWQ | Prefill (128 tokens) | `AwqMarlinLinear` / same | 9.587 ms | 9.372 ms | -2.25% | 13350.90 | 13657.89 |
+| AWQ | Decode (per token) | `AwqMarlinLinear` / same | 9.080 ms | 8.730 ms | -3.85% | 110.14 | 114.54 |
 
 ```mermaid
 xychart-beta
     title "Fusion latency reduction: symmetric INT4 Llama 3.2 1B"
     x-axis ["GPTQ prefill", "GPTQ decode", "AWQ prefill", "AWQ decode"]
-    y-axis "Latency reduction (%)" 0 --> 10
-    bar [8.71, 5.39, 4.48, 6.38]
+    y-axis "Latency reduction (%)" 0 --> 8
+    bar [5.90, 4.65, 2.25, 3.85]
 ```
 
 | Method | Phase | Max absolute logit drift | RMS logit drift | Relative L2 | Top-1 agreement |
@@ -267,7 +270,7 @@ xychart-beta
 | AWQ | Decode | 0.02490234 | 0.00394760 | 0.00156669 | 100.0% |
 
 | Projection | Packed operands exact | Max off/on drift | Max off/oracle drift | Max on/oracle drift |
-| --- | --- | ---: | ---: | ---: |
+| --- | --- | ---: | ---: | ---: | ---: |
 | GPTQ `model.layers.0.self_attn` | True | 0.00390625 | 0.00390625 | 0.00390625 |
 | GPTQ `model.layers.0.mlp` | True | 0.00195312 | 0.00195312 | 0.00195312 |
 | AWQ `model.layers.0.self_attn` | True | 0.01562500 | 0.01562500 | 0.00781250 |
@@ -277,60 +280,68 @@ Both native projection families pass combined `rtol=atol=2e-3` against an
 independent checkpoint-unpacking/FP32 matmul oracle with native FP16
 weight/output rounding. These combined tolerances are not a uniform 0.002
 absolute bound at every magnitude. Sampled packed operands are bitwise equal.
-Composed model logits accumulate changes in reduction order and output
-rounding; absolute, RMS, and relative drift are reported above. The dispatch
-fix leaves every reported drift value unchanged from the previous native
-Marlin implementation.
+Composed logits accumulate reduction-order and output-rounding differences;
+their absolute, RMS, and relative drift are reported above.
 
 Top-1 agreement covers all 128 prefill and 16 decode positions in this fixed
-workload. The real save/reload tests also verify fixed-prompt top-1 and exact
-12-token greedy agreement, unchanged checkpoint keys, native kernel types,
-and bitwise equality of fused results before/after reload. These are execution
-regression checks, not dataset benchmark accuracy or perplexity scores.
+workload. Real checkpoint tests verify fixed-prompt top-1, exact 12-token greedy
+agreement, unchanged checkpoint keys, native kernel types, and bitwise fused
+save/reload parity. Fresh GPTQ V2 quantization tests also compare serialized
+view bytes and fused reload logits exactly. These are execution regression
+checks, not dataset accuracy or perplexity scores.
 
-### Effect of the dispatch correction
+### Shared-view performance check
 
-| Method | Phase | Previous fusion latency change | Corrected fusion latency change |
-| --- | --- | ---: | ---: |
-| GPTQ | Prefill | +20.28% | -8.71% |
-| GPTQ | Decode | +11.54% | -5.39% |
-| AWQ | Prefill | +12.55% | -4.48% |
-| AWQ | Decode | +12.25% | -6.38% |
+This control keeps the same loaded model, fused executor, kernel classes, and
+packed tensors. Only the source projection bindings change between independent
+contiguous packed copies and shared views. Independent copies exist solely in
+this benchmark control; production fusion always shares storage. Blocks run
+in `copies / views / views / copies` order, each with ten warmups and fifteen
+samples, giving thirty samples per layout. Binding/allocation is outside timing,
+and logits must match bitwise across layouts.
 
-Each percentage compares fusion on/off within its own recorded run. Historical
-and current absolute wall times have different baselines; the historical run
-used two warmups/five repeats, the current run three/fifteen. The retained
-[historical report](benchmarks/llama32-fusion-before-dispatch-fix.json) identifies
-the previous implementation. This table does not compare absolute speed across
-different hardware or claim a universal speedup.
+| Method | Phase | Independent source copies | Shared source views | Views latency change |
+| --- | --- | ---: | ---: | ---: |
+| GPTQ | Prefill (128 tokens) | 9.559 ms | 9.476 ms | -0.86% |
+| GPTQ | Decode (per token) | 8.478 ms | 8.567 ms | +1.05% |
+| AWQ | Prefill (128 tokens) | 9.607 ms | 9.259 ms | -3.63% |
+| AWQ | Decode (per token) | 8.640 ms | 8.614 ms | -0.31% |
 
-The original slowdown was Python dispatch/validation overhead, while both paths
-already used Marlin. The correction removes per-projection interception and
-`ContextVar` bookkeeping, prepares the combined operand and bound executor
-before inference, and replaces full fingerprints with direct mutation guards.
-`test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards` makes
-`_key()` and `_incompatible()` raise after preparation, then verifies repeated
-inference succeeds with unchanged leaf forwards. The new warmed token path
-therefore executes neither full fingerprint construction nor compatibility
-scanning. Tensor/hook changes still trigger cold revalidation.
+The measured GPTQ decode result is **1.05% slower with views** in this run, so
+this result does not establish strict zero-regression parity. AWQ decode is
+0.31% faster, and both prefill medians improve. All raw samples and separate
+guard timings are retained in the report. The normal fused path reads the
+contiguous combined tensors directly; source views introduce no extra GEMM or
+weight copy there. Direct source calls/fallbacks may need temporary contiguous
+packed copies; `fuse(False)` restores independent contiguous source tensors.
 
-Both methods retain 32 packed group operands and separate reduction workspace:
-GPTQ **328,744,960 bytes (313.52 MiB)** and AWQ **331,235,328 bytes (315.89 MiB)**,
-additional to checkpoint storage. No dense/expanded weight cache is retained;
-native Marlin uses transient kernel-tile scratch. The optional portable Torch
-executor has temporary dense dequantization scratch local to its computation.
-The tests cover repeated forwards and activation cleanup on success/exception.
-Fusion does not reduce GEMM FLOPs, and different shapes/schedules can still
-change its benefit. `fuse=False` remains available.
+### Retained weight storage
 
-Raw data and all samples: [llama32-fusion.json](benchmarks/llama32-fusion.json).
-Reproduce with:
+| Method | Packed storage off | Packed storage on | Additional packed storage | Additional model workspace |
+| --- | ---: | ---: | ---: | ---: |
+| GPTQ | 501,743,616 B | 501,743,616 B | 0 B | 16,384 B |
+| AWQ | 505,544,704 B | 505,544,704 B | 0 B | 16,384 B |
+
+Storage is counted once by allocation identity across original leaves and
+unregistered executors. The fused allocation replaces the separate allocations;
+the source checkpoint names are views, so additional persistent packed-weight
+storage is **zero**. The additional model-owned tensor storage is **16 KiB of
+Marlin workspace per model**, across 32 groups. This excludes allocator-reserved
+memory, transient activations, Python descriptors, and backend scratch pools.
+Concatenation and unfusing temporarily overlap old/new packed storage during
+the transition. Source-call fallback copies are temporary packed tensors;
+native dequantization remains in kernel tiles. No dense/expanded weight cache
+persists. The portable Torch path can dequantize temporarily inside its call.
+
+Raw data, samples, guard timings, and memory counts:
+[llama32-fusion.json](benchmarks/llama32-fusion.json). Reproduce with an available
+CPU from `taskset -pc $$`:
 
 ```bash
-TORCHDYNAMO_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tests/benchmark_llama_fusion.py \
+TORCHDYNAMO_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. taskset -c 17 python tests/benchmark_llama_fusion.py \
   --gptq-path /path/to/symmetric-llama32-gptq \
   --awq-path /path/to/symmetric-llama32-awq \
-  --warmups 3 --repeats 15 \
+  --warmups 10 --repeats 15 --compare-storage-layout --storage-rounds 2 \
   --output-json /tmp/fusion-prefill-decode.json
 ```
 

@@ -472,7 +472,7 @@ class BaseQModel(nn.Module):
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
-        fusion_enabled: bool = True,
+        fusion_enabled: bool = False,
     ):
         super().__init__()
         if type(fusion_enabled) is not bool:
@@ -680,9 +680,10 @@ class BaseQModel(nn.Module):
     def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None):
         """Enable optional post-quantization QKV/gate-up fusion; return self.
 
-        ``enabled=False`` restores ordinary execution and releases packed
-        fusion operands. Definition overrides and per-call overrides can disable
-        a family (``qkv``/``gate_up``) or an exact parent path.
+        Fusion is disabled by default. Enabling it rebinds checkpoint operands
+        to shared packed storage views. ``enabled=False`` restores independent
+        contiguous operands and ordinary execution. Definition and per-call
+        overrides can disable a family (``qkv``/``gate_up``) or exact parent path.
         """
         if type(enabled) is not bool:
             raise TypeError("Fusion enabled must be bool")

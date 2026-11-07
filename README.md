@@ -110,7 +110,7 @@ Module roles—attention projections, MLP projections, MoE experts and shared ex
 
 Use the **[module-plan guide](docs/module-plan-guide.md)** for `model.module_plan()`, terminal/JSON inspection, model-definition tags, and the required new-model tests. The **[DeepSeek V4.1 Flash inventory](docs/deepseek-v41-module-inventory.md)** shows its verified checkpoint structure and remaining integration requirements.
 
-The **[fusion planner](docs/fusion-planner.md)** uses the compiled module plan for optional, automatic post-quantization QKV and gate/up fusion on compatible Llama Marlin and Torch GPTQ/AWQ layers. Use `model.fuse()` to apply it, `model.fuse(False)` to disable it, and `model.fusion_plan().print()` to inspect eligibility and skip reasons.
+The **[fusion planner](docs/fusion-planner.md)** uses the compiled module plan for opt-in post-quantization QKV and gate/up fusion on compatible Llama Marlin and Torch GPTQ/AWQ layers. Fusion is disabled by default. Use `model.fuse()` to apply it, `model.fuse(False)` to disable it, and `model.fusion_plan().print()` to inspect eligibility and skip reasons. Original projection weights become views into the fused packed storage, preserving checkpoint keys without retaining duplicate weights.
 
 | Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
 |---------------------------|------------|---|---|---|---------------|

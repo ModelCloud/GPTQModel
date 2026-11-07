@@ -134,6 +134,21 @@ def test_nested_empty_module_prefix_is_safe():
     assert "container.buf" in state_dict
 
 
+def test_shared_storage_saves_distinct_views_and_deduplicates_identical_views():
+    model = nn.Module()
+    model._tied_weights_keys = []
+    packed = torch.arange(96, dtype=torch.int32).reshape(8, 12)
+    model.register_buffer("left", packed[:, :4])
+    model.register_buffer("right", packed[:, 4:])
+    model.register_buffer("duplicate_left", packed[:, :4])
+    model.register_buffer("float_alias", packed[:, :4].view(torch.float32))
+    state = get_state_dict_for_save(model)
+    assert set(state) == {"left", "right", "float_alias"}
+    torch.testing.assert_close(state["left"].source, packed[:, :4], rtol=0, atol=0)
+    torch.testing.assert_close(state["right"].source, packed[:, 4:], rtol=0, atol=0)
+    assert state["float_alias"].source.dtype == torch.float32
+
+
 def test_collection_scales_linearly_with_module_count():
     """Smoke/regression check: collection must remain fast for a wide module tree.
 

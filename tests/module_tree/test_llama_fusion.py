@@ -21,7 +21,7 @@ from gptqmodel.quantization import FORMAT, AWQConfig, QuantizeConfig
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 
 
-def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=False, dynamic=None,
+def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=None, dynamic=None,
              kv_heads=2, bits=4, native=False):
     torch.manual_seed(912)
     config = LlamaConfig(hidden_size=128 if native else 64, intermediate_size=256 if native else 128, num_hidden_layers=2,
@@ -79,7 +79,8 @@ def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True
     model.to(device)
     qcfg = (QuantizeConfig if method == "gptq" else AWQConfig)(bits=bits, group_size=128 if native else 16,
                                                            sym=native, dynamic=dynamic)
-    wrapper = LlamaQModel(model, quantized=quantized, quantize_config=qcfg, fusion_enabled=automatic)
+    kwargs = {} if automatic is None else {"fusion_enabled": automatic}
+    wrapper = LlamaQModel(model, quantized=quantized, quantize_config=qcfg, **kwargs)
     return wrapper, weights
 
 
@@ -173,6 +174,93 @@ def test_automatic_opt_out_and_definition_overrides(monkeypatch):
     with pytest.raises(TypeError):
         model.fuse(overrides={"qkv": "yes"})
     assert model.fusion_plan() is None
+
+
+def test_fusion_is_opt_in_at_every_entry_point():
+    from gptqmodel import GPTQModel
+
+    for entry, option in ((GPTQModel.load, "fuse"), (LlamaQModel.from_pretrained, "fuse"),
+                          (LlamaQModel.from_quantized, "fuse"), (LlamaQModel.__init__, "fusion_enabled")):
+        assert inspect.signature(entry).parameters[option].default is False
+    model, _ = _wrapper()
+    assert not model._auto_fusion
+    assert model.fusion_plan() is None
+    model.fuse()
+    assert len(model.fusion_plan().groups) == 4
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq"])
+@pytest.mark.parametrize("native", [False, True])
+def test_shared_version_guard_covers_writes_through_every_sibling(method, native):
+    if native and (not torch.cuda.is_available() or torch.version.hip):
+        pytest.skip("Native Marlin fusion requires NVIDIA CUDA hardware")
+    model, _ = _wrapper(method, device="cuda:0" if native else "cpu", native=native, automatic=True)
+    for group in model.fusion_plan().groups:
+        for index in range(len(group.modules)):
+            for name in ("qweight", "qzeros", "scales", "bias"):
+                tensor = getattr(group.modules[index], name)
+                if tensor is None or not tensor.numel():
+                    continue
+                assert group.guard()
+                before = getattr(group.packed, name)._version
+                with torch.no_grad():
+                    tensor.add_(1)
+                assert getattr(group.packed, name)._version > before
+                assert not group.guard()
+                assert group._refresh()
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq"])
+@pytest.mark.parametrize("native", [False, True])
+def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method, native):
+    if native and (not torch.cuda.is_available() or torch.version.hip):
+        pytest.skip("Native Marlin fusion requires NVIDIA CUDA hardware")
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    model, _ = _wrapper(method, device="cuda:0" if native else "cpu", native=native)
+    original = {name: tensor.clone() for name, tensor in model.model.state_dict().items()}
+    # Weak references catch old allocations retained in guards or closures.
+    references = [weakref.ref(m.qweight) for layer in model.model.model.layers
+                  for m in ((layer.self_attn.q_proj, layer.mlp.gate_proj)
+                            if method == "gptq" or native else (layer.mlp.gate_proj,))]
+    model.fuse()
+    assert all(ref() is None for ref in references)
+    groups = model.fusion_plan().groups
+    for group in groups:
+        for name in ("qweight", "qzeros", "scales", "bias"):
+            operand = getattr(group.packed, name)
+            if operand is None or not operand.numel():
+                continue
+            for module in group.modules:
+                tensor = getattr(module, name)
+                assert tensor.untyped_storage().data_ptr() == operand.untyped_storage().data_ptr()
+        assert group.guard()
+    state = get_state_dict_for_save(model.model)
+    assert {name for name, tensor in original.items() if tensor.numel()} <= set(state)
+    for name, entry in state.items():
+        torch.testing.assert_close(entry.source, original[name], rtol=0, atol=0)
+    del state
+    # Split kernel calls are valid without breaking sharing, including Marlin
+    # which needs ephemeral contiguous copies of column views.
+    for group in groups:
+        x = torch.randn(1, 1, group.modules[0].in_features,
+                        device=group.modules[0].qweight.device, dtype=torch.float16)
+        with torch.no_grad():
+            separate = torch.cat([module(x) for module in group.modules], dim=-1)
+            combined = group.packed(x)
+        torch.testing.assert_close(separate, combined, rtol=2e-3, atol=2e-3)
+        assert group.guard()
+    packed_refs = [weakref.ref(group.packed.qweight) for group in groups]
+    model.fuse(False)
+    assert all(ref() is None for ref in packed_refs)
+    pointers = []
+    for group in groups:
+        for module in group.modules:
+            assert module.qweight.is_contiguous()
+            pointers.append(module.qweight.untyped_storage().data_ptr())
+    assert len(set(pointers)) == len(pointers)
+    for name, tensor in model.model.state_dict().items():
+        torch.testing.assert_close(tensor, original[name], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("override", [{"bits": 8}, {"group_size": 32}, {"sym": True},
@@ -508,7 +596,7 @@ def test_same_storage_dtype_and_shape_changes_are_detected():
     group = model.fusion_plan().groups[0]
     scales = group.modules[0].scales
     pointer = scales.data_ptr()
-    scales.data = scales.data.flatten()
+    scales.data = scales.data.as_strided((scales.numel(),), (1,))
     assert scales.data_ptr() == pointer
     assert not group.guard()
 

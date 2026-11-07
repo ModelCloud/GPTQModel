@@ -1099,7 +1099,7 @@ def ModelLoader(cls):
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
-            fuse: bool = True,
+            fuse: bool = False,
             **model_init_kwargs,
     ):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
@@ -1473,7 +1473,7 @@ def ModelLoader(cls):
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
-            fuse: bool = True,
+            fuse: bool = False,
             **kwargs,
     ):
 

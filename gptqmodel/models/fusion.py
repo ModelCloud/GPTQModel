@@ -36,6 +36,14 @@ _FIELDS = (
     "fp32", "weight_type", "is_k_full", "_marlin_tile_padding",
 )
 _TENSORS = ("qweight", "qzeros", "scales", "bias", "g_idx", "g_idx_sort_indices")
+_SHARED_OPERANDS = (("qweight", 1), ("qzeros", 1), ("scales", 1), ("bias", 0))
+
+
+def _set_operand(module, name, tensor):
+    """Retain the checkpoint registration kind when rebinding packed storage."""
+    if name in module._parameters:
+        tensor = torch.nn.Parameter(tensor, requires_grad=module._parameters[name].requires_grad)
+    setattr(module, name, tensor)
 
 
 @lru_cache(maxsize=32)
@@ -103,7 +111,7 @@ def _parent_template(original, names):
     return namespace[node.name].__code__
 
 
-def _mutation_guard(parent, modules, names):
+def _mutation_guard(parent, modules, names, packed=None):
     """Compile direct dictionary bindings and tensor version/storage checks.
 
     The guard creates no metadata tuples and performs no nn.Module attribute
@@ -112,6 +120,7 @@ def _mutation_guard(parent, modules, names):
     """
     namespace = {}
     checks = []
+    versioned = set()
 
     def bind(value):
         key = f"v{len(namespace)}"
@@ -140,7 +149,14 @@ def _mutation_guard(parent, modules, names):
             if not isinstance(tensor, torch.Tensor):
                 continue
             if not tensor.is_inference():
-                checks.append(f"{ref}._version == {tensor._version}")
+                # _share_operands constructs sibling views with the packed
+                # tensor's version counter. One check covers writes through
+                # every slice; all binding/storage/metadata checks stay per leaf.
+                version = (getattr(packed, name) if packed is not None and tensor.numel()
+                           and name in dict(_SHARED_OPERANDS) else tensor)
+                if id(version) not in versioned:
+                    checks.append(f"{bind(version)}._version == {version._version}")
+                    versioned.add(id(version))
             checks.extend((f"{ref}.data_ptr() == {tensor.data_ptr()}",
                            f"{ref}.dtype is {bind(tensor.dtype)}",
                            f"{ref}.device == {bind(tensor.device)}",
@@ -148,7 +164,9 @@ def _mutation_guard(parent, modules, names):
             if tensor.is_floating_point():
                 checks.append(f"not {ref}.requires_grad")
     exec("def valid():\n    return " + " and ".join(checks), namespace)
-    return namespace["valid"]
+    # Avoid a function -> globals -> function cycle retaining old operand views
+    # after invalidation; packed GPU storage must be released immediately.
+    return namespace.pop("valid")
 
 
 @dataclass(frozen=True)
@@ -289,6 +307,23 @@ class _FusionGroup:
             for m in self.modules
         ))
 
+    def _share_operands(self, fused):
+        for name, dim in _SHARED_OPERANDS:
+            tensor = getattr(fused, name)
+            if tensor is None or not tensor.numel():
+                continue
+            sizes = [getattr(module, name).shape[dim] for module in self.modules]
+            for module, view in zip(self.modules, tensor.split(sizes, dim=dim)):
+                _set_operand(module, name, view)
+        for clear in self.original_clears:
+            if clear is not None:
+                clear()
+        self.invalidate()
+        self.packed = fused
+        self.packed_key = self._key()
+
+    @torch.inference_mode(False)
+    @torch.no_grad()
     def _operand(self, key):
         # Inference tensors use the kernels' explicit clear_weight_cache contract
         # for writes without version counters (installed on every source below).
@@ -316,7 +351,7 @@ class _FusionGroup:
                 fused.bias = torch.cat([m.bias for m in self.modules])
             # Marlin's reduction barriers require zero-initialized scratch.
             fused.workspace = torch.zeros_like(first.workspace)
-            self.packed, self.packed_key = fused, key
+            self._share_operands(fused)
             return fused
         kwargs = {
             "bits": first.bits, "group_size": first.requested_group_size, "sym": first.sym,
@@ -336,11 +371,20 @@ class _FusionGroup:
             fused._qzeros_format = first._qzeros_format
             fused._init_wf_unsqueeze_buffers()
         fused.training = False
-        self.packed, self.packed_key = fused, key
+        self._share_operands(fused)
         return fused
 
     def invalidate(self):
         self.guard = self.packed_forward = None
+        if self.packed is not None:
+            clear = getattr(self.packed, "clear_weight_cache", None)
+            if clear is not None:
+                clear()
+            # nn.Module hooks can form cycles. Drop storage bindings eagerly
+            # rather than waiting for cyclic GC to release a retired executor.
+            self.packed._parameters.clear()
+            self.packed._buffers.clear()
+            self.packed.__dict__.pop("workspace", None)
         self.packed = self.packed_key = None
 
     def _refresh(self):
@@ -355,7 +399,7 @@ class _FusionGroup:
         self.input_dtype = self.modules[0].scales.dtype
         self.input_device = self.modules[0].scales.device
         self.widths = tuple(module.out_features for module in self.modules)
-        self.guard = _mutation_guard(self.parent, self.modules, self.names)
+        self.guard = _mutation_guard(self.parent, self.modules, self.names, self.packed)
         return True
 
     def execute(self, x):
@@ -412,6 +456,17 @@ class _FusionGroup:
                 module.__dict__.pop("clear_weight_cache", None)
             else:
                 module.clear_weight_cache = clear
+        # Separate kernels regain independent contiguous checkpoint operands.
+        # Cloning also releases an entire fused allocation held by small views.
+        with torch.inference_mode(False), torch.no_grad():
+            for module in self.modules:
+                for name, _dim in _SHARED_OPERANDS:
+                    tensor = getattr(module, name)
+                    if tensor is not None and tensor.numel():
+                        _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+            for clear in self.original_clears:
+                if clear is not None:
+                    clear()
         self.invalidate()
 
 
