@@ -105,7 +105,7 @@ autograd is outside this contract.
 
 The bias rows cite the implementation before PR #3649; the unbiased streaming
 row cites the implementation before PR #3654; the empty FP8 row cites the
-implementation before the current change. The ROCm and CPU matmul paths retain
+implementation before PR #3655. The ROCm and CPU matmul paths retain
 their existing arithmetic and dtype behavior.
 
 ## Validation contract
@@ -181,3 +181,5 @@ forward. The peak allocator delta includes CUDA library scratch.
 Native FP8 is slower for the smaller benchmark and faster for the larger one;
 the regression is that one empty request permanently changes the execution
 path for later requests.
+
+The empty FP8 flow was introduced by [PR #3655](https://github.com/ModelCloud/GPTQModel/pull/3655).
