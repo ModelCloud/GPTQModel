@@ -224,6 +224,8 @@ runtime transport and checks that the runtime global scale is `1`. This is a
 zero-row validity fix; a before/after timing comparison has no successful
 prior replay forward to measure.
 
+The empty replay flow was introduced by [PR #3656](https://github.com/ModelCloud/GPTQModel/pull/3656).
+
 ## Ordinary quantization compatibility
 
 Omitting `activation` keeps the ordinary GPTQ, AWQ, or weight-only lifecycle.
