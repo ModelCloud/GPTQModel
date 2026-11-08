@@ -287,3 +287,40 @@ def test_native_rejects_stored_bias_geometry(outputs):
     ).to("cuda")
     with pytest.raises(ValueError, match="logical bias geometry"):
         module._ensure_inner()
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("bits", [2, 4, 6, 8, 10, 12, 16])
+def test_stored_features_accepts_every_supported_bit_width(bits):
+    """Packing width is ``bits`` 16-bit words, so it reaches 256 at 16 bits.
+
+    The first cut of this layer capped the trellis width at 128 (8 bits) and so
+    rejected every valid 10/12/16-bit checkpoint with "invalid trellis geometry".
+    """
+    stored_outputs = 256
+    trellis = torch.randint(-32768, 32767, (8, stored_outputs // 16, bits * 16),
+                            dtype=torch.int16, generator=torch.Generator().manual_seed(bits))
+    module = ExllamaV3TorchLinear.from_tensors(
+        in_features=128, out_features=stored_outputs, name="bits",
+        tensors={"trellis": trellis,
+                 "suh": torch.rand(128).half() * .1,
+                 "svh": torch.rand(stored_outputs).half() * .1},
+    )
+    assert module._stored_features() == (128, stored_outputs)
+    assert module._bits_per_weight() == bits
+    assert module._decode_inner_weight().shape == (128, stored_outputs)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("words", [0, 8, 17, 24])
+def test_stored_features_rejects_non_word_aligned_packing(words):
+    """A width that is not a positive multiple of 16 cannot encode symbols."""
+    trellis = torch.zeros(8, 16, words, dtype=torch.int16)
+    module = ExllamaV3TorchLinear.from_tensors(
+        in_features=128, out_features=256, name="bad",
+        tensors={"trellis": trellis,
+                 "suh": torch.rand(128).half() * .1,
+                 "svh": torch.rand(256).half() * .1},
+    )
+    with pytest.raises(ValueError, match="trellis geometry"):
+        module._stored_features()
