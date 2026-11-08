@@ -510,6 +510,9 @@ export GPTQMODEL_USE_MODELSCOPE=True
 ### FP32 accumulation toggle 🔢
 
 Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
+Biased ParoQuant Triton calls always accumulate and add bias in FP32 before
+output rounding, including when this toggle is `0`. See the
+[ParoQuant Triton bias epilogue](docs/paroquant.md#triton-bias-epilogue).
 
 ```shell
 # default behavior: higher accuracy, slightly lower speed on some kernels

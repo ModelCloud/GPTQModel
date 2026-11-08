@@ -25,6 +25,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 
 
@@ -133,27 +134,29 @@ class ParoQuantTritonLinear(ParoLinear):
         if weight.dtype != rotated.dtype or weight.device != rotated.device:
             weight = weight.to(device=rotated.device, dtype=rotated.dtype)
 
-        out = torch.matmul(rotated, weight)
-        if self.bias is not None:
-            out = out + self.bias.to(device=rotated.device, dtype=rotated.dtype)
-        return out
+        bias = self.bias
+        if bias is not None:
+            bias_dtype = bias.dtype if _wants_fp32_reduce(rotated) else rotated.dtype
+            bias = bias.to(device=rotated.device, dtype=bias_dtype)
+        return matmul_fp32_reduce(rotated, weight, bias)
 
     def _forward_triton_decode(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for small-row decode workloads."""
-        out = paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        return paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros, self.bias)
 
     def _forward_triton_prefill(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for larger prefill batches."""
-        out = paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        return paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros, self.bias)
 
     def _run_plan(self, plan: str, rotated: torch.Tensor) -> torch.Tensor:
         """Dispatch one named execution plan."""
+        if (
+            plan in {"decode_fused", "prefill_fused"}
+            and torch.is_grad_enabled()
+            and self.bias is not None
+            and self.bias.requires_grad
+        ):
+            return self._forward_triton_dense(rotated)
         if plan == "dense":
             return self._forward_triton_dense(rotated)
         if plan == "decode_fused":
@@ -184,6 +187,8 @@ class ParoQuantTritonLinear(ParoLinear):
 
     def _select_plan(self, kind: str, rotated: torch.Tensor) -> str:
         """Pick the best plan, bounded by a bias toward the default fused path."""
+        if torch.is_grad_enabled() and self.bias is not None and self.bias.requires_grad:
+            return "dense"
         default_plan = "decode_fused" if kind == "decode" else "prefill_fused"
         if self.training or not self.paroquant_triton_autotune_enabled:
             return default_plan
