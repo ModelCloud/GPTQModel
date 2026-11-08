@@ -1612,6 +1612,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.gguf_tensor_qtype in _GGUF_QUANT_QTYPES
             and self.adapter is None
             and not self.training
+            and not (torch.is_grad_enabled() and x_flat.requires_grad)
             and max_rows > 0
             and (self.in_features * self.out_features) >= min_matrix_elements
             and x_flat.shape[0] <= max_rows

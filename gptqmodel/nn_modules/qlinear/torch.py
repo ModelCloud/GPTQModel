@@ -719,6 +719,10 @@ class TorchLinear(PackableQuantLinear):
         # Torch kernels with num_itr > 1 already tiled differently.
         if self.g_idx.shape[0] // x.shape[-1] != 1:
             return False
+        if torch.is_grad_enabled() and (
+            x.requires_grad or self.scales.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        ):
+            return False
         return True
 
     def enable_streaming(self, enabled: bool = True, tile_cols: int = None):

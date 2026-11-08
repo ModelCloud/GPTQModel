@@ -556,6 +556,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and x_flat.shape[-1] == self.in_features
             and self.in_features % 16 == 0
             and self.out_features % 16 == 0
+            and not (
+                torch.is_grad_enabled()
+                and (x_flat.requires_grad or self.weight.requires_grad or self.weight_scale_inv.requires_grad)
+            )
         )
 
     def _forward_dequant_matmul(
