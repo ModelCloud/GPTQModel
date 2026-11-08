@@ -86,7 +86,7 @@ def test_encode_weight_casts_to_bf16():
     assert result.storage_bytes == result.packed.numel() + result.escapes.numel() * 2 + 1
 
 
-def test_module_saves_qweight_and_retains_no_dense_cache():
+def test_module_saves_nf12_packed_and_retains_no_dense_cache():
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
     from gptqmodel.utils.backend import BACKEND
 
@@ -103,12 +103,12 @@ def test_module_saves_qweight_and_retains_no_dense_cache():
     )
     module.pack_original(linear)
 
-    # A quantized checkpoint must expose its packed weight as `qweight`, not as
-    # a dense `weight` parameter that a loader could mistake for BF16.
+    # A quantized checkpoint must expose its packed weight as `nf12_packed`,
+    # not as a dense `weight` parameter that a loader could mistake for BF16.
     keys = set(module.state_dict())
-    assert "qweight" in keys
-    assert module.qweight.dtype == torch.uint8
-    assert module.qweight.shape == (32, 192)
+    assert "nf12_packed" in keys
+    assert module.nf12_packed.dtype == torch.uint8
+    assert module.nf12_packed.shape == (32, 192)
     assert "weight" not in module._parameters
     assert int(module.nf12_exp_base.item()) == 54
 
@@ -120,7 +120,7 @@ def test_module_saves_qweight_and_retains_no_dense_cache():
         torch.testing.assert_close(actual.float(), expected, rtol=2e-3, atol=2e-3)
 
     # Repeated inference must not leave a decoded dense weight behind.
-    assert set(module._buffers) == {"qweight", "nf12_escapes", "nf12_exp_base", "bias"}
+    assert set(module._buffers) == {"nf12_packed", "nf12_escapes", "nf12_exp_base", "bias"}
     decoded = module.dequantize_weight()
     assert torch.equal(
         decoded.view(torch.int16),
@@ -150,7 +150,7 @@ def test_loader_resizes_data_dependent_escape_buffer(tmp_path):
     checkpoint = tmp_path / "model.safetensors"
     save_file(
         {
-            "blk.qweight": torch.zeros((16, 96), dtype=torch.uint8),
+            "blk.nf12_packed": torch.zeros((16, 96), dtype=torch.uint8),
             "blk.nf12_escapes": torch.zeros((3, 8), dtype=torch.int16),
             "blk.nf12_exp_base": torch.zeros((1,), dtype=torch.uint8),
         },
@@ -219,7 +219,7 @@ def test_linear_e2e_matches_fp32_oracle_on_cpu():
     # forward. A bias is an ordinary additive parameter, not an expanded weight.
     state = set(linear.state_dict())
     assert "weight" not in state
-    assert {"qweight", "nf12_escapes", "nf12_exp_base"} <= state
+    assert {"nf12_packed", "nf12_escapes", "nf12_exp_base"} <= state
 
 
 def test_hip_kernel_is_bit_exact_when_available():

@@ -52,7 +52,7 @@ Serialized tensors for a weight `W`:
 
 | tensor | dtype | shape |
 | --- | --- | --- |
-| `W.qweight` | uint8 | `[N, K * 3 / 2]` (the packed NF12-AD weight, stored under the standard quantized key) |
+| `W.nf12_packed` | uint8 | `[N, K * 3 / 2]` (the packed NF12-AD weight, under the upstream `nf12` name) |
 | `W.nf12_escapes` | int16 | `[E, 8]` |
 | `W.nf12_exp_base` | uint8 | `[1]` (stored as a scalar buffer) |
 

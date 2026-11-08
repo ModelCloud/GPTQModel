@@ -133,7 +133,7 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, and `NF12_AD` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
@@ -152,7 +152,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
-| `METHOD.NF12_AD` | `FORMAT.NF12_AD` | `BACKEND.NF12_AD` |
+| `METHOD.NF12_AD` (`nf12`) | `FORMAT.NF12_AD` (`nf12`) | `BACKEND.NF12_AD` (`nf12_ad`) |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
@@ -681,7 +681,7 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12ADConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
-`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12_AD` are weight-only and should be quantized with `calibration=None`.
+`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
 
 ##### QQQ Example: Llama 3.2 1B Instruct
 
@@ -857,9 +857,9 @@ model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
 model.save(quant_path)
 ```
 
-##### NF12-AD Example: lossless 12-bit BF16
+##### NF12 Example: lossless 12-bit BF16
 
-NF12-AD stores BF16 weights in Together AI's lossless 12-bit NF12 format,
+NF12 stores BF16 weights in Together AI's lossless 12-bit NF12 format,
 using AlpinDale's tiled layout and CUDA kernels ([dphnAI/nf12](https://github.com/dphnAI/nf12)).
 It is weight-only, needs no calibration data, and decodes back to the exact
 BF16 matrix. The modules must satisfy `in_features % 64 == 0` and
@@ -871,14 +871,14 @@ from gptqmodel import GPTQModel
 from gptqmodel.quantization import NF12ADConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-NF12-AD"
+quant_path = "Llama-3.2-1B-Instruct-NF12"
 
 model = GPTQModel.load(model_id, NF12ADConfig(), dtype=torch.bfloat16)
 model.quantize(calibration=None)
 model.save(quant_path)
 ```
 
-The packed weight is saved as `qweight` (uint8, `N x K*3/2`) with
+The packed weight is saved as `nf12_packed` (uint8, `N x K*3/2`) with
 `nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
 checkpoint rather than a dense weight.
 

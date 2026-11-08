@@ -4640,7 +4640,7 @@ class BaseQModel(nn.Module):
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12_AD"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12"
             )
             return None
 
