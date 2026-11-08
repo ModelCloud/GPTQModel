@@ -176,3 +176,6 @@ ordinary FP16 path. Resident-input M=1/M=16 hot forwards measured
 within timing noise (M=1 0.0877/0.0872 ms, M=16 0.0875/0.0867 ms). The
 benchmark used five warmups and median CUDA-event timing of seven groups of
 20 forwards; peak allocator deltas were unchanged.
+
+This Q6_K range correction was introduced in
+[PR #3670](https://github.com/ModelCloud/GPTQModel/pull/3670).
