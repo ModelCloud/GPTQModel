@@ -59,3 +59,5 @@ flowchart TD
 This contract applies to the reference offload path introduced in
 [PR #3586](https://github.com/ModelCloud/GPTQModel/pull/3586). The index
 stores source locations and hashes; it does not contain a second tensor payload.
+The export source guard was added in
+[PR #3620](https://github.com/ModelCloud/GPTQModel/pull/3620).
