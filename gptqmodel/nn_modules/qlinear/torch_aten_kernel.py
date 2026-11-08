@@ -17,7 +17,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ._runtime_cache import tensor_cache_key
-from .torch_fused import pack_scales_and_zeros
+from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
 
 log = setup_logger()
@@ -375,13 +375,7 @@ class TorchAtenLinear(PackableQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
-        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x.to(self.scales_and_zeros.dtype),
-            self.qweight,
-            self.group_size,
-            self.scales_and_zeros,
-        )
-        return out.to(x.dtype)
+        return _cpu_int4pack_mm(x, self.qweight, self.group_size, self.scales_and_zeros)
 
     def _empty_gptq_only_weights(self):
         self.qzeros = None

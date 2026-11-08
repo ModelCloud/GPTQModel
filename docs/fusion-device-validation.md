@@ -239,3 +239,36 @@ name; actual ExLlamaV2 descriptor lifetime remains covered by the native matrix.
 | native_rocm | 88 | 93 |
 
 Ruff, compileall and diff-whitespace checks pass.
+
+## Additional CPU BF16 precision check on ARM
+
+On an aarch64 Cortex-X925/A725 host with Torch 2.15.0+cu132 and no
+AVX512-BF16, the native CPU int4pack operation accepted FP32 activations and
+affine metadata while keeping weights packed. The BF16-input path now uses
+those FP32 operands for the current call, then returns BF16. Temporary
+activation and metadata conversions are released after the call; no dense or
+expanded weight copy is retained. FP16 keeps its existing path.
+
+The independent oracle computes the FP32 projection and bias, then rounds once
+to the output dtype. These measurements use K=512, GQA Q/K/V widths
+512/256/256, group size 128, and 1/8/33/257 rows. The gate remains
+`rtol=atol=2e-3`. [Raw results](benchmarks/cpu-bf16-int4pack-arm-regression.json)
+record the same four classes before and after the change.
+
+| Native class | Before: max oracle difference | After: max oracle difference | Parent off/on difference | Additional packed-weight bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `TorchAtenAwqLinear` | 0.0029296875 | 0.001953125 | 0 | 0 |
+| `TorchAtenLinear` | 0.0029296875 | 0.001953125 | 0 | 0 |
+| `TorchFusedAwqLinear` | 0.0029296875 | 0.001953125 | 0 | 0 |
+| `TorchFusedLinear` | 0.0029296875 | 0.001953125 | 0 | 0 |
+
+The CPU op-only timing probe used eight Torch threads, four warmups and twenty
+timed calls per shape. BF16 operands took 0.052/0.526/3.565 ms for 1/8/257
+rows; FP32 operands including per-call conversions took 0.055/0.548/3.070 ms.
+These are local kernel timings, not full-model latency claims. The combined
+fusion matrix passed 165 tests and skipped 126 unavailable native cases on this
+host; mutation, exact packed-weight restoration and persistent-storage checks
+are part of that matrix.
+For the K=512, N=512, M=257 projection, explicit temporary FP32 input,
+affine metadata and output tensors total 1,069,056 bytes
+(526,336 + 16,384 + 526,336); this excludes any internal ATen scratch.
