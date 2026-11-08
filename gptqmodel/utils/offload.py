@@ -200,13 +200,14 @@ def offload_to_safetensors_reference(
     if not state:
         raise ValueError("safetensors reference module has no persistent tensors")
 
-    # ``to_empty`` replaces *all* parameters and buffers, but only persistent
-    # ones are recorded in state_dict()/the index. Reject the module rather
-    # than silently destroying non-persistent buffers (e.g. rotary ``inv_freq``).
+    # ``to_empty`` replaces tensor parameters and buffers, but only persistent
+    # ones are recorded in state_dict()/the index. Optional buffers set to None
+    # stay None; reject only live non-persistent tensors that would be lost.
     non_persistent_buffers = sorted(
         f"{prefix}.{buffer_name}" if prefix else buffer_name
         for prefix, submodule in module.named_modules()
         for buffer_name in submodule._non_persistent_buffers_set
+        if submodule._buffers.get(buffer_name) is not None
     )
     if non_persistent_buffers:
         raise ValueError(
