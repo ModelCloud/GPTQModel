@@ -1311,6 +1311,38 @@ def _is_glm5_next_nope_config(config: Any) -> bool:
     )
 
 
+def _rope_parameter_type_labels(config: Any) -> tuple:
+    """Layer/rope-type labels this config declares, in transformers' order."""
+    return (
+        getattr(config, "_rope_type_labels", None)
+        or getattr(config, "layer_types", None)
+        or ()
+    )
+
+
+def _rope_parameters_are_per_layer(config: Any, rope_parameters: Any) -> bool:
+    """True when ``rope_parameters`` is already nested per layer/rope type.
+
+    Must agree with Transformers' own resolution: ``RotaryEmbeddingConfigMixin``
+    reads ``_rope_type_labels`` before ``layer_types``
+    (``nested_rope_parameter_keys``). Keying only on ``layer_types`` misses
+    configs such as DeepSeek V4, whose ``rope_parameters`` are keyed by
+    ``("main", "compress")`` while ``layer_types`` names something else entirely,
+    and would then append flat ``rope_type``/``rope_theta`` scalars next to the
+    nested dictionaries.
+    """
+    if not isinstance(rope_parameters, dict) or not rope_parameters:
+        return False
+    labels = _rope_parameter_type_labels(config)
+    nested_keys = [key for key in rope_parameters if key in labels]
+    if not nested_keys:
+        return False
+    return all(
+        rope_parameters[key] is None or isinstance(rope_parameters[key], dict)
+        for key in nested_keys
+    )
+
+
 def _normalize_rope_parameters_config_compat(config: Any) -> None:
     # HunYuanVL is a composite config: RoPE belongs exclusively to its text
     # sub-config. Adding a synthetic top-level rope_parameters value is not
@@ -1347,14 +1379,7 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
             return
 
     rope_parameters = getattr(config, "rope_parameters", None)
-    layer_types = getattr(config, "layer_types", None)
-    if (
-        isinstance(rope_parameters, dict)
-        and rope_parameters
-        and layer_types
-        and set(rope_parameters).issubset(set(layer_types))
-        and all(value is None or isinstance(value, dict) for value in rope_parameters.values())
-    ):
+    if _rope_parameters_are_per_layer(config, rope_parameters):
         # Hybrid attention configs (including Dots3) already hold one RoPE
         # dictionary per layer type. Flat legacy defaults would introduce
         # scalar entries that Transformers' per-type validator cannot read.
