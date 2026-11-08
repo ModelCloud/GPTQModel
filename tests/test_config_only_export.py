@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import stat
 from pathlib import Path
+
+import pytest
 import torch
+
 from gptqmodel.models.writer import _save_model_configs_without_weights
 
 
@@ -66,7 +70,6 @@ def test_config_only_save_preserves_existing_weight_shards(tmp_path):
 
 
 def test_failed_shard_write_preserves_previous_checkpoint(tmp_path, monkeypatch):
-    import pytest
     from gptqmodel.utils import model as model_utils
 
     path = tmp_path / "model.safetensors"
@@ -81,3 +84,89 @@ def test_failed_shard_write_preserves_previous_checkpoint(tmp_path, monkeypatch)
         model_utils._write_shard_file(str(path), [entry], {})
     assert path.read_bytes() == b"previous checkpoint"
     assert sorted(item.name for item in tmp_path.iterdir()) == [path.name]
+
+
+def test_config_only_save_preserves_nested_source_fields(tmp_path):
+    class Config:
+        def save_pretrained(self, save_dir):
+            payload = {
+                "architectures": ["MergedModel"],
+                "text_config": {"hidden_size": 1024, "num_layers": 4},
+                "quantization_config": {"bits": 4},
+            }
+            (Path(save_dir) / "config.json").write_text(json.dumps(payload))
+
+    class Model:
+        config = Config()
+        generation_config = None
+        dtype = None
+
+        @staticmethod
+        def can_generate():
+            return False
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["SourceModel"],
+                "text_config": {"hidden_size": 4096, "source_only_field": 7},
+                "quantization_config": {"bits": 8, "source_only": True},
+                "source_only_top": "keep",
+            }
+        )
+    )
+
+    _save_model_configs_without_weights(Model(), str(tmp_path), str(source))
+
+    saved_config = json.loads((tmp_path / "config.json").read_text())
+    assert saved_config["architectures"] == ["MergedModel"]
+    assert saved_config["text_config"] == {
+        "hidden_size": 1024,
+        "num_layers": 4,
+        "source_only_field": 7,
+    }
+    # Regenerated sections must never inherit stale source values.
+    assert saved_config["quantization_config"] == {"bits": 4}
+    assert saved_config["source_only_top"] == "keep"
+
+
+def test_atomic_shard_write_preserves_existing_file_mode(tmp_path):
+    from gptqmodel.utils import model as model_utils
+
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(b"previous checkpoint")
+    path.chmod(0o640)
+    entry = model_utils.TensorSource("weight", torch.float32, (1,), torch.ones(1))
+
+    model_utils._write_shard_file(str(path), [entry], {})
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_config_only_save_preserves_source_fields_on_in_place_export(tmp_path):
+    class Config:
+        def save_pretrained(self, save_dir):
+            (Path(save_dir) / "config.json").write_text(
+                json.dumps({"architectures": ["LiveModel"], "dtype": "bfloat16"})
+            )
+
+    class Model:
+        config = Config()
+        generation_config = None
+        dtype = None
+
+        @staticmethod
+        def can_generate():
+            return False
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"architectures": ["SourceModel"], "num_hash_layers": 3})
+    )
+
+    _save_model_configs_without_weights(Model(), str(tmp_path), str(tmp_path))
+
+    saved_config = json.loads((tmp_path / "config.json").read_text())
+    assert saved_config["architectures"] == ["LiveModel"]
+    assert saved_config["num_hash_layers"] == 3

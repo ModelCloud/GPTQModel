@@ -12,6 +12,7 @@ import math
 import operator
 import os
 import shutil
+import stat
 import struct
 import tempfile
 import threading
@@ -2624,12 +2625,29 @@ def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
 @contextmanager
 def _atomic_shard_file(path: str):
     """Keep the current shard and any mapped source tensors alive until commit."""
+    directory = os.path.dirname(os.path.abspath(path))
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{os.path.basename(path)}.", suffix=".tmp",
-        dir=os.path.dirname(os.path.abspath(path)),
+        dir=directory,
     )
     try:
-        with os.fdopen(descriptor, "wb") as handle:
+        # ``mkstemp`` creates 0600 files, while a plain ``open`` would honor the
+        # process umask and keep an existing shard's mode. Match that behavior so
+        # exports do not silently become owner-only (e.g. across containers or
+        # users sharing a checkpoint directory).
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            mode = 0o666 & ~current_umask
+        os.chmod(temporary, mode)
+        try:
+            handle = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
             yield handle
         os.replace(temporary, path)
     finally:
