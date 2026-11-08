@@ -450,7 +450,6 @@ def _scan_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, 
 
 def _detect_layer_prefixes(names: Sequence[str]) -> List[str]:
     counts: Counter[str] = Counter()
-    indexes: Dict[str, set] = defaultdict(set)
     for name in names:
         match = _INDEXED_TENSOR_RE.match(name)
         if match is None:
@@ -459,14 +458,10 @@ def _detect_layer_prefixes(names: Sequence[str]) -> List[str]:
         if prefix.rsplit(".", 1)[-1] not in _LAYER_CONTAINER_NAMES:
             continue
         counts[prefix] += 1
-        indexes[prefix].add(int(match.group("index")))
 
-    multi_layer = [prefix for prefix, values in indexes.items() if len(values) >= 2]
-    if multi_layer:
-        return sorted(multi_layer, key=lambda prefix: (-counts[prefix], prefix))
-    if indexes:
-        return [max(indexes, key=lambda prefix: (counts[prefix], prefix))]
-    return []
+    # A multimodal checkpoint can have a one-layer stack beside a larger
+    # decoder, or several one-layer stacks. Keep every declared-looking stack.
+    return sorted(counts, key=lambda prefix: (-counts[prefix], prefix))
 
 
 def _dedupe_prefixes(prefixes: Sequence[object]) -> List[str]:
@@ -726,13 +721,6 @@ def _validate_destination(target_dir: str, overwrite: bool) -> None:
         )
 
 
-def _remove_path(path: str) -> None:
-    if os.path.islink(path) or not os.path.isdir(path):
-        os.unlink(path)
-    else:
-        shutil.rmtree(path)
-
-
 def reshard(
     from_model,
     to_model_path: Union[str, os.PathLike],
@@ -816,7 +804,7 @@ def reshard(
         # Best-effort only: some filesystems reject chmod on a fresh directory,
         # and a wrong mode must not abort an otherwise valid reshard.
         log.debug("reshard: could not mirror source directory mode", exc_info=True)
-    backup_dir: Optional[str] = None
+    backup_path: Optional[str] = None
     committed = False
     buffer = bytearray(_STREAM_CHUNK_SIZE)
 
@@ -878,29 +866,39 @@ def reshard(
                 handle.write("\n")
 
         if os.path.lexists(target_dir):
-            backup_dir = f"{os.path.abspath(target_dir)}.bak-{os.getpid()}"
-            if os.path.lexists(backup_dir):
-                _remove_path(backup_dir)
-            os.replace(target_dir, backup_dir)
+            # mkdtemp reserves a collision-free parent for the old destination.
+            # A fixed PID-based backup name could contain unrelated data.
+            backup_path = os.path.join(
+                tempfile.mkdtemp(prefix=".gptqmodel-backup-", dir=parent_dir), "destination"
+            )
+            os.replace(target_dir, backup_path)
         try:
             os.replace(staging_dir, target_dir)
         except BaseException:
-            if backup_dir is not None:
+            if backup_path is not None:
                 try:
-                    os.replace(backup_dir, target_dir)
+                    os.replace(backup_path, target_dir)
                 except BaseException:
-                    log.error("reshard: failed to restore destination; backup retained at `%s`", backup_dir)
+                    log.error("reshard: failed to restore destination; backup retained at `%s`", backup_path)
             raise
         staging_dir = None
         committed = True
     finally:
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        if committed and backup_dir is not None:
-            try:
-                _remove_path(backup_dir)
-            except OSError:
-                log.warning("reshard: could not remove backup `%s`", backup_dir, exc_info=True)
+        if backup_path is not None:
+            backup_parent = os.path.dirname(backup_path)
+            if committed:
+                try:
+                    shutil.rmtree(backup_parent)
+                except OSError:
+                    log.warning("reshard: could not remove backup `%s`", backup_path, exc_info=True)
+            elif not os.path.lexists(backup_path):
+                # The old destination was either never moved or was restored.
+                try:
+                    os.rmdir(backup_parent)
+                except OSError:
+                    log.warning("reshard: could not remove empty backup directory `%s`", backup_parent, exc_info=True)
 
     log.info(
         "Resharded `%s` -> `%s` (layout=%s, tensors=%d, size=%.2f MiB)",
