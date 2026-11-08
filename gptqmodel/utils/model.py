@@ -2156,33 +2156,19 @@ def _generate_offload_search_paths(offload_root, module_path):
     return paths
 
 
-def _generate_entry_keys(module_path, leaf):
-    """
-        Generate fallback entry keys for lookup inside `index`.
-
-        Given:
-            module_path = "code2wav.upsample.0.1"
-            leaf = "gamma"
-
-        This function produces a list of possible lookup keys, ordered from
-        least specific to most specific, so that the caller can try them in order.
-
-        Example output:
-            [
-                "gamma",
-                "1.gamma",
-                "0.1.gamma",
-                "upsample.0.1.gamma",
-                "code2wav.upsample.0.1.gamma",
-            ]
-    """
-    keys = [leaf]
-    if module_path:
-        parts = module_path.split(".")
-        for i in range(len(parts)-1, -1, -1):
-            suffix = ".".join(parts[i:])
-            keys.append(f"{suffix}.{leaf}")
-    return keys
+def _generate_entry_keys(
+    module_path: str, leaf: str, index_dir: str, offload_root: str
+) -> tuple[str, ...]:
+    """Use the selected index's scope, then allow a fully qualified key."""
+    full_name = f"{module_path}.{leaf}" if module_path else leaf
+    index_scope = os.path.relpath(index_dir, offload_root)
+    if index_scope == ".":
+        return (full_name,)
+    index_scope = index_scope.replace(os.sep, ".")
+    if module_path != index_scope and not module_path.startswith(f"{index_scope}."):
+        raise ValueError(f"Offload index scope '{index_scope}' does not contain '{full_name}'")
+    relative_name = full_name[len(index_scope) + 1:]
+    return (relative_name, full_name) if relative_name != full_name else (relative_name,)
 
 
 def _resolve_offload_entry(
@@ -2218,14 +2204,22 @@ def _resolve_offload_entry(
     if not index:
         return None
 
-    keys = _generate_entry_keys(module_path, leaf)
-    entry = None
+    keys = _generate_entry_keys(module_path, leaf, module_dir, offload_root)
+    matches = []
     for key in keys:
         entry = index.get(key)
         if entry is not None:
-            break
-    if entry is None:
+            matches.append((key, entry))
+    if not matches:
         return None
+    if len(matches) > 1 and matches[0][1] != matches[1][1]:
+        name = f"{module_path}.{leaf}" if module_path else leaf
+        raise ValueError(
+            f"Ambiguous offload index entries for tensor '{name}' in "
+            f"'{os.path.join(module_dir, 'index.json')}': "
+            f"'{matches[0][0]}' and '{matches[1][0]}' differ."
+        )
+    entry = matches[0][1]
 
     resolved_dtype = _dtype_string_to_torch(entry.get("dtype"), dtype)
     if "shape" in entry:
