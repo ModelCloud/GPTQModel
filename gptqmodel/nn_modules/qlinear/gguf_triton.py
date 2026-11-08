@@ -1856,6 +1856,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             x_work = x_flat.contiguous()
 
         cache = self._get_triton_cache(x_work.device)
+        output_kwargs = {} if output_dtype is None else {"output_dtype": output_dtype}
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
             if cache.get("use_u32"):
@@ -1875,17 +1876,17 @@ class GGUFTritonKernel(GGUFTorchLinear):
                             cache["sign_words"],
                             cache["scale"],
                             fixed_config=fixed_u32_config,
-                            output_dtype=output_dtype,
+                            **output_kwargs,
                         )
                     return _launch_q1_0_g128_u32_fixed_matmul(
                         x_work,
                         cache["sign_words"],
                         cache["scale"],
                         fixed_config=fixed_u32_config,
-                        output_dtype=output_dtype,
+                        **output_kwargs,
                     )
                 return fused_q1_0_g128_matmul(
-                    x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+                    x_work, cache["sign_bytes"], cache["scale"], **output_kwargs,
                 )
             fixed_decode_config = cache.get("fixed_decode_config")
             if fixed_decode_config is not None and x_work.shape[0] == 1:
@@ -1898,24 +1899,24 @@ class GGUFTritonKernel(GGUFTorchLinear):
                         cache["sign_bytes"],
                         cache["scale"],
                         fixed_config=fixed_decode_config,
-                        output_dtype=output_dtype,
+                        **output_kwargs,
                     )
                 return _launch_q1_0_g128_fixed_matmul(
                     x_work,
                     cache["sign_bytes"],
                     cache["scale"],
                     fixed_config=fixed_decode_config,
-                    output_dtype=output_dtype,
+                    **output_kwargs,
                 )
             if _use_q1_0_g128_k2048_decode_specialization(
                 rows=x_work.shape[0],
                 in_features=self.padded_in_features,
             ):
                 return fused_q1_0_g128_k2048_matmul(
-                    x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+                    x_work, cache["sign_bytes"], cache["scale"], **output_kwargs,
                 )
             return fused_q1_0_g128_matmul(
-                x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+                x_work, cache["sign_bytes"], cache["scale"], **output_kwargs,
             )
         # SM89 (RTX 4090) exact-shape fixed tiles, measured against the
         # autotuned generic kernel.  ``None`` keeps the autotuned path, which
@@ -1931,10 +1932,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
             if fixed is not None:
                 return _launch_q4_k_fixed_matmul(
                     x_work, cache["qs"], cache["scale"], cache["min"],
-                    fixed_config=fixed, output_dtype=output_dtype,
+                    fixed_config=fixed, **output_kwargs,
                 )
             return fused_q4_k_matmul(
-                x_work, cache["qs"], cache["scale"], cache["min"], output_dtype=output_dtype,
+                x_work, cache["qs"], cache["scale"], cache["min"], **output_kwargs,
             )
         if self.gguf_tensor_qtype == "Q5_K":
             fixed = _select_q5_k_fixed_launch_config(
@@ -1946,11 +1947,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             if fixed is not None:
                 return _launch_q5_k_fixed_matmul(
                     x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"],
-                    fixed_config=fixed, output_dtype=output_dtype,
+                    fixed_config=fixed, **output_kwargs,
                 )
             return fused_q5_k_matmul(
                 x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"],
-                output_dtype=output_dtype,
+                **output_kwargs,
             )
         if self.gguf_tensor_qtype == "Q6_K":
             fixed = _select_q6_k_fixed_launch_config(
@@ -1962,10 +1963,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
             if fixed is not None:
                 return _launch_q6_k_fixed_matmul(
                     x_work, cache["ql"], cache["qh"], cache["scale"],
-                    fixed_config=fixed, output_dtype=output_dtype,
+                    fixed_config=fixed, **output_kwargs,
                 )
             return fused_q6_k_matmul(
-                x_work, cache["ql"], cache["qh"], cache["scale"], output_dtype=output_dtype,
+                x_work, cache["ql"], cache["qh"], cache["scale"], **output_kwargs,
             )
 
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
