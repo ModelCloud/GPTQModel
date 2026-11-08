@@ -27,12 +27,8 @@ from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 
 
 LazyTurtle = structure_module.LazyTurtle
-alias_all_from_turtle_if_meta = (
-    structure_module.alias_all_from_turtle_if_meta
-)
-alias_from_turtle_for_submodule = (
-    structure_module.alias_from_turtle_for_submodule
-)
+alias_all_from_turtle_if_meta = structure_module.alias_all_from_turtle_if_meta
+alias_from_turtle_for_submodule = structure_module.alias_from_turtle_for_submodule
 
 
 class _LinearWithBuffers(nn.Module):
@@ -306,7 +302,9 @@ def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurt
     return _build_lazy_turtle_from_checkpoint_tensors(tmp_path, state_dict)
 
 
-def _build_lazy_turtle_from_checkpoint_tensors(tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]) -> LazyTurtle:
+def _build_lazy_turtle_from_checkpoint_tensors(
+    tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]
+) -> LazyTurtle:
     """Persist an arbitrary safetensors checkpoint and reopen it through LazyTurtle."""
 
     model_dir = tmp_path / "source_model"
@@ -339,8 +337,12 @@ def _build_rect_fused_expert_checkpoint_tensors(
             [
                 torch.cat(
                     [
-                        expert.gate_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.gate_proj.weight.detach().clone(),
-                        expert.up_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.up_proj.weight.detach().clone(),
+                        expert.gate_proj.weight.detach().clone().transpose(0, 1)
+                        if is_transposed
+                        else expert.gate_proj.weight.detach().clone(),
+                        expert.up_proj.weight.detach().clone().transpose(0, 1)
+                        if is_transposed
+                        else expert.up_proj.weight.detach().clone(),
                     ],
                     dim=gate_split_dim,
                 )
@@ -366,7 +368,9 @@ def _build_rect_fused_expert_checkpoint_tensors(
     if include_down_proj:
         checkpoint_tensors["block.experts.down_proj"] = torch.stack(
             [
-                expert.down_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.down_proj.weight.detach().clone()
+                expert.down_proj.weight.detach().clone().transpose(0, 1)
+                if is_transposed
+                else expert.down_proj.weight.detach().clone()
                 for expert in experts
             ],
             dim=0,
@@ -442,9 +446,7 @@ def _offloaded_save_model(
     offload_root = tmp_path / "offload_root"
 
     if offload_format == "safetensors":
-        offload_to_disk(
-            module=model.block, model=model, disk_path=str(offload_root), force=True
-        )
+        offload_to_disk(module=model.block, model=model, disk_path=str(offload_root), force=True)
     else:
         module_dir = offload_root / "block"
         disk_offload(
@@ -476,9 +478,7 @@ def test_offload_save_rejects_dtype_mismatch(
     stored_dtype: torch.dtype,
     shell_dtype: torch.dtype,
 ) -> None:
-    model, offload_root, _ = _offloaded_save_model(
-        tmp_path, offload_format, dtype=stored_dtype
-    )
+    model, offload_root, _ = _offloaded_save_model(tmp_path, offload_format, dtype=stored_dtype)
     tensor = getattr(model.block, leaf).to(shell_dtype)
     if leaf == "weight":
         tensor = nn.Parameter(tensor)
@@ -496,9 +496,7 @@ def test_offload_save_rejects_dtype_mismatch(
 
 @pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
 @pytest.mark.parametrize("leaf", ["weight", "scale"])
-def test_offload_save_rejects_shape_mismatch(
-    tmp_path: Path, offload_format: str, leaf: str
-) -> None:
+def test_offload_save_rejects_shape_mismatch(tmp_path: Path, offload_format: str, leaf: str) -> None:
     model, offload_root, _ = _offloaded_save_model(tmp_path, offload_format)
     tensor = getattr(model.block, leaf).reshape(6, 4)
     if leaf == "weight":
@@ -517,12 +515,8 @@ def test_offload_save_rejects_shape_mismatch(
 
 @pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_offload_save_preserves_matching_metadata(
-    tmp_path: Path, offload_format: str, dtype: torch.dtype
-) -> None:
-    model, offload_root, original_state = _offloaded_save_model(
-        tmp_path, offload_format, dtype=dtype
-    )
+def test_offload_save_preserves_matching_metadata(tmp_path: Path, offload_format: str, dtype: torch.dtype) -> None:
+    model, offload_root, original_state = _offloaded_save_model(tmp_path, offload_format, dtype=dtype)
     model.output = nn.Module()
     model.output.weight = model.block.weight
 
@@ -905,6 +899,38 @@ def test_lazy_turtle_direct_meta_restores_nonpersistent_buffers_from_module_init
         "inv_freq",
         "original_inv_freq",
     }
+
+
+def test_lazy_turtle_direct_meta_defaults_device_for_nonpersistent_buffers(tmp_path):
+    """``device=None`` must resolve to the shell buffer's device, not crash.
+
+    The public helper defaults to ``device=None``; passing it straight to
+    ``safe_move_to`` raises ``TypeError`` from ``torch.device(None)``.
+    """
+
+    config = _tiny_llama_config()
+    source_model = _RotaryWrapper(config)
+    shell_model = _RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    for name in ("inv_freq", "original_inv_freq"):
+        shell_model.block.rotary.register_buffer(
+            name,
+            torch.empty_like(getattr(shell_model.block.rotary, name), device="meta"),
+            persistent=False,
+        )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block.rotary,
+        device=None,
+    )
+
+    for name in ("inv_freq", "original_inv_freq"):
+        restored = getattr(shell_model.block.rotary, name)
+        assert not restored.is_meta
+        torch.testing.assert_close(restored, getattr(source_model.block.rotary, name))
 
 
 def test_lazy_turtle_direct_meta_restores_deepseek_v4_rotary_buffers(tmp_path):
@@ -1388,7 +1414,9 @@ def test_lazy_turtle_materializes_leaf_qwen_style_expert_gate_proj_from_fused_ch
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = LazyTurtle.maybe_create(
@@ -1425,8 +1453,14 @@ def test_lazy_turtle_materializes_rectangular_transposed_experts_from_fused_chec
             [
                 torch.cat(
                     [
-                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
-                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .gate_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .up_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
                     ],
                     dim=1,
                 )
@@ -1449,7 +1483,10 @@ def test_lazy_turtle_materializes_rectangular_transposed_experts_from_fused_chec
         ),
         "block.experts.down_proj": torch.stack(
             [
-                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.weight.detach().clone().transpose(0, 1)
+                source_model.block.experts.get_submodule(str(expert_idx))
+                .down_proj.weight.detach()
+                .clone()
+                .transpose(0, 1)
                 for expert_idx in range(2)
             ],
             dim=0,
@@ -1532,8 +1569,14 @@ def test_lazy_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_ch
             [
                 torch.cat(
                     [
-                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
-                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .gate_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .up_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
                     ],
                     dim=1,
                 )
@@ -1559,7 +1602,9 @@ def test_lazy_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_ch
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = LazyTurtle.maybe_create(
@@ -1589,7 +1634,9 @@ def test_alias_all_from_turtle_materializes_leaf_qwen_style_expert_gate_proj_fro
     shell_model.load_state_dict(source_model.state_dict())
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = _build_lazy_turtle_from_checkpoint_tensors(
@@ -1612,7 +1659,9 @@ def test_alias_all_from_turtle_materializes_leaf_transposed_expert_gate_proj_fro
     shell_model.load_state_dict(source_model.state_dict())
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = _build_lazy_turtle_from_checkpoint_tensors(
@@ -1634,7 +1683,9 @@ def test_lazy_turtle_raises_when_submodule_materialization_cannot_match_target_s
     shell_model = _HybridWrapper(width=16)
     shell_model.load_state_dict(source_model.state_dict())
 
-    shell_model.block.dt_bias = nn.Parameter(torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad)
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad
+    )
     source = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     with pytest.raises(
@@ -1905,15 +1956,14 @@ def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
-
     tensor = torch.randn(8, 16, dtype=torch.float32).to(torch.float8_e4m3fn)
     state_dict = {
-       "fp8_weight": TensorSource(
+        "fp8_weight": TensorSource(
             name="fp8_weight",
             torch_dtype=tensor.dtype,
             shape=tuple(tensor.shape),
             source=tensor,
-       ),
+        ),
     }
     expected_files, _, _ = streaming_state_dict_to_shards(
         state_dict,
