@@ -31,7 +31,9 @@ flowchart TD
     I --> U
     H --> N["run_perf packs weights with rt.encode on selected GPU"]
     I --> N
-    N --> O["rt.decode and rt.linear consume native packed tensors"]
+    N --> R{"rt.encode succeeds?"}
+    R -- Yes --> O["rt.decode and rt.linear consume native packed tensors"]
+    R -- No --> W["main records performance failure and exits 1"]
     O --> P["timed synchronizes selected device"]
     T --> V["run_accuracy checks Torch codec; run_perf skips native benchmarks"]
     X --> Q["main records failure and exits 1"]
@@ -39,7 +41,7 @@ flowchart TD
     Z --> Q
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     classDef fallback fill:#fff3cf,stroke:#ad7700,color:#111;
-    class X,Y,Z,Q failure;
+    class X,Y,Z,Q,W failure;
     class T,V fallback;
 ```
 
@@ -47,7 +49,8 @@ flowchart TD
 bandwidth. With a native runtime, its decode and linear inputs come from that
 runtime's encoder. The encode throughput row measures the same encoder. Its
 timing, bandwidth, and cache helpers synchronize the selected `--device`, even
-when another GPU is the process's current device.
+when another GPU is the process's current device. A native encode failure
+propagates to `main`, which records the performance failure and exits 1.
 
 | Mechanism | Before | Current |
 | --- | --- | --- |
