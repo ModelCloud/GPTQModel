@@ -125,3 +125,54 @@ The FP32 arrays are selected only for packed blocks whose intermediate range
 requires them. These measurements cover the ordinary FP16 metadata path.
 This Q4_K/Q5_K range correction was introduced by
 [PR #3668](https://github.com/ModelCloud/GPTQModel/pull/3668).
+
+## Q6_K signed scale range
+
+Q6_K stores a signed 8-bit subscale for each 16-element group and a block
+scale `d` in FP16. Its decoded code is in `[-32, 31]`. A packed block with
+`d=1000` and subscale `127` has a finite effective scale of `127000`, beyond
+FP16 range. The previous cache rounded that scale to infinity, so even a zero
+code produced `0 × inf = NaN`. Nonzero codes can have weights beyond FP16
+while a small FP16 activation still gives a finite output.
+
+`_build_triton_cache` computes Q6_K effective scales in FP32. It keeps the
+compact scale array in FP32 when the largest possible signed-code product for
+any group exceeds FP16 range; otherwise it converts the array to FP16. The
+fused Q6_K kernel reconstructs and dots in IEEE FP32 only for the wide array.
+
+```mermaid
+flowchart TD
+    A["Packed Q6_K qweight"] --> B["_build_triton_cache computes d times signed subscale in FP32"]
+    B --> C{"Any absolute effective scale times 32 exceeds FP16 range?"}
+    C -- "Yes" --> D["Keep compact FP32 scale array"]
+    C -- "No" --> E["Store compact FP16 scale array"]
+    D --> F["_gguf_q6_k_fused_matmul_kernel_impl uses IEEE FP32 dot"]
+    E --> G["_gguf_q6_k_fused_matmul_kernel_impl uses FP16 dot"]
+    F --> H["Accumulate output in FP32"]
+    G --> H
+    I["Changed qweight"] --> J["_get_triton_cache rebuilds scale array"]
+    J --> B
+    B -. "Old FP16 multiplication" .-> X["Infinite scale and NaN for zero code"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Q6_K cache build | `gguf_triton.py:1827-1830` multiplied FP16 `d` by signed subscales and could cache infinity | `_build_triton_cache` multiplies in FP32, then selects FP16 or FP32 for the compact scale array |
+| Q6_K fused dot | `gguf_triton.py:900-901` reconstructed the weight and dotted in FP16 | `_gguf_q6_k_fused_matmul_kernel_impl` reconstructs and dots in FP32 for wide scales |
+
+On an NVIDIA GB10, the independent NumPy GGUF decoder and FP64 Torch dot
+product give zero for code `0` and `496.09375` for code `1` with the block
+above and FP16 input `2**-16`; the latter rounds to `496` in FP16. The
+previous fused path returned NaN for code `0`.
+GPU tests cover codes `0`, `1`, `-32`, and `31`; positive and negative
+subscales; FP16 and BF16; one and eight rows; bias; direct wrappers; ordinary
+metadata; and packed-weight replacement. The 64×256 wide scale array adds
+2,048 bytes to the compact cache and retains no expanded weights. For
+K=N=1024, the wide cache uses 1,048,576 bytes versus 917,504 bytes for the
+ordinary FP16 path. Resident-input M=1/M=16 hot forwards measured
+0.0884/0.0881 ms for the wide path; ordinary old/new measurements stayed
+within timing noise (M=1 0.0877/0.0872 ms, M=16 0.0875/0.0867 ms). The
+benchmark used five warmups and median CUDA-event timing of seven groups of
+20 forwards; peak allocator deltas were unchanged.
