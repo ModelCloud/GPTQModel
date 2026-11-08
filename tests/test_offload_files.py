@@ -20,6 +20,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Rotar
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
+import gptqmodel.utils.model as model_utils
 import gptqmodel.utils.structure as structure_module
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import TensorSource, get_state_dict_for_save, move_to, streaming_state_dict_to_shards
@@ -2042,6 +2043,120 @@ def test_streaming_state_dict_to_shards_writes_float8_e8m0_tensors(tmp_path):
 
     assert saved.dtype is torch.float8_e8m0fnu
     assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
+
+
+def test_streaming_state_dict_to_shards_reuses_only_authenticated_shards(tmp_path, monkeypatch):
+    tensor = torch.arange(32, dtype=torch.int16).reshape(4, 8)
+    state_dict = {
+        "weight": TensorSource(
+            name="weight",
+            torch_dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            source=tensor,
+        ),
+    }
+    arguments = {
+        "state_dict": state_dict,
+        "save_dir": str(tmp_path),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+    shard_path = tmp_path / expected_files[0]
+    original = shard_path.read_bytes()
+    original_writer = model_utils._write_shard_file
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("authenticated shard should have been reused")
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", unexpected_write)
+    assert streaming_state_dict_to_shards(**arguments)[0] == expected_files
+
+    with shard_path.open("r+b") as handle:
+        handle.seek(-1, 2)
+        handle.write(bytes([original[-1] ^ 0xFF]))
+
+    writes = 0
+
+    def repair(path, entries, metadata):
+        nonlocal writes
+        writes += 1
+        return original_writer(path, entries, metadata)
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", repair)
+    streaming_state_dict_to_shards(**arguments)
+    assert writes == 1
+    assert shard_path.read_bytes() == original
+
+
+def test_streaming_state_dict_to_shards_rewrites_when_source_changes(tmp_path):
+    tensor = torch.arange(32, dtype=torch.int16).reshape(4, 8)
+    arguments = {
+        "state_dict": {
+            "weight": TensorSource(
+                name="weight",
+                torch_dtype=tensor.dtype,
+                shape=tuple(tensor.shape),
+                source=tensor,
+            ),
+        },
+        "save_dir": str(tmp_path),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+    shard_path = tmp_path / expected_files[0]
+    original = shard_path.read_bytes()
+
+    changed = tensor.clone()
+    changed[0, 0] = 999
+    arguments["state_dict"] = {
+        "weight": TensorSource(
+            name="weight",
+            torch_dtype=changed.dtype,
+            shape=tuple(changed.shape),
+            source=changed,
+        ),
+    }
+    streaming_state_dict_to_shards(**arguments)
+
+    assert shard_path.read_bytes() != original
+
+
+def test_streaming_state_dict_to_shards_reuses_legacy_unhashed_offload(tmp_path, monkeypatch):
+    model = _LinearWithBuffers(in_features=128, out_features=96)
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=model.linear, model=model, disk_path=str(offload_root))
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    offload_refs = [
+        entry.source
+        for entry in state_dict.values()
+        if isinstance(entry.source, model_utils.OffloadTensorRef)
+    ]
+    assert offload_refs
+    assert all(source.sha256 is None for source in offload_refs)
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    arguments = {
+        "state_dict": state_dict,
+        "save_dir": str(save_dir),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("legacy offload source should be compared by content")
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", unexpected_write)
+    assert streaming_state_dict_to_shards(**arguments)[0] == expected_files
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")
