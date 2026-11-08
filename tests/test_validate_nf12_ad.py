@@ -18,6 +18,26 @@ def test_explicit_cuda_backend_reports_unavailable_native_kernel(monkeypatch):
         validate_nf12_ad.backend_module("cuda", "cuda:0")
 
 
+def test_auto_backend_uses_torch_for_cpu_even_when_cuda_extension_loads(monkeypatch):
+    from gptqmodel.utils import nf12_ad
+    from scripts import validate_nf12_ad
+
+    def unexpected_probe():
+        raise AssertionError("CPU validation must not probe the CUDA extension")
+
+    monkeypatch.setattr(nf12_ad, "load", unexpected_probe)
+
+    assert validate_nf12_ad.backend_module("auto", "cpu") == (None, "torch")
+
+
+@pytest.mark.parametrize("backend", ["cuda", "hip"])
+def test_explicit_gpu_backend_rejects_cpu_device(backend):
+    from scripts import validate_nf12_ad
+
+    with pytest.raises(ValueError, match="requires a CUDA/HIP device"):
+        validate_nf12_ad.backend_module(backend, "cpu")
+
+
 def test_perf_only_failure_returns_nonzero_status(monkeypatch):
     from scripts import validate_nf12_ad
 
