@@ -2229,6 +2229,73 @@ def test_safetensors_reference_offload_avoids_a_second_payload(tmp_path):
         )
 
 
+def test_reference_source_inside_export_dir_is_rejected_before_any_shard_write(tmp_path):
+    model = nn.Module()
+    model.linear = nn.Linear(4, 4)
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    # A 4x4 fp32 weight exceeds the shard limit, while the bias fits. The
+    # first output would otherwise replace this source before reading bias.
+    source_path = save_dir / "model-00001-of-00002.safetensors"
+    original = _clone_state_dict(model.linear)
+    save_file(original, source_path)
+    source_bytes = source_path.read_bytes()
+    offload_root = tmp_path / "offload"
+    offload_to_safetensors_reference(
+        model.linear, model, source_path, disk_path=str(offload_root)
+    )
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+
+    with pytest.raises(ValueError, match="inside the export directory"):
+        streaming_state_dict_to_shards(
+            state_dict, str(save_dir), "model", "model.safetensors", {}, 40
+        )
+
+    assert source_path.read_bytes() == source_bytes
+    assert sorted(path.name for path in save_dir.iterdir()) == [source_path.name]
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    names, _, _ = streaming_state_dict_to_shards(
+        state_dict, str(other_dir), "model", "model.safetensors", {}, 40
+    )
+    assert len(names) == 2
+    exported = {}
+    for name in names:
+        with safe_open(str(other_dir / name), framework="pt", device="cpu") as handle:
+            exported.update({key: handle.get_tensor(key) for key in handle.keys()})
+    for name, tensor in original.items():
+        torch.testing.assert_close(exported[f"linear.{name}"], tensor)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires file symlinks")
+@pytest.mark.parametrize("link_inside", [True, False])
+def test_reference_export_preflight_checks_symlink_path_and_target(tmp_path, link_inside):
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    actual_dir, link_dir = (outside, save_dir) if link_inside else (save_dir, outside)
+    actual = actual_dir / "model.safetensors"
+    actual.write_bytes(b"original source")
+    link = link_dir / "source.safetensors"
+    link.symlink_to(actual)
+    entry = TensorSource(
+        name="weight", torch_dtype=torch.float32, shape=(1,),
+        source=model_utils.OffloadTensorRef(
+            path=str(link), torch_dtype=torch.float32, shape=(1,), format="dat"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="inside the export directory"):
+        streaming_state_dict_to_shards(
+            {"weight": entry}, str(save_dir), "model", "model.safetensors", {}, None
+        )
+
+    assert actual.read_bytes() == b"original source"
+    assert link.is_symlink()
+
+
 def test_safetensors_reference_offload_supports_float8(tmp_path):
     model = _LinearWithBuffers(in_features=8, out_features=4)
     weight = model.linear.weight
