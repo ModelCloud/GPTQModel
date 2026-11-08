@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -129,6 +130,158 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Op
     with open(index_path, "w", encoding="utf-8") as fp:
         json.dump(index, fp, indent=2)
 
+    return index
+
+
+_SAFETENSORS_DTYPE = {
+    torch.bool: "BOOL",
+    torch.uint8: "U8",
+    torch.int8: "I8",
+    torch.int16: "I16",
+    torch.int32: "I32",
+    torch.int64: "I64",
+    torch.float16: "F16",
+    torch.bfloat16: "BF16",
+    torch.float32: "F32",
+    torch.float64: "F64",
+}
+
+
+def offload_to_safetensors_reference(
+    module: nn.Module,
+    model: nn.Module,
+    source_path: str | os.PathLike[str],
+    disk_path: str = ".",
+    module_name: str | None = None,
+) -> dict:
+    """Offload a module to an already-authenticated safetensors payload.
+
+    The caller owns the source artifact and must validate its content before
+    calling this helper. We validate the exact header/geometry, publish only a
+    small Accelerate-compatible index, and replace the module tensors with META
+    storage. The streaming model writer can then copy the original tensor ranges
+    directly instead of materializing a second disk copy.
+    """
+
+    if module is None or model is None:
+        raise ValueError("safetensors reference offload requires a module and model")
+    source = os.path.abspath(os.fspath(source_path))
+    if os.path.islink(source) or not os.path.isfile(source):
+        raise ValueError("safetensors reference source is not a regular file")
+    if module_name is None:
+        full_name = get_module_fullname(model=model, module=module)
+    elif not module_name or get_submodule(model, module_name) is not module:
+        raise ValueError("safetensors reference module name differs from the model")
+    else:
+        full_name = module_name
+    state = module.state_dict()
+    if not state:
+        raise ValueError("safetensors reference module has no persistent tensors")
+
+    source_size = os.path.getsize(source)
+    with open(source, "rb") as handle:
+        prefix = handle.read(8)
+        if len(prefix) != 8:
+            raise ValueError("safetensors reference source has no complete header")
+        header_size = struct.unpack("<Q", prefix)[0]
+        if header_size <= 0 or header_size > source_size - 8:
+            raise ValueError("safetensors reference source has an invalid header size")
+        try:
+            header = json.loads(handle.read(header_size).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("safetensors reference source has invalid JSON") from error
+    if not isinstance(header, dict):
+        raise ValueError("safetensors reference header is not an object")
+    tensor_header = {
+        key: value for key, value in header.items() if key != "__metadata__"
+    }
+    if set(tensor_header) != set(state):
+        raise ValueError("safetensors reference tensor set differs from the module")
+
+    data_base = 8 + header_size
+    index: dict[str, dict] = {}
+    ranges: list[tuple[int, int]] = []
+    for key, tensor in state.items():
+        entry = tensor_header.get(key)
+        expected_dtype = _SAFETENSORS_DTYPE.get(tensor.dtype)
+        offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
+        if (
+            not isinstance(entry, dict)
+            or expected_dtype is None
+            or entry.get("dtype") != expected_dtype
+            or entry.get("shape") != list(tensor.shape)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in offsets
+            )
+        ):
+            raise ValueError(
+                f"safetensors reference metadata differs for tensor `{key}`"
+            )
+        start, end = offsets
+        expected_bytes = tensor.numel() * tensor.element_size()
+        if start < 0 or end - start != expected_bytes or data_base + end > source_size:
+            raise ValueError(
+                f"safetensors reference range differs for tensor `{key}`"
+            )
+        ranges.append((start, end))
+        index[key] = {
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "shape": list(tensor.shape),
+            "safetensors_file": source,
+            "weight_name": key,
+            "data_offsets": [data_base + start, data_base + end],
+            "sha256": hashlib.sha256(
+                memoryview(
+                    tensor.detach()
+                    .to(device="cpu")
+                    .contiguous()
+                    .reshape(-1)
+                    .view(torch.uint8)
+                    .numpy()
+                )
+            ).hexdigest(),
+        }
+    ordered_ranges = sorted(ranges)
+    if (
+        not ordered_ranges
+        or ordered_ranges[0][0] != 0
+        or any(
+            left_end != right_start
+            for (_, left_end), (right_start, _) in zip(
+                ordered_ranges, ordered_ranges[1:]
+            )
+        )
+        or data_base + ordered_ranges[-1][1] != source_size
+    ):
+        raise ValueError("safetensors reference tensor ranges are not contiguous")
+
+    module_offload_dir = os.path.join(disk_path, full_name)
+    _prepare_offload_directory(module_offload_dir)
+    index_path = os.path.join(module_offload_dir, "index.json")
+    temporary = f"{index_path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            json.dump(index, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
+            os.fsync(handle.fileno())
+        os.replace(temporary, index_path)
+        directory = os.open(module_offload_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+    module.to_empty(device=torch.device("meta"), recurse=True)
     return index
 
 
