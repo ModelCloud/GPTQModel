@@ -32,6 +32,15 @@ def test_explicit_devices_accepts_concrete_ordinals():
     ) == ["cuda:2", "cuda:1"]
 
 
+def test_duplicate_explicit_devices_do_not_expand_to_every_gpu(monkeypatch):
+    _fake_visible(monkeypatch, 4)
+    requested = ("cuda:1", "cuda:1")
+
+    assert _explicit_requested_devices(requested) == [torch.device("cuda:1")]
+    assert _layerwise_device_count(requested) == 1
+    assert _layerwise_device_strings(requested, 1) == ["cuda:1"]
+
+
 def test_explicit_devices_rejects_non_ordinal_selectors():
     """An abstract family, a bare name, CPU, or a single entry keeps the old path."""
     assert _explicit_layerwise_devices("cuda") is None

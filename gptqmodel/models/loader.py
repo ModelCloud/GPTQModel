@@ -382,7 +382,8 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
     device pool ignored the sequence and expanded to *every* visible
     accelerator, so asking for two GPUs silently used all four. Only fully
     qualified ordinals qualify: an abstract family selector, a bare `cuda`, or
-    a single device keep the historical "span every visible device" behaviour.
+    a single-element request keep the historical "span every visible device"
+    behaviour. Repeated ordinals still request that one concrete GPU.
     """
     if not isinstance(device, (tuple, list)) or len(device) < 2:
         return None
@@ -399,7 +400,7 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
             return None
         if target not in resolved:
             resolved.append(target)
-    return resolved if len(resolved) > 1 else None
+    return resolved
 
 
 def _explicit_layerwise_devices(device) -> Optional[List[str]]:
