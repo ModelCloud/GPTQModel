@@ -2422,6 +2422,37 @@ def test_safetensors_reference_offload_rejects_non_persistent_buffers(tmp_path):
     assert all(not tensor.is_meta for tensor in model.linear.state_dict().values())
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_safetensors_reference_offload_allows_absent_non_persistent_buffers(tmp_path, nested):
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = nn.Module()
+    model.block.linear = nn.Linear(4, 4)
+    holder = model.block.linear if nested else model.block
+    holder.register_buffer("optional_cache", None, persistent=False)
+    original = _clone_state_dict(model.block)
+    source = tmp_path / "source.safetensors"
+    save_file(original, source)
+    offload_root = tmp_path / "offload"
+
+    index = offload_to_safetensors_reference(
+        model.block, model, source, disk_path=str(offload_root)
+    )
+
+    assert set(index) == set(original)
+    assert holder.optional_cache is None
+    assert all(tensor.is_meta for tensor in model.block.state_dict().values())
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    streaming_state_dict_to_shards(
+        state_dict, str(saved), "model", "model.safetensors", {}, None
+    )
+    with safe_open(saved / "model.safetensors", framework="pt", device="cpu") as handle:
+        for name, tensor in original.items():
+            torch.testing.assert_close(handle.get_tensor(f"block.{name}"), tensor)
+
+
 def test_safetensors_reference_offload_keeps_source_inside_target_directory(tmp_path):
     model = _LinearWithBuffers(in_features=8, out_features=4)
     original_state = _clone_state_dict(model.linear)
