@@ -1245,6 +1245,9 @@ awq_config = AWQConfig(bits=4, group_size=128, format=FORMAT.GEMM,
 
 Staged training currently requires a fully materialized, eval-mode dense Llama model on one CPU or CUDA device with eager attention. It trains all seven projections in every decoder block, without dynamic skipping, activation ordering, rotation, adapters, or disk offload. GPTQ accepts symmetric 2-, 3-, and 4-bit scalar export; AWQ accepts 4-bit GEMM export and uses AWQ's scaled weights, integer zero points, and packer. The configuration is saved with the checkpoint. Reduce `epochs` and `qk_steps` for a quick functional check; use matched calibration and evaluation data before comparing quality.
 
+The [GSQ CUDA empty-geometry dispatch](docs/gsq-cuda-empty-geometry.md)
+describes how optional fused training kernels handle empty activations.
+
 Non-uniform per-block bit allocation at an exact bits-per-parameter budget — the paper's 2.37 and 2.62 bpp Llama rows — is available through `gptqmodel/quantization/rco.py`, a port of [IST-DASLab's RCO](https://arxiv.org/abs/2605.00649) by Helcig and Alistarh. `scripts/gsq_paper/rco_allocate.py` searches a width assignment and `scripts/gsq_paper/rco_materialize.py` exports it as a mixed-width checkpoint; see [docs/experiments/gsq-paper-reproduction.md](docs/experiments/gsq-paper-reproduction.md) for usage and measured results.
 
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
