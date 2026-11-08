@@ -1429,3 +1429,4 @@ GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kern
 The following reference pages document features proposed from the working fork.
 
 - [preserve Hessian conditioning and projection diagnostics](docs/exl3-numerical-diagnostics.md)
+- [retain restart-idempotent projection and route ledgers](docs/exl3-error-ledgers.md)
