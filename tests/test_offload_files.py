@@ -1981,6 +1981,33 @@ def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
     assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
 
 
+@pytest.mark.skipif(not hasattr(torch, "float8_e8m0fnu"), reason="float8_e8m0fnu dtype not available")
+def test_streaming_state_dict_to_shards_writes_float8_e8m0_tensors(tmp_path):
+    tensor = torch.tensor([126, 127, 128], dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    state_dict = {
+        "fp8_scale": TensorSource(
+            name="fp8_scale",
+            torch_dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            source=tensor,
+        ),
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(tmp_path),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    shard_path = tmp_path / expected_files[0]
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        saved = handler.get_tensor("fp8_scale")
+
+    assert saved.dtype is torch.float8_e8m0fnu
+    assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")
 def test_move_to_restores_offloaded_meta_leaves_before_gpu_transfer(tmp_path):
     model = _LinearWithBuffers(in_features=32, out_features=24)
