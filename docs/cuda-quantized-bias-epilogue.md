@@ -5,6 +5,9 @@ accumulator with FP16 or BF16 activations on NVIDIA CUDA. When a layer has a
 bias, that bias must be added before the accumulator is rounded to the output
 dtype. Otherwise a finite biased result can become `inf` at an intermediate
 FP16 conversion, and ordinary values can round twice.
+The same wide output is needed for unbiased GPTQ streaming: a narrow split
+reduction can produce `NaN` even when positive and negative terms cancel to
+zero.
 
 ## Inference flow
 
@@ -14,12 +17,15 @@ flowchart TD
     B -- "No" --> C["Existing portable or ROCm path"]
     B -- "Yes" --> D{"Backend path"}
     D -- "GPTQ eager, AWQ, FP8 dense, GGUF dense" --> E["matmul_fp32_reduce"]
-    D -- "GPTQ streaming" --> F["matmul_fp32_reduce per tile with bias slice"]
+    D -- "GPTQ streaming" --> F["matmul_fp32_reduce per tile with optional bias slice"]
     D -- "FP8 native" --> G["_forward_scaled_mm with FP32 output when biased"]
-    E --> H["torch.addmm with bias and FP32 output"]
+    E --> H{"Bias present?"}
     F --> H
     G --> I["Add bias in FP32"]
-    H --> J["Cast once to activation dtype"]
+    H -- "Yes" --> P["torch.addmm with FP32 output"]
+    H -- "No" --> Q["torch.mm with FP32 output"]
+    P --> J["Cast once to activation dtype"]
+    Q --> J
     I --> J
     D -- "Native FP8 call fails" --> K["Disable scaled matmul; use FP8 dense fallback"]
     K --> E
@@ -27,9 +33,10 @@ flowchart TD
     class K failure
 ```
 
-The dense helper requests an FP32 `torch.addmm` output while retaining
-low-precision tensor-core operands. GPTQ streaming keeps the wide value only
-for one output tile; it does not retain an expanded weight. FP8 native scaled
+The shared helper requests an FP32 `torch.mm` or `torch.addmm` output while
+retaining low-precision tensor-core operands. GPTQ streaming uses it for every
+NVIDIA tile, with or without bias, and keeps the wide value only for that tile;
+it does not retain an expanded weight. FP8 native scaled
 matmul requests FP32 output only when a bias is present. The output still has
 the activation dtype, and unsupported native FP8 calls use the dense fallback.
 
@@ -84,13 +91,14 @@ autograd is outside this contract.
 | Path | Previous mechanism | Current mechanism |
 | --- | --- | --- |
 | GPTQ eager, AWQ, FP8 dense, GGUF dense | `matmul_fp32_reduce` rounded before bias at `_numerics.py:35`; callers added bias at `torch.py:413`, `torch_awq.py:288`, `fp8.py:648`, and `gguf.py:1839` | `matmul_fp32_reduce` adds bias with FP32 `torch.addmm`, then rounds once |
-| GPTQ streaming | `torch.addmm` wrote an FP16/BF16 output tile at `torch.py:571`; `torch.py:591` added bias afterward | Each biased NVIDIA tile computes and adds bias in FP32 before copying to the output |
+| GPTQ streaming with bias | `torch.addmm` wrote an FP16/BF16 output tile at `torch.py:571`; `torch.py:591` added bias afterward | Each NVIDIA tile computes and adds bias in FP32 before copying to the output |
+| GPTQ streaming without bias | `torch.py:536` selected the wide tile only when bias existed; `torch.py:576` and `torch.py:577` wrote the unbiased GEMM directly to an FP16/BF16 output tile, producing `NaN` for a cancelled FP16 reduction | Every NVIDIA FP16/BF16 tile uses `matmul_fp32_reduce` and rounds once when copied to the output |
 | FP8 native scaled matmul | `fp8.py:614` requested low-precision output; `fp8.py:648` added bias afterward | Biased NVIDIA calls request FP32 output, add bias, then cast once |
 | Native FP8 unavailable | `fp8.py:625` selected dense fallback after a failed scaled matmul | The fallback passes bias into the wide dense epilogue |
 
-The `file:line` references in the previous-mechanism column refer to the
-pre-change implementation. The ROCm and CPU matmul paths retain their existing
-arithmetic and dtype behavior.
+The bias rows cite the implementation before PR #3649; the unbiased streaming
+row cites the implementation before the current change. The ROCm and CPU
+matmul paths retain their existing arithmetic and dtype behavior.
 
 ## Validation contract
 
@@ -126,3 +134,17 @@ was `5.96e-8`, with zero weight- and bias-gradient difference. These are
 training-graph measurements; inference still uses the prior no-grad path.
 
 The gradient flow was introduced by [PR #3651](https://github.com/ModelCloud/GPTQModel/pull/3651).
+
+`tests/kernels/test_inference_numeric_range.py` also checks unbiased GPTQ
+streaming with 16×2048 FP16 and BF16 activations and 256 outputs, across four
+64-column tiles. Each packed weight is exactly `1`; the input halves are
+equal and opposite, so the independent FP64 oracle is `0`. On the NVIDIA GB10,
+the previous FP16 output contained `NaN`, while the current output is exactly
+`0` in both dtypes. A random FP16 sample's maximum absolute error versus an
+independent FP32 sum fell from `0.03125` to `0`. With resident inputs, ten
+warmups, and the median of seven runs of thirty calls with CUDA synchronization,
+the streaming forward took `0.799 ms` before and `0.887 ms` after. Both runs
+had approximately `32.5 MiB` measured peak allocator delta, including CUDA
+library scratch; no expanded weight persists between forwards.
+
+The unbiased streaming flow was introduced by [PR #3654](https://github.com/ModelCloud/GPTQModel/pull/3654).
