@@ -56,9 +56,11 @@ hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uin
 // Matrix-core path for the mid-M band (nf12_ad_wmma.hip). Returns 0 when the
 // device has no wmma-128b-insts (gfx1250), so callers keep decode-then-GEMM.
 int nf12_ad_wmma_supported(int64_t m);
+size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                               const void* bias, hipStream_t stream);
+                               const void* bias, void* workspace, size_t workspace_bytes,
+                               hipStream_t stream);
 
 // Encode (nf12_ad_encode.hip). Two phases so escapes are allocated exactly.
 size_t nf12_ad_encode_workspace_bytes(int64_t n, int64_t k);
@@ -193,6 +195,12 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
                               const std::optional<torch::Tensor>& bias) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16,
               "nf12_ad_hip.linear: x must be a bf16 CUDA tensor");
+  TORCH_CHECK(packed.is_cuda() && x.device() == packed.device() &&
+                  escapes.device() == packed.device(),
+              "nf12_ad_hip.linear: x, packed and escapes must share a CUDA/HIP device");
+  // wmma_supported queries the current HIP device, and current_stream below
+  // must belong to the device that owns the packed weight.
+  auto guard = device_guard(packed);
   const int64_t k = x.size(-1);
   const int64_t n = packed.size(0);
   TORCH_CHECK(packed.size(1) * 2 / 3 == k, "nf12_ad_hip.linear: x's last dim (", k,
@@ -223,10 +231,6 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
                     escapes.size(1) == 8,
                 "nf12_ad_hip.linear: escapes must be int16 [E, 8]");
-    TORCH_CHECK(packed.device() == escapes.device() && x.device() == packed.device(),
-                "nf12_ad_hip.linear: x, packed and escapes must share a device");
-
-    auto guard = device_guard(packed);
     auto out = torch::empty({x.size(0), n}, x.options());
     // Bias is folded into the kernel's FP32 accumulator, not added to the
     // rounded BF16 result (see the comment in nf12_ad_decode.hip).
@@ -278,11 +282,20 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
       bias_ptr = b_opt->data_ptr();
     }
     auto out = torch::empty({m, n}, x.options());
+    const size_t workspace_bytes = nf12_ad_wmma_workspace_bytes(n, k, m);
+    // PyTorch's caching allocator owns this workspace for the call and tracks
+    // the current stream. Concurrent streams and devices cannot alias it.
+    torch::Tensor workspace;
+    if (workspace_bytes > 0) {
+      workspace = torch::empty({static_cast<int64_t>(workspace_bytes)}, x.options().dtype(at::kByte));
+    }
     const hipError_t status = nf12_ad_linear_wmma(
         packed.data_ptr<uint8_t>(),
         reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
         static_cast<uint32_t>(exp_base), static_cast<const void*>(x.data_ptr()),
-        static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr, current_stream());
+        static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr,
+        workspace_bytes > 0 ? workspace.data_ptr() : nullptr, workspace_bytes,
+        current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.linear (wmma) failed: ",
                 hipGetErrorString(status));
     return out;
