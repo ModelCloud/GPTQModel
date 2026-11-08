@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate import init_empty_weights
-from safetensors.torch import save_file
+from accelerate.utils import set_module_tensor_to_device
+from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, GPTQConfig
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 
@@ -20,6 +21,7 @@ from gptqmodel.utils.model import (
     hf_gptqmodel_post_init_for_load,
     hf_gptqmodel_prepare_model_for_load,
 )
+from gptqmodel.utils.nf12_codec import encode as encode_nf12
 
 
 class _Attention(torch.nn.Module):
@@ -96,6 +98,54 @@ def test_hf_load_bridge_uses_checkpoint_manifest_and_preserves_dense_module(tmp_
     assert isinstance(g_proj, torch.nn.Linear)
     assert g_proj.out_features == 48
     assert context.quantize_config.dynamic is not None
+
+
+def test_hf_load_bridge_sizes_nf12_escape_buffer_before_weight_assignment(tmp_path):
+    """Checkpoint escape rows must fit before Transformers assigns its tensors."""
+
+    config = {
+        "bits": 12,
+        "group_size": -1,
+        "desc_act": False,
+        "sym": True,
+        "format": "nf12",
+        "quant_method": "nf12",
+        "meta": {"quantizer": ["gptqmodel:test"]},
+    }
+    (tmp_path / "quantize_config.json").write_text(json.dumps(config), encoding="utf-8")
+    weight = torch.linspace(-1, 1, 32 * 128).reshape(32, 128).to(torch.bfloat16)
+    packed, escapes, exp_base = encode_nf12(weight, exp_base=54)
+    assert escapes.shape[0] > 0
+    prefix = "model.layers.0.self_attn.q_proj"
+    checkpoint = tmp_path / "model.safetensors"
+    save_file(
+        {
+            f"{prefix}.nf12_packed": packed,
+            f"{prefix}.nf12_escapes": escapes,
+            f"{prefix}.nf12_exp_base": torch.tensor([exp_base], dtype=torch.uint8),
+        },
+        checkpoint,
+    )
+    # The selected checkpoint, rather than every safetensors file in the
+    # directory, determines the buffer shape.
+    save_file({f"{prefix}.nf12_escapes": escapes[:1]}, tmp_path / "stale.safetensors")
+
+    model = _Model(tmp_path)
+    context = hf_gptqmodel_prepare_model_for_load(
+        model,
+        checkpoint_files=[checkpoint],
+        device_map={"": "cpu"},
+        backend=BACKEND.NF12_AD,
+        dtype=torch.bfloat16,
+    )
+    module = model.model.layers[0].self_attn.q_proj
+    assert context.quant_linear is type(module)
+    assert module.nf12_escapes.is_meta
+    for name, value in load_file(checkpoint).items():
+        set_module_tensor_to_device(model, name, "cpu", value=value)
+
+    assert module.nf12_escapes.shape == escapes.shape
+    assert torch.equal(module.dequantize_weight().view(torch.int16), weight.view(torch.int16))
 
 
 @pytest.mark.parametrize(

@@ -290,7 +290,13 @@ def hf_gptqmodel_prepare_model_for_load(
     from ..models.auto import MODEL_MAP
     from ..models.base import BaseQModel
     from .importer import hf_normalize_device_device_map
-    from .model import _module_has_meta_tensors, find_modules, get_module_by_name_prefix, make_quant
+    from .model import (
+        _module_has_meta_tensors,
+        _prepare_variable_quant_buffers,
+        find_modules,
+        get_module_by_name_prefix,
+        make_quant,
+    )
 
     model_type = str(getattr(model.config, "model_type", "")).lower()
     model_definition = MODEL_MAP.get(model_type, BaseQModel)
@@ -340,6 +346,11 @@ def hf_gptqmodel_prepare_model_for_load(
         device=target_device,
         dtype=dtype,
     )
+    if packed_suffix == ".nf12_packed":
+        # The escape row count depends on the encoded weights, so resize the
+        # placeholder buffers before Transformers assigns checkpoint tensors.
+        for checkpoint_file in _checkpoint_files(checkpoint_files) or [checkpoint_path]:
+            _prepare_variable_quant_buffers(model, checkpoint_file)
     log.info(
         "Transformers/Optimum: prepared `%s` native GPTQModel modules from the checkpoint manifest.",
         len(quantized_module_names),
