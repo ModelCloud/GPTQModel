@@ -1541,3 +1541,4 @@ The following reference pages document features proposed from the working fork.
 - [add bounded native core calibration and EXL3 sources](docs/glm-core-calibration.md)
 - [carry native full-MTP alignment and source loading](docs/glm-native-mtp.md)
 - [carry Flash core and MTP calibration adapters](docs/glm-flash-native-calibration.md)
+- [carry bounded native core and MTP calibration](docs/step5-native-calibration.md)
