@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
 
 
@@ -1763,7 +1764,6 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 ).contiguous()
                 return {
                     "fixed_decode_config": None,
-                    "qweight_ptr": self.qweight.data_ptr(),
                     "sign_bytes": sign_bytes,
                     "sign_words": sign_words,
                     "scale": scale,
@@ -1778,7 +1778,6 @@ class GGUFTritonKernel(GGUFTorchLinear):
                     in_features=self.padded_in_features,
                     cols=scale.shape[1],
                 ),
-                "qweight_ptr": self.qweight.data_ptr(),
                 "sign_bytes": sign_bytes,
                 "scale": scale,
                 "use_u32": False,
@@ -1792,7 +1791,6 @@ class GGUFTritonKernel(GGUFTorchLinear):
             min_value = (dmin.unsqueeze(-1) * mins.to(torch.float16)).permute(1, 2, 0).contiguous()
             qs = blocks[..., 16:].permute(1, 2, 0).contiguous()
             return {
-                "qweight_ptr": self.qweight.data_ptr(),
                 "qs": qs,
                 "scale": scale,
                 "min": min_value,
@@ -1807,7 +1805,6 @@ class GGUFTritonKernel(GGUFTorchLinear):
             qh = blocks[..., 16:48].permute(1, 2, 0).contiguous()
             qs = blocks[..., 48:].permute(1, 2, 0).contiguous()
             return {
-                "qweight_ptr": self.qweight.data_ptr(),
                 "qs": qs,
                 "qh": qh,
                 "scale": scale,
@@ -1821,7 +1818,6 @@ class GGUFTritonKernel(GGUFTorchLinear):
             d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1)
             scale = (d.unsqueeze(-1) * scale).permute(1, 2, 0).contiguous()
             return {
-                "qweight_ptr": self.qweight.data_ptr(),
                 "ql": ql,
                 "qh": qh,
                 "scale": scale,
@@ -1831,11 +1827,13 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
     def _get_triton_cache(self, device: torch.device) -> dict[str, Any]:
         key = self._triton_cache_key(device)
+        qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
-        if cached is not None and cached.get("qweight_ptr") == self.qweight.data_ptr():
+        if cached is not None and cached.get("qweight_key") == qweight_key:
             return cached
 
         cached = self._build_triton_cache(device)
+        cached["qweight_key"] = qweight_key
         self._gguf_triton_cache[key] = cached
         return cached
 
