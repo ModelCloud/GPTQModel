@@ -210,6 +210,22 @@ class _AttrBufferWrapper(nn.Module):
         self.block.rotary = _AttrBufferTemplate(width=width, scale=scale, device=torch.device("cpu"))
 
 
+class _DirectParameterAndInitBuffer(nn.Module):
+    """Keep a checkpoint parameter beside a constructor-only buffer."""
+
+    def __init__(self, width: int, device=None):
+        super().__init__()
+        self.width = width
+        self.weight = nn.Parameter(torch.ones(width, device=device))
+        self.register_buffer("cache", torch.arange(width, device=device), persistent=False)
+
+
+class _DirectParameterAndInitBufferWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.block = _DirectParameterAndInitBuffer(width)
+
+
 class _ScalarMetaBufferTemplate(nn.Module):
     """Template module that keeps the constructor scalar separately from the registered buffer."""
 
@@ -931,6 +947,26 @@ def test_lazy_turtle_direct_meta_defaults_device_for_nonpersistent_buffers(tmp_p
         restored = getattr(shell_model.block.rotary, name)
         assert not restored.is_meta
         torch.testing.assert_close(restored, getattr(source_model.block.rotary, name))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for a real device mismatch")
+@pytest.mark.parametrize("buffer_device", ["meta", "cpu"])
+def test_lazy_turtle_direct_meta_defaults_to_materialized_parameter_device(tmp_path, buffer_device):
+    source_model = _DirectParameterAndInitBufferWrapper(width=4)
+    shell_model = _DirectParameterAndInitBufferWrapper(width=4).to("cuda:0")
+    shell_model.block.register_buffer(
+        "cache", torch.arange(4, dtype=torch.int64, device=buffer_device), persistent=False
+    )
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block,
+    )
+
+    assert shell_model.block.weight.device.type == "cuda"
+    assert shell_model.block.cache.device == shell_model.block.weight.device
+    torch.testing.assert_close(shell_model.block.cache.cpu(), source_model.block.cache)
 
 
 def test_lazy_turtle_direct_meta_restores_deepseek_v4_rotary_buffers(tmp_path):
