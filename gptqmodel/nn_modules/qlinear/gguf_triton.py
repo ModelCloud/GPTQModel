@@ -409,7 +409,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -472,7 +472,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -537,7 +537,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -599,7 +599,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -706,7 +706,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -805,7 +805,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -901,7 +901,7 @@ if _TRITON_AVAILABLE:
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-            tl.cast(accumulator, tl.float16),
+            accumulator,
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
@@ -1125,11 +1125,12 @@ def fused_q4_k_matmul(
     qs: torch.Tensor,
     scale: torch.Tensor,
     min_value: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q4_K fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     kernel = _select_triton_kernel(
         _gguf_q4_k_fused_matmul_kernel_small,
         _gguf_q4_k_fused_matmul_kernel_large,
@@ -1167,11 +1168,12 @@ def fused_q1_0_g128_matmul(
     x: torch.Tensor,
     sign_bytes: torch.Tensor,
     scale: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     kernel = _select_triton_kernel(
         _gguf_q1_0_g128_fused_matmul_kernel_small,
         _gguf_q1_0_g128_fused_matmul_kernel_large,
@@ -1204,11 +1206,12 @@ def fused_q1_0_g128_k2048_matmul(
     x: torch.Tensor,
     sign_bytes: torch.Tensor,
     scale: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch(
         _gguf_q1_0_g128_k2048_fused_matmul_kernel,
         x,
@@ -1235,11 +1238,12 @@ def fused_q1_0_g128_u32_matmul(
     x: torch.Tensor,
     sign_words: torch.Tensor,
     scale: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     kernel = _select_triton_kernel(
         _gguf_q1_0_g128_u32_fused_matmul_kernel_small,
         _gguf_q1_0_g128_u32_fused_matmul_kernel_large,
@@ -1272,11 +1276,12 @@ def fused_q1_0_g128_u32_k2048_matmul(
     x: torch.Tensor,
     sign_words: torch.Tensor,
     scale: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch(
         _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel,
         x,
@@ -1305,8 +1310,9 @@ def _launch_q1_0_g128_u32_fixed_matmul(
     scale: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q1_0_g128_u32_fused_matmul_kernel_impl,
         x,
@@ -1337,8 +1343,9 @@ def _launch_q1_0_g128_u32_k2048_fixed_matmul(
     scale: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl,
         x,
@@ -1368,8 +1375,9 @@ def _launch_q1_0_g128_fixed_matmul(
     scale: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q1_0_g128_fused_matmul_kernel_impl,
         x,
@@ -1400,8 +1408,9 @@ def _launch_q1_0_g128_k2048_fixed_matmul(
     scale: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q1_0_g128_k2048_fused_matmul_kernel_impl,
         x,
@@ -1432,8 +1441,9 @@ def _launch_q4_k_fixed_matmul(
     min_value: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q4_k_fused_matmul_kernel_impl,
         x,
@@ -1471,8 +1481,9 @@ def _launch_q5_k_fixed_matmul(
     min_value: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q5_k_fused_matmul_kernel_impl,
         x,
@@ -1513,8 +1524,9 @@ def _launch_q6_k_fixed_matmul(
     scale: torch.Tensor,
     *,
     fixed_config: dict[str, int],
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     return _launch_with_meta(
         _gguf_q6_k_fused_matmul_kernel_impl,
         x,
@@ -1550,11 +1562,12 @@ def fused_q5_k_matmul(
     qh: torch.Tensor,
     scale: torch.Tensor,
     min_value: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q5_K fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     kernel = _select_triton_kernel(
         _gguf_q5_k_fused_matmul_kernel_small,
         _gguf_q5_k_fused_matmul_kernel_large,
@@ -1597,11 +1610,12 @@ def fused_q6_k_matmul(
     ql: torch.Tensor,
     qh: torch.Tensor,
     scale: torch.Tensor,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available for GGUF Q6_K fused matmul.")
 
-    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=output_dtype or x.dtype)
     kernel = _select_triton_kernel(
         _gguf_q6_k_fused_matmul_kernel_small,
         _gguf_q6_k_fused_matmul_kernel_large,
@@ -1825,7 +1839,9 @@ class GGUFTritonKernel(GGUFTorchLinear):
         self._gguf_triton_cache[key] = cached
         return cached
 
-    def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_triton(
+        self, x_flat: torch.Tensor, output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         # HIP reuses the "cuda" device namespace, so this admits CUDA and ROCm
         # while still refusing CPU/MPS/XPU placements.
         if x_flat.device.type != "cuda":
@@ -1859,14 +1875,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
                             cache["sign_words"],
                             cache["scale"],
                             fixed_config=fixed_u32_config,
+                            output_dtype=output_dtype,
                         )
                     return _launch_q1_0_g128_u32_fixed_matmul(
                         x_work,
                         cache["sign_words"],
                         cache["scale"],
                         fixed_config=fixed_u32_config,
+                        output_dtype=output_dtype,
                     )
-                return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
+                return fused_q1_0_g128_matmul(
+                    x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+                )
             fixed_decode_config = cache.get("fixed_decode_config")
             if fixed_decode_config is not None and x_work.shape[0] == 1:
                 if _use_q1_0_g128_k2048_decode_specialization(
@@ -1878,19 +1898,25 @@ class GGUFTritonKernel(GGUFTorchLinear):
                         cache["sign_bytes"],
                         cache["scale"],
                         fixed_config=fixed_decode_config,
+                        output_dtype=output_dtype,
                     )
                 return _launch_q1_0_g128_fixed_matmul(
                     x_work,
                     cache["sign_bytes"],
                     cache["scale"],
                     fixed_config=fixed_decode_config,
+                    output_dtype=output_dtype,
                 )
             if _use_q1_0_g128_k2048_decode_specialization(
                 rows=x_work.shape[0],
                 in_features=self.padded_in_features,
             ):
-                return fused_q1_0_g128_k2048_matmul(x_work, cache["sign_bytes"], cache["scale"])
-            return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
+                return fused_q1_0_g128_k2048_matmul(
+                    x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+                )
+            return fused_q1_0_g128_matmul(
+                x_work, cache["sign_bytes"], cache["scale"], output_dtype=output_dtype,
+            )
         # SM89 (RTX 4090) exact-shape fixed tiles, measured against the
         # autotuned generic kernel.  ``None`` keeps the autotuned path, which
         # stays the fallback for every unmeasured shape and every other GPU.
@@ -1904,9 +1930,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             )
             if fixed is not None:
                 return _launch_q4_k_fixed_matmul(
-                    x_work, cache["qs"], cache["scale"], cache["min"], fixed_config=fixed,
+                    x_work, cache["qs"], cache["scale"], cache["min"],
+                    fixed_config=fixed, output_dtype=output_dtype,
                 )
-            return fused_q4_k_matmul(x_work, cache["qs"], cache["scale"], cache["min"])
+            return fused_q4_k_matmul(
+                x_work, cache["qs"], cache["scale"], cache["min"], output_dtype=output_dtype,
+            )
         if self.gguf_tensor_qtype == "Q5_K":
             fixed = _select_q5_k_fixed_launch_config(
                 capability=capability,
@@ -1917,9 +1946,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             if fixed is not None:
                 return _launch_q5_k_fixed_matmul(
                     x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"],
-                    fixed_config=fixed,
+                    fixed_config=fixed, output_dtype=output_dtype,
                 )
-            return fused_q5_k_matmul(x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"])
+            return fused_q5_k_matmul(
+                x_work, cache["qs"], cache["qh"], cache["scale"], cache["min"],
+                output_dtype=output_dtype,
+            )
         if self.gguf_tensor_qtype == "Q6_K":
             fixed = _select_q6_k_fixed_launch_config(
                 capability=capability,
@@ -1929,13 +1961,24 @@ class GGUFTritonKernel(GGUFTorchLinear):
             )
             if fixed is not None:
                 return _launch_q6_k_fixed_matmul(
-                    x_work, cache["ql"], cache["qh"], cache["scale"], fixed_config=fixed,
+                    x_work, cache["ql"], cache["qh"], cache["scale"],
+                    fixed_config=fixed, output_dtype=output_dtype,
                 )
-            return fused_q6_k_matmul(x_work, cache["ql"], cache["qh"], cache["scale"])
+            return fused_q6_k_matmul(
+                x_work, cache["ql"], cache["qh"], cache["scale"], output_dtype=output_dtype,
+            )
 
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
     def forward(self, x: torch.Tensor):
+        if x.device.type != "cuda":
+            raise RuntimeError(
+                f"{self.__class__.__name__} only supports CUDA/ROCm inference. "
+                "Load GGUF models on CUDA/ROCm or use BACKEND.GGUF_TORCH for the torch fallback."
+            )
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 
@@ -1945,12 +1988,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
         else:
             x_work = x_flat
 
-        output = self._forward_triton(x_work)
+        output = self._forward_triton(
+            x_work, output_dtype=torch.float32 if self.bias is not None else None,
+        )
 
         if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
+            bias = self.bias.to(device=output.device, dtype=torch.float32)
             output = output + bias
 
         if input_dtype != output.dtype:

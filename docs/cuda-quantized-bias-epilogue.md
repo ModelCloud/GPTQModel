@@ -444,3 +444,61 @@ scratch.
 | --- | ---: | ---: | ---: | ---: |
 | 1 | 0.5655 ms | 0.5820 ms | 37.01 MiB | 37.01 MiB |
 | 16 | 0.5679 ms | 0.5811 ms | 37.15 MiB | 37.15 MiB |
+
+## GGUF Triton bias and empty input
+
+`GGUFTritonKernel.forward` accepts FP16 and BF16 activations for Q1_0,
+Q4_K, Q5_K, and Q6_K. With bias present, it now requests an FP32 output
+buffer from `_forward_triton`, adds bias to that buffer, and rounds once to
+the activation dtype. The packed GGUF blocks and their compact decoded
+metadata remain the only retained weight tensors. An empty batch returns
+through `empty_linear_output` before Triton chooses a launch grid.
+
+```mermaid
+flowchart TD
+    A["GGUFTritonKernel.forward"] --> V{"CUDA or ROCm device?"}
+    V -- "No" --> X["Raise RuntimeError"]
+    V -- "Yes" --> B{"input_rows is zero?"}
+    B -- "Yes" --> C["empty_linear_output preserves shape and adapter"]
+    B -- "No" --> D["Convert activation to FP16 for Triton"]
+    D --> E{"Bias present?"}
+    E -- "Yes" --> F["_forward_triton allocates FP32 output"]
+    E -- "No" --> G["_forward_triton allocates FP16 output"]
+    F --> H["Fused GGUF kernel stores FP32 accumulator"]
+    G --> H
+    H --> I{"Bias present?"}
+    I -- "Yes" --> J["Add bias in FP32"]
+    I -- "No" --> K["Keep unbiased output"]
+    J --> L["Round once to activation dtype"]
+    K --> L
+    L --> M["Apply adapter and reshape"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Biased fused GGUF | `gguf_triton.py:409-901` cast every accumulator to FP16 in the kernel; `:1973-1997` added bias after that conversion | The store uses the output pointer dtype; biased calls allocate FP32 and add bias before one output cast |
+| Empty activation | `gguf_triton.py:1973` passed zero rows into Triton's launch grid and raised `ValueError` | `GGUFTritonKernel.forward` returns `empty_linear_output` before launch |
+
+The line references describe the code before this correction. The GPU
+regression test decodes packed bytes with NumPy independently of the fused
+kernel and compares its FP64 biased dot product with Triton across four
+formats and two activation dtypes. The fixed-launch entry point is exercised
+on a CUDA GPU with an explicit launch config; architecture-specific launch
+selection remains covered by its own selector tests.
+
+On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132 and Triton 3.9.0,
+the packed-unit-weight Q4_K case at K=N=1024 produced `inf` before the
+epilogue change and a finite `60480` afterward. With resident FP16 inputs,
+five warmups, and the median of seven sets of 20 CUDA-event timed calls, the
+direct old and new biased paths measured:
+
+| Rows | Old latency | New latency | Old peak allocator delta | New peak allocator delta |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.0816 ms | 0.1134 ms | 0.002 MiB | 0.010 MiB |
+| 16 | 0.0823 ms | 0.1147 ms | 0.031 MiB | 0.098 MiB |
+
+The delta counts temporary outputs and bias conversion, not retained
+weights. The module retained zero expanded-weight bytes after repeated
+forwards. The wider epilogue costs roughly 0.03 ms in this measured shape.
