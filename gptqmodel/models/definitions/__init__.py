@@ -68,6 +68,7 @@ from .interns1 import InternS1QModel
 from .internvl import InternVLQModel
 from .internvl_chat import InternVLChatQModel
 from .k2_horizon import K2HorizonGPTQ, K2HorizonQModel
+from .kimi_k3 import KimiK3QModel, KimiLinearQModel
 from .lfm2_vl import LFM2VLQModel
 from .lfm3 import LFM3QModel
 from .lfm3_omni import LFM3OmniQModel

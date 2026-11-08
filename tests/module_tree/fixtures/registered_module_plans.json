@@ -199,7 +199,9 @@
     "zamba": "ZambaQModel",
     "zamba2": "Zamba2QModel",
     "zdtaichu5_0": "ZDTaichu5QModel",
-    "dots3_note": "Dots3NoteQModel"
+    "dots3_note": "Dots3NoteQModel",
+    "kimi_k3": "KimiK3QModel",
+    "kimi_linear": "KimiLinearQModel"
   },
   "cases": {
     "AfMoeQModel/gptq": {
@@ -2474,6 +2476,30 @@
         ["mlp.shared_experts.down_proj"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
+      ]
+    },
+    "KimiK3QModel/gptq": {
+      "layers": ["language_model.model.layers"],
+      "blocks": [
+        ["block_sparse_moe.gate:!"],
+        ["block_sparse_moe.routed_expert_down_proj:!"],
+        ["block_sparse_moe.routed_expert_up_proj:!"],
+        ["block_sparse_moe.routed_expert_norm:!"],
+        ["block_sparse_moe.experts.{expert_index}.w1", "block_sparse_moe.experts.{expert_index}.w3"],
+        ["block_sparse_moe.experts.{expert_index}.w2"],
+        ["block_sparse_moe.shared_experts.gate_proj:!", "block_sparse_moe.shared_experts.up_proj:!", "block_sparse_moe.shared_experts.down_proj:!"]
+      ]
+    },
+    "KimiLinearQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["block_sparse_moe.gate:!"],
+        ["block_sparse_moe.routed_expert_down_proj:!"],
+        ["block_sparse_moe.routed_expert_up_proj:!"],
+        ["block_sparse_moe.routed_expert_norm:!"],
+        ["block_sparse_moe.experts.{expert_index}.w1", "block_sparse_moe.experts.{expert_index}.w3"],
+        ["block_sparse_moe.experts.{expert_index}.w2"],
+        ["block_sparse_moe.shared_experts.gate_proj:!", "block_sparse_moe.shared_experts.up_proj:!", "block_sparse_moe.shared_experts.down_proj:!"]
       ]
     }
   }
