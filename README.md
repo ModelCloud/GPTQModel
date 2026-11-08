@@ -1500,3 +1500,9 @@ TritonPatch.apply()
 ## License 📜
 
 GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.
+
+## Proposed feature reference pages
+
+The following reference pages document features proposed from the working fork.
+
+- [preserve Hessian conditioning and projection diagnostics](docs/exl3-numerical-diagnostics.md)
