@@ -68,9 +68,15 @@ class _DummyConfig:
         clone.__dict__ = copy.deepcopy(self.__dict__, memo)
         return clone
 
+    def save_pretrained(self, save_dir):
+        with open(os.path.join(save_dir, "config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"dummy": True}, handle)
+
 
 class _DummyGenerationConfig(_DummyConfig):
-    pass
+    def save_pretrained(self, save_dir):
+        with open(os.path.join(save_dir, "generation_config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"do_sample": False}, handle)
 
 
 class _TinySplitModel(nn.Module):

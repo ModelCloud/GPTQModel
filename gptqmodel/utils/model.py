@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -2620,6 +2621,22 @@ def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
         out.write(tensor.view(torch.uint8).numpy().tobytes())
 
 
+@contextmanager
+def _atomic_shard_file(path: str):
+    """Keep the current shard and any mapped source tensors alive until commit."""
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
+        dir=os.path.dirname(os.path.abspath(path)),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            yield handle
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
     header: Dict[str, Any] = {}
     if metadata:
@@ -2641,7 +2658,7 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
     if header_padding:
         header_bytes += b" " * header_padding
 
-    with open(path, "wb") as out:
+    with _atomic_shard_file(path) as out:
         out.write(struct.pack("<Q", len(header_bytes)))
         out.write(header_bytes)
 
