@@ -122,3 +122,5 @@ and the median of seven sets of 20 CUDA-event timed calls, the hot path was:
 
 The FP32 arrays are selected only for packed blocks whose intermediate range
 requires them. These measurements cover the ordinary FP16 metadata path.
+This Q4_K/Q5_K range correction was introduced by
+[PR #3668](https://github.com/ModelCloud/GPTQModel/pull/3668).
