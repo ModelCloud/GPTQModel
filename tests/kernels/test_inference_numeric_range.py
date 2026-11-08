@@ -368,6 +368,32 @@ def test_torch_fallback_ignores_unsafe_reduction_flag(request, backend):
     assert torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
 
 
+@pytest.mark.skipif(not NVIDIA, reason='NVIDIA CUDA streaming reduction')
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_torch_streaming_ignores_unsafe_reduction_flag(request, dtype):
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
+    previous = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+    request.addfinalizer(lambda: setattr(torch.backends.cuda.matmul, 'allow_fp16_reduced_precision_reduction', previous))
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+
+    m = TorchLinear(bits=4, group_size=128, sym=False, desc_act=False,
+                    in_features=2048, out_features=256, bias=False,
+                    checkpoint_format=FORMAT.GPTQ_V2).to(device='cuda', dtype=dtype).eval()
+    # Every packed nibble is 1 and every zero point is 0, so each logical
+    # weight is exactly 1. The two activation halves cancel to zero in FP64.
+    m.qweight.fill_(0x11111111)
+    m.qzeros.zero_()
+    m.scales.fill_(1.)
+    m.post_init()
+    m.enable_streaming(tile_cols=64)
+
+    x = torch.full((16, 2048), 10000., dtype=dtype, device='cuda')
+    x[:, 1024:] *= -1
+    assert m._should_use_streaming(x)
+    check(m, x, 0.)
+
+
 @pytest.mark.skipif(not NVIDIA, reason='ExLlamaV2 CUDA split reduction')
 @pytest.mark.parametrize('backend', ['gptq', 'awq'])
 def test_exllamav2_split_reduction_and_stream(backend):
