@@ -280,8 +280,39 @@ Environment knobs:
 | `nf12_ad_format_hip.cuh` | Format geometry, `nv_sel_to_amd`/`prmt`, `decode_bulk`/`decode_group`, tiling and wmma fragment helpers. |
 | `nf12_ad_decode.hip` | `nf12_ad_decode` (NF12 → exact BF16), `nf12_ad_linear_fused` (small-M fused decode+GEMM), and `nf12_ad_selftest`. |
 | `nf12_ad_encode.hip` | Native analyze/count/scan/write encoder, byte-identical to the Torch codec. |
-| `nf12_ad_wmma.hip` | Matrix-core fused path for `16 <= m <= 256`, including split-K and its reduce kernel. |
+| `nf12_ad_wmma.hip` | Matrix-core fused path for `16 <= m <= 256`, including split-K, its reduce kernel, and the bf16t twin. |
+| `nf12_ad_moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
+| `nf12_ad_pack_bf16t.hip` | BF16 → bf16t twin packing (SPEC.md §4.4). |
 | `nf12_ad_torch.cpp` | Host-only Torch bindings: `encode`, `decode`, `linear`, `selftest`, `arch_info`. |
 
 `nf12_ad_torch.cpp` must stay free of torch types in the `.hip` translation
 unit: the ROCm SDK here ships no thrust, so the two TUs are strictly split.
+
+## Syncing with upstream nf12
+
+These files are a mechanical copy of `dphnAI/nf12`'s `csrc/hip/*`, so a fix
+lands once and is copied, not reimplemented. The transform is:
+
+| Step | Rule |
+| --- | --- |
+| Headers | `#include "format_hip.cuh"` → `#include "nf12_ad_format_hip.cuh"` |
+| Symbols | `nf12_hip_` → `nf12_ad_`, except `nf12_hip_linear_wmma_workspace_bytes` → `nf12_ad_wmma_workspace_bytes` (the name `nf12_ad_torch.cpp` and the docs already use) |
+| Attribution | Prepend `// SPDX-FileCopyrightText: 2026 ModelCloud.ai`; drop the upstream `Adapted from GPT-QModel` line |
+| Geometry | `nf12_ad_format_hip.cuh` drops `#include "nf12/format.cuh"` and the `static_assert`s that compare against it |
+| Duplicates | `nf12_ad_decode.hip` drops the local `warp_super_atom`/`grid_blocks`, which the format header now owns |
+
+Two constraints the upstream sources already satisfy, and that a sync must not
+break:
+
+* Every `kernel<<<...>>>` launch must be a plain identifier or template-id.
+  torch's hipify rewrites launches by matching an identifier, so a launch
+  through an indexed expression is silently mangled.
+* `nf12_ad_decode.hip` and `nf12_ad_wmma.hip` must not include a public header
+  that drags in CUDA-compat aliases; the queries the launchers need are
+  forward-declared in the file.
+
+MoE and the bf16t twin are vendored for parity but not exposed through
+`torch.ops.nf12_ad_hip`: GPT-QModel quantizes MoE expert linears individually,
+so there is no fused-MoE consumer, and the C ABI is the integration point.
+`_SOURCE_FILES` in `gptqmodel/utils/nf12_ad_hip.py` derives the compiled source
+list from itself, so a new file is either built or not staged at all.
