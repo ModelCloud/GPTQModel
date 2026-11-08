@@ -13,9 +13,9 @@ Shapes come from two sources and are stored per preset:
 ``qwen3_8b``      read from the released config: hidden 4096, intermediate
                   12288, 32 query heads and 8 KV heads of width 128.
 ``qwen3_4b``      hidden 2560, intermediate 9728, 8 KV heads of width 128.
-``moe_proxy``     a DeepSeek-style routed expert (hidden 7168, expert FFN 2048)
-                  plus the shared expert. Replace once the target checkpoint's
-                  config is fixed.
+``deepseek_v41``  read from DeepSeek-V4.1-Flash's text_config at revision
+                  314113f8: hidden 5120, expert FFN 2304, MLA q_proj 5120->32768,
+                  kv_a_proj 5120->576.
 
 Protocol, matching ``benchmark_allspark_w8a16.py`` so numbers are comparable:
 
@@ -74,11 +74,17 @@ PRESETS: dict[str, tuple[Shape, ...]] = {
         Shape("gate_up", 2560, 9728),
         Shape("down", 9728, 2560),
     ),
-    "moe_proxy": (
-        Shape("expert_gate_up", 7168, 2048),
-        Shape("expert_down", 2048, 7168),
-        Shape("shared_gate_up", 7168, 18432),
-        Shape("shared_down", 18432, 7168),
+    # deepseek-ai/DeepSeek-V4.1-Flash, revision 314113f8: text_config declares
+    # hidden 5120, 40 layers, 384 routed experts of FFN 2304 plus one shared
+    # expert, and MLA with 64 heads of width 512 (kv heads 1, rope 64).
+    "deepseek_v41": (
+        Shape("q_proj", 5120, 32768),
+        Shape("kv_a_proj", 5120, 576),
+        Shape("o_proj", 32768, 5120),
+        Shape("expert_gate_up", 5120, 2304),
+        Shape("expert_down", 2304, 5120),
+        Shape("shared_gate_up", 5120, 2304),
+        Shape("shared_down", 2304, 5120),
     ),
 }
 
@@ -124,12 +130,12 @@ FUSIONS: dict[str, tuple[Fusion, ...]] = {
             fused=Shape("gateup_fused", 2560, 19456),
         ),
     ),
-    "moe_proxy": (
+    "deepseek_v41": (
         Fusion(
             "expert_gate_up",
-            parts=(Shape("expert_gate_up", 7168, 2048),
-                   Shape("expert_gate_up", 7168, 2048)),
-            fused=Shape("expert_gateup_fused", 7168, 4096),
+            parts=(Shape("expert_gate_up", 5120, 2304),
+                   Shape("expert_gate_up", 5120, 2304)),
+            fused=Shape("expert_gateup_fused", 5120, 4608),
         ),
     ),
 }
