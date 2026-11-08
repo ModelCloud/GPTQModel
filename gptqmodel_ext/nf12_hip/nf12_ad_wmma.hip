@@ -397,16 +397,20 @@ static hipError_t ensure_partial(size_t bytes) {
 // packed weight is never read twice; the cost is the per-split FP32 partial
 // plane plus the reduce pass.
 //
-// The constants below are measured on gfx1201 (best split at m=16 / m=128):
+// The constants below are measured on gfx1201 (best split at m=16 / m=128),
+// on the k x n grid of bench/common.py. blocks_x is n/16/8 (one warp per
+// super-atom row, eight warps per CTA) and k_blocks is k/64:
 //
-//   4096x4096    32 CTAs,  64 k-blocks   s1 / s2
+//   4096x4096    32 CTAs,  64 k-blocks   s4 / s2
+//   4096x14336  112 CTAs,  64 k-blocks   s1 / s1
 //   14336x4096   32 CTAs, 224 k-blocks   s1 / s1
-//   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
-//   4096x14336  112 CTAs, 224 k-blocks   s1 / s1
-//   4096x28672  224 CTAs, 448 k-blocks   s1 / s1
+//   4096x28672  224 CTAs,  64 k-blocks   s4 / s1
 //   5120x25600  200 CTAs,  80 k-blocks   s4 / s1
-//   8192x57344  448 CTAs, 128 k-blocks   s1 / s2
-//   896x4864      7 CTAs,  76 k-blocks   s8 / s8
+//   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
+//   8192x8192    64 CTAs, 128 k-blocks   s1 / s1
+//   8192x57344  448 CTAs, 128 k-blocks   s2 / s2
+//   2048x8192    64 CTAs,  32 k-blocks   s1 / s1
+//   896x4864     38 CTAs,  14 k-blocks   s1 / s2
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   constexpr int64_t kOneWave = 32;  // 32 CUs, one CTA per CU
   // Narrow N: 7 CTAs is under a quarter wave, and every extra CTA is free
@@ -421,9 +425,12 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
     if (m <= 64 && k_blocks < kOneWave * 4 && blocks_x >= 4 * kOneWave) return 4;
     return 1;
   }
-  // One wave or less: the CTA is only short of work when it holds eight token
-  // tiles and K is short (4096x4096 m=128: 80 -> 70 us).
-  if (m > 64 && k_blocks < kOneWave * 4) return 2;
+  // One wave or less. Split only when there is enough K to give every split a
+  // real slice: 4096x4096 (64 k-blocks) goes 27.3 -> 25.7 us at m=16, while
+  // 896x4864 (14 k-blocks) is faster unsplit because the per-CTA prologue
+  // dominates once each split only walks three super-atoms.
+  if (k_blocks >= kOneWave && k_blocks < kOneWave * 4) return (m <= 16) ? 4 : 2;
+  if (m > 64 && k_blocks < kOneWave) return 2;
   return 1;
 }
 
@@ -533,7 +540,12 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   hipError_t status = hipGetLastError();
   if (status == hipSuccess && splits > 1) {
     const int64_t total = m * n;
-    const int reduce_blocks = static_cast<int>((total + 255) / 256);
+    // Cap the natural (total+255)/256 grid at 128 blocks: at exactly 256
+    // blocks gfx1201 hits a pathological 14 us case (measured 3.3 us at 64,
+    // 128 and 512). Small outputs keep their natural, smaller grid.
+    int rb = static_cast<int>((total + 255) / 256);
+    if (rb > 128) rb = 128;
+    const int reduce_blocks = rb;
     wmma_reduce_kernel<<<reduce_blocks, 256, 0, stream>>>(
         partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits);
     status = hipGetLastError();

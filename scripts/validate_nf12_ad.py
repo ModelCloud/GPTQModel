@@ -319,17 +319,29 @@ def run_accuracy(device: str, backend: str, quick: bool, results: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
-def timed(fn, device: str, warmup: int = 15, iters: int = 60):
+def timed(fn, device: str, warmup: int = 15, iters: int = 60, reps: int = 5):
+    """Return (median, min) microseconds per call, timed with CUDA events.
+
+    Timing one call between two ``torch.cuda.synchronize`` calls measures the
+    launch round-trip, not the kernel: on this host that is ~30 us, which is
+    larger than a 4096x4096 decode at m=16 and completely hides the difference
+    between NF12 and BF16 at small m. Batch ``iters`` calls between a pair of
+    recorded events instead, and take the best of several batches. This is the
+    same method as ``bench/hip_linear.py``.
+    """
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize(device)
     samples = []
-    for _ in range(iters):
-        torch.cuda.synchronize(device)
-        start = time.perf_counter()
-        fn()
-        torch.cuda.synchronize(device)
-        samples.append((time.perf_counter() - start) * 1e6)
+    for _ in range(reps):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn()
+        end.record()
+        end.synchronize()
+        samples.append(start.elapsed_time(end) * 1e3 / iters)  # ms -> us
     return statistics.median(samples), min(samples)
 
 
