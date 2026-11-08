@@ -38,6 +38,24 @@ def test_explicit_gpu_backend_rejects_cpu_device(backend):
         validate_nf12_ad.backend_module(backend, "cpu")
 
 
+def test_perf_helpers_synchronize_requested_gpu(monkeypatch):
+    from scripts import validate_nf12_ad
+
+    observed = []
+    tiny = validate_nf12_ad.torch.ones(1)
+    monkeypatch.setattr(validate_nf12_ad.torch.cuda, "synchronize",
+                        lambda device=None: observed.append(device))
+    monkeypatch.setattr(validate_nf12_ad.torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(validate_nf12_ad.torch, "empty", lambda *args, **kwargs: tiny)
+    monkeypatch.setattr(validate_nf12_ad.torch, "randn", lambda *args, **kwargs: tiny)
+
+    validate_nf12_ad.timed(lambda: None, "cuda:1", warmup=0, iters=1)
+    validate_nf12_ad.measure_bandwidth("cuda:1")
+    validate_nf12_ad.measure_cache_size("cuda:1", repetitions=1)
+
+    assert observed and set(observed) == {"cuda:1"}
+
+
 def test_perf_only_failure_returns_nonzero_status(monkeypatch):
     from scripts import validate_nf12_ad
 
