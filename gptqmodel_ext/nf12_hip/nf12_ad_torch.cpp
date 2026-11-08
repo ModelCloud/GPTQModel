@@ -25,10 +25,12 @@
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAFunctions.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <hip/hip_runtime_api.h>
 
 #include <optional>
+#include <vector>
 #include <string>
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,13 @@ hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t 
                           hipStream_t stream);
 
 hipError_t nf12_ad_selftest(uint32_t* out, hipStream_t stream);
+
+// Fused small-M decode+GEMM. `x` and `out` are BF16, row-major, [m, k] and
+// [m, n]. `out` may be `void*` for the same reason as decode's.
+int nf12_ad_linear_fused_small_m_supported(int64_t m);
+hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                const void* bias, hipStream_t stream);
 }
 
 namespace {
@@ -124,21 +133,103 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16,
               "nf12_ad_hip.linear: x must be a bf16 CUDA tensor");
   const int64_t k = x.size(-1);
-  const torch::Tensor w = decode_dispatch(packed, escapes, exp_base);
-  TORCH_CHECK(w.size(1) == k, "nf12_ad_hip.linear: x's last dim (", k,
-              ") must equal K (", w.size(1), ")");
+  const int64_t n = packed.size(0);
+  TORCH_CHECK(packed.size(1) * 2 / 3 == k, "nf12_ad_hip.linear: x's last dim (", k,
+              ") must equal K (", packed.size(1) * 2 / 3, ")");
 
-  if (bias.has_value() && bias->defined()) {
-    // Fold the bias into the GEMM epilogue (addmm), never add it to an
-    // already-rounded BF16 product. Adding afterwards double-rounds: the
-    // matmul rounds H, then H + bias rounds again, which measured 0.0017
-    // RMS relative error and only 80% bit-exact outputs on gfx1201 versus
-    // 2e-5 / 99.99% for addmm. The CUDA kernel also accumulates bias in
-    // FP32 before writing BF16 (csrc/linear/small_m.cu), so addmm matches it.
-    const torch::Tensor b = bias->to(w.device(), w.scalar_type());
-    return at::addmm(b, x, w.t());
+  // Prefer the fused small-M kernel: it reads only the packed weight
+  // (K*3/2 bytes per row) and keeps the decoded super-atom in registers.
+  // Decode-then-GEMM below moves packed + dense write + dense read, which at
+  // M <= 16 is dominated by materialising a matrix the GEMM immediately
+  // re-reads, so it cannot reach BF16 parity. Large M still wants the GEMM.
+  const int64_t m = x.numel() / k;
+  if (x.dim() == 2 && x.is_contiguous() && nf12_ad_linear_fused_small_m_supported(m)) {
+    check_arch(packed);
+    TORCH_CHECK(packed.is_contiguous() && escapes.is_contiguous(),
+                "nf12_ad_hip.linear: packed and escapes must be contiguous");
+    TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
+                "nf12_ad_hip.linear: exp_base must be in [0, 120], got ", exp_base);
+    const int64_t row_bytes = packed.size(1);
+    TORCH_CHECK(n > 0 && n % 16 == 0, "nf12_ad_hip.linear: N must be a positive multiple of 16");
+    TORCH_CHECK(row_bytes % 96 == 0,
+                "nf12_ad_hip.linear: packed row must be a multiple of 96 bytes");
+    TORCH_CHECK(k % 64 == 0, "nf12_ad_hip.linear: K must be a multiple of 64");
+    TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
+                    escapes.size(1) == 8,
+                "nf12_ad_hip.linear: escapes must be int16 [E, 8]");
+    TORCH_CHECK(packed.device() == escapes.device() && x.device() == packed.device(),
+                "nf12_ad_hip.linear: x, packed and escapes must share a device");
+
+    auto guard = device_guard(packed);
+    auto out = torch::empty({x.size(0), n}, x.options());
+    // Bias is folded into the kernel's FP32 accumulator, not added to the
+    // rounded BF16 result (see the comment in nf12_ad_decode.hip).
+    const bool has_bias = bias.has_value() && bias->defined();
+    const torch::Tensor b =
+        has_bias ? bias->to(out.device(), out.scalar_type()).contiguous() : torch::Tensor();
+    if (has_bias) {
+      TORCH_CHECK(b.numel() == n, "nf12_ad_hip.linear: bias must have N elements");
+    }
+    const hipError_t status = nf12_ad_linear_fused(
+        packed.data_ptr<uint8_t>(), reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+        static_cast<uint32_t>(exp_base), static_cast<const void*>(x.data_ptr()),
+        static_cast<void*>(out.data_ptr()), n, k, m,
+        has_bias ? static_cast<const void*>(b.data_ptr()) : nullptr, current_stream());
+    TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.linear (fused) failed: ",
+                hipGetErrorString(status));
+    return out;
   }
-  return at::matmul(x, w.t());
+
+  // Larger M: decode the weight and hand it to rocBLAS (SPEC.md 6.5). Decode
+  // row slices sized to the L2 cache rather than the whole matrix, so the
+  // decoded tile is still hot when the GEMM reads it. A full-matrix decode
+  // spills 32 MiB+ straight past an 8 MiB RDNA4 L2 and the GEMM re-reads it
+  // from memory.
+  const int64_t row_bytes = packed.size(1);
+  TORCH_CHECK(row_bytes * 2 / 3 == k, "nf12_ad_hip.linear: packed K mismatch");
+  TORCH_CHECK(n % 16 == 0 && row_bytes % 96 == 0 && k % 64 == 0,
+              "nf12_ad_hip.linear: unsupported NF12-AD shape");
+
+  // Slice height: large enough that rocBLAS keeps its efficiency (a 256-row
+  // GEMM is launch-bound), small enough that the decoded tile still lands in
+  // L2. 1024 rows measured best on gfx1201 across M = 16..256; the L2 term
+  // only ever raises it. Below ~1024 rows the extra GEMM launches cost more
+  // than the cache locality buys.
+  constexpr int64_t kMinSliceRows = 1024;
+  int64_t slice_rows = n;
+  const int64_t l2_bytes = static_cast<int64_t>(at::cuda::getCurrentDeviceProperties()->l2CacheSize);
+  if (l2_bytes > 0 && n > kMinSliceRows) {
+    const int64_t budget = l2_bytes / 2;  // decoded BF16 tile only
+    const int64_t rows = std::max(kMinSliceRows, (budget / (k * 2)) / 16 * 16);
+    slice_rows = std::min(n, rows);
+  }
+
+  // Collect per-slice results and concatenate once. Writing each slice into a
+  // column view of a preallocated output looks cheaper but the view is
+  // non-contiguous, so the copy_ becomes a strided element-wise pass that cost
+  // far more than the GEMM it was meant to accelerate.
+  std::vector<torch::Tensor> slice_out;
+  slice_out.reserve((n + slice_rows - 1) / slice_rows);
+  for (int64_t n0 = 0; n0 < n; n0 += slice_rows) {
+    const int64_t rows = std::min(slice_rows, n - n0);
+    // A row slice of an NF12 weight is the packed view [n0, n0+rows); escape
+    // indices are absolute, so the full table applies (SPEC.md 6.5).
+    const torch::Tensor ps = packed.narrow(0, n0, rows);
+    const torch::Tensor ws = decode_dispatch(ps, escapes, exp_base);
+    if (bias.has_value() && bias->defined()) {
+      // Fold the bias into the GEMM epilogue (addmm), never add it to an
+      // already-rounded BF16 product. Adding afterwards double-rounds: the
+      // matmul rounds H, then H + bias rounds again, which measured 0.0017
+      // RMS relative error and only 80% bit-exact outputs on gfx1201 versus
+      // 2e-5 / 99.99% for addmm. The CUDA kernel also accumulates bias in
+      // FP32 before writing BF16 (csrc/linear/small_m.cu), so addmm matches it.
+      const torch::Tensor bs = bias->to(ws.device(), ws.scalar_type()).narrow(0, n0, rows);
+      slice_out.push_back(at::addmm(bs, x, ws.t()));
+    } else {
+      slice_out.push_back(at::matmul(x, ws.t()));
+    }
+  }
+  return slice_out.size() == 1 ? slice_out[0] : at::cat(slice_out, 1);
 }
 
 // ---------------------------------------------------------------------------
