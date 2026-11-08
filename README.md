@@ -884,6 +884,8 @@ checkpoint rather than a dense weight.
 
 The [NF12 validation backend flow](docs/nf12-validation-backends.md) explains
 how `scripts/validate_nf12_ad.py` treats explicit CUDA/HIP and automatic selection.
+The [NF12 installed extension flow](docs/nf12-installed-extension.md) describes
+how the runtime checks an installed `nf12` package before reusing its operators.
 
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 
