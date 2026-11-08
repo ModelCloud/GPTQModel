@@ -62,10 +62,10 @@ def get_submodule(root: torch.nn.Module, path: str) -> torch.nn.Module:
 
 def is_meta_module(m: nn.Module) -> bool:
     for p in m.parameters(recurse=True):
-        if getattr(p, "is_meta", False) or (hasattr(p, "device") and p.device is META):
+        if p.is_meta:
             return True
     for b in m.buffers(recurse=True):
-        if hasattr(b, "device") and b.device is META:
+        if b.is_meta:
             return True
     return False
 

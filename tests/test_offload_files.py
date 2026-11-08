@@ -453,6 +453,24 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
         torch.testing.assert_close(tensor, original_state[name])
 
 
+def test_reoffload_skips_buffer_only_meta_nf12_module(tmp_path):
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.utils.offload import is_meta_module
+
+    model = nn.Module()
+    model.block = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    offload_root = tmp_path / "offload"
+    offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+    index_path = offload_root / "block" / "index.json"
+    original_index = index_path.read_bytes()
+    assert model.block.nf12_packed.is_meta
+
+    offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+    assert is_meta_module(model.block)
+    assert index_path.read_bytes() == original_index
+    assert not (offload_root / "block.tmp").exists()
+
+
 def _offloaded_save_model(
     tmp_path: Path, offload_format: str, dtype: torch.dtype = torch.float32
 ) -> tuple[nn.Module, Path, dict[str, torch.Tensor]]:
