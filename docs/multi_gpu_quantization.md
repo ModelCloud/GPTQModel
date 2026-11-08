@@ -96,6 +96,8 @@ sequence before normalization can collapse it at
 `gptqmodel/models/loader.py:453-460` and
 `gptqmodel/models/loader.py:1529-1536`. `ModelLoader.from_pretrained` uses the
 same helper to build its quantization `compute_device_filter`.
+See [PR #3577](https://github.com/ModelCloud/GPTQModel/pull/3577) for the
+regression report and rationale.
 
 | Request on a four-GPU host | Before | After |
 | --- | --- | --- |
