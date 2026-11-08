@@ -66,3 +66,5 @@ See [PR #3589](https://github.com/ModelCloud/GPTQModel/pull/3589) for the
 reproducer and rationale.
 The indexed-shard compatibility rule is covered by
 [PR #3590](https://github.com/ModelCloud/GPTQModel/pull/3590).
+The conflicting-index guard was added in
+[PR #3622](https://github.com/ModelCloud/GPTQModel/pull/3622).
