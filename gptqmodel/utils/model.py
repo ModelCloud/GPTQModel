@@ -2231,6 +2231,7 @@ def _resolve_offload_entry(
             format="safetensors",
             weight_name=entry.get("weight_name", leaf),
             data_offsets=offsets,
+            sha256=entry.get("sha256"),
         )
 
     filename = entry.get("filename")
@@ -2261,11 +2262,20 @@ def _resolve_offload_entry(
     )
 
 
-def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dict[str, TensorSource]:
+def _collect_state_dict_with_offload(
+    model: nn.Module,
+    offload_root: str,
+    include_prefixes: Optional[Tuple[str, ...]] = None,
+    include_names: Optional[set[str]] = None,
+) -> Dict[str, TensorSource]:
     state_dict: Dict[str, TensorSource] = collections.OrderedDict()
     index_cache: Dict[str, Optional[Dict]] = {}
 
     for name, param in model.named_parameters():
+        if include_prefixes is not None and not name.startswith(include_prefixes):
+            continue
+        if include_names is not None and name not in include_names:
+            continue
         module_path, leaf = _split_parameter_path(name)
         source = None
         if getattr(param, "is_meta", False) or param.device.type == "meta":
@@ -2294,6 +2304,10 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
             if buffer_name in non_persistent:
                 continue
             name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+            if include_prefixes is not None and not name.startswith(include_prefixes):
+                continue
+            if include_names is not None and name not in include_names:
+                continue
             if name in state_dict:
                 continue
             module_path, leaf = _split_parameter_path(name)
@@ -2317,7 +2331,12 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
     return state_dict
 
 
-def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None) -> Dict[str, TensorSource]:
+def get_state_dict_for_save(
+    model: nn.Module,
+    offload_root: Optional[str] = None,
+    include_prefixes: Optional[Tuple[str, ...]] = None,
+    include_names: Optional[set[str]] = None,
+) -> Dict[str, TensorSource]:
     """
     Filter weight-sharing tensors.
     Referenced from transformers.modeling_utils.PreTrainedModel.save_pretrained.
@@ -2325,10 +2344,19 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
     See https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2369
     """
     if offload_root:
-        state_dict = _collect_state_dict_with_offload(model, offload_root)
+        state_dict = _collect_state_dict_with_offload(
+            model,
+            offload_root,
+            include_prefixes=include_prefixes,
+            include_names=include_names,
+        )
     else:
         state_dict = collections.OrderedDict()
         for name, param in model.named_parameters():
+            if include_prefixes is not None and not name.startswith(include_prefixes):
+                continue
+            if include_names is not None and name not in include_names:
+                continue
             state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
         # Collect persistent buffers in a single module-tree walk, skipping
         # non-persistent buffers inline via `_non_persistent_buffers_set`.
@@ -2338,6 +2366,10 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
                 if buffer_name in non_persistent:
                     continue
                 name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+                if include_prefixes is not None and not name.startswith(include_prefixes):
+                    continue
+                if include_names is not None and name not in include_names:
+                    continue
                 if name in state_dict:
                     continue
                 state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
@@ -2346,7 +2378,13 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
     for name, entry in state_dict.items():
         source = entry.source
         if isinstance(source, OffloadTensorRef):
-            key = ("offload", source.path, source.weight_name or name, source.data_offsets)
+            key = (
+                "offload",
+                source.path,
+                source.weight_name or name,
+                source.data_offsets,
+                source.sha256,
+            )
         elif isinstance(source, torch.Tensor):
             tensor = source
             if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
@@ -2570,7 +2608,20 @@ _STREAM_BUFFER_SIZE = 32 * 1024 * 1024
 _STREAM_BUFFER = memoryview(bytearray(_STREAM_BUFFER_SIZE))
 _STREAM_BUFFER_LOCK = threading.Lock()
 
-def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0) -> None:
+def _copy_file_stream(
+    src_path: str,
+    dst_fh,
+    length: int,
+    *,
+    offset: int = 0,
+    expected_sha256: str | None = None,
+) -> None:
+    if expected_sha256 is not None and (
+        len(expected_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in expected_sha256)
+    ):
+        raise ValueError(f"Invalid source tensor SHA-256 for {src_path}")
+    digest = hashlib.sha256() if expected_sha256 is not None else None
     with ctx(open(src_path, "rb", buffering=0), _STREAM_BUFFER_LOCK) as (src, _):
         if offset:
             src.seek(offset)
@@ -2581,7 +2632,11 @@ def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0) ->
             if not read:
                 raise IOError(f"Unexpected EOF while copying from {src_path}")
             dst_fh.write(_STREAM_BUFFER[:read])
+            if digest is not None:
+                digest.update(_STREAM_BUFFER[:read])
             remaining -= read
+    if digest is not None and digest.hexdigest() != expected_sha256:
+        raise IOError(f"Source tensor content digest differs for {src_path}")
 
 
 def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
@@ -2597,22 +2652,6 @@ def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
         # PyTorch float8 dtypes and some future storage dtypes may not expose a NumPy bridge.
         # Fall back to the raw byte view so safetensors still receives the exact tensor payload.
         out.write(tensor.view(torch.uint8).numpy().tobytes())
-
-
-@contextmanager
-def _atomic_shard_file(path: str):
-    """Keep the current shard and any mapped source tensors alive until commit."""
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
-        dir=os.path.dirname(os.path.abspath(path)),
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            yield handle
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def _safetensors_header(
@@ -2639,6 +2678,7 @@ def _safetensors_header(
         header_bytes += b" " * header_padding
     return header, header_bytes, offset
 
+
 class _Sha256Writer:
     def __init__(self) -> None:
         self.digest = hashlib.sha256()
@@ -2646,6 +2686,7 @@ class _Sha256Writer:
     def write(self, payload) -> int:
         self.digest.update(payload)
         return len(payload)
+
 
 def _tensor_payload_sha256(entry: TensorSource) -> str | None:
     source = entry.source
@@ -2682,6 +2723,7 @@ def _tensor_payload_sha256(entry: TensorSource) -> str | None:
     writer = _Sha256Writer()
     _write_tensor_bytes(writer, source.detach(), entry.torch_dtype)
     return writer.digest.hexdigest()
+
 
 def _existing_shard_matches(
     path: str, entries: List[TensorSource], metadata: Dict[str, str]
@@ -2725,6 +2767,23 @@ def _existing_shard_matches(
     except (OSError, TypeError, ValueError, struct.error):
         return False
 
+
+@contextmanager
+def _atomic_shard_file(path: str):
+    """Keep the current shard and any mapped source tensors alive until commit."""
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
+        dir=os.path.dirname(os.path.abspath(path)),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            yield handle
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
     _, header_bytes, _ = _safetensors_header(entries, metadata)
 
@@ -2740,11 +2799,23 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
                     start = 0
                     if source.data_offsets is not None:
                         start = source.data_offsets[0]
-                    _copy_file_stream(source.path, out, entry.num_bytes, offset=start)
+                    _copy_file_stream(
+                        source.path,
+                        out,
+                        entry.num_bytes,
+                        offset=start,
+                        expected_sha256=source.sha256,
+                    )
                 elif source.format == "safetensors" and source.data_offsets is not None:
                     # print("offload tensor io buffered transfer SAFETENSOR stream")
                     start, end = source.data_offsets
-                    _copy_file_stream(source.path, out, end - start, offset=start)
+                    _copy_file_stream(
+                        source.path,
+                        out,
+                        end - start,
+                        offset=start,
+                        expected_sha256=source.sha256,
+                    )
                 else:
                     # print("offload tensor slow tensor read")
                     with safe_open(source.path, framework="pt", device="cpu") as handler:

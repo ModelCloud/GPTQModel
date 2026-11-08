@@ -24,7 +24,7 @@ import gptqmodel.utils.model as model_utils
 import gptqmodel.utils.structure as structure_module
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import TensorSource, get_state_dict_for_save, move_to, streaming_state_dict_to_shards
-from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
+from gptqmodel.utils.offload import offload_to_disk, offload_to_safetensors_reference, undo_offload_to_disk
 
 
 LazyTurtle = structure_module.LazyTurtle
@@ -2050,3 +2050,56 @@ def test_move_to_restores_offloaded_meta_leaves_before_gpu_transfer(tmp_path):
     for name, tensor in restored.state_dict().items():
         assert tensor.device.type == "cuda"
         torch.testing.assert_close(tensor.cpu(), original_state[name])
+
+
+def test_safetensors_reference_offload_avoids_a_second_payload(tmp_path):
+    model = _LinearWithBuffers(in_features=128, out_features=96)
+    original_state = _clone_state_dict(model.linear)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(original_state, source_path)
+    offload_root = tmp_path / "offload_root"
+
+    index = offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(offload_root),
+    )
+
+    module_dir = offload_root / "linear"
+    assert sorted(path.name for path in module_dir.iterdir()) == ["index.json"]
+    assert all(tensor.device.type == "meta" for tensor in model.linear.state_dict().values())
+    assert set(index) == set(original_state)
+    assert all(entry["safetensors_file"] == str(source_path) for entry in index.values())
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    expected_files, _tensor_to_filename, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    with safe_open(str(save_dir / expected_files[0]), framework="pt", device="cpu") as handler:
+        for name, tensor in original_state.items():
+            torch.testing.assert_close(handler.get_tensor(f"linear.{name}"), tensor)
+
+    # The index binds the source payload, not merely its header and geometry.
+    save_file(
+        {name: torch.zeros_like(tensor) for name, tensor in original_state.items()},
+        source_path,
+    )
+    rejected_dir = tmp_path / "rejected"
+    rejected_dir.mkdir()
+    with pytest.raises(IOError, match="content digest differs"):
+        streaming_state_dict_to_shards(
+            state_dict,
+            save_dir=str(rejected_dir),
+            model_base_name="model",
+            single_file_name="model.safetensors",
+            metadata={},
+            max_shard_size=None,
+        )
