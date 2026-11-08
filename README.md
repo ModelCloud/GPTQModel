@@ -1532,3 +1532,4 @@ The following reference pages document features proposed from the working fork.
 - [carry causal replay and durable recovery callbacks](docs/looper-causal-replay.md)
 - [integrate resumable distributed and mixed-tier execution](docs/exl3-durable-execution.md)
 - [compose native checkpoint passthrough and save overlays](docs/native-checkpoint-export.md)
+- [carry bounded V4 target and MTP calibration replay](docs/deepseek-v4-mtp-replay.md)
