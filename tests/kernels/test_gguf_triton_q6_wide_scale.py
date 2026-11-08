@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Q6_K Triton must multiply zero and large signed scales without NaNs."""
+"""Q6_K GPU paths must preserve finite dots for wide signed scales."""
 
 import numpy as np
 import pytest
@@ -118,3 +118,90 @@ def test_ordinary_q6_scale_keeps_half_metadata_and_reselects_on_update():
     assert ordinary[0, 0].item() == 256
     assert torch.isfinite(wide).all()
     assert wide[0, 0].item() == 496
+
+
+@requires_gpu
+@pytest.mark.cuda
+@pytest.mark.parametrize("path", ["dense", "chunked"])
+@pytest.mark.parametrize("code", [0, 1, -32])
+@pytest.mark.parametrize("rows", [1, 8])
+@pytest.mark.parametrize("bias", [False, True])
+def test_torch_q6_wide_weight_keeps_finite_output(path, code, rows, bias):
+    source, blocks = _packed_q6(code=code, bias=bias)
+    module = GGUFTorchLinear(
+        bits="q6_k", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=bias,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    if path == "dense":
+        module.gguf_fused_cuda_max_rows = 0
+    else:
+        module.gguf_fused_cuda_min_matrix_elements = 0
+        module.autotune_enabled = False
+    inputs = torch.full((rows, 256), 2**-16, device="cuda", dtype=torch.float16)
+    assert module._should_use_fused_k_forward(inputs) is (path == "chunked")
+    dense = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(blocks, "Q6_K")
+    ).to(device="cuda", dtype=torch.float64)
+    oracle = inputs.double() @ dense.T
+    if bias:
+        oracle += module.bias.double()
+
+    with torch.inference_mode():
+        first = module(inputs)
+        repeated = module(inputs)
+    torch.cuda.synchronize()
+
+    assert first.dtype == inputs.dtype
+    assert torch.isfinite(first).all()
+    assert torch.equal(first, repeated)
+    torch.testing.assert_close(first, oracle.to(inputs.dtype), rtol=2e-3, atol=2e-3)
+    assert list(module._k_scale_overflow_cache.values()) == [True]
+    assert not any(
+        torch.is_tensor(value) and value.numel() >= module.in_features * module.out_features
+        for value in vars(module).values()
+    )
+
+
+@requires_gpu
+@pytest.mark.cuda
+def test_torch_q6_scale_guard_reselects_after_weight_replacement():
+    source, _ = _packed_q6(code=1)
+    module = GGUFTorchLinear(
+        bits="q6_k", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=False,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    blocks, _, _ = module._reshape_blocks(device="cuda")
+    assert module._k_scale_overflows(blocks, torch.float16)
+
+    with torch.no_grad():
+        module.qweight[:, 208:210] = torch.from_numpy(
+            np.array([1], dtype=np.float16).view(np.uint8)
+        ).to("cuda")
+    blocks, _, _ = module._reshape_blocks(device="cuda")
+    assert not module._k_scale_overflows(blocks, torch.float16)
+    assert list(module._k_scale_overflow_cache.values()) == [False]
+
+
+@requires_gpu
+@pytest.mark.cuda
+def test_torch_q6_wide_dense_fallback_preserves_input_gradient():
+    source, _ = _packed_q6(code=1)
+    module = GGUFTorchLinear(
+        bits="q6_k", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=False,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    module.gguf_fused_cuda_max_rows = 0
+    inputs = torch.full(
+        (1, 256), 2**-16, device="cuda", dtype=torch.float16, requires_grad=True,
+    )
+
+    loss = module(inputs).float().sum() / 128
+    loss.backward()
+
+    assert inputs.grad is not None
+    assert torch.isfinite(inputs.grad).all()
+    expected = torch.full_like(inputs.grad, 64 * 127000 / 128)
+    torch.testing.assert_close(inputs.grad, expected, rtol=2e-3, atol=2e-3)

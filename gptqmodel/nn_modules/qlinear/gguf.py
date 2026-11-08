@@ -1684,6 +1684,15 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if self.gguf_tensor_qtype == "Q6_K" and x_flat.dtype == torch.float16:
+            blocks, _, _ = self._reshape_blocks(device=x_flat.device)
+            if self._k_scale_overflows(blocks, x_flat.dtype):
+                # A decoded Q6_K weight can exceed FP16 while its dot product
+                # remains finite. Keep the temporary dense fallback wide until
+                # the output (including bias) is rounded once.
+                weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+                bias_wide = None if bias is None else bias.to(device=x_flat.device, dtype=torch.float32)
+                return matmul_fp32_reduce(x_flat.float(), weight, bias=bias_wide).to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
@@ -1714,7 +1723,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         return cached
 
     def _compute_k_scale_overflow(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        """True when a Q4_K/Q5_K term can leave `target_dtype` range.
+        """True when a K-quant decoded term can leave `target_dtype` range.
 
         Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`. Both terms
         peak at `d_max * 63 * code_max`, with `code_max` 15 for Q4_K and 31
@@ -1723,9 +1732,17 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         lets an out-of-range weight saturate to inf on the narrow path. Only
         the per-block `d`/`d_min` columns and two extremes are inspected, so
         the check stays O(num_blocks) rather than O(weights).
+
+        Q6_K uses signed codes in [-32, 31]. Its per-block bound multiplies
+        |d| by the largest absolute signed subscale and 32, allowing the
+        chunked and dense CUDA paths to keep finite dots for wide weights.
         """
         if not target_dtype.is_floating_point:
             return True
+        if self.gguf_tensor_qtype == "Q6_K":
+            d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).float().abs()
+            subscale = blocks[..., 192:208].contiguous().view(torch.int8).float().abs().amax(dim=-1)
+            return bool(((d * subscale) * 32 > torch.finfo(target_dtype).max).any())
         code_max = 31.0 if self.gguf_tensor_qtype == "Q5_K" else 15.0
         saturation = code_max * 63.0
         for column in (slice(0, 2), slice(2, 4)):
@@ -1747,11 +1764,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         # violate the existing 2e-3 fusion contract. Keep that path wide;
         # FP16 retains exact source values and can use the tensor-core path.
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
-        # Q4_K/Q5_K need a wide scale product only when that product can leave
-        # the target range; otherwise FP16 reconstruction is exact enough and
-        # is much cheaper than building FP32 chunks.
+        # K-quants need wide reconstruction when a decoded term can leave the
+        # target range; otherwise FP16 reconstruction keeps the fast path.
         k_wide = (
-            self.gguf_tensor_qtype in ("Q4_K", "Q5_K")
+            self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K")
             and not (is_cpu or target_dtype == torch.bfloat16)
             and self._k_scale_overflows(blocks, target_dtype)
         )
