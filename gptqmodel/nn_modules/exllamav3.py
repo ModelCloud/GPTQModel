@@ -108,10 +108,16 @@ class ExllamaV3Linear(nn.Module):
         parameter. In-place writes (``bias.add_``, adapter merges, scale
         folding) would then be invisible. ``Tensor._version`` bumps on every
         in-place mutation, so it cheaply distinguishes "alias" from "stale copy".
+        A bias loaded under ``torch.inference_mode`` has no version counter;
+        clone it once outside that mode so subsequent mutations remain visible.
         """
         bias = getattr(self, "bias", None)
         if bias is None or bias.device.type == "meta":
             return None
+        if bias.is_inference():
+            with torch.inference_mode(False), torch.no_grad():
+                bias = bias.clone()
+                self.bias = bias
         return int(bias._version)
 
     def _current_signature(self) -> tuple[Any, ...]:
@@ -119,6 +125,7 @@ class ExllamaV3Linear(nn.Module):
         if trellis is None or trellis.device.type == "meta":
             return ("meta",)
 
+        bias_version = self._bias_version()
         signature: list[Any] = [str(trellis.device)]
         for buffer_name in _EXL3_BUFFER_NAMES:
             tensor = getattr(self, buffer_name, None)
@@ -127,7 +134,7 @@ class ExllamaV3Linear(nn.Module):
                 continue
             signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
         # Only the padded path copies the bias, so only that path needs liveness.
-        signature.append(self._bias_version())
+        signature.append(bias_version)
         return tuple(signature)
 
     def _drop_inner(self) -> None:
