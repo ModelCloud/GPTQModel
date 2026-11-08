@@ -6,7 +6,7 @@ import weakref
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
+import gptqmodel.nn_modules.qlinear.paroquant_triton as paro_module
 from gptqmodel.quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
 from gptqmodel.quantization.paroquant.modules.triton.gemm import (
     paroquant_gemm_triton_decode,
@@ -88,7 +88,7 @@ def test_fused_paroquant_rejects_malformed_bias_before_launch():
 @pytest.mark.parametrize("rows", [1, 16])
 def test_paroquant_module_fused_and_dense_bias_paths(dtype, rows, monkeypatch):
     x, qweight, scales, qzeros, bias, expected = _case(dtype, rows)
-    module = ParoQuantTritonLinear(
+    module = paro_module.ParoQuantTritonLinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=128, out_features=128, bias=True, register_buffers=True, krot=8,
     ).to(device="cuda", dtype=dtype).eval()
@@ -98,8 +98,6 @@ def test_paroquant_module_fused_and_dense_bias_paths(dtype, rows, monkeypatch):
     module.bias.copy_(bias)
     module.post_init()
     module.paroquant_triton_autotune_enabled = False
-
-    import gptqmodel.nn_modules.qlinear.paroquant_triton as paro_module
 
     dequant_refs = []
     original_dequant = paro_module.paroquant_dequantize_triton
@@ -149,7 +147,7 @@ def test_paroquant_module_fused_and_dense_bias_paths(dtype, rows, monkeypatch):
 
 def test_paroquant_dense_preserves_stored_bias_precision_before_bf16_rounding():
     x, qweight, scales, qzeros, _, _ = _case(torch.bfloat16, 1)
-    module = ParoQuantTritonLinear(
+    module = paro_module.ParoQuantTritonLinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=128, out_features=128, bias=True, register_buffers=True, krot=8,
     ).to(device="cuda", dtype=torch.bfloat16).eval()
