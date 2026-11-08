@@ -187,15 +187,31 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
     RowTile xr;
     atoms_to_tile(r, xr);
-    // Undo the encoder's quad transpose to return to row-major.
+    // Scatter the dwords straight into the row-major tile instead of running
+    // quad_transpose first. quad_transpose is a 4x4 dword transpose inside
+    // each 16-byte chunk: it costs 16 ds_bpermute_b32 + 32 selects per
+    // super-atom, and every ds_bpermute occupies the same LDS crossbar as the
+    // store and the B-fragment load.
+    //
+    // The transpose is self-inverse, so undoing it on the address is
+    // equivalent: dword d of lane l's chunk (h,q) belongs to dword (lane&3) of
+    // chunk (d + 4q) in row (lane>>2) + 8h. That is 16 STS.32 whose bank is
+    // 4*(lane>>2) + (lane&3) + const, i.e. all 32 banks exactly once.
+    const int64_t row0 = int64_t(lane >> 2);
+    const int64_t col0 = int64_t(lane & 3) * 2;  // dword position, in bf16
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
 #pragma unroll
-      for (int p = 0; p < 2; ++p) quad_transpose(xr[h][p], lane);
+      for (int q = 0; q < 2; ++q) {
+        const uint4 v = xr[h][q];
+        const uint32_t* const w = reinterpret_cast<const uint32_t*>(&v);
+#pragma unroll
+        for (int d = 0; d < 4; ++d) {
+          *reinterpret_cast<uint32_t*>(
+              dst + (row0 + 8 * h) * kLd + (d + 4 * q) * 8 + col0) = w[d];
+        }
+      }
     }
-    // Tile-local offset: `sh` holds ONE super-atom, so the n-block field is 0
-    // (passing the absolute super-atom would write past the 16x64 tile).
-    store_row_tile(dst, row_tile_offset(SuperAtom{0, 0}, kLd, lane), kLd, xr);
   };
 
   // 4 k-chunks of 16, each feeding one B fragment. A depends on both the token
@@ -240,11 +256,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     }
     for (int64_t kb = kb_lo; kb < kb_hi; ++kb) {
       __hip_bfloat16* const sh = (buf == 0) ? sh0 : sh1;
-      if (kb + 1 < kb_hi) {
-        load_planes(kb + 1, next);
-        decode_into(next, (buf == 0) ? sh1 : sh0);
-      }
+      // Issue the next super-atom's loads BEFORE the matrix-core work and
+      // decode afterwards, so the L3 latency is covered by the mma instead of
+      // stalling the decode. The decode writes the buffer do_mma is not
+      // reading, so no extra barrier is needed.
+      if (kb + 1 < kb_hi) load_planes(kb + 1, next);
       do_mma(sh, kb);
+      if (kb + 1 < kb_hi) decode_into(next, (buf == 0) ? sh1 : sh0);
       __syncwarp();
       buf ^= 1;
     }
@@ -378,28 +396,35 @@ static hipError_t ensure_partial(size_t bytes) {
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
 // packed weight is never read twice; the cost is the per-split FP32 partial
 // plane plus the reduce pass.
+//
+// The constants below are measured on gfx1201 (best split at m=16 / m=128):
+//
+//   4096x4096    32 CTAs,  64 k-blocks   s1 / s2
+//   14336x4096   32 CTAs, 224 k-blocks   s1 / s1
+//   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
+//   4096x14336  112 CTAs, 224 k-blocks   s1 / s1
+//   4096x28672  224 CTAs, 448 k-blocks   s1 / s1
+//   5120x25600  200 CTAs,  80 k-blocks   s4 / s1
+//   8192x57344  448 CTAs, 128 k-blocks   s1 / s2
+//   896x4864      7 CTAs,  76 k-blocks   s8 / s8
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
-  // gfx1201 has 32 CUs, so 32 CTAs is one wave. Split-K is only worth its
-  // partial planes and reduce pass when the unsplit launch is short of a wave
-  // AND each CTA still has enough K work to amortise the extra pass. Measured
-  // on gfx1201 at m=16 and m=128 (best split in brackets):
-  //
-  //   4096x4096   32 CTAs,  64 k-blocks   s1 (m=16) / s2 (m=128)
-  //   14336x4096  32 CTAs, 224 k-blocks   s2 / s1
-  //   25600x5120  40 CTAs, 400 k-blocks   s2 / s1
-  //   896x4864     7 CTAs,  76 k-blocks   s8 / s8
-  //
-  // So: at most four token tiles per CTA, long K means there is real work to
-  // spread; at eight tiles the CTA is already tile-heavy and the m*n partial
-  // plane doubles, so only a short K still benefits from a split.
-  constexpr int64_t kOneWave = 32;
-  if (blocks_x > kOneWave + kOneWave / 4) return 1;
-  // A narrow N (896 rows -> 7 CTAs) is still under one wave at 4x. Every extra
-  // CTA is free because each split reads a DISJOINT k slice: 7 x 8 = 56 CTAs
-  // took 896x4864 m=128 from ~95 to 32 us.
+  constexpr int64_t kOneWave = 32;  // 32 CUs, one CTA per CU
+  // Narrow N: 7 CTAs is under a quarter wave, and every extra CTA is free
+  // because the splits read disjoint k slices.
   if (blocks_x * 4 < kOneWave) return 8;
-  const bool long_k = k_blocks >= 128;
-  return (m > 64) ? (long_k ? 1 : 2) : (long_k ? 2 : 1);
+  // Very wide N: the weight is HBM-resident and a 2-way split hides the extra
+  // latency (8192x57344 m=128: 2598 -> 2418 us). It costs 0.3% at m=16.
+  if (blocks_x >= 8 * kOneWave) return 2;
+  if (blocks_x > kOneWave + kOneWave / 4) {
+    // Wide but short K still benefits from more CTAs at small M
+    // (5120x25600 m=16: 371 -> 360 us); a long K does not.
+    if (m <= 64 && k_blocks < kOneWave * 4 && blocks_x >= 4 * kOneWave) return 4;
+    return 1;
+  }
+  // One wave or less: the CTA is only short of work when it holds eight token
+  // tiles and K is short (4096x4096 m=128: 80 -> 70 us).
+  if (m > 64 && k_blocks < kOneWave * 4) return 2;
+  return 1;
 }
 
 // `out` is [m, n] row-major BF16; `x` is [m, k].
