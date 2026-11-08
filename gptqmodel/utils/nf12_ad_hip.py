@@ -43,6 +43,8 @@ _SOURCE_FILES = (
     "nf12_ad_decode.hip",
     "nf12_ad_encode.hip",
     "nf12_ad_wmma.hip",
+    "nf12_ad_moe.hip",
+    "nf12_ad_pack_bf16t.hip",
     "nf12_ad_format_hip.cuh",
 )
 
@@ -80,12 +82,9 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"NF12-AD HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
-    return [
-        str(stage / "nf12_ad_torch.cpp"),
-        str(stage / "nf12_ad_decode.hip"),
-        str(stage / "nf12_ad_encode.hip"),
-        str(stage / "nf12_ad_wmma.hip"),
-    ]
+    # Derived from _SOURCE_FILES so a new kernel cannot be staged but silently
+    # left out of the build. Headers are staged above but are not sources.
+    return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
 
 
 def _rocm_root() -> Path | None:

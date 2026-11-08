@@ -37,54 +37,34 @@ namespace {
 // ---------------------------------------------------------------------------
 constexpr int kDecodeSuperAtomsPerWarp = 2;
 
-// Interleave warps along K so their row-major stores form contiguous segments.
-template <int kPerWarp>
-__device__ __forceinline__ int64_t warp_super_atom(int i) {
-  return (int64_t(blockIdx.x) * kPerWarp + i) * kWarpsPerBlock + (threadIdx.x / kWarpSize);
-}
-
-template <int kPerWarp>
-int64_t grid_blocks(int64_t num_sa) {
-  const int64_t per_block = int64_t(kPerWarp) * kWarpsPerBlock;
-  return (num_sa + per_block - 1) / per_block;
-}
-
 // Largest token count the fused kernel handles. Above this, decoding the weight
 // once and running a real GEMM wins (SPEC.md 6.5), so callers fall back.
 constexpr int kFusedMaxM = 16;
 
-template <int kPerWarp>
+template <WeightSource S, int kPerWarp>
 __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
                                             const uint4* __restrict__ escapes,
                                             uint32_t base_x4, int64_t num_sa,
                                             int64_t k_blocks,
                                             __hip_bfloat16* __restrict__ out, int64_t ldo) {
   const int lane = threadIdx.x % kWarpSize;
-  uint4 planes[kPerWarp][3];
+  uint4 planes[kPerWarp][SourceTraits<S>::kLoads];
 #pragma unroll
   for (int i = 0; i < kPerWarp; ++i) {
     const int64_t sa = warp_super_atom<kPerWarp>(i);
-    if (sa < num_sa) {
-      const uint4* src = packed + sa * kSuperAtomVecs + lane;
-#pragma unroll
-      for (int p = 0; p < 3; ++p) planes[i][p] = src[p * kPlaneVecs];
-    }
+    if (sa < num_sa) load_source_planes<S>(packed, sa, lane, planes[i]);
   }
 #pragma unroll
   for (int i = 0; i < kPerWarp; ++i) {
     const int64_t sa = warp_super_atom<kPerWarp>(i);
     if (sa >= num_sa) break;
-    const uint4& m = planes[i][0];
-    const uint4& l01 = planes[i][1];
-    const uint4& l23 = planes[i][2];
     AtomRegs r;
-    decode_group(Group{m.x, l01.x, l01.y}, base_x4, escapes, r[0]);
-    decode_group(Group{m.y, l01.z, l01.w}, base_x4, escapes, r[1]);
-    decode_group(Group{m.z, l23.x, l23.y}, base_x4, escapes, r[2]);
-    decode_group(Group{m.w, l23.z, l23.w}, base_x4, escapes, r[3]);
+    source_planes_to_atoms<S>(planes[i], base_x4, escapes, r);
     RowTile x;
     atoms_to_tile(r, x);
-    // Undo the encoder's quad transpose to return to row-major.
+    // Undo the encoder's quad transpose to return to row-major. The bf16t twin
+    // stores the same post-transpose atoms (`pack_bf16t` applies quad_transpose
+    // before tile_to_atoms), so both sources need the same inverse here.
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
 #pragma unroll
@@ -94,12 +74,12 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
   }
 }
 
-template <int kPerWarp>
+template <WeightSource S, int kPerWarp>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
                   uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
                   __hip_bfloat16* __restrict__ out, int64_t ldo) {
-  decode_rows<kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
+  decode_rows<S, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
 }
 
 
@@ -140,7 +120,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 //
 // Decoded super-atoms are still reused across every token in flight, so the
 // packed weight is read once per launch rather than once per token.
-template <int kM>
+template <WeightSource S, int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                   const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n,
@@ -188,16 +168,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
   for (int64_t kb = kb_begin; kb < kb_end; ++kb) {
     const int64_t sa = (n0 / kSuperAtomRows) * k_blocks + kb;
-    const uint4* src = packed + sa * kSuperAtomVecs + lane;
-    uint4 planes[3];
-#pragma unroll
-    for (int p = 0; p < 3; ++p) planes[p] = src[p * kPlaneVecs];
-
+    uint4 planes[SourceTraits<S>::kLoads];
+    load_source_planes<S>(packed, sa, lane, planes);
     AtomRegs regs;
-    decode_group(Group{planes[0].x, planes[1].x, planes[1].y}, base_x4, escapes, regs[0]);
-    decode_group(Group{planes[0].y, planes[1].z, planes[1].w}, base_x4, escapes, regs[1]);
-    decode_group(Group{planes[0].z, planes[2].x, planes[2].y}, base_x4, escapes, regs[2]);
-    decode_group(Group{planes[0].w, planes[2].z, planes[2].w}, base_x4, escapes, regs[3]);
+    source_planes_to_atoms<S>(planes, base_x4, escapes, regs);
 
     // regs[j][i] = R_i of atom j (SPEC 4.1):
     //   R0 -> row g,   cols 2t, 2t+1      R1 -> row g+8, cols 2t, 2t+1
@@ -282,6 +256,50 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
+// One CTA per 16-row output block; the block itself splits K across its warps.
+template <WeightSource S>
+hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                        const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                        const void* bias, hipStream_t stream) {
+  if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
+  const int64_t blocks = n / kSuperAtomRows;
+  if (blocks == 0) return hipSuccess;
+  if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
+
+  // The token count is a template parameter so the accumulators and the
+  // warp-partial plane stay compile-time sized; a runtime `m` keeps the
+  // accumulator array out of VGPRs and costs 3-5x.
+  //
+  // A switch, not a table of function pointers: torch's hipify rewrites
+  // `kernel<<<...>>>` by matching an identifier, so a launch through an indexed
+  // expression is silently mangled.
+#define NF12_AD_FUSED_LAUNCH(K)                                                              \
+  linear_kernel<S, K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>( \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
+      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),       \
+      reinterpret_cast<const __hip_bfloat16*>(bias))
+  switch (m) {
+    case 1: NF12_AD_FUSED_LAUNCH(1); break;
+    case 2: NF12_AD_FUSED_LAUNCH(2); break;
+    case 3: NF12_AD_FUSED_LAUNCH(3); break;
+    case 4: NF12_AD_FUSED_LAUNCH(4); break;
+    case 5: NF12_AD_FUSED_LAUNCH(5); break;
+    case 6: NF12_AD_FUSED_LAUNCH(6); break;
+    case 7: NF12_AD_FUSED_LAUNCH(7); break;
+    case 8: NF12_AD_FUSED_LAUNCH(8); break;
+    case 9: NF12_AD_FUSED_LAUNCH(9); break;
+    case 10: NF12_AD_FUSED_LAUNCH(10); break;
+    case 11: NF12_AD_FUSED_LAUNCH(11); break;
+    case 12: NF12_AD_FUSED_LAUNCH(12); break;
+    case 13: NF12_AD_FUSED_LAUNCH(13); break;
+    case 14: NF12_AD_FUSED_LAUNCH(14); break;
+    case 15: NF12_AD_FUSED_LAUNCH(15); break;
+    default: NF12_AD_FUSED_LAUNCH(16); break;
+  }
+#undef NF12_AD_FUSED_LAUNCH
+  return hipGetLastError();
+}
+
 }  // namespace
 
 }  // namespace nf12_hip
@@ -300,10 +318,26 @@ hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t 
   const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
   if (blocks == 0) return hipSuccess;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
-  decode_kernel<kDecodeSuperAtomsPerWarp>
+  decode_kernel<WeightSource::kNf12, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
           reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa,
           k / kSuperAtomCols, out_bf16, ldo);
+  return hipGetLastError();
+}
+
+// Uncompressed bf16t twin (SPEC.md 4.4). Same walk, no escape table and no
+// exp_base: the super-atom is already the decoded register image.
+hipError_t nf12_ad_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
+                                 int64_t ldo, hipStream_t stream) {
+  __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
+  const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
+  const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
+  if (blocks == 0) return hipSuccess;
+  if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
+  decode_kernel<WeightSource::kBf16t, kDecodeSuperAtomsPerWarp>
+      <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
+          reinterpret_cast<const uint4*>(packed), nullptr, 0u, num_sa, k / kSuperAtomCols,
+          out_bf16, ldo);
   return hipGetLastError();
 }
 
@@ -332,43 +366,16 @@ hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uin
                                 const void* x, void* out, int64_t n, int64_t k,
                                 int64_t m, const void* bias, hipStream_t stream) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
+  return launch_fused<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+                                           stream);
+}
 
-  // One CTA per 16-row output block: the block itself splits K across its
-  // warps, so the grid does not divide by kWarpsPerBlock.
-  const int64_t blocks = n / kSuperAtomRows;
-  if (blocks == 0) return hipSuccess;
-  if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
-
-  // The token count is a template parameter so `acc` and the warp-partial
-  // plane are compile-time sized: with a runtime `m` the accumulator array is
-  // dynamically indexed, which keeps it out of VGPRs, and the shared plane is
-  // sized for 16 tokens even when only one is in flight.
-#define NF12_AD_FUSED_LAUNCH(K)                                                                \
-  linear_kernel<K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(            \
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),       \
-      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),            \
-      reinterpret_cast<const __hip_bfloat16*>(bias))
-  switch (m) {
-    case 1: NF12_AD_FUSED_LAUNCH(1); break;
-    case 2: NF12_AD_FUSED_LAUNCH(2); break;
-    case 3: NF12_AD_FUSED_LAUNCH(3); break;
-    case 4: NF12_AD_FUSED_LAUNCH(4); break;
-    case 5: NF12_AD_FUSED_LAUNCH(5); break;
-    case 6: NF12_AD_FUSED_LAUNCH(6); break;
-    case 7: NF12_AD_FUSED_LAUNCH(7); break;
-    case 8: NF12_AD_FUSED_LAUNCH(8); break;
-    case 9: NF12_AD_FUSED_LAUNCH(9); break;
-    case 10: NF12_AD_FUSED_LAUNCH(10); break;
-    case 11: NF12_AD_FUSED_LAUNCH(11); break;
-    case 12: NF12_AD_FUSED_LAUNCH(12); break;
-    case 13: NF12_AD_FUSED_LAUNCH(13); break;
-    case 14: NF12_AD_FUSED_LAUNCH(14); break;
-    case 15: NF12_AD_FUSED_LAUNCH(15); break;
-    default: NF12_AD_FUSED_LAUNCH(16); break;
-  }
-#undef NF12_AD_FUSED_LAUNCH
-  return hipGetLastError();
+// bf16t twin of the small-M route (SPEC.md 4.4): same kernel, uncompressed
+// source, so the exactness comparison runs through one code path.
+hipError_t nf12_ad_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
+                                      int64_t n, int64_t k, int64_t m, const void* bias,
+                                      hipStream_t stream) {
+  return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias, stream);
 }
 
 }  // extern "C"
