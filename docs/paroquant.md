@@ -69,3 +69,5 @@ separate addition. Peak allocator delta includes the output allocations.
 | --- | --- | --- |
 | 1 | 0.063 ms; 4 KiB peak | 0.055 ms; 2 KiB peak |
 | 16 | 0.064 ms; 64 KiB peak | 0.056 ms; 32 KiB peak |
+
+The Triton bias epilogue was introduced by [PR #3657](https://github.com/ModelCloud/GPTQModel/pull/3657).
