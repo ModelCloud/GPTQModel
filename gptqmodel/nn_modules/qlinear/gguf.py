@@ -1677,9 +1677,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self._autotune_result = bool(self._gguf_fused_autotune_cache[key])
         return self._autotune_result
 
-    def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_dequant_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return matmul_fp32_reduce(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
     def _fused_chunk_blocks(self, num_blocks: int, compute_dtype: torch.dtype) -> int:
         if self.gguf_fused_chunk_blocks > 0:
@@ -1828,15 +1830,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
         if self._should_use_fused_k_forward(x_flat):
             output = self._forward_fused_k(x_flat, bias=self.bias)
-            bias = None
         else:
-            output = self._forward_dequant_matmul(x_flat)
             bias = self.bias
-
-        if bias is not None:
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+            if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+                bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+            output = self._forward_dequant_matmul(x_flat, bias=bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

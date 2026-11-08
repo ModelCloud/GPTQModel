@@ -32,7 +32,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
-from ._numerics import matmul_fp32_reduce
+from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .gguf import _apply_optional_smoother
 
 
@@ -558,9 +558,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and self.out_features % 16 == 0
         )
 
-    def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_dequant_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return matmul_fp32_reduce(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
     def optimize(
         self,
@@ -611,12 +613,15 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             weight.t(),
             scale_a=scale_a,
             scale_b=scale_b,
-            out_dtype=x_flat.dtype,
+            out_dtype=torch.float32 if self.bias is not None and _wants_fp32_reduce(x_flat) else x_flat.dtype,
         )
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
+        bias = self.bias
+        if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
 
         if self._can_use_scaled_mm(x_flat):
             try:
@@ -628,7 +633,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                     f"{x_flat.device} ({type(exc).__name__}: {exc}); "
                     "falling back to dequantize + matmul for the rest of the process."
                 )
-                output = self._forward_dequant_matmul(x_flat)
+                output = self._forward_dequant_matmul(x_flat, bias=bias)
+                bias = None
         elif self._compiled_forward is not None:
             try:
                 output = self._compiled_forward(x_flat)
@@ -637,15 +643,14 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                     f"FP8 compiled CPU forward failed; falling back to eager: {exc}"
                 )
                 self._invalidate_compiled()
-                output = self._forward_dequant_matmul(x_flat)
+                output = self._forward_dequant_matmul(x_flat, bias=bias)
+                bias = None
         else:
-            output = self._forward_dequant_matmul(x_flat)
+            output = self._forward_dequant_matmul(x_flat, bias=bias)
+            bias = None
 
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+        if bias is not None:
+            output = (output + bias.to(dtype=output.dtype)).to(x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

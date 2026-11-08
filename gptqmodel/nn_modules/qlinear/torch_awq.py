@@ -283,9 +283,7 @@ class AwqTorchLinear(AWQuantLinear):
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
         # Subclasses such as ParoQuant use the shared dequantize helper.
         weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = matmul_fp32_reduce(x_flat, weight)
-        if self.bias is not None:
-            output = output + self.bias
+        output = matmul_fp32_reduce(x_flat, weight, bias=self.bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
