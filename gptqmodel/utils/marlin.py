@@ -357,6 +357,39 @@ def marlin_scratch_sizes(
     return int(sizes[0]), int(sizes[1])
 
 
+MARLIN_DEVICE_PROFILE_FIELDS = (
+    "sms",
+    "max_shared_mem",
+    "capability_major",
+    "capability_minor",
+    "l2_cache_size",
+    "max_threads_per_sm",
+    "has_tensor_memory",
+)
+
+
+def marlin_device_profile(
+        device: Optional[Union[int, str, torch.device]] = None,
+        dtype: torch.dtype = torch.float16,
+) -> Dict[str, int]:
+    """Return the cached device profile Marlin uses to pick a kernel.
+
+    Probed once per device inside the extension, so repeated calls are cheap.
+    ``has_tensor_memory`` reports tcgen05 tensor memory, which the datacenter
+    Blackwell parts have and the consumer ones do not.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("Marlin device profile requires CUDA.")
+    target = torch.device(device or torch.device("cuda", torch.cuda.current_device()))
+    op = _marlin_resolve_op(dtype=dtype, op_name="marlin_device_profile")
+    values = op(target.index if target.index is not None else 0)
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if not isinstance(values, (tuple, list)) or len(values) != len(MARLIN_DEVICE_PROFILE_FIELDS):
+        raise RuntimeError(f"Marlin device profile op returned invalid value: {values!r}")
+    return dict(zip(MARLIN_DEVICE_PROFILE_FIELDS, (int(value) for value in values)))
+
+
 # Validate marlin support
 def _validate_marlin_device_support(device: Optional[torch.device] = None) -> bool:
     """
