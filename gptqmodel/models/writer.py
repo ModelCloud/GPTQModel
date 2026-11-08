@@ -386,6 +386,7 @@ def _save_module_replacement_safetensors(
     matched_shards_by_prefix: Dict[str, List[str]] = {}
     for prefix in prefixes:
         checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
+        runtime_prefix = {prefix}
         matched_shards = []
         for tensor_name, shard_name in turtle_model._weight_map.items():
             if _tensor_matches_prefixes(tensor_name, checkpoint_prefixes):
@@ -394,15 +395,14 @@ def _save_module_replacement_safetensors(
                     removed_tensor_names.append(tensor_name)
                 if shard_name not in matched_shards:
                     matched_shards.append(shard_name)
-        for leaf in ("weight", "bias"):
-            runtime_name = f"{prefix}.{leaf}"
-            runtime_shard = existing_weight_map.get(runtime_name)
-            if runtime_shard:
-                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_name)
-                if runtime_name not in removed_tensor_names:
-                    removed_tensor_names.append(runtime_name)
-                if runtime_shard not in matched_shards:
-                    matched_shards.append(runtime_shard)
+        for tensor_name, shard_name in existing_weight_map.items():
+            if not _tensor_matches_prefixes(tensor_name, runtime_prefix):
+                continue
+            drop_by_shard.setdefault(shard_name, set()).add(tensor_name)
+            if tensor_name not in removed_tensor_names:
+                removed_tensor_names.append(tensor_name)
+            if shard_name not in matched_shards:
+                matched_shards.append(shard_name)
         matched_shards_by_prefix[prefix] = matched_shards
 
     tied_input_shards = list(matched_shards_by_prefix.get(input_prefix, [])) if input_prefix else []
@@ -430,6 +430,7 @@ def _save_module_replacement_safetensors(
     rewritten_files = []
     tensor_to_filename = {}
     total_size_bytes = 0
+    runtime_prefixes = set(prefixes)
     for shard_name, dropped_names in drop_by_shard.items():
         if not shard_name.endswith(".safetensors"):
             raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
@@ -440,9 +441,12 @@ def _save_module_replacement_safetensors(
         tensors = {}
         with safe_open(read_path, framework="pt", device="cpu") as handler:
             for tensor_name in handler.keys():
-                if tensor_name not in dropped_names:
-                    tensors[tensor_name] = handler.get_tensor(tensor_name)
-                    tensor_to_filename[tensor_name] = shard_name
+                if tensor_name in dropped_names or _tensor_matches_prefixes(tensor_name, runtime_prefixes):
+                    if tensor_name not in removed_tensor_names:
+                        removed_tensor_names.append(tensor_name)
+                    continue
+                tensors[tensor_name] = handler.get_tensor(tensor_name)
+                tensor_to_filename[tensor_name] = shard_name
         for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
             tensors[tensor_name] = tensor
             tensor_to_filename[tensor_name] = shard_name
