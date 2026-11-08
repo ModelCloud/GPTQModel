@@ -804,8 +804,7 @@ def reshard(
         # Best-effort only: some filesystems reject chmod on a fresh directory,
         # and a wrong mode must not abort an otherwise valid reshard.
         log.debug("reshard: could not mirror source directory mode", exc_info=True)
-    backup_root: Optional[str] = None
-    backup_dir: Optional[str] = None
+    backup_path: Optional[str] = None
     committed = False
     buffer = bytearray(_STREAM_CHUNK_SIZE)
 
@@ -867,37 +866,39 @@ def reshard(
                 handle.write("\n")
 
         if os.path.lexists(target_dir):
-            # Reserve a private, unique directory. A fixed PID-based backup
-            # name may already hold a previous recovery copy or unrelated data.
-            backup_root = tempfile.mkdtemp(prefix=".gptqmodel-backup-", dir=parent_dir)
-            backup_dir = os.path.join(backup_root, "destination")
-            os.replace(target_dir, backup_dir)
+            # mkdtemp reserves a collision-free parent for the old destination.
+            # A fixed PID-based backup name could contain unrelated data.
+            backup_path = os.path.join(
+                tempfile.mkdtemp(prefix=".gptqmodel-backup-", dir=parent_dir), "destination"
+            )
+            os.replace(target_dir, backup_path)
         try:
             os.replace(staging_dir, target_dir)
         except BaseException:
-            if backup_dir is not None:
+            if backup_path is not None:
                 try:
-                    os.replace(backup_dir, target_dir)
+                    os.replace(backup_path, target_dir)
                 except BaseException:
-                    log.error("reshard: failed to restore destination; backup retained at `%s`", backup_dir)
+                    log.error("reshard: failed to restore destination; backup retained at `%s`", backup_path)
             raise
         staging_dir = None
         committed = True
     finally:
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        if backup_root is not None:
+        if backup_path is not None:
+            backup_parent = os.path.dirname(backup_path)
             if committed:
                 try:
-                    shutil.rmtree(backup_root)
+                    shutil.rmtree(backup_parent)
                 except OSError:
-                    log.warning("reshard: could not remove backup `%s`", backup_dir, exc_info=True)
-            elif backup_dir is not None and not os.path.lexists(backup_dir):
+                    log.warning("reshard: could not remove backup `%s`", backup_path, exc_info=True)
+            elif not os.path.lexists(backup_path):
                 # The old destination was either never moved or was restored.
                 try:
-                    os.rmdir(backup_root)
+                    os.rmdir(backup_parent)
                 except OSError:
-                    log.warning("reshard: could not remove empty backup directory `%s`", backup_root, exc_info=True)
+                    log.warning("reshard: could not remove empty backup directory `%s`", backup_parent, exc_info=True)
 
     log.info(
         "Resharded `%s` -> `%s` (layout=%s, tensors=%d, size=%.2f MiB)",
