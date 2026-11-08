@@ -96,6 +96,8 @@ portable backends.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.
+The [GGUF K-scale overflow cache](docs/gguf-k-scale-overflow-cache.md)
+documents the FP16 reconstruction guard for GGUF Torch fused inference.
 
 `BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
 8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime

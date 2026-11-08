@@ -54,6 +54,15 @@ def test_inference_packed_weight_runs_fused_cuda_and_dequantizes(bits):
     assert error / reference.abs().max().item() <= 2e-3
     assert torch.allclose(dequantized.T.to(torch.float64), dense, rtol=2e-3, atol=0)
     assert len(module._k_scale_overflow_cache) == 1
+    assert all(isinstance(value, bool) for value in module._k_scale_overflow_cache.values())
+    assert not any(
+        torch.is_tensor(value) and value.numel() >= module.in_features * module.out_features
+        for value in vars(module).values()
+    )
+    assert all(
+        value.dtype == torch.uint8 or value.numel() < module.in_features * module.out_features
+        for value in module._buffers.values() if torch.is_tensor(value)
+    )
 
 
 @requires_gpu
