@@ -315,16 +315,16 @@ def run_accuracy(device: str, backend: str, quick: bool, results: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
-def timed(fn, warmup: int = 15, iters: int = 60):
+def timed(fn, device: str, warmup: int = 15, iters: int = 60):
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
     samples = []
     for _ in range(iters):
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         start = time.perf_counter()
         fn()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         samples.append((time.perf_counter() - start) * 1e6)
     return statistics.median(samples), min(samples)
 
@@ -336,13 +336,13 @@ def measure_bandwidth(device: str) -> float:
     b = torch.empty(n, dtype=torch.float32, device=device)
     for _ in range(3):
         b.copy_(a)
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
     samples = []
     for _ in range(10):
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         start = time.perf_counter()
         b.copy_(a)
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         samples.append(time.perf_counter() - start)
     del a, b
     torch.cuda.empty_cache()
@@ -364,14 +364,14 @@ def measure_cache_size(device: str, repetitions: int = 20) -> tuple[float, list]
         buffer = torch.randn(n, device=device)
         for _ in range(2):
             buffer.sum()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         samples = []
         for _ in range(8):
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             start = time.perf_counter()
             for _ in range(repetitions):
                 buffer.sum()
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             samples.append((time.perf_counter() - start) / repetitions)
         gbs = n * 4 / min(samples) / 1e9
         curve.append((mib, round(gbs, 1)))
@@ -428,7 +428,7 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         packed, esc, base = encode(w)
         packed_bytes = packed.numel() + esc.numel() * 2 + 1
         out_bytes = n * k * 2
-        median_us, min_us = timed(lambda: rt.decode(packed, esc, base))
+        median_us, min_us = timed(lambda: rt.decode(packed, esc, base), device)
         total_gbs = (packed_bytes + out_bytes) / (min_us * 1e-6) / 1e9
         results["perf"].append({
             "test": "decode", "n": n, "k": k,
@@ -452,8 +452,8 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         packed_bytes = packed.numel() + esc.numel() * 2 + 1
         for m in (1, 2, 8, 16, 64, 256):
             x = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.05
-            t_nf, _ = timed(lambda: rt.linear(x, packed, esc, base))
-            t_bf, _ = timed(lambda: torch.matmul(x, w.t()))
+            t_nf, _ = timed(lambda: rt.linear(x, packed, esc, base), device)
+            t_bf, _ = timed(lambda: torch.matmul(x, w.t()), device)
             flops = 2 * m * n * k
             results["perf"].append({
                 "test": "linear", "n": n, "k": k, "m": m,
@@ -467,7 +467,7 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
 
     banner("H. encode throughput")
     w = (torch.randn(4096, 4096, device=device, dtype=torch.bfloat16) * 0.02).contiguous()
-    median_us, min_us = timed(lambda: encode(w), warmup=5, iters=25)
+    median_us, min_us = timed(lambda: encode(w), device, warmup=5, iters=25)
     results["perf"].append({"test": "encode", "n": 4096, "k": 4096,
                             "median_us": round(median_us, 2), "min_us": round(min_us, 2),
                             "gbs": round(w.numel() * 2 / (min_us * 1e-6) / 1e9, 1)})
