@@ -63,3 +63,6 @@ the new tensor-key logic measured:
 
 The benchmark used the same fused Q4_K kernel for both paths and changed
 only the cache-hit check. No weight was updated during timing.
+
+This cache contract was corrected in
+[PR #3664](https://github.com/ModelCloud/GPTQModel/pull/3664).
