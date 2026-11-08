@@ -42,6 +42,7 @@ _SOURCE_FILES = (
     "nf12_ad_torch.cpp",
     "nf12_ad_decode.hip",
     "nf12_ad_encode.hip",
+    "nf12_ad_wmma.hip",
     "nf12_ad_format_hip.cuh",
 )
 
@@ -83,6 +84,7 @@ def _sources() -> list[str]:
         str(stage / "nf12_ad_torch.cpp"),
         str(stage / "nf12_ad_decode.hip"),
         str(stage / "nf12_ad_encode.hip"),
+        str(stage / "nf12_ad_wmma.hip"),
     ]
 
 

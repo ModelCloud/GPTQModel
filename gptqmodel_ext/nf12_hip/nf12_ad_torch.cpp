@@ -53,6 +53,13 @@ hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uin
                                 const void* x, void* out, int64_t n, int64_t k, int64_t m,
                                 const void* bias, hipStream_t stream);
 
+// Matrix-core path for the mid-M band (nf12_ad_wmma.hip). Returns 0 when the
+// device has no wmma-128b-insts (gfx1250), so callers keep decode-then-GEMM.
+int nf12_ad_wmma_supported(int64_t m);
+hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                               const void* bias, hipStream_t stream);
+
 // Encode (nf12_ad_encode.hip). Two phases so escapes are allocated exactly.
 size_t nf12_ad_encode_workspace_bytes(int64_t n, int64_t k);
 hipError_t nf12_ad_encode_analyze(const void* w, int64_t n, int64_t k, int64_t ldw,
@@ -243,6 +250,38 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
   TORCH_CHECK(row_bytes * 2 / 3 == k, "nf12_ad_hip.linear: packed K mismatch");
   TORCH_CHECK(n % 16 == 0 && row_bytes % 96 == 0 && k % 64 == 0,
               "nf12_ad_hip.linear: unsupported NF12-AD shape");
+
+  // Mid-M: matrix cores. Decode-then-GEMM materialises the dense weight, so it
+  // moves 88 MiB for a 4096x4096 matrix where a BF16 GEMM moves 32 MiB and the
+  // packed form is 24 MiB. This path decodes each super-atom once into shared
+  // memory and feeds wmma for up to eight token tiles, so the packed bytes are
+  // read once and the dense weight never exists. It is selected before the
+  // rocBLAS route and skipped on gfx1250, which has no wmma-128b-insts.
+  if (m > 0 && nf12_ad_wmma_supported(m)) {
+    TORCH_CHECK(n > 0 && n % 16 == 0, "nf12_ad_hip.linear: N must be a positive multiple of 16");
+    TORCH_CHECK(packed.is_contiguous() && escapes.is_contiguous(),
+                "nf12_ad_hip.linear: packed and escapes must be contiguous");
+    TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
+                "nf12_ad_hip.linear: exp_base must be in [0, 120], got ", exp_base);
+    TORCH_CHECK(row_bytes % 96 == 0 && k % 64 == 0,
+                "nf12_ad_hip.linear: unsupported NF12-AD shape");
+    const void* bias_ptr = nullptr;
+    std::optional<torch::Tensor> b_opt;
+    if (bias.has_value() && bias->defined()) {
+      TORCH_CHECK(bias->numel() == n, "nf12_ad_hip.linear: bias must have N elements");
+      b_opt = bias->to(x.device(), x.scalar_type()).contiguous();
+      bias_ptr = b_opt->data_ptr();
+    }
+    auto out = torch::empty({m, n}, x.options());
+    const hipError_t status = nf12_ad_linear_wmma(
+        packed.data_ptr<uint8_t>(),
+        reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+        static_cast<uint32_t>(exp_base), static_cast<const void*>(x.data_ptr()),
+        static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr, current_stream());
+    TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.linear (wmma) failed: ",
+                hipGetErrorString(status));
+    return out;
+  }
 
   // Slice height: large enough that rocBLAS keeps its efficiency (a 256-row
   // GEMM is launch-bound), small enough that the decoded tile still lands in

@@ -335,13 +335,18 @@ __device__ __forceinline__ GroupStats group_stats(const uint32_t (&r)[4]) {
 //
 // so a 16x16 A tile and a 16x16 B tile both load with `rowfrag`, and the 16x16
 // D tile scatters with the same (row,col) map. Every operand is BF16.
+// NOTE: `__gfx1201__` is defined ONLY during the device compilation pass. Any
+// guard that changes a *declaration* between the host and device passes makes
+// the two emit different mangled names, and the launch then fails with
+// "Cannot find Symbol". So the fragment types and helpers are declared
+// unconditionally (they are plain vector types), and `NF12_AD_HAS_WMMA` gates
+// only executable bodies.
 #if defined(__gfx1200__) || defined(__gfx1201__)
 #define NF12_AD_HAS_WMMA 1
 #else
 #define NF12_AD_HAS_WMMA 0
 #endif
 
-#if NF12_AD_HAS_WMMA
 using WmmaA = short __attribute__((ext_vector_type(8)));
 using WmmaD = float __attribute__((ext_vector_type(8)));
 
@@ -351,7 +356,6 @@ __device__ __forceinline__ WmmaA wmma_row_frag(const __hip_bfloat16* __restrict_
   const int64_t off = int64_t(lane & 15) * ld + 8 * (lane >> 4);
   return *reinterpret_cast<const WmmaA*>(base + off);
 }
-#endif
 
 
 }  // namespace nf12_hip
