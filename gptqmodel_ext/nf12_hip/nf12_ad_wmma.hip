@@ -140,16 +140,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // full window (m - 16). That makes it recompute rows an earlier tile already
   // covered; to keep every output written exactly once, each tile owns the
   // disjoint global range [t*16, min((t+1)*16, m)) and drops the rest.
-  int64_t tile_row[kMt];
-  int64_t own_lo[kMt], own_hi[kMt];
-#pragma unroll
-  for (int t = 0; t < kMt; ++t) {
-    const int64_t lo = m0 + int64_t(t) * 16;
-    own_lo[t] = lo;
-    own_hi[t] = min(lo + 16, m);
-    tile_row[t] = min(lo, m - 16);
-    if (tile_row[t] < 0) tile_row[t] = 0;
-  }
+  // Tile t covers rows [m0 + 16t, m0 + 16t + 16). A partial tail tile clamps
+  // its load origin to the last full window so it cannot read past x; the
+  // epilogue filters on the tile's own disjoint range. Computing these inline
+  // instead of in three per-tile arrays keeps ~48 int64 values out of the VGPR
+  // budget; at kMt=8 that is the difference between 167 and ~127 VGPRs.
 
   WmmaD acc[kMt];
 #pragma unroll
@@ -205,7 +200,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         // `wmma_row_frag` supplies the tile's own row ((lane & 15)) itself, so
         // the base passed here is the tile origin only. Adding the lane row
         // here as well applied it twice and produced garbage for every m > 16.
-        const WmmaA a = wmma_row_frag(x + tile_row[t] * k + kb * kSuperAtomCols + 16 * j, k, lane);
+        const int64_t tr = max(int64_t(0), min(m0 + int64_t(t) * 16, m - 16));
+        const WmmaA a = wmma_row_frag(x + tr * k + kb * kSuperAtomCols + 16 * j, k, lane);
         acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc[t]);
       }
     }
@@ -271,12 +267,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   float* const part = (kSplits == 1) ? nullptr : partial + int64_t(blockIdx.z) * m * n;
 #pragma unroll
   for (int t = 0; t < kMt; ++t) {
-    const int64_t origin = m0 + tile_row[t];
+    const int64_t lo = m0 + int64_t(t) * 16;
+    const int64_t hi = min(lo + 16, m);
+    // Absolute tile origin, clamped for a partial tail. This is the row the
+    // accumulator fragment starts at; `m0 + origin` double-counted m0 and only
+    // worked while m_blocks == 1 (m <= 128).
+    const int64_t origin = max(int64_t(0), min(lo, m - 16));
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
       const int64_t row = origin + 8 * (lane >> 4) + i;
-      if (row < own_lo[t] || row >= own_hi[t]) continue;
-      const float v = acc[t][i] + bias_v;
+      if (row < lo || row >= hi) continue;
+      // With split-K each split writes its own FP32 partial plane and the
+      // reduce kernel sums them, so bias must be added exactly once across
+      // the splits (adding it in every split multiplied it by kSplits).
+      const float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
       if (kSplits == 1) {
         out[row * n + col] = __float2bfloat16(v);
       } else {
@@ -309,10 +313,10 @@ extern "C" {
 
 // Largest M this route takes. Each grid.y block decodes the weight for its own
 // M slice, so above the crossover the extra packed reads lose to
-// decode-then-rocBLAS, which decodes once and runs a full GEMM. 128 tokens is
-// the measured crossover on gfx1201 (see the README table); beyond it the
+// decode-then-rocBLAS, which decodes once and runs a full GEMM. 256 tokens is
+// the measured limit on gfx1201 (see the README table); beyond it the
 // dispatcher keeps the rocBLAS route.
-int nf12_ad_wmma_max_m() { return kMaxTokens; }
+int nf12_ad_wmma_max_m() { return 2 * kMaxTokens; }
 
 // `__gfx1201__` is defined only while compiling DEVICE code, so a host function
 // cannot use it: guarding on it silently reports "unsupported" and the route is
@@ -327,7 +331,7 @@ static int wmma_arch_ok(int device) {
 }
 
 int nf12_ad_wmma_supported(int64_t m) {
-  if (m < 17 || m > kMaxTokens) return 0;
+  if (m < 16 || m > 2 * kMaxTokens) return 0;
   int device = 0;
   if (hipGetDevice(&device) != hipSuccess) return 0;
   return wmma_arch_ok(device);
@@ -387,16 +391,33 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
                               const void* bias, hipStream_t stream) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  if (m < 17 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
+  if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
   if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
 
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
-  const int64_t m_blocks = (m + kMaxTokens - 1) / kMaxTokens;
+
+  const int full_tiles = static_cast<int>((m + 15) / 16);
+  // At kMt=8 the 8x8 FP32 accumulator costs 64 VGPRs and the kernel lands at
+  // 167 VGPRs / 9 waves per SIMD. When K is long enough that a second packed
+  // read is cheap relative to the matrix-core work, and the launch is short of
+  // CTAs, halve the tile count and split M across CTAs. Measured on gfx1201:
+  // 8192x8192 m=128 0.68 -> 0.88x and 14336x4096 0.79 -> 0.83x, while the
+  // short-K and wide-N shapes stay on the 8-tile kernel and do not regress.
+  // Above m=128 there are already 2 M-blocks, so the launch is not starved and
+  // splitting further only re-reads the packed weight (measured neutral at
+  // m=256, 2 reads vs 4); keep the 8-tile kernel there.
+  const int64_t k_blocks = k / kSuperAtomCols;
+  const bool split_m = full_tiles > 4 && full_tiles <= 8 && k_blocks >= 128 && n_blocks <= 64;
+  const int tiles = split_m ? 4 : full_tiles;
+  // The dispatcher clamps anything above kMaxTiles to the kMaxTiles kernel, so
+  // the tokens one CTA actually covers is min(tiles, kMaxTiles)*16. Deriving
+  // m_blocks from the UNCLAMPED tile count dropped the second M block at
+  // m=256 (tiles=16 -> m_blocks=1, but only 8 tiles are launched).
+  const int64_t launch_tiles = (tiles < kMaxTiles) ? tiles : kMaxTiles;
+  const int64_t m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
-
-  const int tiles = static_cast<int>((m + 15) / 16);
-  const int splits = pick_splits(n_blocks, m);
+  const int splits = pick_splits(n_blocks * m_blocks, m);
 
   float* partial = nullptr;
   if (splits > 1) {

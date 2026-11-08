@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from the nf12 reference implementation
+# (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
 """Pure-Torch NF12-AD codec and inference reference.
 
 NF12 (NyoomFloat12) is a lossless 12-bit encoding of BF16 weights from

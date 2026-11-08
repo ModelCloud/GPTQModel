@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from the nf12 reference implementation
+# (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
 """NF12-AD accuracy + performance validation with full metric tables.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 weight format
