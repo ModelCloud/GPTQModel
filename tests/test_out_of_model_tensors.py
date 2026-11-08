@@ -15,7 +15,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.auto import check_and_get_model_definition
-from gptqmodel.models.writer import ModelWriter, _merge_prefix_tensors_into_state_dict
+from gptqmodel.models.writer import ModelWriter, _merge_selected_tensors_into_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import TensorSource
 
@@ -543,6 +543,54 @@ def test_merge_prefixed_tensors(tmp_path, monkeypatch):
     assert {"mtp.fc.weight", "mtp.model.layers.0.weight"} <= keys
 
 
+def test_merge_suffix_and_exact_tensors(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "layers.0.ffn.gate.bias_vl": torch.ones(2),
+            "image_start": torch.full((2,), 2.0),
+            "unselected": torch.full((2,), 3.0),
+        },
+        str(original_dir / shard_name),
+    )
+    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {
+                    "layers.0.ffn.gate.bias_vl": shard_name,
+                    "image_start": shard_name,
+                    "unselected": shard_name,
+                },
+            },
+            handle,
+        )
+
+    writer = _build_writer_with_out_of_model_file(
+        str(original_dir),
+        out_of_model_tensor_files=[
+            {
+                "suffixes": [".ffn.gate.bias_vl"],
+                "tensors": ["image_start"],
+            }
+        ],
+    )
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch)
+
+    save_dir = tmp_path / "save"
+    writer.save_quantized(save_dir=str(save_dir))
+
+    with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+    assert "layers.0.ffn.gate.bias_vl" in keys
+    assert "image_start" in keys
+    assert "unselected" not in keys
+
+
 def test_merge_prefixed_tensors_with_multiple_shards(tmp_path, monkeypatch):
     original_dir = tmp_path / "original"
     original_dir.mkdir()
@@ -611,7 +659,7 @@ def test_merge_prefixed_tensors_rejects_incomplete_declared_tensors(tmp_path, fa
     state_dict = {}
 
     with pytest.raises(ValueError, match=r"missing from or unreadable in \['second.safetensors'\], e.g. \['mtp.b'\]"):
-        _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+        _merge_selected_tensors_into_state_dict(["mtp"], [], [], str(tmp_path), state_dict)
     assert state_dict == {}
 
 
@@ -620,7 +668,7 @@ def test_merge_prefixed_tensors_keeps_undeclared_prefix_optional(tmp_path):
     _write_index(tmp_path, {"model.weight": "first.safetensors", "model.bias": "absent.safetensors"})
     state_dict = {}
 
-    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    _merge_selected_tensors_into_state_dict(["mtp"], [], [], str(tmp_path), state_dict)
     assert state_dict == {}
 
 
@@ -636,7 +684,7 @@ def test_merge_prefixed_tensors_checks_whole_dotted_prefixes(tmp_path):
     )
 
     with pytest.raises(ValueError, match=r"1 tensors .* e\.g\. \['model\.layers\.61\.b'\]"):
-        _merge_prefix_tensors_into_state_dict(["model.layers.61"], str(tmp_path), {})
+        _merge_selected_tensors_into_state_dict(["model.layers.61"], [], [], str(tmp_path), {})
 
 
 def test_merge_prefixed_tensors_without_a_readable_index_scans_shards(tmp_path):
@@ -644,7 +692,7 @@ def test_merge_prefixed_tensors_without_a_readable_index_scans_shards(tmp_path):
     (tmp_path / "model.safetensors.index.json").write_text("{", encoding="utf-8")
     state_dict = {}
 
-    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    _merge_selected_tensors_into_state_dict(["mtp"], [], [], str(tmp_path), state_dict)
     assert list(state_dict) == ["mtp.a"]
 
 
