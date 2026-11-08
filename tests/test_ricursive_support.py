@@ -426,6 +426,39 @@ def test_generate_patch_keeps_single_token_decode_shape():
     assert out["input_ids"].shape == (1, 1)
 
 
+@pytest.mark.parametrize(
+    "past_length,input_ids,mask_length,expected_ids,expected_positions",
+    [
+        (10, [17, 18], None, [17, 18], [10, 11]),
+        (1, [17, 18], 3, [17, 18], [1, 2]),
+        (4, [1, 2, 3, 4, 17, 18], 6, [17, 18], [4, 5]),
+    ],
+)
+def test_generate_patch_distinguishes_new_blocks_from_full_prompts(
+    past_length, input_ids, mask_length, expected_ids, expected_positions
+):
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    class _Dummy:
+        device = torch.device("cpu")
+
+    class _Cache:
+        def get_seq_length(self):
+            return past_length
+
+    out = _prepare_inputs_for_generation(
+        _Dummy(),
+        torch.tensor([input_ids]),
+        past_key_values=_Cache(),
+        attention_mask=torch.ones((1, mask_length), dtype=torch.long) if mask_length else None,
+        cache_position=None,
+        use_cache=True,
+    )
+    assert out["input_ids"].tolist() == [expected_ids]
+    assert out["cache_position"].tolist() == expected_positions
+    assert out["position_ids"].tolist() == [expected_positions]
+
+
 def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
     ref_dir = _reference_dir()
     if ref_dir is None:
