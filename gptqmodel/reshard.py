@@ -276,18 +276,19 @@ def _read_safetensors_header(path: str) -> Tuple[Dict[str, object], int]:
     return header, data_start
 
 
-def _resolve_source_dir(from_model) -> str:
+def _resolve_source_input(from_model) -> Tuple[str, Optional[str]]:
     if isinstance(from_model, (str, os.PathLike)):
         path = os.fspath(from_model)
         if os.path.isdir(path):
-            return path
+            return path, None
         if os.path.isfile(path) and path.endswith((".safetensors", ".safetensors.index.json")):
-            return os.path.dirname(os.path.abspath(path))
-        raise FileNotFoundError(f"`from_model` is not a checkpoint directory: {path!r}")
+            selected_file = os.path.abspath(path)
+            return os.path.dirname(selected_file), selected_file
+        raise FileNotFoundError(f"`from_model` is not a checkpoint directory or safetensors file: {path!r}")
 
     local_path = getattr(from_model, "model_local_path", None)
     if local_path is not None and os.path.isdir(os.fspath(local_path)):
-        return os.fspath(local_path)
+        return os.fspath(local_path), None
     raise TypeError(
         "`from_model` must be a checkpoint directory/path or a loaded GPTQModel with a local `model_local_path`."
     )
@@ -408,8 +409,10 @@ def _discover_safetensors(source_dir: str) -> List[str]:
     return sorted(paths)
 
 
-def _scan_unindexed_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
-    paths = _discover_safetensors(source_dir)
+def _scan_unindexed_checkpoint(
+    source_dir: str, paths: Optional[Sequence[str]] = None
+) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    paths = _discover_safetensors(source_dir) if paths is None else paths
     if not paths:
         raise FileNotFoundError(
             f"No safetensors checkpoint found in {source_dir!r}. "
@@ -433,14 +436,24 @@ def _scan_unindexed_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], 
     return refs, metadata
 
 
-def _scan_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
-    for index_name in _SOURCE_INDEX_NAMES:
-        index_path = os.path.join(source_dir, index_name)
-        if os.path.isfile(index_path):
-            refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
-            break
+def _scan_checkpoint(
+    source_dir: str, selected_file: Optional[str] = None
+) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    if selected_file is not None:
+        # An explicit file or index is authoritative even when a standard
+        # index or other safetensors files share its directory.
+        if selected_file.endswith(".safetensors.index.json"):
+            refs, metadata = _scan_indexed_checkpoint(source_dir, selected_file)
+        else:
+            refs, metadata = _scan_unindexed_checkpoint(source_dir, (selected_file,))
     else:
-        refs, metadata = _scan_unindexed_checkpoint(source_dir)
+        for index_name in _SOURCE_INDEX_NAMES:
+            index_path = os.path.join(source_dir, index_name)
+            if os.path.isfile(index_path):
+                refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+                break
+        else:
+            refs, metadata = _scan_unindexed_checkpoint(source_dir)
 
     if not refs:
         raise ValueError(f"No tensors found in checkpoint: {source_dir}")
@@ -733,9 +746,10 @@ def reshard(
     """Rewrite an existing checkpoint into a new shard layout.
 
     Args:
-        from_model: Source checkpoint directory, a ``model.safetensors`` or
-            ``model.safetensors.index.json`` path, or a loaded ``GPTQModel``
-            whose ``model_local_path`` points at the checkpoint.
+        from_model: Source checkpoint directory, a specific ``.safetensors``
+            or ``.safetensors.index.json`` path, or a loaded ``GPTQModel``
+            whose ``model_local_path`` points at the checkpoint. A file path
+            selects only that file or the shards named in that index.
         to_model_path: Destination directory. Weights are copied byte-for-byte;
             config, tokenizer, and other non-weight files are copied alongside.
         config: :class:`ShardConfig`. Defaults to
@@ -768,12 +782,12 @@ def reshard(
         else:
             raise TypeError("`config` must be a ShardConfig instance.")
 
-    source_dir = _resolve_source_dir(from_model)
+    source_dir, selected_file = _resolve_source_input(from_model)
     target_dir = os.fspath(to_model_path)
     _validate_paths(source_dir, target_dir)
     _validate_destination(target_dir, overwrite)
 
-    refs, metadata = _scan_checkpoint(source_dir)
+    refs, metadata = _scan_checkpoint(source_dir, selected_file)
     prefixes = _resolve_layer_prefixes(
         from_model,
         source_dir,

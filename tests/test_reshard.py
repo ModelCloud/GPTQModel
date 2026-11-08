@@ -532,6 +532,44 @@ def test_reshard_discovers_unindexed_multi_shard_checkpoint(tmp_path):
     assert set(load_file(str(target / "global.safetensors"))) == {"lm_head.weight"}
 
 
+def test_reshard_explicit_weight_file_ignores_sibling_weights_and_index(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    selected = {"selected.weight": torch.ones(2)}
+    other = {"other.weight": torch.zeros(2)}
+    save_file(selected, str(source / "selected.safetensors"))
+    save_file(other, str(source / "other.safetensors"))
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"other.weight": "other.safetensors"}}), encoding="utf-8"
+    )
+
+    target = tmp_path / "target"
+    reshard(source / "selected.safetensors", target, ShardLayout.SINGLE)
+
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), selected)
+
+
+def test_reshard_explicit_index_ignores_default_index(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    selected = {"selected.weight": torch.ones(2)}
+    other = {"other.weight": torch.zeros(2)}
+    save_file(selected, str(source / "selected.safetensors"))
+    save_file(other, str(source / "other.safetensors"))
+    explicit_index = source / "selected.safetensors.index.json"
+    explicit_index.write_text(
+        json.dumps({"weight_map": {"selected.weight": "selected.safetensors"}}), encoding="utf-8"
+    )
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"other.weight": "other.safetensors"}}), encoding="utf-8"
+    )
+
+    target = tmp_path / "target"
+    reshard(explicit_index, target, ShardLayout.SINGLE)
+
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), selected)
+
+
 def test_reshard_accepts_hf_cache_symlink_shards(tmp_path):
     # Hugging Face cache snapshots store shards as symlinks into ../../blobs.
     # Resharding a cached checkpoint must accept those links.
