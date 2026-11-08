@@ -37,3 +37,6 @@ flowchart TD
 The key rule applies to both safetensors reference indexes and ordinary disk
 offload bundles. It keeps sibling or parent tensors with equal shapes distinct;
 the payload digest remains a separate content check during export.
+
+This scoped lookup was introduced in
+[PR #3621](https://github.com/ModelCloud/GPTQModel/pull/3621).
