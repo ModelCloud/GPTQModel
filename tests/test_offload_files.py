@@ -2229,6 +2229,77 @@ def test_safetensors_reference_offload_avoids_a_second_payload(tmp_path):
         )
 
 
+@pytest.mark.parametrize("offload_kind", ["reference", "bundle"])
+def test_nested_offload_index_keeps_distinct_same_named_weights(tmp_path, offload_kind):
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.full((2, 2), 1.0))
+            self.child = nn.Linear(2, 2, bias=False)
+            with torch.no_grad():
+                self.child.weight.fill_(2.0)
+
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = Block()
+    expected = _clone_state_dict(model.block)
+    offload_root = tmp_path / "offload"
+    if offload_kind == "reference":
+        source = tmp_path / "source.safetensors"
+        save_file(expected, source)
+        offload_to_safetensors_reference(
+            model.block, model, source, disk_path=str(offload_root)
+        )
+    else:
+        offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    assert set(state_dict) == {"block.weight", "block.child.weight"}
+    assert state_dict["block.child.weight"].source.weight_name == "child.weight"
+
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    streaming_state_dict_to_shards(
+        state_dict, str(saved), "model", "model.safetensors", {}, None
+    )
+    with safe_open(str(saved / "model.safetensors"), framework="pt", device="cpu") as handle:
+        for name, tensor in expected.items():
+            torch.testing.assert_close(handle.get_tensor(f"block.{name}"), tensor)
+
+
+@pytest.mark.parametrize("index_case", ["missing", "full_name", "conflict"])
+def test_nested_offload_index_uses_scoped_key_and_rejects_conflicts(tmp_path, index_case):
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = nn.Module()
+    model.block.weight = nn.Parameter(torch.ones(2, 2))
+    model.block.child = nn.Linear(2, 2, bias=False)
+    source = tmp_path / "source.safetensors"
+    save_file(_clone_state_dict(model.block), source)
+    offload_root = tmp_path / "offload"
+    offload_to_safetensors_reference(model.block, model, source, disk_path=str(offload_root))
+    index_path = offload_root / "block" / "index.json"
+    index = json.loads(index_path.read_text())
+    child = index.pop("child.weight")
+    if index_case == "full_name":
+        index["block.child.weight"] = child
+    elif index_case == "conflict":
+        index["child.weight"] = child
+        index["block.child.weight"] = index["weight"]
+    index_path.write_text(json.dumps(index))
+
+    if index_case == "missing":
+        with pytest.raises(FileNotFoundError, match="block.child.weight"):
+            get_state_dict_for_save(model, offload_root=str(offload_root))
+    elif index_case == "conflict":
+        with pytest.raises(ValueError, match="Ambiguous offload index entries"):
+            get_state_dict_for_save(model, offload_root=str(offload_root))
+    else:
+        state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+        assert set(state_dict) == {"block.weight", "block.child.weight"}
+        assert state_dict["block.child.weight"].source.weight_name == "child.weight"
+
+
 def test_reference_source_inside_export_dir_is_rejected_before_any_shard_write(tmp_path):
     model = nn.Module()
     model.linear = nn.Linear(4, 4)

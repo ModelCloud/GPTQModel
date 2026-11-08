@@ -673,6 +673,7 @@ procedures, and operational gotchas.
 
 For writers that reference an existing safetensors payload instead of making a
 second offload copy, see [Safetensors reference offload](docs/safetensors-reference-offload.md).
+For nested offload tensor names, see [Offload index resolution](docs/offload-index-resolution.md).
 
 #### Other Quantization Formats 📦
 
