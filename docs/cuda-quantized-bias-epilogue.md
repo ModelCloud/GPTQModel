@@ -58,3 +58,5 @@ the previous GPTQ and AWQ outputs were `inf`, while the FP32 oracle rounds
 `65000` to `64992`. FP8 and GGUF dense fallbacks likewise returned `inf`
 for finite oracle results of `60640` and `62752` respectively. All values
 were observed on an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132.
+
+This flow was introduced by [PR #3649](https://github.com/ModelCloud/GPTQModel/pull/3649).
