@@ -52,6 +52,15 @@ int nf12_ad_linear_fused_small_m_supported(int64_t m);
 hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                                 const void* x, void* out, int64_t n, int64_t k, int64_t m,
                                 const void* bias, hipStream_t stream);
+
+// Encode (nf12_ad_encode.hip). Two phases so escapes are allocated exactly.
+size_t nf12_ad_encode_workspace_bytes(int64_t n, int64_t k);
+hipError_t nf12_ad_encode_analyze(const void* w, int64_t n, int64_t k, int64_t ldw,
+                                  void* workspace, size_t workspace_bytes, uint8_t* exp_base_out,
+                                  uint32_t* num_escapes_out, hipStream_t stream);
+hipError_t nf12_ad_encode(const void* w, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base,
+                          uint8_t* packed, uint4* escapes, uint32_t escapes_capacity,
+                          void* workspace, size_t workspace_bytes, hipStream_t stream);
 }
 
 namespace {
@@ -119,6 +128,51 @@ torch::Tensor decode_dispatch(const torch::Tensor& packed, const torch::Tensor& 
       static_cast<void*>(out.data_ptr()), k, current_stream());
   TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.decode failed: ", hipGetErrorString(status));
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// nf12_ad_hip::encode(w) -> (packed, escapes, exp_base)
+//
+// Same two-phase contract as the CUDA `nf12.encode`: analyze picks exp_base
+// and the exact escape count, then encode writes packed/escapes. Output is
+// byte-identical to the Torch codec oracle (asserted by the validator).
+// ---------------------------------------------------------------------------
+std::tuple<torch::Tensor, torch::Tensor, int64_t> encode_dispatch(const torch::Tensor& w_in) {
+  check_arch(w_in);
+  TORCH_CHECK(w_in.is_cuda(), "nf12_ad_hip.encode: weight must be a CUDA tensor");
+  TORCH_CHECK(w_in.scalar_type() == at::kBFloat16,
+              "nf12_ad_hip.encode: weight must be bfloat16");
+  TORCH_CHECK(w_in.dim() == 2, "nf12_ad_hip.encode: weight must be 2-D");
+  const torch::Tensor w = w_in.contiguous();
+  const int64_t n = w.size(0);
+  const int64_t k = w.size(1);
+  TORCH_CHECK(n > 0 && n % 16 == 0 && k > 0 && k % 64 == 0,
+              "nf12_ad_hip.encode: needs N % 16 == 0 and K % 64 == 0, got N=", n, " K=", k);
+
+  auto guard = device_guard(w);
+  const hipStream_t stream = current_stream();
+  const size_t ws_bytes = nf12_ad_encode_workspace_bytes(n, k);
+  auto ws = torch::empty({static_cast<int64_t>(ws_bytes)},
+                         w.options().dtype(at::kByte));
+
+  uint8_t exp_base = 0;
+  uint32_t num_escapes = 0;
+  hipError_t status = nf12_ad_encode_analyze(
+      static_cast<const void*>(w.data_ptr()), n, k, w.stride(0),
+      static_cast<void*>(ws.data_ptr()), ws_bytes, &exp_base, &num_escapes, stream);
+  TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.encode (analyze) failed: ",
+              hipGetErrorString(status));
+
+  auto packed = torch::empty({n, k * 3 / 2}, w.options().dtype(at::kByte));
+  auto escapes = torch::empty({static_cast<int64_t>(num_escapes), 8},
+                              w.options().dtype(at::kShort));
+  status = nf12_ad_encode(
+      static_cast<const void*>(w.data_ptr()), n, k, w.stride(0), exp_base,
+      packed.data_ptr<uint8_t>(),
+      num_escapes > 0 ? reinterpret_cast<uint4*>(escapes.data_ptr<int16_t>()) : nullptr,
+      num_escapes, static_cast<void*>(ws.data_ptr()), ws_bytes, stream);
+  TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.encode failed: ", hipGetErrorString(status));
+  return {packed, escapes, static_cast<int64_t>(exp_base)};
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +314,7 @@ TORCH_LIBRARY(nf12_ad_hip, m) {
   m.def(
       "linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, "
       "Tensor? bias=None) -> Tensor");
+  m.def("encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)");
   m.def("selftest(Tensor ref) -> bool");
   m.def("arch_info() -> str");
 }
@@ -267,6 +322,7 @@ TORCH_LIBRARY(nf12_ad_hip, m) {
 TORCH_LIBRARY_IMPL(nf12_ad_hip, CUDA, m) {
   m.impl("decode", &decode_dispatch);
   m.impl("linear", &linear_dispatch);
+  m.impl("encode", &encode_dispatch);
   m.impl("selftest", &selftest);
 }
 

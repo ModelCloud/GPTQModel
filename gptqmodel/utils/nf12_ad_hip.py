@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
-"""JIT loader for the NF12-AD HIP/RDNA4 decode kernel.
+"""JIT loader for the NF12-AD HIP/RDNA4 codec.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 weight format
 (Liberman, Fang, Zhang, Dao, Fu, 2026). The reference implementation and CUDA
@@ -38,7 +38,12 @@ def _root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "nf12_hip"
 
 
-_SOURCE_FILES = ("nf12_ad_torch.cpp", "nf12_ad_decode.hip", "nf12_ad_format_hip.cuh")
+_SOURCE_FILES = (
+    "nf12_ad_torch.cpp",
+    "nf12_ad_decode.hip",
+    "nf12_ad_encode.hip",
+    "nf12_ad_format_hip.cuh",
+)
 
 
 def _staging_root() -> Path:
@@ -74,7 +79,11 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"NF12-AD HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
-    return [str(stage / "nf12_ad_torch.cpp"), str(stage / "nf12_ad_decode.hip")]
+    return [
+        str(stage / "nf12_ad_torch.cpp"),
+        str(stage / "nf12_ad_decode.hip"),
+        str(stage / "nf12_ad_encode.hip"),
+    ]
 
 
 def _rocm_root() -> Path | None:
@@ -126,11 +135,11 @@ def _ldflags() -> list[str]:
 _EXTENSION = TorchOpsJitExtension(
     name=_OPS_NAME,
     namespace=_NAMESPACE,
-    required_ops=("decode", "linear", "selftest", "arch_info"),
+    required_ops=("encode", "decode", "linear", "selftest", "arch_info"),
     sources=_sources,
     build_root_env="GPTQMODEL_NF12_AD_HIP_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("nf12_ad_hip"),
-    display_name="NF12-AD decode (HIP/RDNA4)",
+    display_name="NF12-AD codec (HIP/RDNA4)",
     extra_cuda_cflags=_cuda_cflags,
     extra_ldflags=_ldflags,
     force_rebuild_env="GPTQMODEL_NF12_AD_HIP_FORCE_REBUILD",
@@ -186,6 +195,21 @@ def last_error() -> str:
     return _EXTENSION.last_error_message()
 
 
+def encode(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Encode a BF16 ``[N, K]`` matrix on RDNA4.
+
+    Byte-identical to :func:`gptqmodel.utils.nf12_codec.encode`: the same
+    ``exp_base``, the same packed bytes and the same escape order. Runs the
+    whole analyze/count/scan/write pipeline on the GPU instead of the
+    pure-Torch CPU codec, which dominated quantization time before this port.
+    """
+
+    if not _EXTENSION.load():
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_ad_hip extension is unavailable")
+    packed, escapes, exp_base = torch.ops.nf12_ad_hip.encode(weight)
+    return packed, escapes, int(exp_base)
+
+
 def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
     """Decode NF12-AD bytes to the exact BF16 ``[N, K]`` matrix on RDNA4."""
 
@@ -212,6 +236,7 @@ __all__ = [
     "SUPPORTED_ARCHS",
     "available",
     "decode",
+    "encode",
     "last_error",
     "linear",
     "nf12_ad_hip_supported",

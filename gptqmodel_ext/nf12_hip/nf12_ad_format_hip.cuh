@@ -227,4 +227,131 @@ __device__ __forceinline__ void atoms_to_tile(const AtomRegs& r, RowTile& x) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Encode (SPEC.md 2, "Reference encode")
+// ---------------------------------------------------------------------------
+// These mirror codec/tile.cuh's encoder half. The encoder walks the same
+// super-atoms as the decoder but in the opposite direction: it loads row-major
+// BF16, quad-transposes into the group registers, then packs the meta/low
+// words that the decoder unpacks.
+
+// Lane (g,t) = (l>>2, l&3) owns 16-byte chunks t and t+4 in rows g and g+8.
+__device__ __forceinline__ void load_atoms(const __hip_bfloat16* __restrict__ w, int64_t ldw,
+                                           SuperAtom s, int lane, AtomRegs& r) {
+  RowTile x;
+  load_row_tile(w, row_tile_offset(s, ldw, lane), ldw, x);
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+#pragma unroll
+    for (int p = 0; p < 2; ++p) quad_transpose(x[h][p], lane);
+  }
+  tile_to_atoms(x, r);
+}
+
+// High bytes of the group's slots, split by pair position: byte j of `a` is
+// hi(s(2j)), byte j of `b` is hi(s(2j+1)), matching the meta byte order.
+struct GroupHigh {
+  uint32_t a, b;
+};
+
+__device__ __forceinline__ GroupHigh group_high(const uint32_t (&r)[4]) {
+  const uint32_t p01 = prmt<0x7531u>(r[0], r[1]);
+  const uint32_t p23 = prmt<0x7531u>(r[2], r[3]);
+  return GroupHigh{prmt<0x6420u>(p01, p23), prmt<0x7531u>(p01, p23)};
+}
+
+// Setting each byte's high bit prevents borrowing when subtracting B <= 120.
+// In-window bytes become [0x80, 0x87], so bits 3-6 detect out-of-window values.
+// A zero meta word requires an escape even when every value is in-window.
+__device__ __forceinline__ bool encode_group_fast(const uint32_t (&r)[4], uint32_t base_x4,
+                                                  Group& out) {
+  const GroupHigh hi = group_high(r);
+  const uint32_t da = ((hi.a & 0x7f7f7f7fu) | 0x80808080u) - base_x4;
+  const uint32_t db = ((hi.b & 0x7f7f7f7fu) | 0x80808080u) - base_x4;
+  out.meta = (hi.a & 0x80808080u) | ((hi.b & 0x80808080u) >> 1) | ((db & 0x07070707u) << 3) |
+             (da & 0x07070707u);
+  out.lo0 = prmt<0x6420u>(r[0], r[1]);
+  out.lo1 = prmt<0x6420u>(r[2], r[3]);
+  return ((da | db) & 0x78787878u) == 0u && out.meta != 0u;
+}
+
+// With h = e>>1, all values fit for B in [hmax-7, hmin], clamped to [0,120].
+// A sentinel collision requires B = hmin = hmax and all sign bits clear.
+struct GroupStats {
+  uint32_t hmin, hmax;
+  bool all_positive;
+};
+
+// RDNA4 has no __vminu4/__vmaxu4 in the HIP headers, so the byte-wise
+// min/max reduction is spelled out. The compiler turns each pass into
+// v_min3_u32 / v_max3_u32 over packed bytes.
+__device__ __forceinline__ uint32_t vminu4(uint32_t a, uint32_t b) {
+  uint32_t r = 0;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const uint32_t x = (a >> (8 * i)) & 0xffu;
+    const uint32_t y = (b >> (8 * i)) & 0xffu;
+    r |= (x < y ? x : y) << (8 * i);
+  }
+  return r;
+}
+
+__device__ __forceinline__ uint32_t vmaxu4(uint32_t a, uint32_t b) {
+  uint32_t r = 0;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const uint32_t x = (a >> (8 * i)) & 0xffu;
+    const uint32_t y = (b >> (8 * i)) & 0xffu;
+    r |= (x > y ? x : y) << (8 * i);
+  }
+  return r;
+}
+
+__device__ __forceinline__ GroupStats group_stats(const uint32_t (&r)[4]) {
+  const GroupHigh hi = group_high(r);
+  const uint32_t ha = hi.a & 0x7f7f7f7fu;
+  const uint32_t hb = hi.b & 0x7f7f7f7fu;
+  uint32_t mn = vminu4(ha, hb);
+  uint32_t mx = vmaxu4(ha, hb);
+  mn = vminu4(mn, mn >> 16);
+  mx = vmaxu4(mx, mx >> 16);
+  mn = vminu4(mn, mn >> 8);
+  mx = vmaxu4(mx, mx >> 8);
+  return GroupStats{mn & 0xffu, mx & 0xffu, ((hi.a | hi.b) & 0x80808080u) == 0u};
+}
+
+// ---------------------------------------------------------------------------
+// WMMA (gfx1200/gfx1201 only; gfx1250 has no wmma-128b-insts)
+// ---------------------------------------------------------------------------
+// `v_wmma_f32_16x16x16_bf16` with wave32: each lane holds 8 A, 8 B and 8 FP32
+// accumulators. The fragment map below was determined empirically on gfx1201
+// with one-hot probes and then asserted against a CPU reference (see
+// gptqmodel_ext/nf12_hip/README.md, "WMMA fragment layout").
+//
+//   A reg (l, i) = A[ l % 16 ][ kb + i + 8 * (l / 16) ]
+//   B reg (l, i) = B[ i + 8 * (l / 16) ][ colbase + l % 16 ]
+//   D reg (l, i) = D[ i + 8 * (l / 16) ][ colbase + l % 16 ]
+//
+// so a 16x16 A tile and a 16x16 B tile both load with `rowfrag`, and the 16x16
+// D tile scatters with the same (row,col) map. Every operand is BF16.
+#if defined(__gfx1200__) || defined(__gfx1201__)
+#define NF12_AD_HAS_WMMA 1
+#else
+#define NF12_AD_HAS_WMMA 0
+#endif
+
+#if NF12_AD_HAS_WMMA
+using WmmaA = short __attribute__((ext_vector_type(8)));
+using WmmaD = float __attribute__((ext_vector_type(8)));
+
+// Element (row = lane % 16, col = kb + i + 8 * (lane / 16)) of `base`.
+__device__ __forceinline__ WmmaA wmma_row_frag(const __hip_bfloat16* __restrict__ base,
+                                               int64_t ld, int lane) {
+  const int64_t off = int64_t(lane & 15) * ld + 8 * (lane >> 4);
+  return *reinterpret_cast<const WmmaA*>(base + off);
+}
+#endif
+
+
 }  // namespace nf12_hip

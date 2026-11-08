@@ -28,6 +28,70 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 
+def _encode_weight(
+    weight: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    exp_base: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Cast to BF16 and encode, preferring the native kernel when available.
+
+    On AMD RDNA4 the HIP encoder runs the whole analyze/count/scan/write
+    pipeline on the GPU and produces output that is byte-identical to
+    :func:`nf12_codec.encode_weight`; the validator asserts that equivalence.
+    Every other device (and any HIP failure) falls back to the Torch codec, so
+    results never depend on which route ran.
+    """
+
+    from ..utils import nf12_ad as cuda_rt
+    from ..utils import nf12_ad_hip as hip_rt
+
+    matrix = weight.detach().to(device="cpu", dtype=dtype).contiguous()
+
+    # A forced base must stay on the codec: the kernels choose `exp_base`
+    # themselves (minimum escapes, smallest base) and expose no override.
+    if exp_base is None and matrix.shape[0] % 16 == 0 and matrix.shape[1] % 64 == 0:
+        runtime, device = _native_encode_runtime(weight, hip_rt, cuda_rt)
+        if runtime is not None:
+            try:
+                gpu = matrix.to(device=device, dtype=dtype).contiguous()
+                packed, escapes, base = runtime.encode(gpu)
+                # Byte-identical to the codec (asserted by the validator), so
+                # returning host tensors here keeps both routes interchangeable.
+                return packed.cpu(), escapes.cpu(), int(base)
+            except Exception:  # noqa: BLE001 - optional accelerator
+                pass
+
+    return nf12_codec.encode_weight(matrix, dtype=dtype, exp_base=exp_base)
+
+
+def _native_encode_runtime(weight: torch.Tensor, hip_rt, cuda_rt):
+    """Pick a native encoder and device, or ``(None, None)`` for the codec.
+
+    The kernel is a large win even when the weight still lives on the host:
+    a 4096x4096 encode is ~665 ms of Torch codec work versus ~1 ms of kernel
+    time plus ~1 ms of transfer. So a CPU weight is staged to the first
+    supported GPU rather than skipped. Byte-exactness makes the two routes
+    interchangeable, and every failure falls back to the codec.
+    """
+
+    device = weight.device
+    if device.type == "cuda":
+        if hip_rt.nf12_ad_hip_supported(device):
+            return hip_rt, device
+        if cuda_rt.available():
+            return cuda_rt, device
+        return None, None
+    if not torch.cuda.is_available():
+        return None, None
+    device = torch.device("cuda", torch.cuda.current_device())
+    if hip_rt.nf12_ad_hip_supported(device):
+        return hip_rt, device
+    if cuda_rt.available():
+        return cuda_rt, device
+    return None, None
+
+
 @dataclass(frozen=True)
 class NF12ADQuantResult:
     """Packed NF12-AD tensors for one weight.
@@ -85,7 +149,7 @@ def quantize_nf12_ad_weight(
     n, k = weight.shape
     nf12_codec.check_shape(n, k)
 
-    packed, escapes, base = nf12_codec.encode_weight(
+    packed, escapes, base = _encode_weight(
         weight,
         dtype=dtype,
         exp_base=exp_base,
