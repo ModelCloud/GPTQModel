@@ -127,12 +127,13 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | VPTQ                      | ✅          | x | x | x | x             |
+| NF12-AD                   | ✅          | x | x | x | x             |
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `ParoQuant`, and `VPTQ` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, and `NF12_AD` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
@@ -151,6 +152,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
+| `METHOD.NF12_AD` | `FORMAT.NF12_AD` | `BACKEND.NF12_AD` |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
@@ -365,12 +367,12 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`), NF12-AD `sm_80+` | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12-AD, BitBLAS, Triton, BitsAndBytes, Torch |
 | 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM/GEMV, ParoQuant Triton, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, FP8 Torch, Torch (fused GPTQ GEMV/GEMM on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
-| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, MLX via conversion |
+| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, NF12-AD Torch, Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, NF12-AD Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 **ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
@@ -677,9 +679,9 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 
 #### Other Quantization Formats 📦
 
-`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12ADConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
-`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12_AD` are weight-only and should be quantized with `calibration=None`.
 
 ##### QQQ Example: Llama 3.2 1B Instruct
 
@@ -854,6 +856,31 @@ model = GPTQModel.load(model_id, qcfg)
 model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
 model.save(quant_path)
 ```
+
+##### NF12-AD Example: lossless 12-bit BF16
+
+NF12-AD stores BF16 weights in Together AI's lossless 12-bit NF12 format,
+using AlpinDale's tiled layout and CUDA kernels ([dphnAI/nf12](https://github.com/dphnAI/nf12)).
+It is weight-only, needs no calibration data, and decodes back to the exact
+BF16 matrix. The modules must satisfy `in_features % 64 == 0` and
+`out_features % 16 == 0`.
+
+```py
+import torch
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import NF12ADConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-NF12-AD"
+
+model = GPTQModel.load(model_id, NF12ADConfig(), dtype=torch.bfloat16)
+model.quantize(calibration=None)
+model.save(quant_path)
+```
+
+The packed weight is saved as `qweight` (uint8, `N x K*3/2`) with
+`nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
+checkpoint rather than a dense weight.
 
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 
@@ -1233,6 +1260,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
+* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12-AD inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
@@ -1392,6 +1420,21 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   author = {AlpinDale},
   title = {Swordfish: A Weight-Quantized {GEMM} Family for {NVIDIA} Blackwell},
   howpublished = {\url{https://blog.alpindale.net/posts/swordfish/}},
+  year = {2026}
+}
+
+# NF12 / NyoomFloat12
+@article{liberman2026nyoomfloat12,
+  title   = {NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression},
+  author  = {Liberman and Fang and Zhang and Dao and Fu},
+  year    = {2026},
+  note    = {Together AI}
+}
+
+@misc{alpindale2026nf12,
+  author = {AlpinDale},
+  title = {{NF12}: Lossless 12-bit {BF16} weight compression},
+  howpublished = {\url{https://github.com/dphnAI/nf12}},
   year = {2026}
 }
 
