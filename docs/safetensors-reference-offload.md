@@ -7,6 +7,11 @@ available until export. This path
 does not install Accelerate hooks, so `undo_offload_to_disk()` cannot restore the
 module from the reference index.
 
+The reference index and streaming writer share the safetensors dtype map.
+When PyTorch exposes `float8_e4m3fnuz` and `float8_e5m2fnuz`, they use the
+`F8_E4M3FNUZ` and `F8_E5M2FNUZ` header IDs. Both export paths preserve their
+payload bytes exactly.
+
 The module's target offload directory is cleared before its new `index.json` is
 written. A source file inside that directory would be deleted while the index
 was being built. The source location is therefore checked before any directory

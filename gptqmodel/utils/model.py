@@ -109,11 +109,10 @@ _DTYPE_SAFE_MAP = {
 # safetensors 0.8.0. Add new entries by checking the accepted spelling, never by
 # transforming the torch dtype name.
 #
-# Gotcha 2 — a dtype can be a valid safetensors identifier and still be missing
-# here, and vice versa. ``float8_e4m3fnuz``/``float8_e5m2fnuz`` parse correctly as
-# ``F8_E4M3FNUZ``/``F8_E5M2FNUZ`` and are absent only because no export path
-# currently produces them; they are listed in ``_FLOAT8_DTYPE_NAMES`` for byte-size
-# bookkeeping. Adding them here is safe once something actually needs to write them.
+# Gotcha 2 — every supported float8 dtype needs an entry here as well as in
+# ``_FLOAT8_DTYPE_NAMES``. The FNUZ variants use the explicit safetensors IDs
+# ``F8_E4M3FNUZ`` and ``F8_E5M2FNUZ``; streaming export and reference offload
+# both use this map when writing their headers.
 #
 # The failure mode when a dtype is missing here is a hard ``NotImplementedError``
 # from ``_torch_dtype_to_safetensors`` at export time, not silent byte corruption.
@@ -126,6 +125,10 @@ if hasattr(torch, "float8_e4m3fn"):
     _DTYPE_SAFE_MAP[torch.float8_e4m3fn] = ("F8_E4M3", 1)
 if hasattr(torch, "float8_e5m2"):
     _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
+if hasattr(torch, "float8_e4m3fnuz"):
+    _DTYPE_SAFE_MAP[torch.float8_e4m3fnuz] = ("F8_E4M3FNUZ", 1)
+if hasattr(torch, "float8_e5m2fnuz"):
+    _DTYPE_SAFE_MAP[torch.float8_e5m2fnuz] = ("F8_E5M2FNUZ", 1)
 if hasattr(torch, "float8_e8m0fnu"):
     _DTYPE_SAFE_MAP[torch.float8_e8m0fnu] = ("F8_E8M0", 1)
 
