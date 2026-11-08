@@ -21,6 +21,9 @@ from ....util.tensor import save_tensor_image
 
 # Constant
 had_k, had_n = 128, 128
+
+EXL3_HESSIAN_NUMERICAL_CONTRACT = "signed-block-hadamard-congruence-fp64-v1"
+EXL3_HESSIAN_SYMMETRY_CONTRACT = "mean-with-transpose-fp64"
 codebook_scale = 1.24371088
 
 codebook_mcg_mult = 0xCBAC1FED
@@ -348,7 +351,7 @@ def preapply_had_r(x: torch.Tensor, had_dim):
 def blockwise_preapply_had_l_(x: torch.Tensor, had_dim):
     k, n = x.shape
     assert k % had_dim == 0
-    assert x.dtype == torch.float
+    assert x.dtype in (torch.float32, torch.float64)
     had = get_hadamard_dt(had_dim, x.device, x.dtype, 1 / math.sqrt(had_dim))
     num_blocks = k // had_dim
     for i in range(num_blocks):
@@ -362,7 +365,7 @@ def blockwise_preapply_had_l_(x: torch.Tensor, had_dim):
 def blockwise_preapply_had_r_(x: torch.Tensor, had_dim):
     k, n = x.shape
     assert n % had_dim == 0
-    assert x.dtype == torch.float
+    assert x.dtype in (torch.float32, torch.float64)
     had = get_hadamard_dt(had_dim, x.device, x.dtype, 1 / math.sqrt(had_dim))
     num_blocks = n // had_dim
     for i in range(num_blocks):
@@ -658,19 +661,111 @@ def fallback_quant(
 
 finalize_capture_H_mutex = threading.Lock()
 
-def _random_signs(size, *, device, seed=None, stream=0):
-    """Per-task randomness: never reseed a generator shared by GPU workers.
 
-    Separate input/output streams also make signs independent of whether a
-    shared Hessian was finalized by another module first.
+@torch.no_grad()
+def restore_hessian_symmetry_(H: torch.Tensor, quant_args: dict) -> None:
+    """Restore symmetry lost to independent finite-precision Hadamard GEMMs."""
+
+    if H.ndim != 2 or H.shape[0] != H.shape[1]:
+        raise ValueError("EXL3 Hessian symmetry restoration requires a square matrix")
+    if H.dtype not in (torch.float32, torch.float64):
+        raise ValueError(
+            "EXL3 Hessian symmetry restoration requires FP32 or FP64 input"
+        )
+    symmetric = (H + H.transpose(0, 1)) * 0.5
+    correction_max_abs = float((H - symmetric).abs().max().item())
+    H.copy_(symmetric)
+    del symmetric
+    quant_args["hessian_symmetry_restoration"] = (
+        "mean-with-transpose-fp64"
+        if H.dtype == torch.float64
+        else "mean-with-transpose-fp32"
+    )
+    quant_args["hessian_symmetry_correction_max_abs"] = correction_max_abs
+
+
+@torch.no_grad()
+def regularize_and_transform_hessian_(
+    H: torch.Tensor,
+    *,
+    su: torch.Tensor,
+    diag_mean: torch.Tensor,
+    quant_args: dict,
+) -> None:
+    """Apply EXL3's regularized signed-Hadamard congruence in FP64.
+
+    The diagonal regularizer makes the captured covariance positive-definite
+    before the congruence. Applying the independent left/right block-Hadamard
+    GEMMs in FP32 can consume that positive margin for highly correlated expert
+    activations, even after the represented matrix is made exactly symmetric.
+    FP64 preserves the intended mathematical operation without increasing
+    ``sigma_reg`` or introducing data-dependent damping.
+    """
+
+    if (
+        H.ndim != 2
+        or H.shape[0] != H.shape[1]
+        or H.dtype != torch.float32
+        or su.shape != (H.shape[0], 1)
+        or su.device != H.device
+        or diag_mean.numel() != 1
+        or diag_mean.device != H.device
+    ):
+        raise ValueError("EXL3 FP64 Hessian congruence received invalid input")
+
+    sigma_reg = quant_args.get("sigma_reg", 0.025)
+    if (
+        isinstance(sigma_reg, bool)
+        or not isinstance(sigma_reg, (int, float))
+        or not math.isfinite(float(sigma_reg))
+        or float(sigma_reg) < 0.0
+    ):
+        raise ValueError(
+            "EXL3 Hessian regularization sigma must be finite and non-negative"
+        )
+
+    regularization = float(sigma_reg) * float(diag_mean.item())
+    transformed = H.to(dtype=torch.float64)
+    idx = torch.arange(H.shape[0], device=H.device)
+    transformed[idx, idx] += regularization
+    su_fp64 = su.to(dtype=torch.float64)
+    transformed *= su_fp64.transpose(0, 1)
+    blockwise_preapply_had_r_(transformed, had_k)
+    transformed *= su_fp64
+    blockwise_preapply_had_l_(transformed, had_k)
+    restore_hessian_symmetry_(transformed, quant_args)
+    if quant_args["hessian_symmetry_restoration"] != EXL3_HESSIAN_SYMMETRY_CONTRACT:
+        raise RuntimeError("EXL3 FP64 Hessian symmetry contract was not recorded")
+    H.copy_(transformed)
+
+    quant_args["hessian_numerical_contract"] = EXL3_HESSIAN_NUMERICAL_CONTRACT
+    quant_args["hessian_transform_compute_dtype"] = "torch.float64"
+    quant_args["hessian_storage_dtype"] = "torch.float32"
+    quant_args["hessian_regularization_placement"] = "before-fp64-congruence"
+    quant_args["hessian_regularization_diagonal_addend"] = regularization
+
+
+def _random_signs(size, *, device, seed=None, stream=0):
+    """Generate independent task-local signs without changing global RNG state.
+
+    The calibrated CUDA quantizer retains its established projection-local
+    generator sequence; this helper provides the independent streams used by
+    the upstream backends.
     """
     generator = None
     if seed is not None:
-        generator = torch.Generator(device=device).manual_seed(int(seed) + stream)
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("EXL3 quantizer seed must be an integer")
+        generator = torch.Generator(device=device).manual_seed(seed + stream)
     return (torch.randn(size, device=device, generator=generator).sign() + 1e-5).sign().float()
 
 
-def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
+def finalize_capture_H(
+    H_data: dict,
+    quant_args: dict,
+    verbose: bool,
+    generator: torch.Generator | None = None,
+):
     with finalize_capture_H_mutex:
 
         # Unswap H
@@ -687,18 +782,17 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
         count = H_data["count"]
         if count == 0:
             q_fallback = True
+            diag_mean = torch.diag(H).mean()
         else:
             H /= count
             diag_mean = torch.diag(H).mean()
             q_fallback = diag_mean.item() < 1e-20
 
-        # Regularize diagonal. ``H.diagonal()`` is a view, so this avoids
-        # materializing index tensors and the gather/scatter pair that advanced
-        # indexing performs for the same elementwise update.
-        H.diagonal().add_(quant_args.get("sigma_reg", 0.025) * diag_mean)
-
-        # Some tests
-        diag = H.diagonal().clone()
+        # Preserve the original-channel diagonal used by the weight
+        # regularizer. The same sigma term is applied to the Hessian in FP64
+        # immediately before the signed-Hadamard congruence below.
+        regularization = quant_args.get("sigma_reg", 0.025) * diag_mean
+        diag = H.diagonal().clone() + regularization
 
         if verbose:
             print(f"     - H min/max: {H.min().item():.6f}   {H.max().item():.6f}")
@@ -707,14 +801,23 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
 
         # Random sign flips for input channel, fixed for the first linear layer to quantize with this H
         k = H.shape[0]
-        su = _random_signs(k, device=H.device, seed=quant_args.get("seed")).unsqueeze(1)
+        su = (
+            (torch.randn(k, device=H.device, generator=generator).sign() + 1e-5)
+            .sign()
+            .to(torch.float)
+            .unsqueeze(1)
+        )
         H_data["su"] = su
 
-        # Input had
-        H *= su.T
-        blockwise_preapply_had_r_(H, had_k)
-        H *= su
-        blockwise_preapply_had_l_(H, had_k)
+        # Input signed-Hadamard congruence. FP64 preserves the positive margin
+        # supplied by sigma_reg for cold/highly-correlated experts; exact
+        # symmetry is restored before the result is stored back in FP32.
+        regularize_and_transform_hessian_(
+            H,
+            su=su,
+            diag_mean=diag_mean,
+            quant_args=quant_args,
+        )
 
         # Get block LDL decomposition of H, zero diagonal
         if q_fallback:
@@ -750,6 +853,54 @@ def pack_trellis(encoded: torch.Tensor, quant_args: dict) -> torch.Tensor:
     # ext.unpack_trellis(unpacked, packed, K)
     # assert torch.equal(unpacked, encoded)
     return packed
+
+
+def reconstruct_exl3_tensors(
+    tensors: dict[str, torch.Tensor],
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reconstruct the exact runtime EXL3 weight represented by packed tensors."""
+
+    required = {"trellis", "suh", "svh"}
+    if not required.issubset(tensors):
+        raise ValueError("EXL3 reconstruction is missing trellis/suh/svh tensors")
+    trellis = tensors["trellis"]
+    suh = tensors["suh"]
+    svh = tensors["svh"]
+    if (
+        trellis.ndim != 3
+        or suh.ndim != 1
+        or svh.ndim != 1
+        or suh.numel() != trellis.shape[0] * 16
+        or svh.numel() != trellis.shape[1] * 16
+        or trellis.shape[-1] % 16
+    ):
+        raise ValueError("EXL3 reconstruction received inconsistent tensor geometry")
+    K = int(trellis.shape[-1] // 16)
+    if K < 1 or K > 8:
+        raise ValueError(f"EXL3 reconstruction received invalid K={K}")
+
+    target = torch.device(device)
+    packed = trellis.to(device=target, non_blocking=True).contiguous()
+    reconstructed = torch.empty(
+        (suh.numel(), svh.numel()),
+        dtype=torch.float16,
+        device=target,
+    )
+    ext.reconstruct(
+        reconstructed,
+        packed,
+        K,
+        "mcg" in tensors,
+        "mul1" in tensors,
+    )
+    reconstructed = preapply_had_l(reconstructed, had_k)
+    reconstructed *= suh.to(device=target, dtype=torch.float16).unsqueeze(1)
+    reconstructed = preapply_had_r(reconstructed, had_n)
+    reconstructed *= svh.to(device=target, dtype=torch.float16).unsqueeze(0)
+    return reconstructed.to(dtype=dtype)
 
 
 def pack_signs(signs: torch.Tensor, quant_args: dict) -> torch.Tensor:
@@ -899,6 +1050,98 @@ def block_nmse(x: torch.Tensor, y: torch.Tensor, dim: int = 0, blocksize: int = 
     return diff_sq.item() / (sq.item() + 1e-20)
 
 
+def reconstruction_error_metrics(
+    error: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    tile_rows: int = 16,
+    tile_cols: int = 16,
+    worst_tiles: int = 16,
+):
+    """Return bounded, JSON-compatible reconstruction diagnostics.
+
+    EXL3 optimizes the regularized/Hadamard search-space matrix, so these
+    values deliberately describe that domain.  Keeping the domain explicit is
+    important: downstream source-space and activation-output errors are
+    separate measurements and must not be compared as if they were the same
+    loss.
+    """
+
+    if error.shape != reference.shape:
+        raise ValueError("EXL3 error and reference tensors must have identical shapes")
+    if error.ndim != 2:
+        raise ValueError("EXL3 reconstruction diagnostics require rank-2 tensors")
+
+    rows, columns = error.shape
+    if rows % tile_rows or columns % tile_cols:
+        raise ValueError(
+            "EXL3 reconstruction diagnostics require dimensions divisible by "
+            f"{tile_rows}x{tile_cols}, got {rows}x{columns}"
+        )
+
+    error_sq = error.square()
+    reference_sq = reference.square()
+    element_count = error.numel()
+    error_sum_sq = error_sq.sum().item()
+    reference_sum_sq = reference_sq.sum().item()
+    mse = error_sum_sq / max(element_count, 1)
+    nmse = error_sum_sq / max(reference_sum_sq, 1e-20)
+
+    tile_sse = (
+        error_sq.reshape(rows // tile_rows, tile_rows, columns // tile_cols, tile_cols)
+        .sum(dim=(1, 3))
+        .flatten()
+    )
+    quantile_levels = torch.tensor(
+        [0.5, 0.9, 0.99, 0.999],
+        dtype=torch.float,
+        device=tile_sse.device,
+    )
+    quantiles = torch.quantile(tile_sse.float(), quantile_levels).tolist()
+    worst_count = min(max(int(worst_tiles), 0), tile_sse.numel())
+    if worst_count:
+        worst_values, worst_indices = torch.topk(tile_sse, worst_count)
+        worst_values = worst_values.tolist()
+        worst_indices = worst_indices.tolist()
+    else:
+        worst_values = []
+        worst_indices = []
+    tile_columns = columns // tile_cols
+
+    return {
+        "domain": "regularized_exl3_search_space",
+        "shape": [rows, columns],
+        "element_count": element_count,
+        "error_sum_sq": error_sum_sq,
+        "reference_sum_sq": reference_sum_sq,
+        "mse": mse,
+        "nmse": nmse,
+        "relative_frobenius": math.sqrt(max(nmse, 0.0)),
+        "mean_abs_error": error.abs().mean().item(),
+        "max_abs_error": error.abs().max().item(),
+        "reference_finite": bool(torch.isfinite(reference).all().item()),
+        "error_finite": bool(torch.isfinite(error).all().item()),
+        "tile_shape": [tile_rows, tile_cols],
+        "tile_count": tile_sse.numel(),
+        "tile_sse_sum": tile_sse.sum().item(),
+        "tile_sse_max": tile_sse.max().item(),
+        "tile_sse_percentiles": {
+            "p50": quantiles[0],
+            "p90": quantiles[1],
+            "p99": quantiles[2],
+            "p99_9": quantiles[3],
+        },
+        "worst_tiles": [
+            {
+                "row": index // tile_columns,
+                "column": index % tile_columns,
+                "sse": value,
+            }
+            for index, value in zip(worst_indices, worst_values)
+        ],
+    }
+
+
 def block_trace(A: torch.Tensor, B: torch.Tensor, block_size: int = 1024):
     # Compute trace(A @ B) by streaming 1024-column blocks of B.
     #
@@ -996,6 +1239,7 @@ def regularize(
         g_scale, mse_scale = g_scale_gss(weight, False, quant_args, pb = pb)
     else:
         g_scale = 1.0
+        mse_scale = None
     weight *= g_scale
     su /= g_scale
 
@@ -1005,10 +1249,18 @@ def regularize(
     if verbose:
         print(f"     - su/sv std: {su.std().item():.6f}   {sv.std().item():.6f}")
         print(f"     - global scale: {g_scale:.6f}")
-        print(f"     - sample mse: {mse_scale.item():.6f}")
+        if mse_scale is not None:
+            print(f"     - sample mse: {mse_scale.item():.6f}")
         print(f"     - apply_out_scales: {str(apply_out_scales)}")
 
-    return apply_out_scales, weight, g_scale, su, sv
+    return (
+        apply_out_scales,
+        weight,
+        g_scale,
+        None if mse_scale is None else mse_scale.item(),
+        su,
+        sv,
+    )
 
 
 def quantize_exl3(
@@ -1116,8 +1368,27 @@ def _quantize_exl3_body(
         device = weight.device if swap_to_device is None else swap_to_device
         k, n = weight.shape
 
+        # Never mutate the process-global CUDA generators from free-threaded
+        # projection workers. Concurrent ``torch.manual_seed`` calls reseed all
+        # devices while kernels are active on peer workers, making the sign
+        # transforms nondeterministic and, under sustained dual-GPU execution,
+        # corrupting the scale-search result. A projection-local generator keeps
+        # the established seed/sequence while isolating devices and threads.
+        generator = None
+        if "seed" in quant_args:
+            seed = quant_args["seed"]
+            if isinstance(seed, bool) or not isinstance(seed, int):
+                raise ValueError("EXL3 quantizer seed must be an integer")
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed)
+
         # Get H, LDL decomp. and input/output sign flips
-        q_fallback, H, L, su, H_diag = finalize_capture_H(H_data, quant_args, verbose)
+        q_fallback, H, L, su, H_diag = finalize_capture_H(
+            H_data,
+            quant_args,
+            verbose,
+            generator=generator,
+        )
         if H.is_cuda:
             H = H.to(device)
         if L is not None and L.is_cuda:
@@ -1126,7 +1397,12 @@ def _quantize_exl3_body(
             su = su.to(device)
         if H_diag.is_cuda:
             H_diag = H_diag.to(device)
-        sv = _random_signs(n, device=device, seed=quant_args.get("seed"), stream=1).unsqueeze(0)
+        sv = (
+            (torch.randn(n, device=device, generator=generator).sign() + 1e-5)
+            .sign()
+            .to(torch.float)
+            .unsqueeze(0)
+        )
 
         # ``finalize_capture_H`` returns the very tensor it cached in ``H_data``, so the
         # working copy below aliases the caller's stored reference. Replacing the cached
@@ -1151,7 +1427,7 @@ def _quantize_exl3_body(
             print(f"     - input tensor rms: {rms:.6f}")
 
         # Regularization
-        apply_out_scales, weight_r, g_scale, su, sv = regularize(
+        apply_out_scales, weight_r, g_scale, scale_search_mse, su, sv = regularize(
             weight_r,
             su,
             sv,
@@ -1187,31 +1463,84 @@ def _quantize_exl3_body(
 
         pb.update(tiles_k)
 
-        # Metrics
+        # Metrics. Keep every component needed to compare K values; a lone
+        # proxy number is insufficient because the fallback and Hessian paths
+        # do not have the same meaning.
+        E = weight_r - weight_q  # may run on CPU
+        error_metrics = reconstruction_error_metrics(E, weight_r)
+        hessian_num = None
+        hessian_den = None
+        hessian_ratio = None
+        hessian_status = "not_applicable_fallback" if q_fallback else "ok"
         if not q_fallback:
+            W = weight_r
+            Hd = None
             try:
-                E = None
-                W = None
-                Hd = None
-                E = weight_r - weight_q  # may run on CPU
-                W = weight_r
                 Hd = H.to(device)
-                weight_r = None
-                E = E.to(device)
-                num = block_trace(E, Hd)
-                E = None
-                W = W.to(device)
-                den = block_trace(W, Hd)
-                W = None
-                Hd = None
-                # Both traces are complete on the device; read them once and
-                # keep the original host double division.
-                proxy_err = num.item() / max(den.item(), 1e-8)
+                E_device = E.to(device)
+                num = block_trace(E_device, Hd)
+                E_device = None
+                W_device = W.to(device)
+                den = block_trace(W_device, Hd)
+                W_device = None
+                hessian_num = num.item()
+                hessian_den = den.item()
+                hessian_ratio = hessian_num / max(hessian_den, 1e-8)
+                proxy_err = hessian_ratio
             except torch.OutOfMemoryError:
-                del weight_r, E, W, Hd
+                hessian_status = "out_of_memory"
                 proxy_err = -1.0
+            finally:
+                Hd = None
+                W = None
         else:
-            proxy_err = 0.0
+            proxy_err = error_metrics["mse"]
+
+        quant_args["error_metrics"] = {
+            "schema": "gptqmodel.exl3-trellis-error",
+            "schema_version": 1,
+            "quantizer_path": "fallback" if q_fallback else "hessian_ldlq",
+            "reported_metric_kind": (
+                "unweighted_reconstruction_mse"
+                if q_fallback
+                else "hessian_weighted_relative_error"
+            ),
+            "reported_metric_value": (
+                error_metrics["mse"] if q_fallback else hessian_ratio
+            ),
+            "hessian_domain": "regularized_exl3_search_space",
+            "hessian_sample_count": int(H_data["count"]),
+            "hessian_regularization_sigma": float(quant_args.get("sigma_reg", 0.025)),
+            "hessian_numerical_contract": quant_args.get(
+                "hessian_numerical_contract"
+            ),
+            "hessian_transform_compute_dtype": quant_args.get(
+                "hessian_transform_compute_dtype"
+            ),
+            "hessian_storage_dtype": quant_args.get("hessian_storage_dtype"),
+            "hessian_regularization_placement": quant_args.get(
+                "hessian_regularization_placement"
+            ),
+            "hessian_regularization_diagonal_addend": quant_args.get(
+                "hessian_regularization_diagonal_addend"
+            ),
+            "hessian_symmetry_restoration": quant_args.get(
+                "hessian_symmetry_restoration"
+            ),
+            "hessian_symmetry_correction_max_abs": quant_args.get(
+                "hessian_symmetry_correction_max_abs"
+            ),
+            "hessian_weighted_error_numerator": hessian_num,
+            "hessian_weighted_reference_denominator": hessian_den,
+            "hessian_weighted_relative_error": hessian_ratio,
+            "hessian_metric_status": hessian_status,
+            "selected_global_scale": g_scale,
+            "scale_search_mse": scale_search_mse,
+            "apply_out_scales": bool(apply_out_scales),
+            "reconstruction": error_metrics,
+        }
+        weight_r = None
+        E = None
 
         # free_mem()
 
