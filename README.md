@@ -886,6 +886,8 @@ The [NF12 validation backend and performance flow](docs/nf12-validation-backends
 explains device selection, native encoder measurements, and Torch fallback.
 The [NF12 installed extension flow](docs/nf12-installed-extension.md) describes
 how the runtime checks an installed `nf12` package before reusing its operators.
+The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
+describes matrix-core device selection and split-K scratch ownership.
 
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 

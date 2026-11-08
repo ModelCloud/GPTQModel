@@ -368,31 +368,6 @@ int nf12_ad_wmma_supported(int64_t m) {
   return wmma_arch_ok(device);
 }
 
-// Split workspace, cached per device.
-//
-// It must NOT be allocated per call: hipMalloc/hipFree are synchronising, and
-// doing them around every launch measured +110 us at m=32 (147 us instead of
-// 38 us), which completely erased the win split-K buys. The buffer is a plain
-// process-wide scratch pointer that never escapes this file, grows on demand,
-// and is sized once per (splits, m, n) shape seen.
-static float* g_partial = nullptr;
-static size_t g_partial_bytes = 0;
-
-static hipError_t ensure_partial(size_t bytes) {
-  if (bytes <= g_partial_bytes) return hipSuccess;
-  if (g_partial != nullptr) {
-    if (hipFree(g_partial) != hipSuccess) return hipErrorOutOfMemory;
-    g_partial = nullptr;
-    g_partial_bytes = 0;
-  }
-  if (hipMalloc(&g_partial, bytes) != hipSuccess) {
-    g_partial = nullptr;
-    return hipErrorOutOfMemory;
-  }
-  g_partial_bytes = bytes;
-  return hipSuccess;
-}
-
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
 // packed weight is never read twice; the cost is the per-split FP32 partial
 // plane plus the reduce pass.
@@ -434,21 +409,14 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   return 1;
 }
 
-// `out` is [m, n] row-major BF16; `x` is [m, k].
-//
-// Tiles per CTA are chosen so the CTA covers the caller's M with as few
-// instantiated tiles as possible: a 32-token call runs a 2-tile kernel instead
-// of an 8-tile one. Both cover the same tokens; the 2-tile version just skips
-// matrix-core work (and shared-memory traffic) that the tail tiles would have
-// thrown away. Every tile count in [1, kMaxTiles] is instantiated so the choice
-// stays a compile-time bound inside the kernel.
-hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                              const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                              const void* bias, hipStream_t stream) {
-  if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
-  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+struct WmmaLaunchPlan {
+  int tiles;
+  int splits;
+  int64_t n_blocks;
+  int64_t m_blocks;
+};
 
+static WmmaLaunchPlan wmma_launch_plan(int64_t n, int64_t k, int64_t m) {
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
 
   const int full_tiles = static_cast<int>((m + 15) / 16);
@@ -470,17 +438,42 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   // m=256 (tiles=16 -> m_blocks=1, but only 8 tiles are launched).
   const int64_t launch_tiles = (tiles < kMaxTiles) ? tiles : kMaxTiles;
   const int64_t m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
+  return {tiles, pick_splits(n_blocks * m_blocks, m, k_blocks), n_blocks, m_blocks};
+}
+
+// The Torch binding allocates this many bytes from its stream-aware caching
+// allocator, so two in-flight calls never share a split-K partial plane.
+size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
+  const auto plan = wmma_launch_plan(n, k, m);
+  return plan.splits > 1 ? size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float) : 0;
+}
+
+// `out` is [m, n] row-major BF16; `x` is [m, k].
+//
+// Tiles per CTA are chosen so the CTA covers the caller's M with as few
+// instantiated tiles as possible: a 32-token call runs a 2-tile kernel instead
+// of an 8-tile one. Both cover the same tokens; the 2-tile version just skips
+// matrix-core work (and shared-memory traffic) that the tail tiles would have
+// thrown away. Every tile count in [1, kMaxTiles] is instantiated so the choice
+// stays a compile-time bound inside the kernel.
+hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                              const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                              const void* bias, void* workspace, size_t workspace_bytes,
+                              hipStream_t stream) {
+  if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
+  if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
+  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+
+  const auto plan = wmma_launch_plan(n, k, m);
+  const int64_t n_blocks = plan.n_blocks;
+  const int64_t m_blocks = plan.m_blocks;
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
-  const int splits = pick_splits(n_blocks * m_blocks, m, k_blocks);
-
-  float* partial = nullptr;
-  if (splits > 1) {
-    const size_t bytes = size_t(splits) * size_t(m) * size_t(n) * sizeof(float);
-    const hipError_t alloc = ensure_partial(bytes);
-    if (alloc != hipSuccess) return alloc;
-    partial = g_partial;
-  }
+  const int tiles = plan.tiles;
+  const int splits = plan.splits;
+  const size_t needed = nf12_ad_wmma_workspace_bytes(n, k, m);
+  if (needed > 0 && (workspace == nullptr || workspace_bytes < needed)) return hipErrorInvalidValue;
+  float* partial = static_cast<float*>(workspace);
 
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),
                   static_cast<unsigned>(splits));

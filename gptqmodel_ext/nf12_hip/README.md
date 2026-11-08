@@ -78,10 +78,12 @@ and measured 3–5× slower, which is why this is a template and not a parameter
 **Split-K** over `grid.z` uses disjoint K slices and separate FP32 partial
 planes; a small reduce kernel sums them and rounds to BF16 exactly once, so the
 result is identical to a single-pass FP32 accumulation followed by one rounding.
-Atomics measured 2.6–3.8× slower. The partial workspace is cached per process
-because per-call `hipMalloc`/`hipFree` cost +110 µs at m=32 and erased the win.
-Split count is picked from the **CTA count**, not `m`: splitting only pays below
-~1.2 waves (32 CTAs on 32 CUs) and loses at N=11008 (86 CTAs).
+Atomics measured 2.6–3.8× slower. Each call obtains its partial workspace from
+PyTorch's stream-aware caching allocator; directly calling `hipMalloc`/`hipFree`
+per launch had cost +110 µs at m=32 and erased the win.
+The current split planner uses CTA count, `m`, and K-block count. It selects
+eight splits for very narrow launches, two for very wide launches, and can use
+four for wide, short-K launches at small `m`; other shapes may remain unsplit.
 
 **Double buffering** is enabled only for `kMt <= 6`. Decoding the next
 super-atom into the idle buffer while the busy one is consumed removes the
@@ -112,9 +114,11 @@ encoder is gated rather than assumed.
 
 ## Measured performance
 
-All numbers are Radeon AI PRO R9700 (`gfx1201`, 32 CUs, wave32), median of the
-best of several trials, compared against `torch.nn.functional.linear` on the
-dense BF16 weight. Reproduce with `scripts/validate_nf12_ad.py --backend hip`.
+The measurements below are from #3644 on Radeon AI PRO R9700 (`gfx1201`, 32
+CUs, wave32), before the per-call split-K workspace change in #3635. They are
+the median of the best of several trials, compared against
+`torch.nn.functional.linear` on the dense BF16 weight. Reproduce with
+`scripts/validate_nf12_ad.py --backend hip`.
 
 ### Read the cache geometry before reading the table
 
@@ -167,7 +171,7 @@ The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates —
 1.14–1.35x at `m=16..64` for the 14336/25600/57344-wide shapes.
 
-### What this means, stated plainly
+### Interpreting the measurements
 
 * **Wins where the weight must stream from HBM.** 14336x4096 and 25600x5120 are
   real MLP shapes and the packed form is 25% smaller than BF16; NF12 wins

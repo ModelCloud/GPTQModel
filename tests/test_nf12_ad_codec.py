@@ -325,3 +325,83 @@ def test_hip_kernel_is_bit_exact_when_available():
             packed.to("cuda"), escapes.to("cuda"), int(exp_base)
         ).cpu()
         assert torch.equal(decoded.view(torch.int16), weight.contiguous().view(torch.int16))
+
+
+def test_hip_wmma_uses_weight_device_when_current_device_differs():
+    """WMMA dispatch and stream must follow the packed weight on multi-GPU HIP."""
+    if torch.version.hip is None or torch.cuda.device_count() < 2:
+        pytest.skip("requires at least two AMD ROCm devices")
+
+    from gptqmodel.utils import nf12_ad_hip
+
+    wmma_devices = [
+        index
+        for index in range(torch.cuda.device_count())
+        if getattr(torch.cuda.get_device_properties(index), "gcnArchName", "").split(":", 1)[0]
+        in {"gfx1200", "gfx1201"}
+    ]
+    if len(wmma_devices) < 2:
+        pytest.skip("requires two RDNA4 WMMA devices")
+    target, other = wmma_devices[:2]
+    with torch.cuda.device(target):
+        if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
+            pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+
+    torch.manual_seed(17)
+    weight = (torch.randn(256, 256) * 0.02).to(torch.bfloat16)
+    x = (torch.randn(16, 256) * 0.05).to(torch.bfloat16)
+    bias = (torch.randn(256) * 0.1).to(torch.bfloat16)
+    packed, escapes, exp_base = nf12_codec.encode(weight)
+    expected = (x.float() @ weight.float().t() + bias.float()).to(torch.bfloat16)
+    target_device = torch.device(f"cuda:{target}")
+    x = x.to(target_device)
+    packed = packed.to(target_device)
+    escapes = escapes.to(target_device)
+    bias = bias.to(target_device)
+    torch.cuda.synchronize(target_device)
+    with torch.cuda.device(other):
+        actual = nf12_ad_hip.linear(x, packed, escapes, exp_base, bias)
+        assert torch.cuda.current_device() == other
+
+    torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=2e-3, atol=2e-3)
+
+
+def test_hip_split_k_calls_on_distinct_streams_keep_their_own_workspace():
+    """In-flight split-K calls must not overwrite each other's FP32 partials."""
+    if torch.version.hip is None or not torch.cuda.is_available():
+        pytest.skip("requires an AMD ROCm device")
+
+    from gptqmodel.utils import nf12_ad_hip
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "").split(":", 1)[0]
+    if arch not in {"gfx1200", "gfx1201"}:
+        pytest.skip("requires an RDNA4 WMMA device")
+    if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
+        pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+
+    torch.manual_seed(23)
+    # N=512 launches four CTAs, so the current RDNA4 planner uses eight K
+    # splits and allocates the partial planes exercised by this test.
+    weight = (torch.randn(512, 512) * 0.02).to(torch.bfloat16)
+    x_a = (torch.randn(32, 512) * 0.05).to(torch.bfloat16)
+    x_b = (torch.randn(32, 512) * 0.05).to(torch.bfloat16)
+    packed, escapes, exp_base = nf12_codec.encode(weight)
+    expected_a = (x_a.float() @ weight.float().t()).to(torch.bfloat16)
+    expected_b = (x_b.float() @ weight.float().t()).to(torch.bfloat16)
+    packed = packed.to(device)
+    escapes = escapes.to(device)
+    x_a = x_a.to(device)
+    x_b = x_b.to(device)
+    torch.cuda.synchronize(device)
+    stream_a = torch.cuda.Stream(device=device)
+    stream_b = torch.cuda.Stream(device=device)
+
+    for _ in range(4):
+        with torch.cuda.stream(stream_a):
+            actual_a = nf12_ad_hip.linear(x_a, packed, escapes, exp_base)
+        with torch.cuda.stream(stream_b):
+            actual_b = nf12_ad_hip.linear(x_b, packed, escapes, exp_base)
+        torch.cuda.synchronize(device)
+        torch.testing.assert_close(actual_a.cpu().float(), expected_a.float(), rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(actual_b.cpu().float(), expected_b.float(), rtol=2e-3, atol=2e-3)
