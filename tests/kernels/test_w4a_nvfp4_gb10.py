@@ -107,6 +107,30 @@ def test_small_dynamic_nvfp4_operands_match_replay_and_oracle(dtype, maximum):
     torch.testing.assert_close(replay, expected, rtol=1e-6, atol=1e-12)
 
 
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(0, 128), (2, 0, 128)])
+def test_empty_nvfp4_replay_matches_runtime_transport(dtype, shape):
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import (
+        round_w4a_activation,
+        round_w4a_replay_operand,
+    )
+
+    x = torch.empty(shape, device="cuda", dtype=dtype)
+    packed = pack_activation(x, "w4a_nvfp4")
+    assert packed.global_scale.dtype == torch.float32
+    torch.testing.assert_close(packed.global_scale, torch.ones((), device=x.device))
+
+    rounded = round_w4a_activation(x, "w4a_nvfp4")
+    operand = round_w4a_replay_operand(x, "w4a_nvfp4")
+    assert rounded.shape == operand.shape == packed.decode().shape == shape
+    assert rounded.dtype == dtype
+    assert operand.dtype == torch.float32
+    torch.testing.assert_close(rounded, packed.decode())
+    torch.testing.assert_close(operand, packed.decode(torch.float32))
+
+
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
     """Numeric codebook oracle for hardware-scale least-squares refinement."""
     blocks = x.float().reshape(*x.shape[:-1], x.shape[-1] // 16, 16)

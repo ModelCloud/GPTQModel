@@ -188,6 +188,42 @@ directly. Replay retains decoded GEMM operands in FP32 to avoid an extra
 FP16/BF16 round trip before the GEMM. Projection results return to the model
 dtype, matching inference.
 
+### Empty NVFP4 replay operands
+
+Runtime `pack_activation` gives a zero-row NVFP4 operand an FP32 global scale
+of `1` because no activation maximum exists. The two calibration replay
+rounders now use the same value when they need a dynamic scale. The default
+rounder returns an empty tensor with the original logical shape; replay GEMM
+operands retain FP32 dtype, as they do for nonempty operands.
+
+```mermaid
+flowchart TD
+    A["NVFP4 replay: round_w4a_activation or round_w4a_replay_operand"] --> B{"global_scale supplied?"}
+    B -- "Yes" --> C["Use supplied scale"]
+    B -- "No" --> D["_dynamic_nvfp4_global_scale"]
+    D --> E{"x.numel() == 0?"}
+    E -- "Yes" --> F["FP32 scalar 1 on x.device"]
+    E -- "No" --> G["amax then nvfp4_global_scale"]
+    C --> H{"Nonempty input and invalid scale?"}
+    F --> H
+    G --> H
+    H -- "Yes" --> I["nvfp4_block_qdq raises ValueError"]
+    H -- "No" --> J["Default rounder calls nvfp4_block_qdq"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class I failure
+```
+
+| Case | Before | Current behavior |
+| --- | --- | --- |
+| Empty operand with dynamic scale | `w4a_llama_replay.py:35` and `w4a_llama_replay.py:61` called `amax()` and raised | Both rounders receive the FP32 scalar `1`, matching `pack_activation` in `w4a_activation.py:138` |
+| Nonempty operand with dynamic scale | Reduce the input maximum, then derive the recipe scale | Same scale computation through `_dynamic_nvfp4_global_scale` |
+
+`tests/kernels/test_w4a_nvfp4_gb10.py` checks zero-row 2D and 3D operands
+for FP16 and BF16 on NVIDIA GB10. It compares replay shape and dtype with
+runtime transport and checks that the runtime global scale is `1`. This is a
+zero-row validity fix; a before/after timing comparison has no successful
+prior replay forward to measure.
+
 ## Ordinary quantization compatibility
 
 Omitting `activation` keeps the ordinary GPTQ, AWQ, or weight-only lifecycle.
