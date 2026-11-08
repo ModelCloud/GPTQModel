@@ -395,10 +395,16 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             )
 
     def extra_repr(self) -> str:
+        exponent = getattr(self, "nf12_exp_base", None)
+        # Construction and disk offload can leave checkpoint buffers absent or
+        # on meta; repr must not materialize a scalar from either state.
+        available = (isinstance(exponent, torch.Tensor)
+                     and exponent.device.type != "meta" and exponent.numel() == 1)
+        exp_base = self._exp_base() if available else "unavailable"
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={getattr(self, 'bias', None) is not None}, "
-            f"exp_base={self._exp_base()}"
+            f"exp_base={exp_base}"
         )
 
 

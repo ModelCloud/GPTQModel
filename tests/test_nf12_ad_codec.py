@@ -176,6 +176,19 @@ def test_exponent_cache_tracks_versioned_updates_and_explicit_clear():
         assert module._exp_base() == 57
 
 
+def test_repr_handles_meta_and_unallocated_exponent_buffers():
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    with torch.device("meta"):
+        meta = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    assert meta.nf12_exp_base.device.type == "meta"
+    assert "exp_base=unavailable" in repr(meta)
+
+    unallocated = NF12ADLinear(bits=12, in_features=64, out_features=16,
+                               register_buffers=False)
+    assert "exp_base=unavailable" in repr(unallocated)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_pack_and_reload_preserve_source_bias_precision(dtype):
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
