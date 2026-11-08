@@ -64,3 +64,6 @@ timed forwards, the old direct-version and new shared-key checks measured:
 
 The peak includes a temporary dequantized chunk and CUDA library scratch;
 the new key does not change that allocation or retain it after the forward.
+
+This cache contract was corrected in
+[PR #3666](https://github.com/ModelCloud/GPTQModel/pull/3666).
