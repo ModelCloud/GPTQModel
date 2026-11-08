@@ -207,11 +207,13 @@ class StageInputsCapture:
                 "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
             )
         else:
-            layers[0] = self.gptq_model.shell_module_materialize(
-                target_submodule=layers[0],
-                device=CPU,
-                module_path=module_path,
-            )
+            prepare_capture_layer = getattr(self.gptq_model, "prepare_input_capture_layer", None)
+            if callable(prepare_capture_layer):
+                layers[0] = prepare_capture_layer(layers[0], module_path=module_path, device=CPU)
+            else:
+                layers[0] = self.gptq_model.shell_module_materialize(
+                    target_submodule=layers[0], module_path=module_path, device=CPU,
+                )
         cur_layer_device = CPU
 
         # Use calibration_data_device if specified, otherwise use cur_layer_device
@@ -376,6 +378,14 @@ class StageInputsCapture:
                     and "input_ids" in example
                 ):
                     src_inputs.append([move_to(example["input_ids"], device=CPU)])
+                begin_example = getattr(
+                    self.gptq_model, "begin_input_capture_example", None
+                )
+                end_example = getattr(
+                    self.gptq_model, "end_input_capture_example", None
+                )
+                if callable(begin_example):
+                    begin_example(example=example, batch_device=forward_device)
                 try:
                     with ctx(
                         DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
@@ -389,6 +399,8 @@ class StageInputsCapture:
                 except StopForward:
                     pass
                 finally:
+                    if callable(end_example):
+                        end_example()
                     processed_batches = batch_index
                     if cache_forward_pb is not None:
                         rows_for_batch = 0

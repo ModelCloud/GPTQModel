@@ -43,6 +43,7 @@ from ..utils.looper_helpers import (
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
+from .input_cache import TensorLifetimeDiagnostic
 from .extension import LoopStep
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
@@ -103,7 +104,13 @@ def _should_drain_finalize_futures_synchronously(
     multi-device runs drain per-layer finalizers synchronously.
 
     """
-    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
+    if (
+        looper.gptq_model.quantize_config.wait_for_submodule_finalizers
+        or getattr(
+            looper.gptq_model, "quantization_layer_boundary_checkpoint", None
+        )
+        is not None
+    ):
         return True
 
     # W4A finalization creates the packed GPTQ module that post-init later
@@ -231,7 +238,7 @@ def _replay_layer_outputs(
     log,
     region_timer,
     replay_plan: Optional[SubsetPlan] = None,
-    force_serial: bool = False,
+    force_serial: Optional[bool] = None,
 ) -> List[List[torch.Tensor]]:
     """Replay one layer forward to materialize outputs for the next layer.
 
@@ -253,7 +260,7 @@ def _replay_layer_outputs(
         replay_source = f"{layer_descriptor}:untouched"
         replay_modules = None
         replay_forward_device_map: Dict[str, torch.device] = {}
-        replay_force_serial = force_serial
+        replay_force_serial = False
         replay_preserve_module_devices = False
     else:
         replay_batch_count = replay_plan.batch_count
@@ -265,8 +272,11 @@ def _replay_layer_outputs(
         )
         replay_modules = replay_plan.modules
         replay_forward_device_map = replay_plan.forward_device_map
-        replay_force_serial = replay_plan.subset_forward_serial or force_serial
+        replay_force_serial = replay_plan.subset_forward_serial
         replay_preserve_module_devices = replay_plan.preserve_module_devices
+
+    if force_serial is not None:
+        replay_force_serial = bool(force_serial)
 
     replay_msg = (
         "Forward replay "
@@ -426,6 +436,7 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
+    start_layer_index: int = 0,
     embed_quant_mode: Optional[QuantizeEmbed] = None,
     embed_only: Optional[bool] = None,
     logger=None,
@@ -479,6 +490,19 @@ def run_layer_stage(
         is_embeddings_module = (
             is_input_embeddings_module or is_output_embeddings_module or is_lm_head_module
         )
+        layer_boundary_checkpoint = getattr(
+            looper.gptq_model,
+            "quantization_layer_boundary_checkpoint",
+            None,
+        )
+
+        if not is_embeddings_module and model_layer_index < start_layer_index:
+            if durable_progress_logs:
+                log.info(
+                    "StageLayer: restored layer=%s from durable boundary index",
+                    model_layer_index,
+                )
+            continue
 
         if (
             embed_quant_mode is None
@@ -495,6 +519,30 @@ def run_layer_stage(
             )
             pb.close()
             break
+
+        catchup_processor = None
+        is_catchup_layer = False
+        if not is_embeddings_module and layer_boundary_checkpoint is not None:
+            catchup_query = getattr(
+                layer_boundary_checkpoint, "is_catchup_layer", None
+            )
+            is_catchup_layer = callable(catchup_query) and bool(
+                catchup_query(model_layer_index)
+            )
+            if is_catchup_layer:
+                prepare_catchup = getattr(
+                    layer_boundary_checkpoint, "prepare_catchup_layer", None
+                )
+                if not callable(prepare_catchup):
+                    raise TypeError(
+                        "quantization layer-boundary catch-up has no "
+                        "prepare_catchup_layer() method"
+                    )
+                catchup_processor = prepare_catchup(
+                    model=looper.gptq_model,
+                    processors=looper.processors,
+                    layer_index=model_layer_index,
+                )
 
         if is_input_embeddings_module:
             layer_title = "Quantizing input embeddings"
@@ -567,6 +615,35 @@ def run_layer_stage(
             if needs_group_pristine:
                 pristine_group_module = copy.deepcopy(module) if needs_pristine_group_clone else None
 
+            if is_catchup_layer:
+                # Restored routed experts are already packed and therefore do
+                # not appear in ``find_modules``.  Every remaining supported
+                # leaf is native source state (attention, router, shared
+                # expert, and so on) and must traverse the active FP8 decoder
+                # before this layer can be replayed.
+                catchup_layer_descriptor = layer_name or str(layer_index)
+                for relative_name, native_module in find_modules(module).items():
+                    full_name = (
+                        f"{catchup_layer_descriptor}.{relative_name}"
+                        if relative_name
+                        else catchup_layer_descriptor
+                    )
+                    named_native = NamedModule(
+                        native_module,
+                        name=relative_name,
+                        full_name=full_name,
+                        layer_index=layer_index,
+                    )
+                    prepared_native = looper._prepare_named_module_for_forward(
+                        named_module=named_native,
+                        fallback_device=normalize_device_like(
+                            looper.gptq_model.quantize_config.device
+                        )
+                        or CPU,
+                    )
+                    if not relative_name and prepared_native is not module:
+                        module = prepared_native
+
             replace_module_with_hooked_legacy(
                 module,
                 quant_lm_head=looper.gptq_model.quantize_config.lm_head,
@@ -591,6 +668,133 @@ def run_layer_stage(
             name=embedding_module_name or (looper.gptq_model.lm_head if is_lm_head_module else ""),
         )
 
+        if is_catchup_layer:
+            # A legacy run can already have every projection in this layer
+            # durably packed even though it predates activation boundaries.
+            # Restore those exact checkpoint tensors, forward the packed layer
+            # once, and promote the resulting activation boundary.  Rebuilding
+            # Hessians here would be both wasteful and numerically unsafe.
+            processor = catchup_processor
+            processor.log_call_count = 0
+            processor.collect_memory_info(layer_index)
+            cache = processor.inputs_cache
+            layer_inputs = cache.layer_inputs
+            layer_input_kwargs = cache.layer_input_kwargs
+            position_ids = cache.position_ids
+            attention_masks = cache.attention_masks
+            looper._prepare_layer_direct_state_for_forward(
+                module,
+                cur_layer_device,
+                projection_modules=full,
+            )
+            # Recovery must use the same forward topology as the original
+            # capture.  In particular, DeepSeek's router can make different
+            # low-bit decisions when a batch that was originally split over
+            # two GPUs is replayed serially on one GPU.  Let ForwardExecutor
+            # honor the run's immutable auto-forward-data-parallel policy.
+            layer_outputs = _replay_layer_outputs(
+                looper,
+                module=module,
+                processor=processor,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=False,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                layer_descriptor=layer_descriptor,
+                full=full,
+                log=log,
+                region_timer=region_timer,
+                replay_plan=None,
+                force_serial=False,
+            )
+            if not layer_outputs:
+                raise RuntimeError(
+                    f"packed catch-up produced no output for layer {layer_index}"
+                )
+
+            output_requirement = getattr(
+                looper.gptq_model, "quantization_layer_output_required", None
+            )
+            if callable(output_requirement) and output_requirement(
+                layer_index=layer_index,
+                layer_name=layer_name,
+                layer_count=layer_count,
+            ):
+                output_receiver = getattr(
+                    looper.gptq_model,
+                    "receive_quantization_layer_outputs",
+                    None,
+                )
+                if not callable(output_receiver):
+                    raise RuntimeError(
+                        "model requested quantization layer outputs without a receiver"
+                    )
+                output_receiver(
+                    layer_index=layer_index,
+                    layer_name=layer_name,
+                    layer_outputs=layer_outputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                )
+
+            # Native source state was materialized only to execute this one
+            # recovery forward.  Rehome the complete materialized layer before
+            # packed leaves become disk-backed META shells again.  The generic
+            # ``post_quantize`` path is intentionally skipped: it is for float
+            # layers and rejects valid disk-offloaded EXL3 buffers.
+            module.to(device=CPU)
+            finalize_catchup = getattr(
+                layer_boundary_checkpoint, "finalize_catchup_layer", None
+            )
+            if not callable(finalize_catchup):
+                raise TypeError(
+                    "quantization layer-boundary catch-up has no "
+                    "finalize_catchup_layer() method"
+                )
+            finalize_catchup(
+                model=looper.gptq_model,
+                processor=processor,
+                layer_index=layer_index,
+            )
+            layers[layer_index] = module
+            processor.clear_cache_data()
+            processor.receive_layer_inputs(layer_outputs)
+            torch_sync()
+            looper._emit_layer_complete(
+                layer_idx=layer_index,
+                submodule_finalized=False,
+                raise_in_place=True,
+            )
+            looper._emit_layer_complete(
+                layer_idx=layer_index,
+                submodule_finalized=True,
+                raise_in_place=True,
+            )
+            commit_boundary = getattr(
+                layer_boundary_checkpoint, "commit_layer", None
+            )
+            if not callable(commit_boundary):
+                raise TypeError(
+                    "quantization layer-boundary checkpoint has no commit_layer() method"
+                )
+            commit_boundary(
+                model=looper.gptq_model,
+                processor=processor,
+                layer_index=layer_index,
+                layer_name=layer_descriptor,
+            )
+            if durable_progress_logs:
+                log.info(
+                    "StageLayer: packed catch-up boundary committed for layer=%s",
+                    layer_index,
+                )
+            continue
+
         for p_index, processor in enumerate(looper.processors):
             if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
                 from ..nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
@@ -609,11 +813,37 @@ def run_layer_stage(
                 layer_inputs = processor.inputs_cache.src_inputs
             else:
                 layer_inputs = processor.inputs_cache.layer_inputs
+            input_lifetime_diagnostic = getattr(
+                layer_inputs, "lifetime_diagnostic", None
+            )
+            if not callable(input_lifetime_diagnostic):
+                input_lifetime_diagnostic = TensorLifetimeDiagnostic(
+                    layer_inputs
+                ).lifetime_diagnostic
             if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
             attention_masks = processor.inputs_cache.attention_masks
+            output_requirement = getattr(
+                looper.gptq_model, "quantization_layer_output_required", None
+            )
+            model_output_required = (
+                not is_lm_head_module
+                and p_index == len(looper.processors) - 1
+                and callable(output_requirement)
+                and output_requirement(
+                    layer_index=layer_index,
+                    layer_name=layer_name,
+                    layer_count=layer_count,
+                )
+            )
+            boundary_output_required = (
+                not is_lm_head_module
+                and p_index == len(looper.processors) - 1
+                and layer_boundary_checkpoint is not None
+            )
+            output_required = model_output_required or boundary_output_required
 
             processed_subset: Dict[str, NamedModule] = {}
             last_subset_plan: Optional[SubsetPlan] = None
@@ -727,6 +957,12 @@ def run_layer_stage(
                     # The most recent subset plan defines the replay contract
                     # for the outputs that flow into the next layer.
                     last_subset_plan = subset_result.plan
+                # Do not retain the result wrapper across decoder iterations.
+                # Its layer_inputs member otherwise keeps the previous
+                # activation generation alive until the next layer finishes
+                # its first complete subset. The extracted local owns the
+                # inputs for exactly as long as this layer still needs them.
+                del subset_result
                 if durable_progress_logs:
                     log.info(
                         "StageLayer: layer=%s processor=%s subset=%s/%s complete modules=%s",
@@ -740,6 +976,22 @@ def run_layer_stage(
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
 
+            # A processor may need one layer-wide decision after all individual
+            # modules have finished but before the only authoritative replay.
+            # Inline EXL3 mixed-bitrate selection uses this boundary to replace
+            # its highest-risk base-tier projections with the adjacent higher
+            # tier before activations propagate into the next decoder layer.
+            prepare_layer_replay = getattr(processor, "prepare_layer_replay", None)
+            if callable(prepare_layer_replay):
+                prepare_layer_replay(
+                    model=looper.gptq_model,
+                    layer_module=module,
+                    layer_index=layer_index,
+                    layer_count=layer_count,
+                    processed_modules=processed_subset,
+                    is_lm_head_module=is_lm_head_module,
+                )
+
             # When dynamic exclusions remove every tracked module from a layer,
             # no subset stage runs, so nothing materializes that layer's
             # outputs. Processors that enable post-process forward replay
@@ -752,16 +1004,56 @@ def run_layer_stage(
                 and execution_config.fwd_replay_after_process
             )
 
+            if replay_skipped_layer:
+                # A checkpoint-backed lazy layer normally materializes its
+                # direct state and projections while executing a subset. A
+                # fully excluded layer has no subset, but its untouched native
+                # forward is still required to advance calibration inputs.
+                # Restore every supported projection through the decoder-aware
+                # forward role before ForwardExecutor tries to replicate it.
+                looper._prepare_layer_direct_state_for_forward(
+                    module,
+                    cur_layer_device,
+                    projection_modules=full,
+                )
+                for relative_name, native_module in full.items():
+                    if isinstance(native_module, NamedModule):
+                        named_native = native_module
+                    else:
+                        full_name = (
+                            f"{layer_descriptor}.{relative_name}"
+                            if relative_name
+                            else layer_descriptor
+                        )
+                        named_native = NamedModule(
+                            native_module,
+                            name=relative_name,
+                            full_name=full_name,
+                            layer_index=layer_index,
+                        )
+                    prepared_native = looper._prepare_named_module_for_forward(
+                        named_module=named_native,
+                        fallback_device=cur_layer_device,
+                    )
+                    if not relative_name and prepared_native is not module:
+                        module = prepared_native
+
             # Some processors consume outputs only after `process()` updates the
             # current layer. In that case, replay the layer once using the
             # metadata already computed by the final subset plan.
             replay_after_process = (
-                not is_last_module
-                and replay_plan is not None
+                replay_plan is not None
                 and replay_plan.replay_after_process
+                and (not is_last_module or output_required)
             )
 
-            if replay_skipped_layer or replay_after_process:
+            replay_for_output_consumer = (
+                output_required
+                and not replay_after_process
+                and execution_config.require_fwd
+            )
+
+            if replay_skipped_layer or replay_after_process or replay_for_output_consumer:
                 # Pass `replay_plan` through unconditionally: the helper uses
                 # subset metadata when available and falls back to generic
                 # untouched-layer replay when it is `None`.
@@ -784,9 +1076,43 @@ def run_layer_stage(
                     replay_plan=replay_plan,
                 )
 
+            if model_output_required:
+                if not layer_outputs:
+                    raise RuntimeError(
+                        "model-specific quantization layer output consumer received "
+                        f"no replay output for layer {layer_index} ({layer_name})"
+                    )
+                output_receiver = getattr(
+                    looper.gptq_model, "receive_quantization_layer_outputs", None
+                )
+                if not callable(output_receiver):
+                    raise RuntimeError(
+                        "model requested quantization layer outputs without a receiver"
+                    )
+                output_receiver(
+                    layer_index=layer_index,
+                    layer_name=layer_name,
+                    layer_outputs=layer_outputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                )
+
             # Finalize module after last processor
             if p_index == len(looper.processors) - 1:
                 torch_sync()
+
+                prepare_layer_post_quantize = getattr(
+                    processor, "prepare_layer_post_quantize", None
+                )
+                if callable(prepare_layer_post_quantize):
+                    prepare_layer_post_quantize(
+                        model=looper.gptq_model,
+                        layer_module=module,
+                        layer_index=layer_index,
+                        processed_modules=processed_subset,
+                        is_lm_head_module=is_embeddings_module,
+                    )
 
                 if is_embeddings_module:
                     looper.gptq_model.post_quantize(module)
@@ -1080,6 +1406,27 @@ def run_layer_stage(
                             layer_index if not is_lm_head_module else "lm_head",
                         )
 
+                if layer_boundary_checkpoint is not None and not is_embeddings_module:
+                    if callable(input_lifetime_diagnostic):
+                        log.info(
+                            "StageLayer: input lifetime diagnostic layer=%s result=%s",
+                            layer_index,
+                            input_lifetime_diagnostic(),
+                        )
+                    commit_boundary = getattr(
+                        layer_boundary_checkpoint, "commit_layer", None
+                    )
+                    if not callable(commit_boundary):
+                        raise TypeError(
+                            "quantization layer-boundary checkpoint has no "
+                            "commit_layer() method"
+                        )
+                    commit_boundary(
+                        model=looper.gptq_model,
+                        processor=processor,
+                        layer_index=layer_index,
+                        layer_name=layer_descriptor,
+                    )
         if extensions:
             step_kind = (
                 "input_embeddings" if is_input_embeddings_module else

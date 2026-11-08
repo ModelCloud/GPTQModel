@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field, replace
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
@@ -207,7 +208,8 @@ def _resolve_forward_flush_device(
         active_forward_devices = {
             str(normalize_device_like(device))
             for device in selected_devices
-            if normalize_device_like(device) is not None and normalize_device_like(device).type != "cpu"
+            if normalize_device_like(device) is not None
+            and normalize_device_like(device).type != "cpu"
         }
         if len(active_forward_devices) > 1:
             used_devices.extend(selected_devices)
@@ -288,7 +290,9 @@ def _resolve_forward_baseline_devices(
     baseline: Dict[str, torch.device] = {}
     fallback_device: Optional[torch.device] = None
     for name, module_ref in candidates.items():
-        actual_module = module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+        actual_module = (
+            module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+        )
         try:
             device = get_device(actual_module)
         except Exception:
@@ -421,7 +425,9 @@ def build_subset_plan(
     """
 
     execution_config = processor.execution_config
-    calibration_coverage_policy = _resolve_subset_calibration_coverage_policy(processor, fallback)
+    calibration_coverage_policy = _resolve_subset_calibration_coverage_policy(
+        processor, fallback
+    )
 
     moe_groups: Dict[str, List[str]] = {}
     forward_device_map: Dict[str, torch.device] = {}
@@ -430,19 +436,19 @@ def build_subset_plan(
 
     layer_candidate_names = _collect_layer_candidate_names(subset=subset, full=full)
     subset_moe_group_key_by_name: Dict[str, Optional[str]] = {
-        name: looper._extract_moe_group_key(name)
-        for name in subset
+        name: looper._extract_moe_group_key(name) for name in subset
     }
     layer_moe_group_key_by_name: Dict[str, Optional[str]] = {
-        name: looper._extract_moe_group_key(name)
-        for name in layer_candidate_names
+        name: looper._extract_moe_group_key(name) for name in layer_candidate_names
     }
     subset_moe_module_names = [
-        name for name, group_key in subset_moe_group_key_by_name.items()
+        name
+        for name, group_key in subset_moe_group_key_by_name.items()
         if group_key is not None
     ]
     layer_moe_module_names = [
-        name for name, group_key in layer_moe_group_key_by_name.items()
+        name
+        for name, group_key in layer_moe_group_key_by_name.items()
         if group_key is not None
     ]
     is_moe_subset = len(subset_moe_module_names) >= looper._moe_subset_threshold
@@ -466,22 +472,31 @@ def build_subset_plan(
     for name, named_module in subset.items():
         setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-    dense_strategy_active = bool(getattr(looper, "_dense_vram_strategy_explicit", False))
-    moe_strategy_active = bool(getattr(looper, "_moe_vram_strategy_explicit", False)) and bool(moe_groups)
+    dense_strategy_active = bool(
+        getattr(looper, "_dense_vram_strategy_explicit", False)
+    )
+    moe_strategy_active = bool(
+        getattr(looper, "_moe_vram_strategy_explicit", False)
+    ) and bool(moe_groups)
 
     if dense_strategy_active or moe_strategy_active:
         dense_devices = [
-            dev for dev in getattr(looper, "_dense_quant_devices", [])
+            dev
+            for dev in getattr(looper, "_dense_quant_devices", [])
             if dev is not None and getattr(dev, "type", None) != "cpu"
         ] or list(getattr(looper, "_dense_quant_devices", []))
         moe_devices = [
-            dev for dev in getattr(looper, "_moe_quant_devices", [])
+            dev
+            for dev in getattr(looper, "_moe_quant_devices", [])
             if dev is not None and getattr(dev, "type", None) != "cpu"
         ] or list(getattr(looper, "_moe_quant_devices", []))
 
         if dense_strategy_active and dense_groups and dense_devices:
             dense_group_keys = list(dense_groups.keys())
-            if looper._dense_vram_strategy == VramStrategy.BALANCED and len(dense_devices) > 1:
+            if (
+                looper._dense_vram_strategy == VramStrategy.BALANCED
+                and len(dense_devices) > 1
+            ):
                 for group_index, group_key in enumerate(dense_group_keys):
                     target_device = dense_devices[group_index % len(dense_devices)]
                     for module_name in dense_groups[group_key]:
@@ -498,7 +513,10 @@ def build_subset_plan(
                 _model_module_plan(looper.gptq_model),
             )
             if assignable_group_keys:
-                if looper._moe_vram_strategy == VramStrategy.BALANCED and len(moe_devices) > 1:
+                if (
+                    looper._moe_vram_strategy == VramStrategy.BALANCED
+                    and len(moe_devices) > 1
+                ):
                     for group_index, group_key in enumerate(assignable_group_keys):
                         target_device = moe_devices[group_index % len(moe_devices)]
                         for module_name in moe_groups[group_key]:
@@ -517,6 +535,24 @@ def build_subset_plan(
         and callable(placement_override_active)
         and placement_override_active()
     )
+
+    if moe_strategy_active and moe_groups and moe_devices:
+        for module_name, named_module in subset.items():
+            preferred_device = forward_device_map.get(module_name)
+            distributed_device = normalize_device_like(
+                named_module.state.get("distributed_quant_device")
+            )
+            if distributed_device is not None:
+                if distributed_device not in moe_devices:
+                    raise ValueError(
+                        "Distributed expert quantization assigned "
+                        f"{module_name} to {distributed_device}, outside the "
+                        f"configured MoE device pool {moe_devices}."
+                    )
+                preferred_device = distributed_device
+                forward_device_map[module_name] = distributed_device
+            if preferred_device is not None:
+                named_module.state["preferred_quant_device"] = preferred_device
 
     if forward_device_map or placement_override_active:
         # Start from each leaf's current device so an excluded tensor is never
@@ -555,11 +591,13 @@ def build_subset_plan(
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
     execute_forward = execution_config.require_fwd
-    batch_count, forward_row_counts, forward_total_rows = _collect_subset_forward_progress(
-        looper,
-        processor,
-        layer_inputs,
-        execute_forward=execute_forward,
+    batch_count, forward_row_counts, forward_total_rows = (
+        _collect_subset_forward_progress(
+            looper,
+            processor,
+            layer_inputs,
+            execute_forward=execute_forward,
+        )
     )
 
     # ExpertsRoutingBypass is the only routing mode that exposes a deterministic
@@ -576,7 +614,10 @@ def build_subset_plan(
     if is_moe_subset and batch_size is not None and batch_size > 0 and execute_forward:
         sorted_module_names = sorted(subset.keys())
         module_chunks = [
-            {name: subset[name] for name in sorted_module_names[start:start + batch_size]}
+            {
+                name: subset[name]
+                for name in sorted_module_names[start : start + batch_size]
+            }
             for start in range(0, len(sorted_module_names), batch_size)
         ]
 
@@ -586,7 +627,8 @@ def build_subset_plan(
         subset_index=subset_index,
         subset_total=subset_total,
         execute_forward=execute_forward,
-        replay_after_process=execute_forward and execution_config.fwd_replay_after_process,
+        replay_after_process=execute_forward
+        and execution_config.fwd_replay_after_process,
         forward_mode="serial" if subset_forward_serial else "parallel",
         batch_count=batch_count,
         forward_row_counts=forward_row_counts,
@@ -646,6 +688,32 @@ def build_layer_subset_plans(
         if subset:
             subsets.append(subset)
 
+    # Lazy packed checkpoints can leave forward-only (`:!`) linear leaves on
+    # META because no quantization subset preprocesses them. Wrap only those
+    # lazy passthrough leaves so the forward device boundary can attach the
+    # active decoder plan and materialize them without changing ordinary eager
+    # model behavior.
+    for name, candidate in list(full.items()):
+        if isinstance(candidate, NamedModule):
+            continue
+        try:
+            candidate_device = get_device(candidate)
+        except Exception:
+            continue
+        if candidate_device != META:
+            continue
+        full_name = (
+            looper.gptq_model.lm_head
+            if is_lm_head_module
+            else f"{layers_prefix}.{name}"
+        )
+        full[name] = NamedModule(
+            candidate,
+            name=name,
+            full_name=full_name,
+            layer_index=layer_index,
+        )
+
     subset_total = len(subsets)
     return [
         build_subset_plan(
@@ -675,7 +743,9 @@ def _emit_moe_parallel_quant_subset_telemetry(
     if not plan.moe_groups or futures_count <= 0:
         return
 
-    unique_devices = sorted({str(device) for device in quant_target_devices.values() if device is not None})
+    unique_devices = sorted(
+        {str(device) for device in quant_target_devices.values() if device is not None}
+    )
     thread_pool_workers: Dict[str, int] = {}
     thread_pool_total_workers: Optional[int] = None
     thread_pool_total_inflight: Optional[int] = None
@@ -715,8 +785,12 @@ def _emit_moe_parallel_quant_subset_telemetry(
         python_gil_env=os.environ.get("PYTHON_GIL"),
         python_gil_controllable=has_gil_control(),
         python_gil_disabled=has_gil_disabled(),
-        free_threaded_parallel_quant_eligible=bool(has_gil_disabled() and futures_count > 1),
-        free_threaded_parallel_quant_active=bool(total_parallel_workers > 1 and futures_count > 1),
+        free_threaded_parallel_quant_eligible=bool(
+            has_gil_disabled() and futures_count > 1
+        ),
+        free_threaded_parallel_quant_active=bool(
+            total_parallel_workers > 1 and futures_count > 1
+        ),
     )
 
 
@@ -759,7 +833,7 @@ def _emit_shared_input_hessian_dedup_telemetry(
 
 
 def _run_single_subset_pass(
-    looper: 'ModuleLooper',
+    looper: "ModuleLooper",
     processor: LoopProcessor,
     module: torch.nn.Module,
     plan: SubsetPlan,
@@ -803,12 +877,51 @@ def _run_single_subset_pass(
     forward_row_counts = plan.forward_row_counts
     batch_count = plan.batch_count
     forward_device_map = plan.forward_device_map
-    execute_forward = plan.execute_forward if execute_forward is None else execute_forward
+    execute_forward = (
+        plan.execute_forward if execute_forward is None else execute_forward
+    )
+    capture_restored = False
+    restore_capture = getattr(
+        processor, "restore_subset_capture_frontier", None
+    )
+    if (
+        execute_forward
+        and not plan.need_forward_outputs
+        and not execution_config.capture_layer_forward_context
+        and callable(restore_capture)
+    ):
+        capture_restored = bool(
+            restore_capture(
+                layer_index=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                subset=subset,
+            )
+        )
+        if capture_restored:
+            execute_forward = False
+    if execute_forward and not capture_restored:
+        restore_capture_batches = getattr(
+            processor, "restore_subset_capture_batches", None
+        )
+        if callable(restore_capture_batches):
+            restore_capture_batches(
+                layer_index=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                expected_batches=batch_count,
+                subset=subset,
+            )
 
     handle = []
     subset_size = len(subset_names)
 
     if execute_forward:
+        looper._prepare_layer_direct_state_for_forward(
+            module,
+            cur_layer_device,
+            projection_modules=full,
+        )
         for named_module in subset.values():
             if isinstance(named_module, NamedModule):
                 looper._prepare_named_module_for_forward(
@@ -864,7 +977,7 @@ def _run_single_subset_pass(
             # Register the forward hook that captures activations for quantization.
             # The final module optionally flips a flag so processors can trigger
             # once-per-subset logic after the forward pass.
-            is_last = (idx == subset_size - 1)
+            is_last = idx == subset_size - 1
             hook_source = getattr(m, "full_name", None)
             if hook_source is None:
                 hook_source = getattr(m, "name", name)
@@ -874,13 +987,17 @@ def _run_single_subset_pass(
             # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
             is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
 
-            if hasattr(subset[name], 'forward_hook'):
+            if hasattr(subset[name], "forward_hook"):
                 original_hook = processor.pre_process_fwd_hook(name)
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
-                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
+                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(
+                        processor, original_hook, hook_source
+                    )
                 else:
-                    subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                    subset[name].forward_hook = looper._masked_hook_wrapper(
+                        processor, original_hook, hook_source
+                    )
                 enable_stop = (
                     execution_config.fwd_replay_after_process
                     or execution_config.subset_forward_early_stop
@@ -891,13 +1008,21 @@ def _run_single_subset_pass(
                 original_hook = processor.pre_process_fwd_hook(name)
                 # Use pre-hook registration for MoE modules
                 if is_moe_module:
-                    handle.append(subset[name].register_forward_hook(
-                        looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
-                    ))
+                    handle.append(
+                        subset[name].register_forward_hook(
+                            looper._masked_pre_hook_wrapper(
+                                processor, original_hook, hook_source
+                            )
+                        )
+                    )
                 else:
-                    handle.append(subset[name].register_forward_hook(
-                        looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                    ))
+                    handle.append(
+                        subset[name].register_forward_hook(
+                            looper._masked_hook_wrapper(
+                                processor, original_hook, hook_source
+                            )
+                        )
+                    )
 
     if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
         if is_awq_processor:
@@ -919,17 +1044,30 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
-    capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
+    capture_layer_forward_context = (
+        execute_forward and execution_config.capture_layer_forward_context
+    )
     if capture_layer_forward_context:
-        subset_capture_override = getattr(processor, "capture_layer_forward_context_during_subset", None)
+        subset_capture_override = getattr(
+            processor, "capture_layer_forward_context_during_subset", None
+        )
         if callable(subset_capture_override):
             capture_layer_forward_context = bool(subset_capture_override())
-    need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
+    need_outputs = execute_forward and (
+        plan.need_forward_outputs or capture_layer_forward_context
+    )
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
         if subset_event_cb:
-            subset_event_cb(stage="forward_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
+            subset_event_cb(
+                stage="forward_start",
+                layer_idx=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                module_names=subset_names,
+                processor=getattr(processor, "name", type(processor).__name__),
+            )
 
         fwd_start = time.perf_counter()
         reuse_kv = bool(getattr(module, "reuse_kv", False))
@@ -940,8 +1078,8 @@ def _run_single_subset_pass(
         )
         forward_pb = (
             logger.pb(range(plan.forward_total_rows))
-               .manual()
-               .set(show_left_steps=False)
+            .manual()
+            .set(show_left_steps=False)
         )
         forward_pb.title(forward_msg).subtitle(
             f"Row 0/{plan.forward_total_rows}"
@@ -949,7 +1087,7 @@ def _run_single_subset_pass(
 
     previous_forward_devices: Dict[str, torch.device] = {}
     preserve_devices = plan.preserve_module_devices
-    if forward_device_map:
+    if execute_forward and forward_device_map:
         previous_forward_devices = looper._apply_forward_device_overrides(
             subset,
             forward_device_map,
@@ -958,6 +1096,16 @@ def _run_single_subset_pass(
 
     forward_outputs = None
     if execute_forward:
+        capture_context_factory = getattr(
+            processor,
+            "subset_forward_capture_context",
+            None,
+        )
+        capture_context = (
+            capture_context_factory(layer_module=module, subset=subset)
+            if callable(capture_context_factory)
+            else nullcontext()
+        )
         try:
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.
@@ -999,29 +1147,30 @@ def _run_single_subset_pass(
                     )
                 finally:
                     end_scale_probe(subset, layer=module)
-            forward_outputs = looper._run_forward_batches(
-                module=module,
-                processor=processor,
-                current_subset=None if disable_moe_hooks else subset,
-                ordered_module_names=subset_names,
-                layer_inputs=layer_inputs,
-                layer_input_kwargs=layer_input_kwargs,
-                position_ids=position_ids,
-                attention_masks=attention_masks,
-                cur_layer_device=cur_layer_device,
-                is_lm_head_module=is_lm_head_module,
-                shared_kv_cache_dict=shared_kv_cache_dict,
-                layer_index=layer_index,
-                need_outputs=need_outputs,
-                reuse_kv=reuse_kv,
-                progress_pb=forward_pb,
-                progress_title=forward_msg,
-                progress_stage="Forward",
-                progress_rows_per_batch=forward_row_counts,
-                progress_total_rows=plan.forward_total_rows,
-                force_serial=plan.subset_forward_serial,
-                preserve_module_devices=preserve_devices,
-            )
+            with capture_context:
+                forward_outputs = looper._run_forward_batches(
+                    module=module,
+                    processor=processor,
+                    current_subset=None if disable_moe_hooks else subset,
+                    ordered_module_names=subset_names,
+                    layer_inputs=layer_inputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                    cur_layer_device=cur_layer_device,
+                    is_lm_head_module=is_lm_head_module,
+                    shared_kv_cache_dict=shared_kv_cache_dict,
+                    layer_index=layer_index,
+                    need_outputs=need_outputs,
+                    reuse_kv=reuse_kv,
+                    progress_pb=forward_pb,
+                    progress_title=forward_msg,
+                    progress_stage="Forward",
+                    progress_rows_per_batch=forward_row_counts,
+                    progress_total_rows=plan.forward_total_rows,
+                    force_serial=plan.subset_forward_serial,
+                    preserve_module_devices=preserve_devices,
+                )
         finally:
             if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
@@ -1031,6 +1180,105 @@ def _run_single_subset_pass(
                 )
             if forward_pb is not None:
                 forward_pb.close()
+
+        plan_zero_recovery = getattr(
+            processor, "plan_subset_zero_route_recovery", None
+        )
+        zero_recovery_tasks = (
+            plan_zero_recovery(subset=subset, layer_module=module)
+            if callable(plan_zero_recovery)
+            else ()
+        )
+        if zero_recovery_tasks:
+            recovery_context_factory = getattr(
+                looper.gptq_model, "zero_route_recovery_context", None
+            )
+            if not callable(recovery_context_factory):
+                raise RuntimeError(
+                    "EXL3 route-coverage top-up is enabled but the model has no "
+                    "direct-expert recovery implementation"
+                )
+            recovery_msg = (
+                "Zero-route recovery: "
+                f"Layer=`{layer_descriptor}`, subset={subset_index + 1}/{subset_total}, "
+                f"modules={len(zero_recovery_tasks)}, batches={batch_count}"
+            )
+            recovery_pb = (
+                logger.pb(range(plan.forward_total_rows))
+                .manual()
+                .set(show_left_steps=False)
+            )
+            recovery_pb.title(recovery_msg).subtitle(
+                f"Row 0/{plan.forward_total_rows}"
+            ).draw()
+            if subset_event_cb:
+                subset_event_cb(
+                    stage="zero_route_recovery_start",
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=list(zero_recovery_tasks),
+                    processor=getattr(
+                        processor, "name", type(processor).__name__
+                    ),
+                )
+            try:
+                with recovery_context_factory(
+                    looper=looper,
+                    processor=processor,
+                    layer_module=module,
+                    subset=subset,
+                    task_names=zero_recovery_tasks,
+                ) as replay_required:
+                    if replay_required is not False:
+                        looper._run_forward_batches(
+                            module=module,
+                            processor=processor,
+                            current_subset=subset,
+                            ordered_module_names=subset_names,
+                            layer_inputs=layer_inputs,
+                            layer_input_kwargs=layer_input_kwargs,
+                            position_ids=position_ids,
+                            attention_masks=attention_masks,
+                            cur_layer_device=cur_layer_device,
+                            is_lm_head_module=is_lm_head_module,
+                            shared_kv_cache_dict=shared_kv_cache_dict,
+                            layer_index=layer_index,
+                            need_outputs=False,
+                            reuse_kv=reuse_kv,
+                            progress_pb=recovery_pb,
+                            progress_title=recovery_msg,
+                            progress_stage="Zero-route recovery",
+                            progress_rows_per_batch=forward_row_counts,
+                            progress_total_rows=plan.forward_total_rows,
+                            force_serial=True,
+                            preserve_module_devices=preserve_devices,
+                            apply_moe_config=False,
+                        )
+                finish_zero_recovery = getattr(
+                    processor, "finish_subset_zero_route_recovery", None
+                )
+                if not callable(finish_zero_recovery):
+                    raise RuntimeError(
+                        "EXL3 route-coverage top-up lost its completion validator"
+                    )
+                finish_zero_recovery(
+                    subset=subset,
+                    task_names=zero_recovery_tasks,
+                )
+            finally:
+                recovery_pb.close()
+            if subset_event_cb:
+                subset_event_cb(
+                    stage="zero_route_recovery_end",
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=list(zero_recovery_tasks),
+                    processor=getattr(
+                        processor, "name", type(processor).__name__
+                    ),
+                )
 
     returned_outputs = None
     if execute_forward and capture_layer_forward_context:
@@ -1048,11 +1296,18 @@ def _run_single_subset_pass(
         # immediately rather than after the later layer replay step.
         processor.receive_layer_inputs(forward_outputs)
         if return_outputs:
-             returned_outputs = processor.inputs_cache.layer_inputs
+            returned_outputs = processor.inputs_cache.layer_inputs
         del forward_outputs
 
     if execute_forward and subset_event_cb:
-        subset_event_cb(stage="forward_end", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
+        subset_event_cb(
+            stage="forward_end",
+            layer_idx=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=subset_names,
+            processor=getattr(processor, "name", type(processor).__name__),
+        )
 
     fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
     processor.set_fwd_time(fwd_time)
@@ -1071,7 +1326,7 @@ def _run_single_subset_pass(
         for name in subset_names:
             # Reset inline hook attributes on NamedModule wrappers so future passes
             # do not reuse state from this subset run.
-            if hasattr(subset[name], 'forward_hook'):
+            if hasattr(subset[name], "forward_hook"):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
 
@@ -1085,6 +1340,24 @@ def _run_single_subset_pass(
             subset_total=subset_total,
             logger=logger,
         )
+
+    if execute_forward and not capture_restored:
+        commit_capture = getattr(
+            processor, "commit_subset_capture_frontier", None
+        )
+        if callable(commit_capture):
+            commit_capture(
+                layer_index=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                subset=subset,
+            )
+
+    validate_capture_readiness = getattr(
+        processor, "validate_subset_capture_readiness", None
+    )
+    if callable(validate_capture_readiness):
+        validate_capture_readiness(subset=subset, layer_module=module)
 
     forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
@@ -1146,14 +1419,22 @@ def _run_single_subset_pass(
 
         quant_target_devices[name] = target_device
 
-    quant_flush_device = _resolve_quant_flush_device(cur_layer_device, quant_target_devices)
+    quant_flush_device = _resolve_quant_flush_device(
+        cur_layer_device, quant_target_devices
+    )
 
     processed_subset: Dict[str, NamedModule] = {}
     futures = []
 
     if subset_event_cb:
-        subset_event_cb(stage="quant_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=active_subset_names, processor=getattr(processor, "name", type(processor).__name__))
-
+        subset_event_cb(
+            stage="quant_start",
+            layer_idx=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=active_subset_names,
+            processor=getattr(processor, "name", type(processor).__name__),
+        )
 
     @torch.inference_mode()
     def _process_on_worker(
@@ -1172,7 +1453,11 @@ def _run_single_subset_pass(
         module_ref = nm.module if isinstance(nm, NamedModule) else nm
         module_weight = getattr(module_ref, "weight", None)
         if module_weight is not None and expected_device is not None:
-            target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
+            target_device = (
+                expected_device
+                if isinstance(expected_device, torch.device)
+                else torch.device(expected_device)
+            )
             actual_device = get_device(module_weight)
             assert actual_device == META or actual_device == target_device, (
                 f"Device mismatch for '{module_label}' process task: "
@@ -1248,10 +1533,14 @@ def _run_single_subset_pass(
     except _WORKER_FAILURES as exc:
         submission_error = exc
 
-    for name, named_module in _collect_worker_results(futures, prior_error=submission_error):
+    for name, named_module in _collect_worker_results(
+        futures, prior_error=submission_error
+    ):
         # Collect results in submission order so the final subset map preserves
         # deterministic iteration for downstream consumers.
-        if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
+        if isinstance(named_module, NamedModule) and named_module.state.get(
+            "capture_only"
+        ):
             # Capture-only modules should not be finalized or offloaded.
             continue
         processed_subset[name] = named_module
@@ -1261,7 +1550,14 @@ def _run_single_subset_pass(
         torch_sync()
 
     if subset_event_cb:
-        subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=active_subset_names, processor=getattr(processor, "name", type(processor).__name__))
+        subset_event_cb(
+            stage="quant_complete",
+            layer_idx=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=active_subset_names,
+            processor=getattr(processor, "name", type(processor).__name__),
+        )
 
     used_data_parallel = False
     if execute_forward and forward_flush_device is None:
@@ -1273,7 +1569,7 @@ def _run_single_subset_pass(
 
 
 def run_subset_stage(
-    looper: 'ModuleLooper',
+    looper: "ModuleLooper",
     *,
     plan: SubsetPlan,
     processor: LoopProcessor,
@@ -1305,7 +1601,9 @@ def run_subset_stage(
     """
     logger = log or setup_logger()
 
-    processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
+    processor_name = (
+        processor.name() if hasattr(processor, "name") else type(processor).__name__
+    )
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
 
@@ -1417,16 +1715,16 @@ def run_subset_stage(
         # to the layer stage, the subset stage must do one final replay here to
         # rebuild the real layer outputs.
         if not plan.replay_after_process:
-             replay_plan = plan.for_modules({})
-             _, new_layer_inputs, _ = _run_single_subset_pass(
-                 **common_args,
-                 plan=replay_plan,  # Empty modules prevent quant hooks during replay.
-                 subset_event_cb=None,
-                 return_outputs=True,
-                 disable_moe_hooks=True,
-             )
-             if new_layer_inputs is not None:
-                 layer_inputs = new_layer_inputs
+            replay_plan = plan.for_modules({})
+            _, new_layer_inputs, _ = _run_single_subset_pass(
+                **common_args,
+                plan=replay_plan,  # Empty modules prevent quant hooks during replay.
+                subset_event_cb=None,
+                return_outputs=True,
+                disable_moe_hooks=True,
+            )
+            if new_layer_inputs is not None:
+                layer_inputs = new_layer_inputs
 
     elif plan.execute_forward:
         # Single pass
@@ -1437,7 +1735,7 @@ def run_subset_stage(
             return_outputs=True,
         )
         if new_layer_inputs is not None:
-             layer_inputs = new_layer_inputs
+            layer_inputs = new_layer_inputs
     else:
         # No forward required; still run process() for each module.
         if DEBUG_ON:

@@ -1529,3 +1529,4 @@ The following reference pages document features proposed from the working fork.
 - [persist deterministic adjacent mixed-tier plans](docs/exl3-inline-mixed-tiers.md)
 - [dispatch authenticated projections to pipelined workers](docs/exl3-remote-workers.md)
 - [preserve lazy native sources across replay and export](docs/lazy-source-replay-contracts.md)
+- [carry causal replay and durable recovery callbacks](docs/looper-causal-replay.md)
