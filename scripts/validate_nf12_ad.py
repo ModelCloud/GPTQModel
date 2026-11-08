@@ -155,6 +155,11 @@ def make_weight(n: int, k: int, kind: str, seed: int) -> torch.Tensor:
 
 
 def backend_module(backend: str, device: str):
+    if torch.device(device).type != "cuda":
+        if backend == "auto":
+            return None, "torch"
+        raise ValueError(f"--backend {backend} requires a CUDA/HIP device, got {device}")
+
     from gptqmodel.utils import nf12_ad as cuda_rt
 
     if backend == "hip":
