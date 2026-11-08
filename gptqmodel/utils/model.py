@@ -12,6 +12,7 @@ import json
 import math
 import operator
 import os
+import secrets
 import shutil
 import stat
 import struct
@@ -2797,31 +2798,40 @@ def _existing_shard_matches(
 def _atomic_shard_file(path: str):
     """Keep the current shard and any mapped source tensors alive until commit."""
     directory = os.path.dirname(os.path.abspath(path))
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
-        dir=directory,
-    )
     try:
-        # ``mkstemp`` creates 0600 files, while a plain ``open`` would honor the
-        # process umask and keep an existing shard's mode. Match that behavior so
-        # exports do not silently become owner-only (e.g. across containers or
-        # users sharing a checkpoint directory).
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        existing_mode = None
+
+    # os.open applies the process umask to a new file without changing it.
+    # O_EXCL and a random name keep the temporary private to this export.
+    for _ in range(10):
+        temporary = os.path.join(
+            directory, f".{os.path.basename(path)}.{secrets.token_hex(16)}.tmp"
+        )
         try:
-            mode = stat.S_IMODE(os.stat(path).st_mode)
-        except FileNotFoundError:
-            current_umask = os.umask(0)
-            os.umask(current_umask)
-            mode = 0o666 & ~current_umask
-        os.chmod(temporary, mode)
-        try:
-            handle = os.fdopen(descriptor, "wb")
-        except BaseException:
-            os.close(descriptor)
-            raise
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o666 if existing_mode is None else 0o600,
+            )
+        except FileExistsError:
+            continue
+        break
+    else:
+        raise FileExistsError(f"Could not create a temporary shard beside {path}")
+
+    try:
+        if existing_mode is not None:
+            os.chmod(temporary, existing_mode)
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = None
         with handle:
             yield handle
         os.replace(temporary, path)
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if os.path.exists(temporary):
             os.unlink(temporary)
 
