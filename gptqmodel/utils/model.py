@@ -2674,7 +2674,7 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
         if not isinstance(current, torch.Tensor) or tuple(current.shape) == shape:
             continue
         dtype = current.dtype
-        module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype))
+        module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype, device=current.device))
 
 
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
