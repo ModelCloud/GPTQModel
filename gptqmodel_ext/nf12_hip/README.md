@@ -30,11 +30,11 @@ NF12 → **exact BF16** first, so none of them introduces new numerics.
 
 | tokens | route | why |
 | --- | --- | --- |
-| `m <= 16` | `nf12_ad_linear_fused` | bandwidth-bound; decoding once and reusing it beats a GEMM |
-| `17 <= m <= 128` | `nf12_ad_linear_wmma` | matrix cores amortise the decode across token tiles |
-| `m > 128`, or no `wmma-128b-insts` | row-sliced decode-then-rocBLAS | a real GEMM wins once decode can be amortised |
+| `m <= 15` | `nf12_ad_linear_fused` | bandwidth-bound; decoding once and reusing it beats a GEMM |
+| `16 <= m <= 256` | `nf12_ad_linear_wmma` | matrix cores amortise the decode across token tiles |
+| `m > 256`, or no `wmma-128b-insts` | row-sliced decode-then-rocBLAS | a real GEMM wins once decode can be amortised |
 
-### 1. Fused small-M kernel (`m <= 16`)
+### 1. Fused small-M kernel (`m <= 15`)
 
 `nf12_ad_linear_fused` never materialises the dense weight. Each CTA owns one
 16-row output block and splits K across its eight warps; the decoded super-atom
@@ -48,7 +48,7 @@ move `packed + dense_write + dense_read` = **88 MiB** for a 4096² matrix, where
 a BF16 GEMM needs **32 MiB**. Reading only the packed weight is a 25% traffic
 saving over BF16, which is where the wins come from.
 
-### 2. Matrix-core fused kernel (`17 <= m <= 128`)
+### 2. Matrix-core fused kernel (`16 <= m <= 256`)
 
 `nf12_ad_linear_wmma` decodes each 16×64 super-atom **once** into shared memory
 and feeds `v_wmma_f32_16x16x16_bf16_w32_gfx12` for every token tile in flight,
@@ -90,7 +90,7 @@ second buffer costs 16 KiB of LDS and pushes VGPRs from 67–167 to a flat
 169–188, which halves resident CTAs per CU. At `kMt=8` that made m=128 regress
 184 → 289 µs, so the two variants are selected by tile count at compile time.
 
-### 3. Row-sliced decode-then-GEMM (`m > 128`)
+### 3. Row-sliced decode-then-GEMM (`m > 256`)
 
 Per SPEC.md §6.5 the matrix is decoded in **row slices** (escape indices are
 absolute, so every slice decodes with the full table). Slices are sized to at
@@ -139,54 +139,57 @@ Two consequences:
 So the same kernel wins or loses depending on whether the weight fits in the
 LLC. Both regimes are reported below.
 
-### Warm: one weight reused in a loop (best case, single layer)
+### Warm / cold on the canonical CUDA benchmark grid
 
-| N | M | nf12 µs | bf16 µs | ratio |
-| ---: | ---: | ---: | ---: | ---: |
-| 4096 | 17 | 41.2 | 22.9 | 0.56× |
-| 4096 | 32 | 54.8 | 22.9 | 0.42× |
-| 4096 | 64 | 61.9 | 26.1 | 0.42× |
-| 4096 | 96 | 57.5 | 37.1 | 0.65× |
-| 4096 | 128 | 74.3 | 47.3 | 0.64× |
-| 11008 | 17 | 103.0 | 148.5 | **1.44×** |
-| 11008 | 32 | 103.2 | 148.4 | **1.44×** |
-| 11008 | 64 | 108.2 | 152.4 | **1.41×** |
-| 11008 | 96 | 125.7 | 164.0 | **1.30×** |
-| 11008 | 128 | 184.4 | 168.5 | 0.91× |
+Same `k x n` rows as `bench/common.py`, so the HIP numbers line up with the
+CUDA ones. Each cell is **warm / cold**: *warm* reuses one weight in a loop,
+*cold* cycles several so the working set exceeds 96 MiB — which is what a
+real multi-layer model does.
 
-### Cold: several weights cycled, working set > 96 MiB
+| k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096×4096 | 0.93 / 1.21 | 0.69 / 0.99 | 0.87 / 1.09 | 0.75 / 1.07 | 0.69 / 0.96 | 0.64 / 0.69 |
+| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.24 / 1.23 | 1.18 / 1.16 | 1.14 / 1.15 | 0.77 / 0.82 |
+| 14336×4096 | 1.35 / 1.35 | 1.21 / 1.21 | 1.33 / 1.33 | 1.23 / 1.25 | 1.17 / 1.21 | 1.08 / 1.09 |
+| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.22 | 1.14 / 1.13 | 1.07 / 1.07 | 0.96 / 0.96 | 0.76 / 0.67 |
+| 5120×25600 | 1.38 / 1.38 | 1.30 / 1.30 | 1.21 / 1.21 | 1.14 / 1.13 | 1.04 / 1.04 | 0.80 / 0.75 |
+| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.16 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.15 / 1.10 |
+| 8192×8192 | 1.69 / 1.64 | 1.09 / 1.10 | 1.29 / 1.28 | 1.30 / 1.30 | 1.24 / 1.24 | 0.78 / 0.75 |
+| 8192×57344 | 1.40 / 1.40 | 1.22 / 1.22 | 1.22 / 1.22 | 1.22 / 1.22 | 1.15 / 1.14 | 0.78 / 0.74 |
+| 2048×8192 | 1.33 / 1.31 | 0.78 / 1.05 | 1.02 / 1.23 | 0.92 / 1.20 | 0.76 / 1.11 | 0.66 / 0.74 |
+| 896×4864 | 1.62 / 1.98 | 0.69 / 0.94 | 1.14 / 1.09 | 1.16 / 1.64 | 0.83 / 1.39 | 0.53 / 0.71 |
 
-This is the regime a real multi-layer model runs in — by the time a layer is
-revisited, the others have evicted it.
+Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
+output-rounding floor. The fused linear has **0 violations** of
+`|err| <= 2e-3 + 2e-3*|ref|`.
 
-| N | M | nf12 µs | bf16 µs | ratio |
-| ---: | ---: | ---: | ---: | ---: |
-| 4096 | 17 | 54.4 | 57.7 | **1.06×** |
-| 4096 | 32 | 69.3 | 57.8 | 0.84× |
-| 4096 | 64 | 77.8 | 59.6 | 0.77× |
-| 4096 | 96 | 78.5 | 62.3 | 0.79× |
-| 4096 | 128 | 100.7 | 62.9 | 0.62× |
-| 11008 | 17 | 126.8 | 149.3 | **1.18×** |
-| 11008 | 32 | 127.9 | 150.3 | **1.18×** |
-| 11008 | 64 | 133.5 | 158.2 | **1.18×** |
-| 11008 | 96 | 141.1 | 163.2 | **1.16×** |
-| 11008 | 128 | 202.8 | 167.7 | 0.83× |
+The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
+`m=8` upward on weights large enough that the packed read dominates —
+1.14–1.35x at `m=16..64` for the 14336/25600/57344-wide shapes.
 
 ### What this means, stated plainly
 
-* **Wins where the weight must stream from HBM.** 11008×4096 is a real MLP
-  shape and the packed form is 64.5 MiB against 86 MiB of BF16; NF12 wins
-  1.30–1.44× warm and 1.16–1.18× cold across the whole `m = 17..96` band. At
-  `m = 17..64` the kernel runs at ~640 GB/s, which is the measured HBM read
-  ceiling (633 GB/s), so that win is bandwidth, not luck.
-* **Loses where BF16 fits in the 64 MiB LLC.** At 4096² the BF16 weight is
-  32 MiB and cache-resident at ~1.4 TB/s, so the 1.33× traffic saving cannot
-  pay for the decode. Cold, where rotation evicts it, the two are close
-  (1.06× at m=17, 0.62–0.84× above that).
-* **Loses above `m = 96`.** At m=128 the CTA already covers 128 tokens, the
-  kernel becomes matrix-core/decode bound rather than bandwidth bound, and
-  rocBLAS's larger-tile GEMM wins. `nf12_ad_wmma_max_m()` returns 128 for that
-  reason and the dispatcher hands larger M to the decode-then-GEMM route.
+* **Wins where the weight must stream from HBM.** 14336x4096 and 25600x5120 are
+  real MLP shapes and the packed form is 25% smaller than BF16; NF12 wins
+  1.17–1.35x warm and 1.20–1.35x cold across `m = 16..64`. At those points the
+  kernel runs at ~640 GB/s, the measured HBM read ceiling (633 GB/s), so the
+  win is bandwidth, not luck.
+* **Wins cold where BF16 fits in the 64 MiB LLC.** At 4096x4096 the BF16 weight
+  is 32 MiB and cache-resident at ~1.4 TB/s, so warm it is a 0.87x at m=16.
+  Cold, where rotation evicts it, NF12 is 1.09x at m=16 and 0.69-1.07x above
+  that. 2048x8192 and 896x4864 are at or above parity at m=16 (1.02x / 1.14x
+  warm, 1.23x / 1.09x cold).
+* **The remaining gap is `m >= 32` on the three small shapes** (0.64-0.75x
+  warm). Eight token tiles per CTA halve the CTA count and the extra packed
+  reads only pay back once the weight leaves the cache.
+* **Loses above `m = 256`.** There the CTA already covers the whole token
+  block, the kernel becomes matrix-core/decode bound rather than bandwidth
+  bound, and rocBLAS's larger-tile GEMM wins; the dispatcher hands larger M to
+  the decode-then-GEMM route.
+
+Reproduce the table with `bench/hip_linear.py` in
+[dphnAI/nf12](https://github.com/dphnAI/nf12); `scripts/validate_nf12_ad.py
+--backend hip` is the accuracy gate and the shape-coverage check.
 
 No end-to-end model speedup is claimed. These are single-operator numbers.
 
@@ -260,7 +263,7 @@ Environment knobs:
 | `nf12_ad_format_hip.cuh` | Format geometry, `nv_sel_to_amd`/`prmt`, `decode_bulk`/`decode_group`, tiling and wmma fragment helpers. |
 | `nf12_ad_decode.hip` | `nf12_ad_decode` (NF12 → exact BF16), `nf12_ad_linear_fused` (small-M fused decode+GEMM), and `nf12_ad_selftest`. |
 | `nf12_ad_encode.hip` | Native analyze/count/scan/write encoder, byte-identical to the Torch codec. |
-| `nf12_ad_wmma.hip` | Matrix-core fused path for `17 <= m <= 128`, including split-K and its reduce kernel. |
+| `nf12_ad_wmma.hip` | Matrix-core fused path for `16 <= m <= 256`, including split-K and its reduce kernel. |
 | `nf12_ad_torch.cpp` | Host-only Torch bindings: `encode`, `decode`, `linear`, `selftest`, `arch_info`. |
 
 `nf12_ad_torch.cpp` must stay free of torch types in the `.hip` translation
