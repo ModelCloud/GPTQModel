@@ -11,6 +11,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
+from ...nn_modules.qlinear._numerics import matmul_fp32_reduce
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.modules.triton.scheduler import (
     AwqTritonPlan,
@@ -61,6 +62,8 @@ class AwqGemmTritonFn(torch.autograd.Function):
         ctx.save_for_backward(qweight, qzeros, scales)
         ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features
+        ctx.bias_shape = None if bias is None else bias.shape
+        ctx.bias_dtype = None if bias is None else bias.dtype
 
         out_shape = x.shape[:-1] + (out_features,)
         function_input_dtype = x.dtype
@@ -80,7 +83,9 @@ class AwqGemmTritonFn(torch.autograd.Function):
             raise ValueError("AWQ Triton qweight must be rank-2 with qweight.shape[0] == K")
         N = qweight.shape[1] * 8
         request = prefer_backend if isinstance(prefer_backend, dict) else {}
-        fp32_accum = bool(request.get("fp32_accum", FP32_ACCUM))
+        # Keep the biased sum wide even when low-precision accumulation was
+        # requested: rounding the GEMM first can turn a finite sum into inf.
+        fp32_accum = bias is not None or bool(request.get("fp32_accum", FP32_ACCUM))
         if qzeros.ndim != 2 or scales.ndim != 2 or qzeros.shape[0] <= 0:
             raise ValueError("AWQ Triton qzeros/scales must be non-empty rank-2 tensors")
         if K % qzeros.shape[0] or scales.shape[0] != qzeros.shape[0]:
@@ -108,8 +113,11 @@ class AwqGemmTritonFn(torch.autograd.Function):
             cuda_graph=capturing,
         )
         if not plan.fused:
-            out = awq_dequantize_triton(qweight, scales, qzeros)
-            out = torch.matmul(x_2d, out.to(x.dtype))
+            weights = awq_dequantize_triton(qweight, scales, qzeros).to(x.dtype)
+            out = (
+                matmul_fp32_reduce(x_2d, weights, bias)
+                if bias is not None else torch.matmul(x_2d, weights)
+            )
         else:
             out = awq_gemm_triton(
                 x_2d,
@@ -117,11 +125,12 @@ class AwqGemmTritonFn(torch.autograd.Function):
                 scales,
                 qzeros,
                 fp32_accum=fp32_accum,
-                output_dtype=x.dtype,
+                output_dtype=torch.float32 if bias is not None else x.dtype,
                 **plan.as_kwargs(),
             )
+            if bias is not None:
+                out = (out + bias.float()).to(x.dtype)
 
-        out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
         if not capturing:
             mark_awq_triton_plan_warmed(
@@ -140,10 +149,13 @@ class AwqGemmTritonFn(torch.autograd.Function):
         qweight, qzeros, scales = ctx.saved_tensors
 
         grad_input = None
+        grad_bias = None
+        if ctx.needs_input_grad[6]:
+            grad_bias = grad_output.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
         if ctx.needs_input_grad[0]:
             if ctx.input_rows == 0:
                 grad_input = grad_output.new_empty(ctx.input_shape)
-                return grad_input, None, None, None, None, None, None, None, None
+                return grad_input, None, None, None, None, None, grad_bias, None, None
             from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
 
             weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
@@ -152,7 +164,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
             grad_input = torch.matmul(grad_output_2d, weights.transpose(-1, -2))
             grad_input = grad_input.reshape(ctx.input_shape)
 
-        return grad_input, None, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, grad_bias, None, None
 
 
 class AwqGEMMTritonLinear(AWQuantLinear):
