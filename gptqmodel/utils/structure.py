@@ -1166,6 +1166,41 @@ class LazyTurtle:
                 param_cache={},
                 buffer_cache={},
             )
+            direct_buffers = dict(target_submodule.named_buffers(recurse=False))
+            nonpersistent = getattr(
+                target_submodule,
+                "_non_persistent_buffers_set",
+                set(),
+            )
+            # Non-persistent buffers are absent from the checkpoint, so the
+            # recursive path rebuilds them from a constructor template whenever
+            # they are meta or not on the requested device. Match that here
+            # instead of only rebuilding meta tensors.
+            restore_device = device
+            if restore_device is None:
+                resolved = next(
+                    (
+                        buffer.device
+                        for buffer in direct_buffers.values()
+                        if not _is_meta_tensor(buffer)
+                    ),
+                    None,
+                )
+                restore_device = resolved if resolved is not None else torch.device("cpu")
+            missing_nonpersistent_buffers = [
+                (name, name)
+                for name, buffer in direct_buffers.items()
+                if name in nonpersistent
+                and (_is_meta_tensor(buffer) or buffer.device != restore_device)
+            ]
+            if missing_nonpersistent_buffers:
+                self._restore_missing_nonpersistent_buffers(
+                    target_model=target_model,
+                    target_submodule=target_submodule,
+                    t_bufs=direct_buffers,
+                    missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+                    device=restore_device,
+                )
             return target_submodule
 
     def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
