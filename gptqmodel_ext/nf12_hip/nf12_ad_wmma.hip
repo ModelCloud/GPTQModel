@@ -78,7 +78,7 @@ constexpr int kMaxTokens = kMaxTiles * 16;
 constexpr int kMaxSplits = 8;
 
 // kMt is the number of 16-token tiles this instantiation covers.
-template <int kMt, int kSplits>
+template <int kMt, int kSplits, bool kDbl>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     wmma_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                 const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
@@ -121,12 +121,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   const int64_t per = (k_blocks + kSplits - 1) / kSplits;
   const int64_t kb_lo = int64_t(blockIdx.z) * per;
   const int64_t kb_hi = min(k_blocks, kb_lo + per);
-  // Two buffers per warp. Decoding into the idle buffer while the busy one is
-  // consumed removes the barrier between the store and the first matrix-core
-  // read, so the decode ALU overlaps the wmma issue instead of serialising with
-  // it. Measured 1-4% faster and bit-identical (2 x 8 x 2 KiB = 32 KiB per CTA,
-  // which still admits four CTAs per 128 KiB CU).
-  __shared__ __align__(16) __hip_bfloat16 tile[2][kWarpsPerBlock][kSuperAtomRows * kSuperAtomCols];
+  // Two buffers per warp when kDbl. Decoding into the idle buffer while the
+  // busy one is consumed removes the barrier between the store and the first
+  // matrix-core read. It is not free: the second buffer costs 16 KiB of LDS and
+  // ~20 VGPRs (measured 169-188 vs 67-167), which lowers the resident CTA count
+  // per CU, so the launcher enables it only where that still pays (kMt <= 6).
+  __shared__ __align__(16) __hip_bfloat16 tile[kDbl ? 2 : 1][kWarpsPerBlock]
+                                                 [kSuperAtomRows * kSuperAtomCols];
 
   // Output column this lane owns, and its bias, constant across the K walk.
   const int col = int(n0) + (lane & 15);
@@ -158,7 +159,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   __hip_bfloat16* const sh0 = &tile[0][warp][0];
-  __hip_bfloat16* const sh1 = &tile[1][warp][0];
+  __hip_bfloat16* const sh1 = &tile[kDbl ? 1 : 0][warp][0];
 
   // Load one super-atom's three packed planes for this lane.
   auto load_planes = [&](int64_t kb, uint4 (&planes)[3]) {
@@ -189,36 +190,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     store_row_tile(dst, row_tile_offset(SuperAtom{0, 0}, kSuperAtomCols, lane), kSuperAtomCols, xr);
   };
 
-  // Prefetch the next super-atom's packed bytes into registers before the
-  // current one is consumed, so the three plane loads overlap the decode and
-  // the matrix-core work.
-  uint4 planes[3], next[3];
-  bool have_planes = kb_lo < kb_hi;
-  int buf = 0;
-  if (have_planes) {
-    load_planes(kb_lo, planes);
-    decode_into(planes, sh0);
-    __syncwarp();
-  }
-
-  for (int64_t kb = kb_lo; kb < kb_hi; ++kb) {
-    __hip_bfloat16* const sh = (buf == 0) ? sh0 : sh1;
-    // Decode the NEXT super-atom into the other buffer while this one is
-    // consumed, so its ALU work overlaps the matrix-core issue below.
-    if (kb + 1 < kb_hi) {
-      load_planes(kb + 1, next);
-      decode_into(next, (buf == 0) ? sh1 : sh0);
-    }
-
-    // 4 k-chunks of 16, each feeding one B fragment
+  // 4 k-chunks of 16, each feeding one B fragment. A depends on both the token
+  // tile (t) and the k-chunk (j), so it cannot be hoisted out of either loop:
+  // each (t, j) pair is a distinct 16-byte row fragment. What IS shared is B,
+  // which is loaded once per j and reused by every tile. The A loads hit L1
+  // because the four j-chunks for a row cover consecutive 16-byte spans of the
+  // same two cache lines.
+  auto do_mma = [&](__hip_bfloat16* sh, int64_t kb) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const WmmaA b = wmma_row_frag(sh + 16 * j, kSuperAtomCols, lane);
-      // A depends on both the token tile (t) and the k-chunk (j), so it cannot
-      // be hoisted out of either loop: each (t, j) pair is a distinct 16-byte
-      // row fragment. What IS shared is B, which is loaded once per j above and
-      // reused by every tile. The A loads hit L1 because the four j-chunks for
-      // a row cover consecutive 16-byte spans of the same two cache lines.
 #pragma unroll
       for (int t = 0; t < kMt; ++t) {
         // `wmma_row_frag` supplies the tile's own row ((lane & 15)) itself, so
@@ -228,8 +209,53 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc[t]);
       }
     }
-    __syncwarp();
-    buf ^= 1;
+  };
+
+  // Prefetch the next super-atom's packed bytes into registers before the
+  // current one is consumed, so the three plane loads overlap the decode and
+  // the matrix-core work.
+  uint4 planes[3], next[3];
+  const bool have_planes = kb_lo < kb_hi;
+
+  if (kDbl) {
+    // Decode the NEXT super-atom into the idle buffer while this one is
+    // consumed, so the store no longer waits on the barrier before the first
+    // matrix-core read. Bit-identical to the single-buffer path (checked by
+    // checksum on gfx1201); 6% faster at 4096x4096/m=64 and 8-24% at
+    // 11008x4096 for m=64..96.
+    int buf = 0;
+    if (have_planes) {
+      load_planes(kb_lo, planes);
+      decode_into(planes, sh0);
+      __syncwarp();
+    }
+    for (int64_t kb = kb_lo; kb < kb_hi; ++kb) {
+      __hip_bfloat16* const sh = (buf == 0) ? sh0 : sh1;
+      if (kb + 1 < kb_hi) {
+        load_planes(kb + 1, next);
+        decode_into(next, (buf == 0) ? sh1 : sh0);
+      }
+      do_mma(sh, kb);
+      __syncwarp();
+      buf ^= 1;
+    }
+  } else {
+    // Single buffer: the store has to wait for the barrier, so the decode does
+    // not overlap the matrix-core issue. Kept for kMt >= 7, where the second
+    // buffer pushed VGPRs to 188 and halved resident CTAs per CU (m=128 at
+    // N=11008 regressed 184 -> 289 us before this split).
+    if (have_planes) load_planes(kb_lo, planes);
+    for (int64_t kb = kb_lo; kb < kb_hi; ++kb) {
+      if (kb + 1 < kb_hi) load_planes(kb + 1, next);
+      decode_into(planes, sh0);
+      __syncwarp();
+      do_mma(sh0, kb);
+      __syncwarp();
+      if (kb + 1 < kb_hi) {
+#pragma unroll
+        for (int p = 0; p < 3; ++p) planes[p] = next[p];
+      }
+    }
   }
 
   // ---- epilogue ------------------------------------------------------------
@@ -383,34 +409,38 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),
                   static_cast<unsigned>(splits));
 
-#define NF12_AD_LAUNCH(T, S)                                                             \
-  wmma_kernel<T, S><<<grid, kThreadsPerBlock, 0, stream>>>(                              \
+#define NF12_AD_LAUNCH(T, S, D)                                                             \
+  wmma_kernel<T, S, D><<<grid, kThreadsPerBlock, 0, stream>>>(                              \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
       escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),    \
       reinterpret_cast<const __hip_bfloat16*>(bias), partial)
 
   // (tile count, split count) pairs the dispatcher can reach. Split 1 needs no
   // reduce pass; every other case reduces from a partial plane.
-#define NF12_AD_DISPATCH(T)                     \
+#define NF12_AD_DISPATCH(T, D)                  \
   do {                                          \
     if (splits == 1) {                          \
-      NF12_AD_LAUNCH(T, 1);                     \
+      NF12_AD_LAUNCH(T, 1, D);                  \
     } else if (splits == 2) {                   \
-      NF12_AD_LAUNCH(T, 2);                     \
+      NF12_AD_LAUNCH(T, 2, D);                  \
     } else {                                    \
-      NF12_AD_LAUNCH(T, 4);                     \
+      NF12_AD_LAUNCH(T, 4, D);                  \
     }                                           \
   } while (0)
 
+  // Double buffering only pays while the extra LDS and VGPRs still leave room
+  // for more than one CTA per CU; above six tiles they do not (m=128 at
+  // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
+  // exactly one of the two variants, so the kernel count is unchanged.
   switch (tiles) {
-    case 1: NF12_AD_DISPATCH(1); break;
-    case 2: NF12_AD_DISPATCH(2); break;
-    case 3: NF12_AD_DISPATCH(3); break;
-    case 4: NF12_AD_DISPATCH(4); break;
-    case 5: NF12_AD_DISPATCH(5); break;
-    case 6: NF12_AD_DISPATCH(6); break;
-    case 7: NF12_AD_DISPATCH(7); break;
-    default: NF12_AD_DISPATCH(kMaxTiles); break;
+    case 1: NF12_AD_DISPATCH(1, true); break;
+    case 2: NF12_AD_DISPATCH(2, true); break;
+    case 3: NF12_AD_DISPATCH(3, true); break;
+    case 4: NF12_AD_DISPATCH(4, true); break;
+    case 5: NF12_AD_DISPATCH(5, true); break;
+    case 6: NF12_AD_DISPATCH(6, true); break;
+    case 7: NF12_AD_DISPATCH(7, false); break;
+    default: NF12_AD_DISPATCH(kMaxTiles, false); break;
   }
 #undef NF12_AD_DISPATCH
 #undef NF12_AD_LAUNCH
