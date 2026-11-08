@@ -106,6 +106,8 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         self._compiled_forward = None
         self.requested_exp_base = exp_base
         self._exp_base_value: int | None = None
+        self._exp_base_tensor: torch.Tensor | None = None
+        self._exp_base_version: int | None = None
         if not bias:
             self.bias = None
         if register_buffers:
@@ -167,18 +169,34 @@ class NF12ADLinear(WeightOnlyQuantLinear):
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
 
+    def clear_weight_cache(self) -> None:
+        """Forget the exponent cached from a previous checkpoint or buffer value."""
+        self._exp_base_value = None
+        self._exp_base_tensor = None
+        self._exp_base_version = None
+        self._invalidate_compiled()
+
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return weight_to_matrix(linear)
 
     def _exp_base(self) -> int:
+        tensor = self.nf12_exp_base
+        if self._exp_base_tensor is not tensor:
+            self._exp_base_value = None
+            self._exp_base_tensor = tensor
+            try:
+                self._exp_base_version = tensor._version
+            except RuntimeError:
+                # Inference tensors have no version counter. Buffer replacement
+                # is still detected by identity; in-place updates need an
+                # explicit clear_weight_cache() call.
+                self._exp_base_version = None
+        elif self._exp_base_version is not None and tensor._version != self._exp_base_version:
+            self._exp_base_value = None
+            self._exp_base_version = tensor._version
         if self._exp_base_value is None:
-            self._exp_base_value = int(self.nf12_exp_base.item())
+            self._exp_base_value = int(tensor.item())
         return self._exp_base_value
-
-    def _load_from_state_dict(self, *args, **kwargs):
-        super()._load_from_state_dict(*args, **kwargs)
-        # The buffer may have been copied into without replacing the object.
-        self._exp_base_value = None
 
     def pack(self, linear, scales=None, zeros=None, g_idx=None, **kwargs):
         self.pack_original(linear, scales, zeros, g_idx, **kwargs)
@@ -238,8 +256,6 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             self.nf12_exp_base = base
         else:
             self.register_buffer("nf12_exp_base", base)
-        self._exp_base_value = int(result.exp_base)
-
         source_bias = bias
         if source_bias is None and linear is not None:
             source_bias = getattr(linear, "bias", None)
@@ -251,7 +267,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
                 self.register_buffer("bias", value)
         else:
             self.bias = None
-        self._invalidate_compiled()
+        self.clear_weight_cache()
 
     # ------------------------------------------------------------------
     # export / inference

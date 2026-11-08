@@ -128,6 +128,54 @@ def test_module_saves_nf12_packed_and_retains_no_dense_cache():
     )
 
 
+def test_accelerate_buffer_replacement_refreshes_cached_exponent_base():
+    """A pre-load repr must not pin the placeholder exponent for inference."""
+    from accelerate.utils.modeling import set_module_tensor_to_device
+
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    module = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    assert "exp_base=0" in repr(module)
+
+    weight = torch.full((16, 64), 2.0**-12, dtype=torch.bfloat16)
+    weight[:, ::2] = -weight[:, ::2]
+    result = quantize_nf12_ad_weight(weight, exp_base=54)
+    assert result.escapes.shape == (0, 8)
+    set_module_tensor_to_device(module, "nf12_packed", "cpu", value=result.packed)
+    set_module_tensor_to_device(module, "nf12_escapes", "cpu", value=result.escapes)
+    set_module_tensor_to_device(
+        module, "nf12_exp_base", "cpu",
+        value=torch.tensor([result.exp_base], dtype=torch.uint8),
+    )
+
+    assert torch.equal(module.dequantize_weight().view(torch.int16), weight.view(torch.int16))
+    x = torch.ones((1, 64), dtype=torch.bfloat16)
+    x[:, 1::2] = 0
+    expected = (x.float() @ weight.float().T).to(torch.bfloat16)
+    for _ in range(2):
+        assert torch.equal(module(x), expected)
+    assert "exp_base=54" in repr(module)
+    assert "weight" not in module.state_dict()
+
+
+def test_exponent_cache_tracks_versioned_updates_and_explicit_clear():
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    module = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    module.nf12_exp_base = torch.tensor([54], dtype=torch.uint8)
+    assert module._exp_base() == 54
+    module.nf12_exp_base.fill_(55)
+    assert module._exp_base() == 55
+
+    with torch.inference_mode():
+        module.nf12_exp_base = torch.tensor([56], dtype=torch.uint8)
+        assert module._exp_base() == 56
+        module.nf12_exp_base.fill_(57)
+        module.clear_weight_cache()
+        assert module._exp_base() == 57
+
+
 def test_loader_resizes_data_dependent_escape_buffer(tmp_path):
     """The escape table has a checkpoint-dependent row count, not a config size."""
 

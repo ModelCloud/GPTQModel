@@ -5,9 +5,10 @@ This directory vendors the NF12 CUDA codec and inference kernels from
 weights to NF12 and run them without a separate Python package.
 
 GPT-QModel exposes the format as `METHOD.NF12_AD` / `FORMAT.NF12_AD`
-(`"nf12_ad"`). The `AD` suffix identifies the **AlpinDale modified** tiled
-layout implemented by the upstream `nf12` library, which is intentionally not
-byte-compatible with the layout in the paper. See `UPSTREAM_README.md` and
+(both serialize as `"nf12"`). The `AD` suffix on the enum names identifies
+the **AlpinDale modified** tiled layout implemented by the upstream `nf12`
+library, which is intentionally not byte-compatible with the layout in the
+paper. See `UPSTREAM_README.md` and
 the format specification below.
 
 ## Credits
