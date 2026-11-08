@@ -12,6 +12,13 @@ written. A source file inside that directory would be deleted while the index
 was being built. The source location is therefore checked before any directory
 cleanup or module mutation.
 
+The export directory must also be separate from every referenced source file.
+`streaming_state_dict_to_shards()` may replace an output shard before it has
+read later tensors from the same source. `save_quantized()` may also clean old
+weight files after export. Both paths reject a source under the export root
+before writing any shard. Save to a different directory to keep the source and
+its offload index usable.
+
 ```mermaid
 flowchart TD
     A["offload_to_safetensors_reference"] --> B{"Source and module valid?"}
@@ -31,12 +38,26 @@ flowchart TD
     class X,Y failure;
 ```
 
+```mermaid
+flowchart TD
+    A["save_quantized or streaming_state_dict_to_shards"] --> B["_validate_offload_sources_outside_save_dir"]
+    B --> C{"Any OffloadTensorRef source under save_dir?"}
+    C -- Yes --> X["ValueError before shard writes; source preserved"]
+    C -- No --> D["Plan and write output shards"]
+    D --> E["Writer cleanup can remove old weight files"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
 | Case | Earlier behavior | Current behavior |
 | --- | --- | --- |
 | Source inside the module offload directory | `_prepare_offload_directory()` deleted the source, then the index pointed to a missing file and `module.to_empty()` discarded the live tensors | `gptqmodel/utils/offload.py:193` rejects the location before cleanup; the source and live tensors remain intact |
 | New index file with a restrictive process umask | An explicit `fchmod(0644)` broadened its permissions | `gptqmodel/utils/offload.py:300` lets `open(..., "x")` honor the process umask |
 | Source outside the module offload directory | Header and tensor metadata are checked, then the index is committed and the module becomes meta | The same reference offload path remains available |
+| Referenced source under the export root | `streaming_state_dict_to_shards()` could replace the source while writing the first shard; `_cleanup_saved_weight_files()` could remove it afterward | `_validate_offload_sources_outside_save_dir()` rejects the save before shard writes, including layer-split exports (`gptqmodel/utils/model.py:2917`, `gptqmodel/models/writer.py:1219`) |
 
 This contract applies to the reference offload path introduced in
 [PR #3586](https://github.com/ModelCloud/GPTQModel/pull/3586). The index
 stores source locations and hashes; it does not contain a second tensor payload.
+The export source guard was added in
+[PR #3620](https://github.com/ModelCloud/GPTQModel/pull/3620).

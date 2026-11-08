@@ -2914,6 +2914,31 @@ def _plan_shards(entries: List[TensorSource], max_shard_size: Optional[int]) -> 
     return shards
 
 
+def _validate_offload_sources_outside_save_dir(
+    state_dict: Dict[str, TensorSource], save_dir: str
+) -> None:
+    """Keep source artifacts out of the export directory we may rewrite or clean."""
+    save_roots = (os.path.abspath(save_dir), os.path.realpath(save_dir))
+    for entry in state_dict.values():
+        source = entry.source
+        if not isinstance(source, OffloadTensorRef):
+            continue
+        source_paths = (os.path.abspath(source.path), os.path.realpath(source.path))
+        for save_root, source_path in zip(save_roots, source_paths):
+            try:
+                if os.path.commonpath((save_root, source_path)) == save_root:
+                    break
+            except ValueError:  # Paths on different Windows drives cannot overlap.
+                continue
+        else:
+            continue
+        raise ValueError(
+            f"Offloaded tensor '{entry.name}' references '{source.path}' inside "
+            f"the export directory '{save_dir}'; choose a different save_dir "
+            "so shard writes and cleanup cannot destroy the source."
+        )
+
+
 def streaming_state_dict_to_shards(
     state_dict: Dict[str, TensorSource],
     save_dir: str,
@@ -2922,6 +2947,7 @@ def streaming_state_dict_to_shards(
     metadata: Dict[str, str],
     max_shard_size: Optional[int],
 ) -> Tuple[List[str], Dict[str, str], int]:
+    _validate_offload_sources_outside_save_dir(state_dict, save_dir)
     entries = list(state_dict.values())
     shards = _plan_shards(entries, max_shard_size)
     num_shards = len(shards)

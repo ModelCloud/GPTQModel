@@ -54,6 +54,7 @@ from ..utils.hf import (
 from ..utils.logger import setup_logger
 from ..utils.model import (
     TensorSource,
+    _validate_offload_sources_outside_save_dir,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -1212,6 +1213,10 @@ def ModelWriter(cls):
             state_dict = _convert_checkpoint_state_dict_keys(state_dict, checkpoint_key_for_save)
         state_dict.update(out_of_model_state_dict)
         out_of_model_state_dict.clear()
+
+        # The layer split path writes into several subdirectories, so guard
+        # references against the export root before any group can be written.
+        _validate_offload_sources_outside_save_dir(state_dict, save_dir)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
