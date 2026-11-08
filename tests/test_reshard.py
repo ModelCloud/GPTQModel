@@ -343,6 +343,23 @@ def test_reshard_groups_all_layer_stacks_and_keeps_numeric_non_layer_global(tmp_
     assert set(global_state) == {"mlp1.0.weight", "mlp1.1.weight", "lm_head.weight"}
 
 
+def test_reshard_detects_multiple_single_layer_stacks_without_config(tmp_path):
+    state = {
+        "model.text.layers.0.attn.qweight": torch.ones(4, 4, dtype=torch.int32),
+        "model.vision.layers.0.attn.qweight": torch.full((4, 4), 2, dtype=torch.int32),
+        "lm_head.weight": torch.ones(4, 4, dtype=torch.float16),
+    }
+    source = tmp_path / "source"
+    _build_source(source, with_config=False, state=state)
+    target = tmp_path / "target"
+
+    reshard(source, target)
+
+    assert (target / "model.text.layers.0" / "layer.safetensors").is_file()
+    assert (target / "model.vision.layers.0" / "layer.safetensors").is_file()
+    assert set(load_file(str(target / "global.safetensors"))) == {"lm_head.weight"}
+
+
 def test_reshard_does_not_mmap_source_weights(tmp_path, monkeypatch):
     import safetensors
 
@@ -474,6 +491,26 @@ def test_reshard_restores_destination_when_publish_fails(tmp_path, monkeypatch):
         reshard(source, target, overwrite=True)
 
     assert (target / "stale.txt").read_text(encoding="utf-8") == "stale"
+
+
+def test_reshard_overwrite_preserves_unrelated_backup_path(tmp_path):
+    source = tmp_path / "source"
+    state = _build_source(source)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "stale.txt").write_text("stale", encoding="utf-8")
+
+    # The former deterministic backup name can already exist after a failed
+    # operation in this process. It must never be removed by a new reshard.
+    existing_backup = tmp_path / f"target.bak-{os.getpid()}"
+    existing_backup.mkdir()
+    (existing_backup / "keep.txt").write_text("keep", encoding="utf-8")
+
+    reshard(source, target, ShardConfig(layout=ShardLayout.SINGLE), overwrite=True)
+
+    assert (existing_backup / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert not (target / "stale.txt").exists()
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
 
 
 def test_reshard_discovers_unindexed_multi_shard_checkpoint(tmp_path):
