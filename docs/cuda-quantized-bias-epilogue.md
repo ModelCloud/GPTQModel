@@ -1,6 +1,6 @@
 # CUDA quantized linear epilogue
 
-GPT-QModel's portable GPTQ, AWQ, FP8, and GGUF linear backends may use an FP32
+GPT-QModel's portable GPTQ, Torch AWQ, FP8, and GGUF linear backends may use an FP32
 accumulator with FP16 or BF16 activations on NVIDIA CUDA. When a layer has a
 bias, that bias must be added before the accumulator is rounded to the output
 dtype. Otherwise a finite biased result can become `inf` at an intermediate
@@ -16,7 +16,7 @@ flowchart TD
     A["Quantized linear forward"] --> B{"CUDA low precision and not ROCm?"}
     B -- "No" --> C["Existing portable or ROCm path"]
     B -- "Yes" --> D{"Backend path"}
-    D -- "GPTQ eager, AWQ, FP8 dense, GGUF dense" --> E["matmul_fp32_reduce"]
+    D -- "GPTQ eager, Torch AWQ, FP8 dense, GGUF dense" --> E["matmul_fp32_reduce"]
     D -- "GPTQ streaming" --> F["matmul_fp32_reduce per tile with optional bias slice"]
     D -- "FP8 native candidate" --> R{"x_flat.numel() > 0?"}
     R -- "Yes" --> G["_forward_scaled_mm with FP32 output when biased"]
@@ -80,6 +80,80 @@ A bias-only gradient does not retain a temporary dequantized weight. GPTQ
 streaming, FP8 native scaled matmul, and GGUF fused execution use their dense
 or eager path when their native backward cannot represent the requested input
 gradient. No persistent expanded weight cache is created.
+
+## AWQ Triton fused and dense paths
+
+`AwqGemmTritonFn` has its own backward and uses the legacy or selected AWQ
+plan. A biased fused call requests an FP32 result from `awq_gemm_triton`, adds
+the bias in FP32, then rounds once to FP16. This also applies when a caller
+sets `fp32_accum=False`: bias correctness requires a wide accumulation target.
+A biased dense call passes the temporary dequantized weight and bias to
+`matmul_fp32_reduce`. Unbiased calls retain their existing output paths. The
+backward reduces the bias gradient in FP32, including zero-row inputs, and
+saves only packed weights, zeros, and scales for the input gradient.
+
+```mermaid
+flowchart TD
+    A["AwqGEMMTritonLinear.forward"] --> B["AwqGemmTritonFn.forward"]
+    B --> C{"input_rows == 0?"}
+    C -- "Yes" --> D["empty_linear_output"]
+    C -- "No" --> V{"Packed shapes and group valid?"}
+    V -- "No" --> X["Raise ValueError"]
+    V -- "Yes" --> E["select_awq_triton_plan"]
+    E --> F{"plan.fused?"}
+    F -- "Yes" --> G{"Bias present?"}
+    G -- "Yes" --> H["awq_gemm_triton FP32 output"]
+    H --> I["Add bias in FP32"]
+    I --> J["Cast once to FP16"]
+    G -- "No" --> Z["awq_gemm_triton FP16 output"]
+    F -- "No" --> L{"Bias present?"}
+    L -- "Yes" --> M["matmul_fp32_reduce with bias"]
+    L -- "No" --> N["torch.matmul"]
+    D --> Q["Return output"]
+    J --> Q
+    Z --> Q
+    M --> Q
+    N --> Q
+    Q --> R{"Backward called?"}
+    R -- "Yes" --> K["AwqGemmTritonFn.backward"]
+    R -- "No" --> S["Finish"]
+    K --> O["Input gradient from temporary dequantized weights"]
+    K --> P["Bias gradient from FP32 sum_to_size"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Fused bias | `gemm_awq_triton.py:120-124` returned an FP16 GEMM result, then added bias | `awq_gemm_triton` returns FP32 for biased calls; bias is added before one FP16 cast |
+| Dense bias | `gemm_awq_triton.py:113-115` used FP16 `torch.matmul` before adding bias | `matmul_fp32_reduce` adds bias during FP32-output `torch.addmm` on NVIDIA CUDA |
+| Bias backward | `gemm_awq_triton.py:152-155` returned `None` for bias, including zero-row input | `AwqGemmTritonFn.backward` returns an FP32-reduced bias gradient |
+
+The line references in this table refer to the implementation before the AWQ
+Triton epilogue change. This flow was introduced by
+[PR #3658](https://github.com/ModelCloud/GPTQModel/pull/3658).
+
+On an NVIDIA GB10 (SM 12.1), PyTorch 2.15.0+cu132, and Triton 3.9.0, the
+packed-unit-weight FP16 cases at 1×128×128 (fused) and 129×128×128 (dense)
+matched an independent FP32 Torch oracle exactly after output rounding. The
+old output was `inf`; the corrected result is `65024`. Input and bias gradients
+also matched the independent Torch oracle exactly, including the zero bias
+gradient for empty rows. Both `fp32_accum` settings were tested; the relevant
+AWQ suite completed with 99 passed and 1 skipped.
+
+With resident FP16 inputs, five warmups, and the median of seven runs of 30
+calls timed with CUDA events, the direct old and new biased epilogues measured:
+
+| Path and shape (M×K×N) | Old latency | New latency | Old peak allocator delta | New peak allocator delta |
+| --- | ---: | ---: | ---: | ---: |
+| Fused 16×1024×1024 | 0.0796 ms | 0.0855 ms | 0.09 MiB | 0.13 MiB |
+| Dense 129×1024×1024 | 0.0724 ms | 0.1016 ms | 34.25 MiB | 3.51 MiB |
+
+The peak delta includes temporary output and library scratch. After two
+forwards through each public-module path, only the packed qweight, packed
+qzeros, scales, and bias remained in the module; retained expanded-weight
+storage was 0 bytes. The dense path still creates a temporary dequantized
+weight for each forward.
 
 | Path | Previous mechanism | Current mechanism |
 | --- | --- | --- |
