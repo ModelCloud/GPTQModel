@@ -213,17 +213,20 @@ def run_accuracy(device: str, backend: str, quick: bool, results: dict) -> bool:
                 if not (row["bytes_match"] and row["escapes_match"] and row["decode_bit_exact"]):
                     all_ok = False
             elif rt is not None and active == "hip":
-                packed = ref_packed.to(device)
-                esc = ref_esc.to(device)
-                native = rt.decode(packed, esc, int(ref_base))
+                # The HIP port ships its own analyze/scan/write encoder, so this
+                # exercises the native kernel rather than reusing the Torch
+                # codec's bytes. A regression here means the GPU encoder drifted
+                # from the reference bit layout.
+                packed, esc, base = rt.encode(wc)
+                native = rt.decode(packed, esc, base)
                 row.update(
-                    exp_base=int(ref_base),
-                    bytes_match=True,  # HIP consumes the Torch encoder's bytes
-                    escapes_match=True,
+                    exp_base=int(base),
+                    bytes_match=bool(torch.equal(packed.cpu().reshape(-1), ref_packed.reshape(-1))),
+                    escapes_match=bool(torch.equal(esc.cpu(), ref_esc)),
                     decode_bit_exact=bool(torch.equal(native.cpu().view(torch.int16), w.view(torch.int16))),
                     packed_shape=list(packed.shape), packed_dtype=str(packed.dtype),
                 )
-                if not row["decode_bit_exact"]:
+                if not (row["bytes_match"] and row["escapes_match"] and row["decode_bit_exact"]):
                     all_ok = False
             else:
                 t = codec.encode(w)
