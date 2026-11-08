@@ -22,6 +22,15 @@ from .w4a_boundary import layer_mlp_policy, norm_codes_fused
 from .w4a_llama_stream import _bind_forward, _track_bound_forward
 
 
+def _dynamic_nvfp4_global_scale(x: torch.Tensor, recipe: str | None) -> torch.Tensor:
+    # Match pack_activation: an empty operand has no maximum to reduce.
+    if x.numel() == 0:
+        return torch.ones((), device=x.device, dtype=torch.float32)
+    return nvfp4_global_scale(
+        x.detach().abs().amax(), grid_dtype=x.dtype, recipe=recipe or "least_squares"
+    )
+
+
 def round_w4a_activation(x: torch.Tensor, mode: str,
                          recipe: str | None = None,
                          global_scale: torch.Tensor | float | None = None) -> torch.Tensor:
@@ -31,9 +40,7 @@ def round_w4a_activation(x: torch.Tensor, mode: str,
     if mode == "w4a_nvfp4":
         scale = global_scale
         if scale is None:
-            scale = nvfp4_global_scale(
-                x.detach().abs().amax(), grid_dtype=x.dtype, recipe=recipe or "least_squares"
-            )
+            scale = _dynamic_nvfp4_global_scale(x, recipe)
         return nvfp4_block_qdq(
             x, scale, recipe or "least_squares",
         )
@@ -59,8 +66,7 @@ def round_w4a_replay_operand(x: torch.Tensor, mode: str, recipe=None, global_sca
     # carrier, so an FP16/BF16 round-trip here would teach a different function
     # than inference.
     if mode == "w4a_nvfp4" and global_scale is None:
-        global_scale = nvfp4_global_scale(x.detach().abs().amax(), grid_dtype=x.dtype,
-                                          recipe=recipe or "least_squares")
+        global_scale = _dynamic_nvfp4_global_scale(x, recipe)
     return rounder(x.float(), mode, recipe, global_scale)
 
 
