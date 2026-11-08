@@ -159,8 +159,8 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Q6_K cache build | `gguf_triton.py:1827-1830` multiplied FP16 `d` by signed subscales and could cache infinity | `_build_triton_cache` multiplies in FP32, then selects FP16 or FP32 for the compact scale array |
-| Q6_K fused dot | `gguf_triton.py:900-901` reconstructed the weight and dotted in FP16 | `_gguf_q6_k_fused_matmul_kernel_impl` reconstructs and dots in FP32 for wide scales |
+| Q6_K cache build | `gguf_triton.py:1835-1837` multiplied FP16 `d` by signed subscales and could cache infinity | `_build_triton_cache` multiplies in FP32, then selects FP16 or FP32 for the compact scale array |
+| Q6_K fused dot | `gguf_triton.py:906-907` reconstructed the weight and dotted in FP16 | `_gguf_q6_k_fused_matmul_kernel_impl` reconstructs and dots in FP32 for wide scales |
 
 On an NVIDIA GB10, the independent NumPy GGUF decoder and FP64 Torch dot
 product give zero for code `0` and `496.09375` for code `1` with the block
