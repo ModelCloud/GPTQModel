@@ -76,6 +76,13 @@ def assert_identical_tensors(expected, actual):
 def run_guarded_driver(command, *, tmp_path, mode, timeout):
     stdout_path = tmp_path / f"{mode}.stdout.log"
     stderr_path = tmp_path / f"{mode}.stderr.log"
+    repo_root = str(Path(__file__).resolve().parents[1])
+    pythonpath = os.environ.get("PYTHONPATH")
+    env = {
+        **os.environ,
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": os.pathsep.join((repo_root, pythonpath)) if pythonpath else repo_root,
+    }
     # Files preserve diagnostics on timeout and avoid inherited pipe writers
     # keeping communicate() alive after a hostile kill of the driver.
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -84,7 +91,7 @@ def run_guarded_driver(command, *, tmp_path, mode, timeout):
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
-            env={**os.environ, "PYTHONHASHSEED": "0"},
+            env=env,
         )
         try:
             returncode = process.wait(timeout=timeout)
