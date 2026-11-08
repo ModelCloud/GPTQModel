@@ -702,8 +702,11 @@ if _TRITON_AVAILABLE:
                     other=0.0,
                 )
 
-                weight = tl.cast(q, tl.float16) * scale[None, :] - min_value[None, :]
-                accumulator += tl.dot(a, weight)
+                weight = tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]
+                if scale_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a.to(tl.float32), weight, input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -801,8 +804,11 @@ if _TRITON_AVAILABLE:
                     other=0.0,
                 )
 
-                weight = tl.cast(q, tl.float16) * scale[None, :] - min_value[None, :]
-                accumulator += tl.dot(a, weight)
+                weight = tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]
+                if scale_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a.to(tl.float32), weight, input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -1794,11 +1800,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q4_K":
-            d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
-            dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1)
+            scale_dtype = torch.float32 if self._k_scale_overflows(blocks, torch.float16) else torch.float16
+            d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
+            dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
-            scale = (d.unsqueeze(-1) * sc.to(torch.float16)).permute(1, 2, 0).contiguous()
-            min_value = (dmin.unsqueeze(-1) * mins.to(torch.float16)).permute(1, 2, 0).contiguous()
+            scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
+            min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
             qs = blocks[..., 16:].permute(1, 2, 0).contiguous()
             return {
                 "qs": qs,
@@ -1807,11 +1814,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q5_K":
-            d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
-            dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1)
+            scale_dtype = torch.float32 if self._k_scale_overflows(blocks, torch.float16) else torch.float16
+            d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
+            dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
-            scale = (d.unsqueeze(-1) * sc.to(torch.float16)).permute(1, 2, 0).contiguous()
-            min_value = (dmin.unsqueeze(-1) * mins.to(torch.float16)).permute(1, 2, 0).contiguous()
+            scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
+            min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
             qh = blocks[..., 16:48].permute(1, 2, 0).contiguous()
             qs = blocks[..., 48:].permute(1, 2, 0).contiguous()
             return {
