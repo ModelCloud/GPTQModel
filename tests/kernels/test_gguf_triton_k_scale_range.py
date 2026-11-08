@@ -188,6 +188,42 @@ def test_torch_dense_wide_k_weight_still_has_finite_dot_product(bits, rows, bias
 @requires_gpu
 @pytest.mark.cuda
 @pytest.mark.parametrize("bits", ["q4_k", "q5_k"])
+@pytest.mark.parametrize("rows", [1, 8])
+@pytest.mark.parametrize("bias", [False, True])
+def test_torch_dense_bf16_k_cancellation_matches_fp64_oracle(bits, rows, bias):
+    source, blocks, _, _, _ = _packed_source(bits, bias=bias)
+    module = GGUFTorchLinear(
+        bits=bits, group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=bias,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    module.gguf_fused_cuda_max_rows = 0
+    inputs = torch.full((rows, 256), 2**-16, device="cuda", dtype=torch.bfloat16)
+    dense = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(blocks, module.gguf_tensor_qtype)
+    ).to(device="cuda", dtype=torch.float64)
+    oracle = inputs.double() @ dense.T
+    if bias:
+        oracle += module.bias.double()
+
+    with torch.inference_mode():
+        first = module(inputs)
+        repeated = module(inputs)
+    torch.cuda.synchronize()
+
+    assert first.dtype == torch.bfloat16
+    assert torch.isfinite(first).all()
+    assert torch.equal(first, repeated)
+    torch.testing.assert_close(first, oracle.to(torch.bfloat16), rtol=2e-3, atol=2e-3)
+    assert not any(
+        torch.is_tensor(value) and value.numel() >= module.in_features * module.out_features
+        for value in vars(module).values()
+    )
+
+
+@requires_gpu
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", ["q4_k", "q5_k"])
 def test_ordinary_k_scale_keeps_compact_fp16_metadata(bits):
     linear = torch.nn.Linear(256, 64, bias=False, dtype=torch.float32)
     with torch.no_grad():

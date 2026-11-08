@@ -205,3 +205,50 @@ def test_torch_q6_wide_dense_fallback_preserves_input_gradient():
     assert torch.isfinite(inputs.grad).all()
     expected = torch.full_like(inputs.grad, 64 * 127000 / 128)
     torch.testing.assert_close(inputs.grad, expected, rtol=2e-3, atol=2e-3)
+
+
+@requires_gpu
+@pytest.mark.cuda
+@pytest.mark.parametrize("rows", [1, 8])
+@pytest.mark.parametrize("bias", [False, True])
+def test_torch_q6_dense_bf16_signed_subscale_cancellation(rows, bias):
+    source = GGUFTorchLinear(
+        bits="q6_k", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=bias,
+    ).eval()
+    blocks = np.zeros((64, source.gguf_type_size), dtype=np.uint8)
+    blocks[:, :128] = 0x11
+    blocks[:, 128:192] = 0xAA
+    blocks[:, 192:208] = np.array([127, -126] * 8, dtype=np.int8).view(np.uint8)
+    blocks[:, 208:210] = np.array([1000], dtype=np.float16).view(np.uint8)
+    source.qweight.copy_(torch.from_numpy(blocks))
+    if bias:
+        source.bias.fill_(-16)
+    module = GGUFTorchLinear(
+        bits="q6_k", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=bias,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    module.gguf_fused_cuda_max_rows = 0
+    inputs = torch.full((rows, 256), 2**-8, device="cuda", dtype=torch.bfloat16)
+    dense = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(blocks, "Q6_K")
+    ).to(device="cuda", dtype=torch.float64)
+    oracle = inputs.double() @ dense.T
+    if bias:
+        oracle += module.bias.double()
+    assert oracle[0, 0].item() == (484 if bias else 500)
+
+    with torch.inference_mode():
+        first = module(inputs)
+        repeated = module(inputs)
+    torch.cuda.synchronize()
+
+    assert first.dtype == torch.bfloat16
+    assert torch.isfinite(first).all()
+    assert torch.equal(first, repeated)
+    torch.testing.assert_close(first, oracle.to(torch.bfloat16), rtol=2e-3, atol=2e-3)
+    assert not any(
+        torch.is_tensor(value) and value.numel() >= module.in_features * module.out_features
+        for value in vars(module).values()
+    )

@@ -1684,12 +1684,16 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K") and x_flat.dtype == torch.float16:
-            blocks, _, _ = self._reshape_blocks(device=x_flat.device)
-            if self._k_scale_overflows(blocks, x_flat.dtype):
-                # A decoded K-quant weight can exceed FP16 while its dot product
-                # remains finite. Keep the temporary dense fallback wide until
-                # the output (including bias) is rounded once.
+        if self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K") and x_flat.dtype in (torch.float16, torch.bfloat16):
+            # BF16 weight rounding can amplify cancellation across signed
+            # subblocks. FP16 needs a wide path only for out-of-range terms.
+            use_fp32 = x_flat.dtype == torch.bfloat16
+            if not use_fp32:
+                blocks, _, _ = self._reshape_blocks(device=x_flat.device)
+                use_fp32 = self._k_scale_overflows(blocks, x_flat.dtype)
+            if use_fp32:
+                # Keep the temporary dense fallback wide until the output
+                # (including bias) is rounded once.
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
                 bias_wide = None if bias is None else bias.to(device=x_flat.device, dtype=torch.float32)
                 return matmul_fp32_reduce(x_flat.float(), weight, bias=bias_wide).to(x_flat.dtype)
