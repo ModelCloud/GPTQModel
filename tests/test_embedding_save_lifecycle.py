@@ -9,6 +9,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel.models import writer
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.writer import _save_module_replacement_safetensors
 
@@ -54,6 +55,40 @@ def test_embedding_replacement_rewrites_only_affected_shard(tmp_path):
         assert set(handler.keys()) == {"embed_tokens.qweight", "final_norm.weight"}
     with safe_open(str(source / rewritten[0]), framework="pt", device="cpu") as handler:
         assert set(handler.keys()) == {"embed_tokens.weight", "final_norm.weight"}
+
+
+def test_embedding_replacement_write_failure_keeps_existing_shard(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    saved = tmp_path / "saved"
+    source.mkdir()
+    saved.mkdir()
+    shard_name = "model.safetensors"
+    tensors = {"embed_tokens.weight": torch.ones(4, 3), "final_norm.weight": torch.ones(3)}
+    save_file(tensors, str(source / shard_name))
+    save_file(tensors, str(saved / shard_name))
+    original = (saved / shard_name).read_bytes()
+
+    model = nn.Module()
+    model.embed_tokens = nn.Module()
+    model.embed_tokens.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
+    turtle = SimpleNamespace(
+        model_local_path=str(source),
+        _weight_map={"embed_tokens.weight": shard_name, "final_norm.weight": shard_name},
+    )
+
+    def fail_after_open(_tensors, path, metadata):
+        with open(path, "wb") as handle:
+            handle.write(b"partial shard")
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(writer, "save_file", fail_after_open)
+    with pytest.raises(OSError, match="injected write failure"):
+        _save_module_replacement_safetensors(
+            model, turtle, ["embed_tokens"], save_dir=str(saved), metadata={"format": "pt"}
+        )
+
+    assert (saved / shard_name).read_bytes() == original
+    assert sorted(path.name for path in saved.iterdir()) == [shard_name]
 
 
 @pytest.mark.parametrize(
@@ -144,6 +179,7 @@ def test_model_save_routes_embedding_only_lifecycle_with_metadata(tmp_path):
     model._model_free_weight_only_replacements_only = True
     model.quant_override_files = {}
     model.quant_region_timer = None
+    model.quantize_config = SimpleNamespace(dynamic=None)
     captured = {}
     model.save_quantized_embeddings = lambda **kwargs: captured.update(kwargs)
     model.save_quantized = lambda **_kwargs: (_ for _ in ()).throw(

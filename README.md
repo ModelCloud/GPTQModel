@@ -1150,6 +1150,9 @@ model.requantize(calibration=calibration, norm=NormConfig(teacher="teacher-model
 model.save("norm-tuned")
 ```
 
+The embedding checkpoint writer [replaces affected shards atomically](docs/embedding-checkpoint-shard-replacement.md),
+including when saving over an existing checkpoint.
+
 A combined embedding/Norm call remains supported for training-capable GPTQ-v2
 models.
 
