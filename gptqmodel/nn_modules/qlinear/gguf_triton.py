@@ -924,6 +924,11 @@ def _launch(
     output: torch.Tensor,
     *args,
 ) -> torch.Tensor:
+    if x.device.type != "cuda":
+        raise RuntimeError("GGUF Triton fused matmul requires CUDA/ROCm tensors.")
+    if x.shape[0] == 0 or output.shape[1] == 0:
+        return output
+
     def grid(meta):
         return (
             triton.cdiv(x.shape[0], meta["BLOCK_SIZE_M"]),
@@ -941,6 +946,11 @@ def _launch_with_meta(
     *args,
     **meta,
 ) -> torch.Tensor:
+    if x.device.type != "cuda":
+        raise RuntimeError("GGUF Triton fused matmul requires CUDA/ROCm tensors.")
+    if x.shape[0] == 0 or output.shape[1] == 0:
+        return output
+
     def grid(meta_args):
         return (
             triton.cdiv(x.shape[0], meta_args["BLOCK_SIZE_M"]),

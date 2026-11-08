@@ -502,3 +502,46 @@ direct old and new biased paths measured:
 The delta counts temporary outputs and bias conversion, not retained
 weights. The module retained zero expanded-weight bytes after repeated
 forwards. The wider epilogue costs roughly 0.03 ms in this measured shape.
+
+### Direct GGUF fused launchers
+
+The exported `fused_q*_matmul` functions and fixed launch wrappers share
+`_launch` or `_launch_with_meta`. They now return an already allocated empty
+output when rows or output columns are zero, before Triton's autotuner sees a
+zero-sized grid. CPU inputs still raise the CUDA/ROCm device error.
+
+```mermaid
+flowchart TD
+    A["GGUF fused or fixed wrapper allocates output"] --> B["_launch or _launch_with_meta"]
+    B --> C{"CUDA or ROCm input?"}
+    C -- "No" --> X["Raise RuntimeError"]
+    C -- "Yes" --> D{"Rows or columns zero?"}
+    D -- "Yes" --> E["Return empty output with requested dtype"]
+    D -- "No" --> F["Build grid and launch Triton kernel"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Direct fused/fixed empty input | `gguf_triton.py:923-949` built and passed a zero-sized grid to the autotuner or kernel; the fused Q4_K wrapper raised `ValueError: expected a positive input` | The shared launch helpers return the empty output before grid construction |
+| Direct CPU empty input | Triton rejected CPU tensors | The shared launch helpers raise a CUDA/ROCm requirement error |
+
+The line references describe the old launch helpers. The direct GPU test
+checks both launch helpers, requested FP32 output, zero rows, zero columns,
+and the CPU error path. Ordinary nonempty GGUF numerics remain covered by
+the independent GGUF decoder tests above.
+
+On the NVIDIA GB10 (SM 12.1), the direct Q4_K K=N=1024 FP16 path with
+nonempty resident inputs measured as follows with five warmups and the median
+of seven sets of 20 CUDA-event timed calls. The old and new paths used the
+same fused kernel; only the launch guard differed.
+
+| Rows | Previous launch | Guarded launch | Peak allocator delta |
+| --- | ---: | ---: | ---: |
+| 1 | 0.0633 ms | 0.0645 ms | 0.002 MiB |
+| 16 | 0.0632 ms | 0.0647 ms | 0.031 MiB |
+
+The new guard retains no additional weight data or temporary allocation.
+This direct-launch contract was introduced by
+[PR #3667](https://github.com/ModelCloud/GPTQModel/pull/3667).
