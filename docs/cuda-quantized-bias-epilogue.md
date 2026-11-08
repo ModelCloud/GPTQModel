@@ -543,3 +543,5 @@ same fused kernel; only the launch guard differed.
 | 16 | 0.0632 ms | 0.0647 ms | 0.031 MiB |
 
 The new guard retains no additional weight data or temporary allocation.
+This direct-launch contract was introduced by
+[PR #3667](https://github.com/ModelCloud/GPTQModel/pull/3667).
