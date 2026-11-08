@@ -198,7 +198,8 @@
     "yi": "LlamaQModel",
     "zamba": "ZambaQModel",
     "zamba2": "Zamba2QModel",
-    "zdtaichu5_0": "ZDTaichu5QModel"
+    "zdtaichu5_0": "ZDTaichu5QModel",
+    "dots3_note": "Dots3NoteQModel"
   },
   "cases": {
     "AfMoeQModel/gptq": {
@@ -2454,6 +2455,23 @@
         ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
         ["linear_attn.out_proj"],
         ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
+      ]
+    },
+    "Dots3NoteQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj", "self_attn.g_proj", "self_attn.indexer.wq_b", "self_attn.indexer.wk", "self_attn.indexer.weights_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
       ]

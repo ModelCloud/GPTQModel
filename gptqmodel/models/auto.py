@@ -88,6 +88,7 @@ from .definitions.cohere2_moe import Cohere2MoeQModel  # noqa: E402
 from .definitions.cohere_compass import CohereCompassQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
+from .definitions.dots3_note import Dots3NoteQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
@@ -246,6 +247,7 @@ else:
 
 
 MODEL_MAP = {
+    "dots3_note": Dots3NoteQModel,
     "agnes": AgnesQModel,
     "apertus": ApertusQModel,
     "apertus1p5": Apertus1p5QModel,
