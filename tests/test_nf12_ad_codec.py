@@ -201,8 +201,8 @@ def test_near_zero_outputs_do_not_trip_the_relative_bound():
 
 
 def test_linear_e2e_matches_fp32_oracle_on_cpu():
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
 
     torch.manual_seed(0)
     n, k, m = 256, 256, 8
