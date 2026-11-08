@@ -117,8 +117,7 @@ def test_paroquant_module_fused_and_dense_bias_paths(dtype, rows, monkeypatch):
     torch.testing.assert_close(dense, expected, rtol=0, atol=0)
     assert all(ref() is None for ref in dequant_refs)
 
-    # The fused path has no backward for a trainable bias; the dense wide path
-    # preserves the pre-existing bias gradient contract.
+    # The fused path has no backward for differentiable inputs or bias.
     module.bias.requires_grad_(True)
     kind = "decode" if rows == 1 else "prefill"
     assert module._select_plan(kind, x) == "dense"
@@ -132,6 +131,20 @@ def test_paroquant_module_fused_and_dense_bias_paths(dtype, rows, monkeypatch):
     direct.float().sum().backward()
     torch.testing.assert_close(direct, expected, rtol=0, atol=0)
     torch.testing.assert_close(module.bias.grad, torch.full_like(bias, rows), rtol=0, atol=0)
+
+    module.bias.requires_grad_(False)
+    input_with_grad = x.detach().clone().requires_grad_(True)
+    assert module._select_plan(kind, input_with_grad) == "dense"
+    differentiable = module(input_with_grad)
+    differentiable.float().sum().backward()
+    torch.testing.assert_close(differentiable, expected, rtol=0, atol=0)
+    torch.testing.assert_close(input_with_grad.grad, torch.full_like(x, 128), rtol=0, atol=0)
+
+    direct_input = x.detach().clone().requires_grad_(True)
+    direct = module._run_plan("decode_fused", direct_input)
+    direct.float().sum().backward()
+    torch.testing.assert_close(direct, expected, rtol=0, atol=0)
+    torch.testing.assert_close(direct_input.grad, torch.full_like(x, 128), rtol=0, atol=0)
 
 
 def test_paroquant_dense_preserves_stored_bias_precision_before_bf16_rounding():

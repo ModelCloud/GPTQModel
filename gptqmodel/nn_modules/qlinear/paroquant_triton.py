@@ -148,14 +148,14 @@ class ParoQuantTritonLinear(ParoLinear):
         """Run the fused Triton kernel optimized for larger prefill batches."""
         return paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros, self.bias)
 
+    def _needs_dense_autograd(self, rotated: torch.Tensor) -> bool:
+        return torch.is_grad_enabled() and (
+            rotated.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        )
+
     def _run_plan(self, plan: str, rotated: torch.Tensor) -> torch.Tensor:
         """Dispatch one named execution plan."""
-        if (
-            plan in {"decode_fused", "prefill_fused"}
-            and torch.is_grad_enabled()
-            and self.bias is not None
-            and self.bias.requires_grad
-        ):
+        if plan in {"decode_fused", "prefill_fused"} and self._needs_dense_autograd(rotated):
             return self._forward_triton_dense(rotated)
         if plan == "dense":
             return self._forward_triton_dense(rotated)
@@ -187,7 +187,7 @@ class ParoQuantTritonLinear(ParoLinear):
 
     def _select_plan(self, kind: str, rotated: torch.Tensor) -> str:
         """Pick the best plan, bounded by a bias toward the default fused path."""
-        if torch.is_grad_enabled() and self.bias is not None and self.bias.requires_grad:
+        if self._needs_dense_autograd(rotated):
             return "dense"
         default_plan = "decode_fused" if kind == "decode" else "prefill_fused"
         if self.training or not self.paroquant_triton_autotune_enabled:
