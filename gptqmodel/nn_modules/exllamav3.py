@@ -100,6 +100,20 @@ class ExllamaV3Linear(nn.Module):
             tensors=tensors,
         )
 
+    def _bias_version(self) -> Optional[int]:
+        """Version counter of the logical bias owned by this module.
+
+        ``_ensure_inner`` hands ``LinearEXL3`` a *widened copy* of ``bias`` when
+        ``out_features`` is padded, so the kernel no longer aliases the live
+        parameter. In-place writes (``bias.add_``, adapter merges, scale
+        folding) would then be invisible. ``Tensor._version`` bumps on every
+        in-place mutation, so it cheaply distinguishes "alias" from "stale copy".
+        """
+        bias = getattr(self, "bias", None)
+        if bias is None or bias.device.type == "meta":
+            return None
+        return int(bias._version)
+
     def _current_signature(self) -> tuple[Any, ...]:
         trellis = getattr(self, "trellis", None)
         if trellis is None or trellis.device.type == "meta":
@@ -112,6 +126,8 @@ class ExllamaV3Linear(nn.Module):
                 signature.append(None)
                 continue
             signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
+        # Only the padded path copies the bias, so only that path needs liveness.
+        signature.append(self._bias_version())
         return tuple(signature)
 
     def _drop_inner(self) -> None:

@@ -274,6 +274,37 @@ def test_native_forward_crops_to_logical_outputs(outputs, bias):
 
 @pytest.mark.cuda
 @NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [128, 576, 1056])
+def test_native_padded_bias_stays_live(outputs):
+    """An in-place ``bias`` write must reach the kernel output.
+
+    The padded shape makes the backend hand ``LinearEXL3`` a *widened copy* of
+    the bias. A copy is frozen at ``_ensure_inner`` time, so without an explicit
+    refresh a later ``bias.add_`` (adapters, calibration, scale folding) is
+    silently ignored for every non-128-aligned width.
+    """
+    device = "cuda"
+    packed = _packed(outputs, bias=True)
+    module = _native_module(packed, outputs, device)
+    gen = torch.Generator().manual_seed(23)
+    x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device=device, dtype=torch.float16)
+
+    with torch.inference_mode():
+        before = module(x).float().clone()
+    with torch.no_grad():
+        module.bias.add_(10.0)
+    with torch.inference_mode():
+        after = module(x).float()
+
+    # Every visible output moves by the bias delta. FP16 rounding of the
+    # pre-add accumulator allows a couple of ulps at this magnitude (10.0),
+    # but a frozen padded copy shows an exact 0.0 shift instead.
+    delta = after - before
+    torch.testing.assert_close(delta, torch.full_like(delta, 10.0), rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
 @pytest.mark.parametrize("outputs", [576, 1056])
 def test_native_rejects_stored_bias_geometry(outputs):
     """A bias already widened to the padded width is a checkpoint bug."""
