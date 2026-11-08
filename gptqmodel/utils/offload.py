@@ -182,6 +182,20 @@ def offload_to_safetensors_reference(
         raise ValueError("safetensors reference module name differs from the model")
     else:
         full_name = module_name
+
+    module_offload_dir = os.path.join(disk_path, full_name)
+    source_real = os.path.realpath(source)
+    offload_real = os.path.realpath(module_offload_dir)
+    try:
+        source_in_offload_dir = os.path.commonpath((source_real, offload_real)) == offload_real
+    except ValueError:  # Different drives on Windows cannot overlap.
+        source_in_offload_dir = False
+    if source_in_offload_dir:
+        raise ValueError(
+            "safetensors reference source is inside the target offload directory, "
+            "which is cleared before the index is written"
+        )
+
     state = module.state_dict()
     if not state:
         raise ValueError("safetensors reference module has no persistent tensors")
@@ -279,7 +293,6 @@ def offload_to_safetensors_reference(
     ):
         raise ValueError("safetensors reference tensor ranges are not contiguous")
 
-    module_offload_dir = os.path.join(disk_path, full_name)
     _prepare_offload_directory(module_offload_dir)
     index_path = os.path.join(module_offload_dir, "index.json")
     temporary = f"{index_path}.{os.getpid()}.tmp"
@@ -288,8 +301,6 @@ def offload_to_safetensors_reference(
             json.dump(index, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
-            if hasattr(os, "fchmod"):
-                os.fchmod(handle.fileno(), 0o644)
             os.fsync(handle.fileno())
         os.replace(temporary, index_path)
         if os.name == "posix":

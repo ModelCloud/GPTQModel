@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import os
+import stat
 import struct
 import threading
 from pathlib import Path
@@ -2280,3 +2282,50 @@ def test_safetensors_reference_offload_rejects_non_persistent_buffers(tmp_path):
         )
 
     assert all(not tensor.is_meta for tensor in model.linear.state_dict().values())
+
+
+def test_safetensors_reference_offload_keeps_source_inside_target_directory(tmp_path):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    original_state = _clone_state_dict(model.linear)
+    offload_root = tmp_path / "offload_root"
+    module_dir = offload_root / "linear"
+    module_dir.mkdir(parents=True)
+    source_path = module_dir / "source.safetensors"
+    save_file(original_state, source_path)
+    source_bytes = source_path.read_bytes()
+
+    with pytest.raises(ValueError, match="source is inside the target offload directory"):
+        offload_to_safetensors_reference(
+            module=model.linear,
+            model=model,
+            source_path=source_path,
+            disk_path=str(offload_root),
+        )
+
+    assert source_path.read_bytes() == source_bytes
+    assert sorted(path.name for path in module_dir.iterdir()) == [source_path.name]
+    for name, tensor in model.linear.state_dict().items():
+        torch.testing.assert_close(tensor, original_state[name])
+
+
+def test_safetensors_reference_index_honors_process_umask(tmp_path, monkeypatch):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(_clone_state_dict(model.linear), source_path)
+    ordinary_file = tmp_path / "ordinary-file"
+    ordinary_file.write_bytes(b"created under the process umask")
+
+    def reject_forced_mode(*_args):
+        raise AssertionError("reference index must honor the process umask")
+
+    monkeypatch.setattr(os, "fchmod", reject_forced_mode, raising=False)
+    offload_root = tmp_path / "offload_root"
+    offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(offload_root),
+    )
+
+    index_mode = stat.S_IMODE((offload_root / "linear" / "index.json").stat().st_mode)
+    assert index_mode == stat.S_IMODE(ordinary_file.stat().st_mode)
