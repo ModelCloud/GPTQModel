@@ -1684,10 +1684,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.gguf_tensor_qtype == "Q6_K" and x_flat.dtype == torch.float16:
+        if self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K") and x_flat.dtype == torch.float16:
             blocks, _, _ = self._reshape_blocks(device=x_flat.device)
             if self._k_scale_overflows(blocks, x_flat.dtype):
-                # A decoded Q6_K weight can exceed FP16 while its dot product
+                # A decoded K-quant weight can exceed FP16 while its dot product
                 # remains finite. Keep the temporary dense fallback wide until
                 # the output (including bias) is rounded once.
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)

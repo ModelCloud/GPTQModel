@@ -138,7 +138,7 @@ while a small FP16 activation still gives a finite output.
 The same wide-weight case also affected `GGUFTorchLinear`: its dense and
 chunked CUDA paths returned infinity for a finite dot product. They now use
 the cached Q6_K bound and FP32 arithmetic only when needed, as shown in the
-[K-scale overflow cache flow](gguf-k-scale-overflow-cache.md#q6_k-finite-output-guard).
+[K-scale overflow cache flow](gguf-k-scale-overflow-cache.md#finite-output-cuda-fallback-for-k-quants).
 
 `_build_triton_cache` computes Q6_K effective scales in FP32. It keeps the
 compact scale array in FP32 when the largest possible signed-code product for

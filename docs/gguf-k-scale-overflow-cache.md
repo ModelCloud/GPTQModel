@@ -68,7 +68,7 @@ the new key does not change that allocation or retain it after the forward.
 This cache contract was corrected in
 [PR #3666](https://github.com/ModelCloud/GPTQModel/pull/3666).
 
-## Q6_K finite-output guard
+## Finite-output CUDA fallback for K-quants
 
 Q6_K multiplies an FP16 block scale `d`, a signed 8-bit subscale, and a signed
 code in `[-32, 31]`. A decoded weight can exceed FP16 even when a small FP16
@@ -77,19 +77,26 @@ packed-source keyed boolean cache for a Q6_K bound: the absolute block scale
 times the largest absolute signed subscale times `32`. The bound is computed
 from packed metadata, without materializing a full weight.
 
+Q4_K and Q5_K have the same finite-output case when a completed decoded
+weight exceeds FP16. Their existing bound now also selects FP32 arithmetic
+for `_forward_dequant_matmul`; the chunked path was already protected.
+
 ```mermaid
 flowchart TD
     A["GGUFTorchLinear.forward selects dense or chunked CUDA path"] --> B["_reshape_blocks from qweight"]
-    B --> C["_k_scale_overflows checks Q6_K d, signed subscales, and code bound"]
-    C --> D{"Decoded term can exceed FP16 range?"}
-    D -- "Yes, dense" --> E["_forward_dequant_matmul uses temporary FP32 weight and FP32 matmul"]
-    D -- "Yes, chunked" --> F["_forward_fused_k reconstructs FP32 chunks and accumulates in FP32"]
-    D -- "No" --> G["Keep ordinary FP16 operand paths"]
-    E --> H["Apply optional bias and round output once to FP16"]
-    F --> H
-    G --> H
-    I["Changed packed qweight"] --> J["tensor_cache_key invalidates old overflow answer"]
-    J --> C
+    B --> C{"GGUF K-quant format?"}
+    C -- "Q4_K or Q5_K" --> D["_k_scale_overflows checks d and dmin times 63 times code maximum"]
+    C -- "Q6_K" --> E["_k_scale_overflows checks d times signed subscale times 32"]
+    D --> F{"Decoded term can exceed FP16 range?"}
+    E --> F
+    F -- "Yes, dense" --> G["_forward_dequant_matmul uses temporary FP32 weight and FP32 matmul"]
+    F -- "Yes, chunked" --> H["_forward_fused_k reconstructs FP32 chunks and accumulates in FP32"]
+    F -- "No" --> I["Keep ordinary FP16 operand paths"]
+    G --> J["Apply optional bias and round output once to FP16"]
+    H --> J
+    I --> J
+    K["Changed packed qweight"] --> L["tensor_cache_key invalidates old overflow answer"]
+    L --> C
     B -. "Old FP16 decoded weight" .-> X["Infinity despite finite FP64 dot product"]
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
     class X failure
@@ -97,7 +104,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Dense fallback | `gguf.py:1684-1688` dequantized Q6_K into the activation dtype before matmul | `_forward_dequant_matmul` keeps the temporary Q6_K weight and matmul in FP32 only when the bound requires it |
+| Dense fallback | `gguf.py:1684-1688` dequantized Q4_K/Q5_K/Q6_K into the activation dtype before matmul | `_forward_dequant_matmul` keeps the temporary K-quant weight and matmul in FP32 only when the bound requires it |
 | Chunked CUDA path | `gguf.py:1750-1759` checked the range only for Q4_K/Q5_K | `_forward_fused_k` checks Q6_K too and uses FP32 chunks for wide weights |
 | Cached decision | `gguf.py:1716-1736` only computed the Q4_K/Q5_K bound | `_compute_k_scale_overflow` includes the Q6_K signed-code bound; the existing source key invalidates it on normal packed-weight writes |
 
@@ -108,6 +115,11 @@ regression covers dense and chunked paths, bias, one/eight rows, signed codes,
 repeated forwards, gradient propagation, and packed-weight replacement.
 Dense fallback weights are temporary for the current matmul; the chunked path
 keeps its bounded tile, and neither path installs an expanded weight cache.
+For Q4_K/Q5_K with `d=1000` and maximum code/scale, the old dense CUDA path
+also returned infinity. Their FP64 references for one FP16 row are
+`1845.703125` and `3814.453125`; the corrected visible FP16 outputs are
+`1846` and `3814`. GPU tests cover both formats, bias, one/eight rows,
+repeatability, and the absence of a persistent expanded weight.
 
 On an NVIDIA GB10 with K=N=1024 and one resident FP16 row, five warmups and
 the median of seven groups of 20 synchronized wall-clock forwards measured:
