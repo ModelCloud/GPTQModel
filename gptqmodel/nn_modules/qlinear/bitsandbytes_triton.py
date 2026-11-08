@@ -148,7 +148,20 @@ def _bnb_4bit_gemm_kernel(
         )
         hi = ((packed >> 4) & 0xF).to(tl.int32)
         lo = (packed & 0xF).to(tl.int32)
-        codes = tl.interleave(hi, lo)
+        if K % 2:
+            # For odd K, alternate rows begin in the low nibble of a byte.
+            # Their next code is the high nibble of the following byte.
+            odd_row = ((cols * K) & 1) != 0
+            next_packed = tl.load(
+                q_ptr + (cols[:, None] * K + k0) // 2 + half[None, :] + 1,
+                mask=nmask[:, None] & odd_row[:, None] & ((k0 + 2 * half + 1)[None, :] < K),
+                other=0,
+            )
+            first = tl.where(odd_row[:, None], lo, hi)
+            second = tl.where(odd_row[:, None], (next_packed >> 4).to(tl.int32), lo)
+            codes = tl.interleave(first, second)
+        else:
+            codes = tl.interleave(hi, lo)
         valid = nmask[:, None] & kvalid[None, :]
         am = tl.load(
             am_ptr + (cols[:, None] * K + ks[None, :]) // BS, mask=valid, other=0.0,
@@ -189,7 +202,18 @@ def _bnb_4bit_dequant_kernel(
     )
     hi = ((packed >> 4) & 0xF).to(tl.int32)
     lo = (packed & 0xF).to(tl.int32)
-    codes = tl.interleave(hi, lo)
+    if K % 2:
+        odd_row = ((cols * K) & 1) != 0
+        next_packed = tl.load(
+            q_ptr + (cols[:, None] * K + pid_k * BK) // 2 + half[None, :] + 1,
+            mask=(cols < N)[:, None] & odd_row[:, None] & ((pid_k * BK + 2 * half + 1)[None, :] < K),
+            other=0,
+        )
+        first = tl.where(odd_row[:, None], lo, hi)
+        second = tl.where(odd_row[:, None], (next_packed >> 4).to(tl.int32), lo)
+        codes = tl.interleave(first, second)
+    else:
+        codes = tl.interleave(hi, lo)
     am = tl.load(
         am_ptr + (cols[:, None] * K + ks[None, :]) // BS, mask=valid, other=0.0,
     ).to(tl.float32)
