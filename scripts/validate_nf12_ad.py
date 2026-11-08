@@ -458,7 +458,7 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         w = (torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.02).contiguous()
         packed, esc, base = rt.encode(w)
         packed_bytes = packed.numel() + esc.numel() * 2 + 1
-        for m in (1, 2, 8, 16, 64, 256):
+        for m in (1, 2, 8, 16, 64, 128, 256):
             x = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.05
             t_nf, _ = timed(lambda: rt.linear(x, packed, esc, base), device)
             t_bf, _ = timed(lambda: torch.matmul(x, w.t()), device)

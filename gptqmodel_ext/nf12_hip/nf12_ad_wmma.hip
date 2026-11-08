@@ -424,16 +424,22 @@ static WmmaLaunchPlan wmma_launch_plan(int64_t n, int64_t k, int64_t m) {
 
   const int full_tiles = static_cast<int>((m + 15) / 16);
   // At kMt=8 the 8x8 FP32 accumulator costs 64 VGPRs and the kernel lands at
-  // 167 VGPRs / 9 waves per SIMD. When K is long enough that a second packed
-  // read is cheap relative to the matrix-core work, and the launch is short of
-  // CTAs, halve the tile count and split M across CTAs. Measured on gfx1201:
-  // 8192x8192 m=128 0.68 -> 0.88x and 14336x4096 0.79 -> 0.83x, while the
-  // short-K and wide-N shapes stay on the 8-tile kernel and do not regress.
-  // Above m=128 there are already 2 M-blocks, so the launch is not starved and
-  // splitting further only re-reads the packed weight (measured neutral at
-  // m=256, 2 reads vs 4); keep the 8-tile kernel there.
+  // 167 VGPRs, which fits about one CTA per CU. Halving the tile count and
+  // splitting M across CTAs doubles the packed read but restores the occupancy,
+  // and that trade only pays when the second read is cheap. Two cases qualify:
+  //
+  //   * long K, where the matrix-core work amortises the extra read
+  //     (8192x8192 m=128 0.68 -> 0.88x, 14336x4096 0.79 -> 0.83x);
+  //   * a narrow N, where the doubled grid is still only ~2.5 waves
+  //     (4096x4096 m=128: 67.2 -> 55.0 us, 896x4864 m=128: 30.2 -> 20.6 us).
+  //
+  // 2048x8192 has 64 column blocks, so splitting M makes 128 CTAs *and* reads
+  // the weight twice, which measured 58.6 -> 85.2 us; it stays on 8 tiles.
+  // Wide N (>64 blocks) is excluded outright, and above m=128 there are already
+  // two M-blocks so the launch is not starved and splitting only re-reads.
   const int64_t k_blocks = k / kSuperAtomCols;
-  const bool split_m = full_tiles > 4 && full_tiles <= 8 && k_blocks >= 128 && n_blocks <= 64;
+  const bool split_m = full_tiles > 4 && full_tiles <= 8 && n_blocks <= 64 &&
+                       (k_blocks >= 128 || n_blocks <= 40);
   const int tiles = split_m ? 4 : full_tiles;
   // The dispatcher clamps anything above kMaxTiles to the kMaxTiles kernel, so
   // the tokens one CTA actually covers is min(tiles, kMaxTiles)*16. Deriving
