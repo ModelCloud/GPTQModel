@@ -44,3 +44,5 @@ flowchart TD
 The native inner keeps the packed trellis and scale vectors. Its padded bias is
 a small output vector, not a dense reconstructed weight matrix. The original
 inference-created bias is no longer retained by the module after rebinding.
+
+Introduced in [PR #3625](https://github.com/ModelCloud/GPTQModel/pull/3625).
