@@ -177,10 +177,10 @@ def _oracle(x, weights, biases, spec):
         maximum = values.abs().amax(-1, keepdim=True)
         scale = torch.where(maximum > 0, maximum / 448, 1.0)
         values = (values / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale
-        # The FP8 kernel adds bias in its FP32 accumulator before output
-        # rounding, unlike the post-output bias addition of the other paths.
-        return torch.cat([(values @ w.float() + b.float()).to(x.dtype) for w, b in zip(weights, biases)], -1)
-    return torch.cat([(values @ w.float()).to(x.dtype) + b for w, b in zip(weights, biases)], -1)
+    # Compute the mathematical result independently in FP32, then round once
+    # to the visible dtype. Mirroring a kernel's intermediate BF16 rounding
+    # can make the oracle itself differ by a full BF16 step near a bias tie.
+    return torch.cat([(values @ w.float() + b.float()).to(x.dtype) for w, b in zip(weights, biases)], -1)
 
 
 @pytest.mark.parametrize("cls,family,dtype", list(_cases()))
