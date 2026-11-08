@@ -11,17 +11,24 @@ import weakref
 
 import pytest
 import torch
+from torch.utils.cpp_extension import CUDA_HOME
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.models.fusion import FusionDecision, _FusionGroup, _incompatible
 from gptqmodel.models.fusion_kernels import kernel_specs
+from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
+from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
 from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.cpu_features import has_avx512_bf16
+from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
 from tests.module_tree.test_fusion_device_inference import _target
 
 
@@ -75,6 +82,15 @@ def _contract(cls):
 
 def _available(cls, family, dtype):
     device = _target(family)
+    # A visible NVIDIA device does not imply that optional native extensions
+    # can be loaded. Prebuilt ops still run without a local CUDA toolkit.
+    if family == DEVICE.CUDA and CUDA_HOME is None:
+        if cls in (AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear) and not awq_runtime_available():
+            reason = awq_runtime_error().partition(" | ")[0]
+            pytest.skip(f"Native AWQ extension unavailable: {reason}")
+        if cls in (MarlinLinear, AwqMarlinLinear) and not marlin_runtime_available(dtype):
+            reason = marlin_runtime_error(dtype).partition(" | ")[0]
+            pytest.skip(f"Native Marlin extension unavailable for {dtype}: {reason}")
     bits, group_size, pack_dtype = _contract(cls)
     ok, error = cls.validate(bits=bits, group_size=group_size, sym=True, desc_act=False,
                              pack_dtype=pack_dtype, dtype=dtype, device=device,
@@ -339,15 +355,16 @@ def test_auto_keeps_the_native_optimized_kernel(family, method, fmt, dtype, reco
     selected = importer.select_quant_linear(bits=4, group_size=128, sym=True, desc_act=False,
                                             pack_dtype=torch.int32, dtype=dtype, device=device,
                                             backend=BACKEND.AUTO, format=fmt, quant_method=method)
+    cpu_avx512 = has_avx512_bf16()
     expected = {
-        (DEVICE.CPU, METHOD.GPTQ): ("TorchAtenLinear", "TorchCpuAvx512Linear"),
-        (DEVICE.CPU, METHOD.AWQ): ("TorchAtenAwqLinear", "TorchCpuAvx512AwqLinear"),
+        (DEVICE.CPU, METHOD.GPTQ): ("TorchAtenLinear", "TorchCpuAvx512Linear" if cpu_avx512 else "TorchAtenLinear"),
+        (DEVICE.CPU, METHOD.AWQ): ("TorchAtenAwqLinear", "TorchCpuAvx512AwqLinear" if cpu_avx512 else "TorchAtenAwqLinear"),
         (DEVICE.CUDA, METHOD.GPTQ): ("MarlinLinear", "MarlinLinear"),
         (DEVICE.CUDA, METHOD.AWQ): ("AwqMarlinLinear", "AwqMarlinLinear"),
         (DEVICE.ROCM, METHOD.GPTQ): ("TorchLinear", "TorchLinear"),
         (DEVICE.ROCM, METHOD.AWQ): ("AwqGEMMTritonLinear", "AwqTorchLinear"),
     }[family, method][dtype == torch.bfloat16]
-    # CPU AVX512 is hardware-specific; this check intentionally qualifies Zen5.
+    # AVX512-BF16 is hardware-specific; AUTO must preserve its native selection when available.
     assert selected.__name__ == expected
     assert selected in SPECS
     record_property("auto_kernel", expected)
