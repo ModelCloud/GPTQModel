@@ -9,6 +9,7 @@ silently used all of them. These tests pin the helper contract without needing
 accelerators: the visible-device count is monkeypatched.
 """
 
+import pytest
 import torch
 
 from gptqmodel.models.loader import (
@@ -16,7 +17,10 @@ from gptqmodel.models.loader import (
     _explicit_requested_devices,
     _layerwise_device_count,
     _layerwise_device_strings,
+    _resolve_default_layerwise_device,
 )
+from gptqmodel.utils import importer
+from gptqmodel.utils.backend import BACKEND
 
 
 def _fake_visible(monkeypatch, n):
@@ -41,14 +45,80 @@ def test_duplicate_explicit_devices_do_not_expand_to_every_gpu(monkeypatch):
     assert _layerwise_device_strings(requested, 1) == ["cuda:1"]
 
 
+def test_single_explicit_device_sequence_does_not_expand(monkeypatch):
+    _fake_visible(monkeypatch, 4)
+    requested = ("cuda:1",)
+
+    assert _explicit_requested_devices(requested) == [torch.device("cuda:1")]
+    assert _layerwise_device_count(requested) == 1
+    assert _layerwise_device_strings(requested, 1) == ["cuda:1"]
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ((0, 1), ["cuda:0", "cuda:1"]),
+        (("cuda:1", 0), ["cuda:1", "cuda:0"]),
+        ((0,), ["cuda:0"]),
+    ],
+)
+def test_integer_ordinals_keep_the_requested_subset(monkeypatch, requested, expected):
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+    monkeypatch.setattr(importer, "_device_capability", lambda _target: (8, 9))
+
+    assert _explicit_requested_devices(requested) == [torch.device(target) for target in expected]
+    assert _layerwise_device_count(requested) == len(expected)
+    assert _layerwise_device_strings(requested, len(expected)) == expected
+
+
+def test_selected_devices_validate_each_gpu_capability(monkeypatch):
+    monkeypatch.setattr(
+        importer,
+        "_device_capability",
+        lambda target: (8, 9) if target.index == 0 else (9, 0),
+    )
+    with pytest.raises(ValueError, match="different GPU compute capabilities"):
+        _explicit_requested_devices(("cuda:0", "cuda:1"))
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (("cuda:1",), ["cuda:1"]),
+        (("cuda:1", "cuda:1"), ["cuda:1"]),
+        ((0, 1), ["cuda:0", "cuda:1"]),
+    ],
+)
+def test_default_loader_resolution_preserves_explicit_sequences(monkeypatch, requested, expected):
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+    resolved = _resolve_default_layerwise_device(requested, BACKEND.AUTO)
+
+    assert resolved == tuple(torch.device(target) for target in expected)
+    assert _layerwise_device_count(resolved) == len(expected)
+    assert _layerwise_device_strings(resolved, len(expected)) == expected
+
+
 def test_explicit_devices_rejects_non_ordinal_selectors():
-    """An abstract family, a bare name, CPU, or a single entry keeps the old path."""
+    """Abstract families and bare names keep the family-wide path."""
     assert _explicit_layerwise_devices("cuda") is None
     assert _explicit_layerwise_devices("cuda:1") is None
-    assert _explicit_layerwise_devices(("cuda", "cuda:1")) is None
-    assert _explicit_layerwise_devices(("cuda:1", "cpu")) is None
-    # a single-element sequence is not a placement request
-    assert _explicit_layerwise_devices(("cuda:1",)) is None
+    assert _explicit_layerwise_devices(("cuda", "cuda")) is None
+    assert _explicit_layerwise_devices(("cuda",)) is None
+
+
+@pytest.mark.parametrize("requested", [("cuda:1", "cuda"), ("cuda:1", "cpu")])
+def test_mixed_concrete_and_abstract_devices_fail_before_broadening(monkeypatch, requested):
+    _fake_visible(monkeypatch, 4)
+    with pytest.raises(ValueError, match="cannot mix concrete accelerator ordinals"):
+        _explicit_requested_devices(requested)
+    with pytest.raises(ValueError, match="cannot mix concrete accelerator ordinals"):
+        _layerwise_device_count(requested)
+    with pytest.raises(ValueError, match="cannot mix concrete accelerator ordinals"):
+        _layerwise_device_strings(requested, 4)
+    with pytest.raises(ValueError, match="cannot mix concrete accelerator ordinals"):
+        _resolve_default_layerwise_device(requested, BACKEND.AUTO)
 
 
 def test_requested_devices_are_concrete_torch_devices():
