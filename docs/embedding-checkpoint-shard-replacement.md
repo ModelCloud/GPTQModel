@@ -36,3 +36,5 @@ The guarantee is per shard. If a later shard fails, earlier successfully
 rewritten shards stay published; the export as a whole is not transactional.
 The normal streaming writer has used atomic shard replacement since
 [PR #3584](https://github.com/ModelCloud/GPTQModel/pull/3584).
+The module-replacement writer gained the same per-shard protection in
+[PR #3623](https://github.com/ModelCloud/GPTQModel/pull/3623).
