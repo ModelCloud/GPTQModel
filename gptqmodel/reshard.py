@@ -436,16 +436,44 @@ def _scan_unindexed_checkpoint(
     return refs, metadata
 
 
+def _index_containing_file(source_dir: str, selected_file: str) -> Optional[str]:
+    """Keep a named shard attached to its complete standard checkpoint."""
+    for index_name in _SOURCE_INDEX_NAMES:
+        index_path = os.path.join(source_dir, index_name)
+        if not os.path.isfile(index_path):
+            continue
+        try:
+            with open(index_path, encoding="utf-8") as handle:
+                index = json.load(handle)
+            weight_map = index.get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                continue
+            shard_paths = {
+                _resolve_shard_path(source_dir, shard)
+                for shard in {str(value) for value in weight_map.values()}
+            }
+        except (OSError, ValueError, AttributeError):
+            # An unrelated invalid index must not override a named file.
+            continue
+        if selected_file in shard_paths:
+            return index_path
+    return None
+
+
 def _scan_checkpoint(
     source_dir: str, selected_file: Optional[str] = None
 ) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
     if selected_file is not None:
-        # An explicit file or index is authoritative even when a standard
-        # index or other safetensors files share its directory.
+        # A named index is authoritative. A named shard in a standard index
+        # still means the complete checkpoint, not an incomplete subset.
         if selected_file.endswith(".safetensors.index.json"):
             refs, metadata = _scan_indexed_checkpoint(source_dir, selected_file)
         else:
-            refs, metadata = _scan_unindexed_checkpoint(source_dir, (selected_file,))
+            index_path = _index_containing_file(source_dir, selected_file)
+            if index_path is not None:
+                refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+            else:
+                refs, metadata = _scan_unindexed_checkpoint(source_dir, (selected_file,))
     else:
         for index_name in _SOURCE_INDEX_NAMES:
             index_path = os.path.join(source_dir, index_name)
@@ -748,8 +776,9 @@ def reshard(
     Args:
         from_model: Source checkpoint directory, a specific ``.safetensors``
             or ``.safetensors.index.json`` path, or a loaded ``GPTQModel``
-            whose ``model_local_path`` points at the checkpoint. A file path
-            selects only that file or the shards named in that index.
+            whose ``model_local_path`` points at the checkpoint. A standalone
+            file selects only itself; an indexed shard retains the complete
+            checkpoint, and a named index selects its own shards.
         to_model_path: Destination directory. Weights are copied byte-for-byte;
             config, tokenizer, and other non-weight files are copied alongside.
         config: :class:`ShardConfig`. Defaults to

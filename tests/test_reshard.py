@@ -570,6 +570,30 @@ def test_reshard_explicit_index_ignores_default_index(tmp_path):
     _assert_tensors_equal(load_file(str(target / "model.safetensors")), selected)
 
 
+def test_reshard_named_shard_keeps_its_complete_indexed_checkpoint(tmp_path):
+    source = tmp_path / "source"
+    state = _build_source(source)
+    first_shard = source / "model-00001-of-00002.safetensors"
+
+    target = tmp_path / "target"
+    reshard(first_shard, target, ShardLayout.SINGLE)
+
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
+
+
+def test_reshard_standalone_file_ignores_unrelated_invalid_index(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    selected = {"selected.weight": torch.ones(2)}
+    save_file(selected, str(source / "selected.safetensors"))
+    (source / "model.safetensors.index.json").write_text("{invalid", encoding="utf-8")
+
+    target = tmp_path / "target"
+    reshard(source / "selected.safetensors", target, ShardLayout.SINGLE)
+
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), selected)
+
+
 def test_reshard_accepts_hf_cache_symlink_shards(tmp_path):
     # Hugging Face cache snapshots store shards as symlinks into ../../blobs.
     # Resharding a cached checkpoint must accept those links.
