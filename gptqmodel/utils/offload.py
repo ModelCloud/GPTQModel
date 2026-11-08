@@ -133,18 +133,22 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Op
     return index
 
 
-_SAFETENSORS_DTYPE = {
-    torch.bool: "BOOL",
-    torch.uint8: "U8",
-    torch.int8: "I8",
-    torch.int16: "I16",
-    torch.int32: "I32",
-    torch.int64: "I64",
-    torch.float16: "F16",
-    torch.bfloat16: "BF16",
-    torch.float32: "F32",
-    torch.float64: "F64",
-}
+def _safetensors_dtype(dtype: torch.dtype) -> str:
+    """Resolve the safetensors header spelling through the canonical export map.
+
+    Do not duplicate the table here: the float8 spellings are non-obvious
+    (``F8_E4M3``, not ``F8_E4M3FN``) and a second copy silently drifts. The
+    import is local because ``utils/model.py`` imports this module lazily.
+    """
+
+    from .model import _torch_dtype_to_safetensors
+
+    try:
+        return _torch_dtype_to_safetensors(dtype)
+    except NotImplementedError as error:
+        raise ValueError(
+            f"safetensors reference offload cannot serialize dtype {dtype}"
+        ) from error
 
 
 def offload_to_safetensors_reference(
@@ -161,6 +165,10 @@ def offload_to_safetensors_reference(
     small Accelerate-compatible index, and replace the module tensors with META
     storage. The streaming model writer can then copy the original tensor ranges
     directly instead of materializing a second disk copy.
+
+    Note: no Accelerate offload hooks are attached, so ``undo_offload_to_disk``
+    will not materialize the module again. This path is intended for export via
+    ``get_state_dict_for_save``; the caller keeps ownership of the source file.
     """
 
     if module is None or model is None:
@@ -177,6 +185,20 @@ def offload_to_safetensors_reference(
     state = module.state_dict()
     if not state:
         raise ValueError("safetensors reference module has no persistent tensors")
+
+    # ``to_empty`` replaces *all* parameters and buffers, but only persistent
+    # ones are recorded in state_dict()/the index. Reject the module rather
+    # than silently destroying non-persistent buffers (e.g. rotary ``inv_freq``).
+    non_persistent_buffers = sorted(
+        f"{prefix}.{buffer_name}" if prefix else buffer_name
+        for prefix, submodule in module.named_modules()
+        for buffer_name in submodule._non_persistent_buffers_set
+    )
+    if non_persistent_buffers:
+        raise ValueError(
+            "safetensors reference offload cannot preserve non-persistent buffers "
+            f"(e.g. `{non_persistent_buffers[0]}`)"
+        )
 
     source_size = os.path.getsize(source)
     with open(source, "rb") as handle:
@@ -203,11 +225,10 @@ def offload_to_safetensors_reference(
     ranges: list[tuple[int, int]] = []
     for key, tensor in state.items():
         entry = tensor_header.get(key)
-        expected_dtype = _SAFETENSORS_DTYPE.get(tensor.dtype)
+        expected_dtype = _safetensors_dtype(tensor.dtype)
         offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
         if (
             not isinstance(entry, dict)
-            or expected_dtype is None
             or entry.get("dtype") != expected_dtype
             or entry.get("shape") != list(tensor.shape)
             or not isinstance(offsets, list)
@@ -267,14 +288,18 @@ def offload_to_safetensors_reference(
             json.dump(index, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
-            os.fchmod(handle.fileno(), 0o644)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), 0o644)
             os.fsync(handle.fileno())
         os.replace(temporary, index_path)
-        directory = os.open(module_offload_dir, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == "posix":
+            directory = os.open(
+                module_offload_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         try:
             os.unlink(temporary)

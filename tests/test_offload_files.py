@@ -2225,3 +2225,58 @@ def test_safetensors_reference_offload_avoids_a_second_payload(tmp_path):
             metadata={},
             max_shard_size=None,
         )
+
+
+def test_safetensors_reference_offload_supports_float8(tmp_path):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    weight = model.linear.weight
+    model.linear.weight = nn.Parameter(
+        torch.arange(weight.numel(), dtype=torch.float32)
+        .to(torch.float8_e4m3fn)
+        .reshape(weight.shape),
+        requires_grad=False,
+    )
+    original_state = _clone_state_dict(model.linear)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(original_state, source_path)
+
+    index = offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(tmp_path / "offload_root"),
+    )
+
+    assert index["weight"]["dtype"] == "float8_e4m3fn"
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    state_dict = get_state_dict_for_save(model, offload_root=str(tmp_path / "offload_root"))
+    expected_files, _tensor_to_filename, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    with safe_open(str(save_dir / expected_files[0]), framework="pt", device="cpu") as handler:
+        exported = handler.get_tensor("linear.weight")
+    assert exported.dtype == torch.float8_e4m3fn
+    assert torch.equal(exported.view(torch.uint8), original_state["weight"].view(torch.uint8))
+
+
+def test_safetensors_reference_offload_rejects_non_persistent_buffers(tmp_path):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    model.linear.register_buffer("cache", torch.ones(2), persistent=False)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(_clone_state_dict(model.linear), source_path)
+
+    with pytest.raises(ValueError, match="non-persistent buffers"):
+        offload_to_safetensors_reference(
+            module=model.linear,
+            model=model,
+            source_path=source_path,
+            disk_path=str(tmp_path / "offload_root"),
+        )
+
+    assert all(not tensor.is_meta for tensor in model.linear.state_dict().values())
