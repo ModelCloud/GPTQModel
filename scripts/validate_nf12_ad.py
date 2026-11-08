@@ -414,18 +414,10 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         "backend": results.get("backend"),
     }
 
-    def encode(w):
-        if active == "cuda":
-            return rt.encode(w)
-        from gptqmodel.utils import nf12_codec as codec
-
-        p, e, b = codec.encode(w.cpu(), None)
-        return p.to(device), e.to(device), int(b)
-
     banner("F. decode throughput")
     for n, k in ([(4096, 4096)] if quick else [(2048, 2048), (4096, 4096), (8192, 2048), (11008, 4096)]):
         w = (torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.02).contiguous()
-        packed, esc, base = encode(w)
+        packed, esc, base = rt.encode(w)
         packed_bytes = packed.numel() + esc.numel() * 2 + 1
         out_bytes = n * k * 2
         median_us, min_us = timed(lambda: rt.decode(packed, esc, base), device)
@@ -448,7 +440,7 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         shapes = shapes[:2]
     for n, k in shapes:
         w = (torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.02).contiguous()
-        packed, esc, base = encode(w)
+        packed, esc, base = rt.encode(w)
         packed_bytes = packed.numel() + esc.numel() * 2 + 1
         for m in (1, 2, 8, 16, 64, 256):
             x = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.05
@@ -467,7 +459,7 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
 
     banner("H. encode throughput")
     w = (torch.randn(4096, 4096, device=device, dtype=torch.bfloat16) * 0.02).contiguous()
-    median_us, min_us = timed(lambda: encode(w), device, warmup=5, iters=25)
+    median_us, min_us = timed(lambda: rt.encode(w), device, warmup=5, iters=25)
     results["perf"].append({"test": "encode", "n": 4096, "k": 4096,
                             "median_us": round(median_us, 2), "min_us": round(min_us, 2),
                             "gbs": round(w.numel() * 2 / (min_us * 1e-6) / 1e9, 1)})

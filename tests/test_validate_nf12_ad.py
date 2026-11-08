@@ -3,6 +3,7 @@
 """Validation CLI backend selection contracts."""
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,6 +55,45 @@ def test_perf_helpers_synchronize_requested_gpu(monkeypatch):
     validate_nf12_ad.measure_cache_size("cuda:1", repetitions=1)
 
     assert observed and set(observed) == {"cuda:1"}
+
+
+def test_hip_perf_uses_native_encoder(monkeypatch):
+    from gptqmodel.utils import nf12_codec
+    from scripts import validate_nf12_ad
+
+    tiny = validate_nf12_ad.torch.ones((1, 1), dtype=validate_nf12_ad.torch.bfloat16)
+    calls = []
+
+    class Runtime:
+        def encode(self, weight):
+            calls.append(weight)
+            return tiny, tiny, 0
+
+        def decode(self, *args):
+            return tiny
+
+        def linear(self, *args):
+            return tiny
+
+    def timed_once(fn, *args, **kwargs):
+        fn()
+        return 1.0, 1.0
+
+    monkeypatch.setattr(validate_nf12_ad, "backend_module", lambda *args: (Runtime(), "hip"))
+    monkeypatch.setattr(validate_nf12_ad, "measure_bandwidth", lambda device: 1.0)
+    monkeypatch.setattr(validate_nf12_ad, "measure_cache_size", lambda device: (1.0, []))
+    monkeypatch.setattr(validate_nf12_ad, "timed", timed_once)
+    monkeypatch.setattr(validate_nf12_ad.torch.cuda, "get_device_properties", lambda device:
+                        SimpleNamespace(major=12, minor=0, total_memory=1, multi_processor_count=1))
+    monkeypatch.setattr(validate_nf12_ad.torch.cuda, "get_device_name", lambda device: "test")
+    monkeypatch.setattr(validate_nf12_ad.torch, "randn", lambda *args, **kwargs: tiny)
+    monkeypatch.setattr(nf12_codec, "encode", lambda *args: pytest.fail("CPU codec used for HIP perf"))
+
+    results = {"device": {}, "perf": [], "notes": [], "backend": None}
+    validate_nf12_ad.run_perf("cuda:0", "hip", quick=True, results=results)
+
+    assert len(calls) == 4
+    assert results["backend"] == "hip"
 
 
 def test_perf_only_failure_returns_nonzero_status(monkeypatch):
