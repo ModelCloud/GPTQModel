@@ -156,7 +156,7 @@ _LEGACY_BACKEND_BY_METHOD = {
     "vptq": {
         BACKEND.TORCH: BACKEND.VPTQ_TORCH,
     },
-    "nf12_ad": {
+    "nf12": {
         BACKEND.TORCH: BACKEND.NF12_AD,
     },
 }

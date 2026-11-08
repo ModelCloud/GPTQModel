@@ -264,14 +264,25 @@ def hf_gptqmodel_prepare_model_for_load(
     if not _is_native_gptqmodel_config(qcfg):
         return None
 
-    # Serialized qweights are authoritative; dynamic rules may also name dense modules.
+    # Serialized packed tensors are authoritative; dynamic rules may also name
+    # dense modules. NF12-AD stores its packed weight under `nf12_packed`.
+    packed_suffix = (
+        ".nf12_packed"
+        if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.NF12_AD
+        else ".qweight"
+    )
     tensor_keys = _checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
     quantized_module_names = tuple(
-        sorted(key.removesuffix(".qweight") for key in tensor_keys if key.endswith(".qweight"))
+        sorted(
+            key.removesuffix(packed_suffix)
+            for key in tensor_keys
+            if key.endswith(packed_suffix)
+        )
     )
     if not quantized_module_names:
         raise ValueError(
-            "The GPTQModel checkpoint does not expose any `.qweight` tensors in its checkpoint manifest."
+            "The GPTQModel checkpoint does not expose any "
+            f"`{packed_suffix}` tensors in its checkpoint manifest."
         )
 
     import defuser

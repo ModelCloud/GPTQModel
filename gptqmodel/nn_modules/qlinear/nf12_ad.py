@@ -5,8 +5,8 @@
 
 NF12 is Together AI's lossless 12-bit BF16 weight format, implemented by
 AlpinDale at https://github.com/dphnAI/nf12. This module stores the packed
-NF12-AD weight as ``qweight`` (like every other GPT-QModel quantized
-checkpoint) plus ``nf12_escapes`` and ``nf12_exp_base``. On CUDA the vendored
+NF12-AD weight as ``nf12_packed`` plus ``nf12_escapes`` and
+``nf12_exp_base``, matching the upstream nf12 serialization names. On CUDA the vendored
 fused decode-GEMM kernels run
 directly from that storage; elsewhere a bounded decode feeds an FP32
 accumulated matmul. No dense or dequantized weight is retained between
@@ -138,13 +138,13 @@ class NF12ADLinear(WeightOnlyQuantLinear):
     # storage
     # ------------------------------------------------------------------
     def _allocate_buffers(self, *, bias: bool) -> None:
-        qweight = torch.zeros(
+        packed = torch.zeros(
             (self.out_features, self.in_features * 3 // 2),
             dtype=torch.uint8,
         )
         escapes = torch.zeros((0, 8), dtype=torch.int16)
         exp_base = torch.zeros((1,), dtype=torch.uint8)
-        self.register_buffer("qweight", qweight)
+        self.register_buffer("nf12_packed", packed)
         self.register_buffer("nf12_escapes", escapes)
         self.register_buffer("nf12_exp_base", exp_base)
         if bias:
@@ -154,15 +154,15 @@ class NF12ADLinear(WeightOnlyQuantLinear):
 
     def list_buffers(self):
         buffers = []
-        for name in ("qweight", "nf12_escapes", "nf12_exp_base", "bias"):
+        for name in ("nf12_packed", "nf12_escapes", "nf12_exp_base", "bias"):
             tensor = getattr(self, name, None)
             if isinstance(tensor, torch.Tensor):
                 buffers.append(tensor)
         return buffers
 
     def runtime_device(self):
-        qweight = getattr(self, "qweight", None)
-        return qweight.device if isinstance(qweight, torch.Tensor) else None
+        packed = getattr(self, "nf12_packed", None)
+        return packed.device if isinstance(packed, torch.Tensor) else None
 
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
@@ -217,18 +217,18 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         self._install_result(result, bias=bias)
 
     def _install_result(self, result: NF12ADQuantResult, *, linear=None, bias=None):
-        if hasattr(self, "qweight"):
-            target_device = self.qweight.device
+        if hasattr(self, "nf12_packed"):
+            target_device = self.nf12_packed.device
         elif isinstance(getattr(self, "bias", None), torch.Tensor):
             target_device = self.bias.device
         else:
             target_device = torch.device("cpu")
         packed = result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
         escapes = result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
-        if "qweight" in self._buffers:
-            self.qweight = packed
+        if "nf12_packed" in self._buffers:
+            self.nf12_packed = packed
         else:
-            self.register_buffer("qweight", packed)
+            self.register_buffer("nf12_packed", packed)
         if "nf12_escapes" in self._buffers:
             self.nf12_escapes = escapes
         else:
@@ -269,8 +269,8 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         is never installed as an inference cache.
         """
 
-        target = self.qweight.device if device is None else torch.device(device)
-        packed = self.qweight.to(device=target)
+        target = self.nf12_packed.device if device is None else torch.device(device)
+        packed = self.nf12_packed.to(device=target)
         escapes = self.nf12_escapes.to(device=target)
         if target.type == "cuda" and _hip_path(target):
             try:
@@ -306,7 +306,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
     def _native_forward(self, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
         if not x.is_cuda or x.dtype != torch.bfloat16:
             return None
-        if self.qweight.device != x.device:
+        if self.nf12_packed.device != x.device:
             return None
         # RDNA4 has no mma.sync/wgmma, so the HIP port decodes to exact BF16 and
         # uses rocBLAS (SPEC.md 6.5). CUDA hosts keep the fused MMA kernel.
@@ -316,7 +316,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             try:
                 return nf12_ad_hip_runtime.linear(
                     x.contiguous(),
-                    self.qweight,
+                    self.nf12_packed,
                     self.nf12_escapes,
                     self._exp_base(),
                     bias,
@@ -332,7 +332,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         try:
             return nf12_ad_runtime.linear(
                 x.contiguous(),
-                self.qweight,
+                self.nf12_packed,
                 self.nf12_escapes,
                 self._exp_base(),
                 bias,
@@ -372,10 +372,10 @@ class NF12ADLinear(WeightOnlyQuantLinear):
     def post_init(self):
         super().post_init()
         # Validate the loaded checkpoint's packing geometry once.
-        if self.qweight.shape != (self.out_features, self.in_features * 3 // 2):
+        if self.nf12_packed.shape != (self.out_features, self.in_features * 3 // 2):
             raise ValueError(
-                f"NF12ADLinear `{self.name}`: unexpected `qweight` shape "
-                f"{tuple(self.qweight.shape)}"
+                f"NF12ADLinear `{self.name}`: unexpected `nf12_packed` shape "
+                f"{tuple(self.nf12_packed.shape)}"
             )
 
     def extra_repr(self) -> str:

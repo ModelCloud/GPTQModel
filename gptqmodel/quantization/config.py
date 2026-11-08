@@ -127,7 +127,9 @@ class FORMAT(str, Enum):
     QQQ = "qqq"
     EXL3 = "exl3"
     VPTQ = "vptq"
-    NF12_AD = "nf12_ad"
+    # Public name is `nf12`; the internal extension/loader symbols keep the
+    # `nf12_ad` suffix so they cannot collide with the upstream `nf12` package.
+    NF12_AD = "nf12"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -149,7 +151,8 @@ class METHOD(str, Enum):
     EXL3 = "exl3"
     PARO = "paroquant"
     VPTQ = "vptq"
-    NF12_AD = "nf12_ad"
+    # Public name is `nf12`; see the FORMAT note above.
+    NF12_AD = "nf12"
 
 
 # Integer bit widths each method's packer and kernels can actually realize.
@@ -5713,7 +5716,7 @@ class NF12ADConfig(PreProcessorConfig):
     def __post_init__(self):
         super().__post_init__()
         if self.method != METHOD.NF12_AD:
-            raise ValueError("NF12ADConfig: `method` must be `nf12_ad`.")
+            raise ValueError("NF12ADConfig: `method` must be `nf12`.")
         self.format = FORMAT.NF12_AD
         self.group_size = -1
         self.desc_act = False

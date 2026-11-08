@@ -2652,8 +2652,8 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
     shapes = _checkpoint_tensor_shapes(checkpoint)
     if not shapes:
         return
-    # Only the escape table is data-dependent. `qweight`, `nf12_exp_base`, and
-    # `bias` shapes follow from the module geometry the model was built with.
+    # Only the escape table is data-dependent. `nf12_packed`,
+    # `nf12_exp_base`, and `bias` shapes follow from the module geometry.
     suffixes = (".nf12_escapes", ".nf12_exp_base")
     for key, shape in shapes.items():
         suffix = next((item for item in suffixes if key.endswith(item)), None)
