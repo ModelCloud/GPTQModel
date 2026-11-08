@@ -7,7 +7,7 @@ otherwise. The writer stages the new shard beside its destination so a failed
 serialization leaves that destination shard intact. On a repeated save, indexed
 prior tensor keys under each replaced module prefix, plus matching keys found
 in affected shards, are removed before the current `module.state_dict()` is
-written. The index is updated to match.
+written. An index, when present, is updated to match.
 
 ```mermaid
 flowchart TD
@@ -44,3 +44,5 @@ The normal streaming writer has used atomic shard replacement since
 [PR #3584](https://github.com/ModelCloud/GPTQModel/pull/3584).
 The module-replacement writer gained the same per-shard protection in
 [PR #3623](https://github.com/ModelCloud/GPTQModel/pull/3623).
+Repeated saves also remove keys from prior replacement layouts as described in
+[PR #3624](https://github.com/ModelCloud/GPTQModel/pull/3624).
