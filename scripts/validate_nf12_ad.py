@@ -57,6 +57,7 @@ import statistics
 import sys
 import time
 import traceback
+import zlib
 
 import torch
 
@@ -204,7 +205,10 @@ def run_accuracy(device: str, backend: str, quick: bool, results: dict) -> bool:
     all_ok = True
     for n, k in shapes:
         for kind in kinds:
-            w = make_weight(n, k, kind, seed=abs(hash((n, k, kind))) % 65536)
+            # Python's hash is salted per process; a stable seed keeps accuracy
+            # inputs comparable across runs and backend revisions.
+            seed = zlib.crc32(f"{n}:{k}:{kind}".encode("ascii"))
+            w = make_weight(n, k, kind, seed=seed)
             wc = w.to(device).contiguous()
             ref_packed, ref_esc, ref_base = codec.encode(w, None)
             row = {"test": "codec", "kind": kind, "n": n, "k": k,
