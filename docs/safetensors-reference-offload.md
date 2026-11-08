@@ -78,3 +78,5 @@ The export source guard was added in
 [PR #3620](https://github.com/ModelCloud/GPTQModel/pull/3620).
 Absent optional nonpersistent buffers were admitted in
 [PR #3626](https://github.com/ModelCloud/GPTQModel/pull/3626).
+FNUZ float8 serialization was added in
+[PR #3628](https://github.com/ModelCloud/GPTQModel/pull/3628).
