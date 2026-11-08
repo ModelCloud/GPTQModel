@@ -1538,3 +1538,4 @@ The following reference pages document features proposed from the working fork.
 - [add bounded K3 source and explicit AttnRes model contracts](docs/kimi-k3-native-source.md)
 - [carry causal core calibration and padded EXL3 source storage](docs/kimi-core-calibration.md)
 - [carry K3.1 source and bounded calibration adapters](docs/kimi-k31-calibration.md)
+- [add bounded native core calibration and EXL3 sources](docs/glm-core-calibration.md)
