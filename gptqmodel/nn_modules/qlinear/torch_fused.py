@@ -38,6 +38,15 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
+def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros):
+    """Run BF16 int4pack with FP32 operands without expanding stored weights."""
+    compute_dtype = torch.float32 if x.dtype == torch.bfloat16 else scales_and_zeros.dtype
+    out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+        x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
+    )
+    return out.to(x.dtype)
+
+
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
         super().__init__()
@@ -46,10 +55,7 @@ class Int4PackedOp(torch.nn.Module):
         self.group_size = group_size
 
     def forward(self, x):
-        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x.to(self.scales_and_zeros.dtype), self.qweight_uint8, self.group_size, self.scales_and_zeros
-        )
-        return out.to(x.dtype)
+        return _cpu_int4pack_mm(x, self.qweight_uint8, self.group_size, self.scales_and_zeros)
 
 
 class TorchFusedLinear(PackableQuantLinear):

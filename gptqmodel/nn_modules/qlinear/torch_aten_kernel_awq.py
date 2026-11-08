@@ -24,7 +24,7 @@ from .torch_aten_kernel import (
     _cpu_int4pack_zero_offsets,
     _has_local_int4pack_cpu_ops,
 )
-from .torch_fused import pack_scales_and_zeros
+from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
 
 log = setup_logger()
@@ -195,13 +195,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
-        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x.to(self.scales_and_zeros.dtype),
-            self.qweight,
-            self.group_size,
-            self.scales_and_zeros,
-        )
-        return out.to(x.dtype)
+        return _cpu_int4pack_mm(x, self.qweight, self.group_size, self.scales_and_zeros)
 
     # The native affine operand is derived metadata, shared with GPTQ's ATen
     # implementation. Rebuild it after loads, moves or source mutations.
