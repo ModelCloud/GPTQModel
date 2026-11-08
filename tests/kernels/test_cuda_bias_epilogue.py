@@ -4,13 +4,13 @@
 
 import pytest
 import torch
+from test_torch_weight_storage import state_tensors
 
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT
-from test_torch_weight_storage import state_tensors
 
 
 pytestmark = pytest.mark.skipif(
