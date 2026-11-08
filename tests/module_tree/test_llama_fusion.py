@@ -12,6 +12,7 @@ from dataclasses import replace
 
 import pytest
 import torch
+from torch.utils.cpp_extension import CUDA_HOME
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
 
 import gptqmodel.models.fusion as fusion
@@ -23,10 +24,14 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, AWQConfig, QuantizeConfig
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
 
 
 def _wrapper(method="gptq", dtype=torch.float16, device="cpu", *, quantized=True, automatic=None, dynamic=None,
              kv_heads=2, bits=4, native=False, canonical=False, definition=LlamaQModel):
+    if native and CUDA_HOME is None and not marlin_runtime_available(dtype):
+        reason = marlin_runtime_error(dtype).partition(" | ")[0]
+        pytest.skip(f"Native Marlin extension unavailable for {dtype}: {reason}")
     torch.manual_seed(912)
     aligned = native or canonical
     config = LlamaConfig(hidden_size=128 if aligned else 64, intermediate_size=256 if aligned else 128, num_hidden_layers=2,
