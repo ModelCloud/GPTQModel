@@ -26,14 +26,22 @@ def _wants_fp32_reduce(x: torch.Tensor) -> bool:
     )
 
 
-def matmul_fp32_reduce(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Keep CUDA low-precision partial sums in FP32 without changing global cuBLAS flags."""
+def matmul_fp32_reduce(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Keep the CUDA reduction and optional bias in FP32 until output rounding."""
     if _wants_fp32_reduce(x):
         shape = x.shape[:-1] + (weight.shape[-1],)
         # FP32 output also keeps split reductions wide, while retaining low-precision
         # tensor-core operands. No expanded FP32 weight copy is needed.
-        return torch.mm(x.reshape(-1, x.shape[-1]), weight, out_dtype=torch.float32).to(x.dtype).reshape(shape)
-    return torch.matmul(x, weight)
+        flat_x = x.reshape(-1, x.shape[-1])
+        if bias is not None:
+            output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
+        else:
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32)
+        return output.to(x.dtype).reshape(shape)
+    output = torch.matmul(x, weight)
+    return output + bias if bias is not None else output
 
 
 def linear_fp32_reduce(x, weight, bias=None):

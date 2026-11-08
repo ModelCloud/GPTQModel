@@ -89,6 +89,9 @@ dequantized workspaces. Only zero-point and group-index metadata is cached;
 call `clear_weight_cache()` after manually mutating inference-mode tensors
 without version counters. Normal tensor mutations, checkpoint loads, and
 device/dtype moves invalidate this metadata automatically.
+The [CUDA quantized bias epilogue](docs/cuda-quantized-bias-epilogue.md)
+documents when portable GPTQ, AWQ, FP8, and GGUF paths add bias before
+low-precision output rounding.
 
 `BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
 8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime
