@@ -182,3 +182,75 @@ def test_materialize_submodule_descendant_map_respects_local_is_transposed(tmp_p
     assert loaded.shape == expected.shape
     assert loaded.dtype == expected.dtype
     assert torch.equal(loaded, expected)
+
+
+def test_active_source_staging_is_layer_scoped_and_pruned_after_boundary(tmp_path):
+    model_dir = tmp_path / "source"
+    model_dir.mkdir()
+    source = {"model.layers.0.weight": torch.randn(4, 4)}
+    shard_name = "model.safetensors"
+    save_file(source, str(model_dir / shard_name))
+    _write_index(model_dir, shard_name, source)
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+    staging = tmp_path / "active"
+    turtle.configure_active_source_staging(
+        str(staging), provenance={"plan_sha256": "a" * 64}
+    )
+
+    first = Path(
+        turtle._checkpoint_shard_path(
+            shard_name, module_path="model.layers.0"
+        )
+    )
+    second = Path(
+        turtle._checkpoint_shard_path(
+            shard_name, module_path="model.layers.0.mlp.experts.0"
+        )
+    )
+
+    assert first == second
+    assert first.parent == staging / "base-000000"
+    assert first.read_bytes() == (model_dir / shard_name).read_bytes()
+    turtle.prune_active_source_through(0)
+    assert not first.parent.exists()
+
+
+def test_active_source_staging_can_be_suspended_for_direct_checkpoint_reads(tmp_path):
+    model_dir = tmp_path / "source"
+    model_dir.mkdir()
+    source = {"model.layers.0.weight": torch.randn(4, 4)}
+    shard_name = "model.safetensors"
+    save_file(source, str(model_dir / shard_name))
+    _write_index(model_dir, shard_name, source)
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+    staging = tmp_path / "active"
+    turtle.configure_active_source_staging(
+        str(staging), provenance={"plan_sha256": "a" * 64}
+    )
+
+    with turtle.suspend_active_source_staging():
+        direct = Path(
+            turtle._checkpoint_shard_path(
+                shard_name, module_path="model.layers.0"
+            )
+        )
+        assert direct == model_dir / shard_name
+        assert not (staging / "base-000000").exists()
+
+    staged = Path(
+        turtle._checkpoint_shard_path(
+            shard_name, module_path="model.layers.0"
+        )
+    )
+    assert staged == staging / "base-000000" / shard_name
+    assert staged.is_file()

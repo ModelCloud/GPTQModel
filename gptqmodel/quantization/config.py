@@ -2857,6 +2857,7 @@ def _dynamic_cache_key(dynamic):
     # Untracked mappings are still correct; they simply pay fingerprint cost
     # because arbitrary in-place mutations cannot expose a safe O(1) token.
     return _dynamic_fingerprint(dynamic)
+_MODULE_INCLUDE_PATTERN_CACHE: Dict[Tuple[str, ...], Tuple[Any, ...]] = {}
 
 def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     """If `raw` is a regex that matches a single literal string, return that string."""
@@ -2938,6 +2939,24 @@ def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]):
             _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
             _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
             return exact_lookup, all_exact, regex_patterns
+
+
+def _get_module_include_patterns(patterns: Tuple[str, ...]) -> Tuple[Any, ...]:
+    """Compile and cache ordered positive module-include patterns."""
+
+    cached = _MODULE_INCLUDE_PATTERN_CACHE.get(patterns)
+    if cached is not None:
+        return cached
+
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(pcre.compile(pattern))
+        except Exception as exc:
+            raise ValueError(f"EXL3Config: invalid module_include pattern `{pattern}`") from exc
+    result = tuple(compiled)
+    _MODULE_INCLUDE_PATTERN_CACHE[patterns] = result
+    return result
 
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
@@ -5873,7 +5892,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         self.compress_statistics = bool(value)
 
 @dataclass
-class EXL3Config(BaseQuantizeConfig):
+class EXL3Config(PreProcessorConfig):
     bits: float = field(default=3.0)
     method: METHOD = field(default=METHOD.EXL3)
     format: FORMAT = field(default=FORMAT.EXL3)
@@ -5885,6 +5904,10 @@ class EXL3Config(BaseQuantizeConfig):
     codebook: str = field(default="mcg")
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
     calibration: Optional[Dict[str, int]] = field(default=None)
+    module_include: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "Positive regex allowlist of module names eligible for EXL3 quantization."},
+    )
 
     @property
     def runtime_bits(self) -> int:
@@ -5932,6 +5955,7 @@ class EXL3Config(BaseQuantizeConfig):
                 raise ValueError("EXL3Config: `group_size` is not used; keep it at `-1`.")
 
     def __post_init__(self):
+        self._normalize_preprocessor_state()
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -5994,6 +6018,17 @@ class EXL3Config(BaseQuantizeConfig):
                 for key, value in self.calibration.items()
             }
 
+        if self.module_include is not None:
+            if not isinstance(self.module_include, (list, tuple)) or not self.module_include:
+                raise ValueError("EXL3Config: `module_include` must be a non-empty list of regex patterns.")
+            normalized_patterns = []
+            for pattern in self.module_include:
+                if not isinstance(pattern, str) or not pattern.strip():
+                    raise ValueError("EXL3Config: every `module_include` entry must be a non-empty string.")
+                normalized_patterns.append(pattern.strip())
+            self.module_include = normalized_patterns
+            _get_module_include_patterns(tuple(self.module_include))
+
         if self.meta is not None:
             if not isinstance(self.meta, dict):
                 raise ValueError("QuantizeConfig: `meta` must be a dictionary")
@@ -6027,12 +6062,59 @@ class EXL3Config(BaseQuantizeConfig):
         self.moe = _normalize_moe_config(self.moe)
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
-        out["bits"] = float(self.bits)
-        out["head_bits"] = None if self.head_bits is None else float(self.head_bits)
+        # EXL3 matrices always have an integer trellis width. Keep that type in
+        # portable metadata as well: some standard HF consumers reject `2.0`.
+        # Artifact-average mixed BPW belongs in an explicit tier-plan extension,
+        # never in this standard per-matrix field.
+        out["bits"] = int(self.bits)
+        out["head_bits"] = None if self.head_bits is None else int(self.head_bits)
         out["out_scales"] = self.out_scales
         out["codebook"] = self.codebook
         out["tensor_storage"] = self.tensor_storage
         out["calibration"] = self.calibration
+        out["module_include"] = self.module_include
+
+    def to_dict(self):
+        """Serialize portable EXL3 checkpoint metadata.
+
+        Quantization-time offload paths, placement policy, and worker-lifecycle
+        controls describe the machine that produced the checkpoint; they are
+        neither needed nor safe to replay when the checkpoint is loaded
+        elsewhere.  Keep method and calibration provenance in ``meta`` while
+        removing those execution-only values from the saved artifact.
+        """
+
+        out = super().to_dict()
+        meta_payload = out.get(META_FIELD)
+        if isinstance(meta_payload, dict):
+            for key in (
+                "offload_to_disk",
+                "offload_to_disk_path",
+                "pack_impl",
+                "gc_mode",
+                "wait_for_submodule_finalizers",
+                "auto_forward_data_parallel",
+                "dense_vram_strategy",
+                "dense_vram_strategy_devices",
+                "moe_vram_strategy",
+                "moe_vram_strategy_devices",
+                "weight_only",
+            ):
+                meta_payload.pop(key, None)
+            if not meta_payload:
+                out.pop(META_FIELD, None)
+
+        return out
+
+    def module_is_included(self, module_name: str) -> bool:
+        """Return whether a module passes the positive EXL3 allowlist."""
+
+        if self.module_include is None:
+            return True
+        return any(
+            pattern.match(module_name)
+            for pattern in _get_module_include_patterns(tuple(self.module_include))
+        )
 
     def calculate_bits_per_weight(self):
         head_bits = self.head_bits if self.head_bits is not None else self.bits

@@ -8,6 +8,7 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
+from types import MethodType
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -27,7 +28,11 @@ from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
 
 
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
+# torch.nn.parallel.replicate has repeatedly proved unsafe in free-threaded
+# quantization processes. Keep the serialized deepcopy implementation as the
+# fail-safe default; callers may still opt into replicate explicitly when they
+# have qualified it for their Python/PyTorch build.
+USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", False)
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -36,6 +41,27 @@ _DEEPCOPY_LOCK = threading.Lock()
 # every layer only re-raises the same NCCL error; the deepcopy fallback below is
 # the correct path for the rest of the process.
 _REPLICATE_DISABLED = False
+
+
+def _rebind_copied_instance_methods(
+    source: torch.nn.Module,
+    replica: torch.nn.Module,
+) -> None:
+    """Rebind shallow-copied instance methods to the matching replica node."""
+
+    source_modules = dict(source.named_modules())
+    replica_modules = dict(replica.named_modules())
+    if source_modules.keys() != replica_modules.keys():
+        raise RuntimeError("replicated module topology changed while rebinding methods")
+    for path, source_module in source_modules.items():
+        replica_module = replica_modules[path]
+        for attribute, value in tuple(vars(replica_module).items()):
+            if isinstance(value, MethodType) and value.__self__ is source_module:
+                setattr(
+                    replica_module,
+                    attribute,
+                    MethodType(value.__func__, replica_module),
+                )
 
 def torch_replicate(
     module: torch.nn.Module,
@@ -126,11 +152,15 @@ def find_last_quantized_layer_index(
 
 
 @contextmanager
-def device_ctx(dev: Optional[torch.device | "DEVICE"]):
+def device_ctx(dev: Optional[torch.device | "DEVICE" | str]):
     """Temporarily set the thread-local device for CUDA/XPU backends."""
     if dev is None:
         yield
         return
+
+    dev = normalize_device_like(dev)
+    if dev is None:
+        raise ValueError("device_ctx received an invalid device")
 
     if dev.type == "cuda":
         with torch.cuda.device(dev.index):
@@ -495,6 +525,7 @@ def clone_module_for_devices(
             _record("replicate", replicate_start)
 
             for idx, (dev, replica) in enumerate(zip(devices, replicas), start=1):
+                _rebind_copied_instance_methods(module, replica)
                 replica.eval()
                 rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
                 clear_state_fn(replica)
@@ -531,6 +562,7 @@ def clone_module_for_devices(
         start_ts = time.perf_counter()
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
+        _rebind_copied_instance_methods(module, replica)
         replica.eval()
         rehome_module_to_device(
             replica,
@@ -605,10 +637,6 @@ def forward_batch_worker(
         seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
         keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
 
-    mask_tls = getattr(processor, "_mask_tls", None)
-    if mask_tls is not None:
-        mask_tls.value = keep_mask
-
     if reuse_kv and prev_kv is not None:
         additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device)
 
@@ -621,6 +649,17 @@ def forward_batch_worker(
             additional_inputs=additional_inputs,
             target_device=module_device,
         )
+        keep_mask = gptq_model.prepare_layer_replay_keep_mask(
+            layer=module,
+            layer_input=inputs,
+            additional_inputs=additional_inputs,
+            keep_mask=keep_mask,
+            target_device=module_device,
+        )
+
+    mask_tls = getattr(processor, "_mask_tls", None)
+    if mask_tls is not None:
+        mask_tls.value = keep_mask
 
     module_output = None
     kv_next = None

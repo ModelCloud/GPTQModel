@@ -53,7 +53,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
-from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
+from ..quantization import AutoModuleDecoderConfig, METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
 from ..utils.env import env_flag  # noqa: E402
@@ -543,6 +543,17 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     return False
 
 
+def _uses_auto_module_decoder(quantize_config: Optional[QuantizeConfig]) -> bool:
+    """Return whether an explicit target config decodes a floatx source checkpoint."""
+
+    if quantize_config is None:
+        return False
+    return any(
+        isinstance(preprocessor, AutoModuleDecoderConfig)
+        for preprocessor in (getattr(quantize_config, "preprocessors", None) or [])
+    )
+
+
 @contextmanager
 def _hide_unsupported_quantization_config_for_eval(model):
     config = getattr(model, "config", None)
@@ -771,7 +782,8 @@ class GPTQModel:
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif model_cfg is not None and _is_supported_quantization_config(model_cfg):
+        elif (model_cfg is not None and _is_supported_quantization_config(model_cfg)
+              and not _uses_auto_module_decoder(quantize_config)):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
@@ -870,7 +882,7 @@ class GPTQModel:
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif _is_supported_quantization_config(config):
+        elif _is_supported_quantization_config(config) and not _uses_auto_module_decoder(quantize_config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
