@@ -671,6 +671,9 @@ See **[Quantization checkpointing and resume](checkpoint.md)** for resume
 policies, supported methods, safe-stop behavior, storage requirements, recovery
 procedures, and operational gotchas.
 
+For writers that reference an existing safetensors payload instead of making a
+second offload copy, see [Safetensors reference offload](docs/safetensors-reference-offload.md).
+
 #### Other Quantization Formats 📦
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
