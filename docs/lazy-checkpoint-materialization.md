@@ -51,3 +51,6 @@ An explicit device remains authoritative for restored nonpersistent buffers.
 If a meta buffer cannot be reconstructed from its module constructor, the
 restoration helper leaves it meta; callers must handle that module's custom
 initialization requirements.
+
+See [PR #3617](https://github.com/ModelCloud/GPTQModel/pull/3617) for the
+CUDA reproducer and change rationale.
