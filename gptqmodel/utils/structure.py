@@ -1178,14 +1178,25 @@ class LazyTurtle:
             # instead of only rebuilding meta tensors.
             restore_device = device
             if restore_device is None:
+                # A materialized direct parameter anchors this module's
+                # execution device before any init-only buffer does.
                 resolved = next(
                     (
-                        buffer.device
-                        for buffer in direct_buffers.values()
-                        if not _is_meta_tensor(buffer)
+                        param.device
+                        for param in target_submodule.parameters(recurse=False)
+                        if not _is_meta_tensor(param)
                     ),
                     None,
                 )
+                if resolved is None:
+                    resolved = next(
+                        (
+                            buffer.device
+                            for buffer in direct_buffers.values()
+                            if not _is_meta_tensor(buffer)
+                        ),
+                        None,
+                    )
                 restore_device = resolved if resolved is not None else torch.device("cpu")
             missing_nonpersistent_buffers = [
                 (name, name)
