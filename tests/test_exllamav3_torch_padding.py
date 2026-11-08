@@ -232,6 +232,40 @@ NATIVE_EXL3 = pytest.mark.skipif(
     reason="native EXL3 linear declares CUDA-only support",
 )
 
+
+@pytest.mark.parametrize("device", [
+    pytest.param("cpu", marks=pytest.mark.cpu),
+    pytest.param("cuda", marks=pytest.mark.cuda),
+])
+def test_native_inference_created_bias_tracks_mutation_without_extension(device):
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    with torch.inference_mode():
+        module = ExllamaV3Linear.from_tensors(
+            in_features=128, out_features=576, name="kv_a",
+            tensors={
+                "trellis": torch.zeros((8, 40, 96), dtype=torch.int16, device=device),
+                "bias": torch.zeros(576, dtype=torch.float16, device=device),
+            },
+        )
+    assert module.bias.is_inference()
+    packed_trellis = module.trellis
+    with torch.inference_mode():
+        first = module._current_signature()
+    assert not module.bias.is_inference()
+    assert module.trellis is packed_trellis
+    assert module.bias.numel() * module.bias.element_size() == 1152
+    normalized_bias = module.bias
+    with torch.inference_mode():
+        assert module._current_signature() == first
+    assert module.bias is normalized_bias
+    with torch.inference_mode():
+        module.bias.add_(1)
+    assert module._current_signature() != first
+
+
 # --- The native ExllamaV3Linear path shares this logical/padded contract but
 # --- needs admitted hardware (it builds LinearEXL3 through the compiled ext).
 def _native_module(packed, outputs, device):
@@ -301,6 +335,50 @@ def test_native_padded_bias_stays_live(outputs):
     # but a frozen padded copy shows an exact 0.0 shift instead.
     delta = after - before
     torch.testing.assert_close(delta, torch.full_like(delta, 10.0), rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [128, 576])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
+    """Inference-created checkpoint buffers must run and track a later bias edit."""
+    packed = _packed(outputs, bias=True)
+    weight = _oracle_weight(packed, device="cuda").float()[:, :outputs]
+    gen = torch.Generator().manual_seed(31)
+    x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device="cuda", dtype=dtype)
+    reference = x.float().reshape(-1, 128) @ weight + packed["bias"].to("cuda").float()
+
+    with torch.inference_mode():
+        module = _native_module(packed, outputs, "cuda")
+        assert module.bias.is_inference()
+        try:
+            before = module(x)
+        except ModuleNotFoundError as exc:
+            if "ExLlamaV3 torch.ops kernels are not properly installed" not in str(exc):
+                raise
+            pytest.skip("native EXL3 torch.ops extension is unavailable")
+        assert not module.bias.is_inference()
+        initial_inner = module._inner
+        repeated = module(x)
+        assert module._inner is initial_inner
+        module.bias.add_(0.25)
+        after = module(x)
+        assert module._inner is not initial_inner
+
+    assert before.dtype == repeated.dtype == after.dtype == dtype
+    assert before.shape == repeated.shape == after.shape == (1, 2, outputs)
+    expected = reference.reshape(1, 2, outputs).to(dtype)
+    changed_expected = (reference + 0.25).reshape(1, 2, outputs).to(dtype)
+    torch.testing.assert_close(before, expected, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(repeated, expected, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(after, changed_expected, rtol=2e-3, atol=2e-3)
+    assert module._inner.trellis is module.trellis
+    stored_outputs = math.ceil(outputs / 128) * 128
+    assert all(
+        not isinstance(value, torch.Tensor) or tuple(value.shape) != (128, stored_outputs)
+        for holder in (module, module._inner) for value in vars(holder).values()
+    )
 
 
 @pytest.mark.cuda
