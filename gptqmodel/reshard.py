@@ -438,6 +438,8 @@ def _scan_unindexed_checkpoint(
 
 def _index_containing_file(source_dir: str, selected_file: str) -> Optional[str]:
     """Keep a named shard attached to its complete standard checkpoint."""
+    selected_index: Optional[str] = None
+    selected_map: Optional[Dict[str, str]] = None
     for index_name in _SOURCE_INDEX_NAMES:
         index_path = os.path.join(source_dir, index_name)
         if not os.path.isfile(index_path):
@@ -448,16 +450,22 @@ def _index_containing_file(source_dir: str, selected_file: str) -> Optional[str]
             weight_map = index.get("weight_map")
             if not isinstance(weight_map, dict) or not weight_map:
                 continue
-            shard_paths = {
-                _resolve_shard_path(source_dir, shard)
-                for shard in {str(value) for value in weight_map.values()}
+            resolved_map = {
+                str(name): _resolve_shard_path(source_dir, str(shard))
+                for name, shard in weight_map.items()
             }
         except (OSError, ValueError, AttributeError):
             # An unrelated invalid index must not override a named file.
             continue
-        if selected_file in shard_paths:
-            return index_path
-    return None
+        if selected_file not in resolved_map.values():
+            continue
+        if selected_map is not None and resolved_map != selected_map:
+            raise ValueError(
+                f"Selected shard '{selected_file}' belongs to conflicting checkpoint "
+                f"indexes '{selected_index}' and '{index_path}'; select an index file explicitly."
+            )
+        selected_index, selected_map = index_path, resolved_map
+    return selected_index
 
 
 def _scan_checkpoint(
