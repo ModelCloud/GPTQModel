@@ -219,7 +219,8 @@ flowchart TD
 | Empty bias gradient | `gemv_awq.py:362-366` returned an empty output without connecting bias | Empty output includes a zero bias gradient when requested |
 
 The line references are from before this change. This flow was introduced by
-PR #TBD. No dequantized or expanded weight is retained by the module.
+[PR #3660](https://github.com/ModelCloud/GPTQModel/pull/3660). No dequantized
+or expanded weight is retained by the module.
 
 On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132 and Triton 3.9.0,
 packed-unit-weight 1×128×128 and 9×128×128 FP16/BF16 biased outputs matched
