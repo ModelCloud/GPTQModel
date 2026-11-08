@@ -1,0 +1,389 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
+# SPDX-License-Identifier: Apache-2.0
+"""NF12-AD (NyoomFloat12) inference linear layer.
+
+NF12 is Together AI's lossless 12-bit BF16 weight format, implemented by
+AlpinDale at https://github.com/dphnAI/nf12. This module stores the packed
+NF12-AD weight as ``qweight`` (like every other GPT-QModel quantized
+checkpoint) plus ``nf12_escapes`` and ``nf12_exp_base``. On CUDA the vendored
+fused decode-GEMM kernels run
+directly from that storage; elsewhere a bounded decode feeds an FP32
+accumulated matmul. No dense or dequantized weight is retained between
+forwards.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import torch
+import torch.nn as nn
+
+from ...adapter.adapter import Adapter, Lora
+from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
+from ...quantization.nf12_ad import NF12ADQuantResult, quantize_nf12_ad_weight, weight_to_matrix
+from ...utils import nf12_ad as nf12_ad_runtime
+from ...utils import nf12_ad_hip as nf12_ad_hip_runtime
+from ...utils import nf12_codec
+from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
+from . import WeightOnlyQuantLinear
+from ._numerics import linear_fp32_reduce
+
+
+log = setup_logger()
+
+
+def _hip_path(device: torch.device | str) -> bool:
+    """True when the device is an RDNA4 GPU that must use the HIP port.
+
+    RDNA4 lacks ``mma.sync``/``wgmma``, so the CUDA kernels cannot be loaded
+    there at all. Selecting by GPU family (not by ``IS_ROCM`` alone) keeps the
+    fused CUDA MMA path on NVIDIA while routing AMD to the HIP decode port.
+    """
+
+    return nf12_ad_hip_runtime.nf12_ad_hip_supported(device)
+
+
+class NF12ADLinear(WeightOnlyQuantLinear):
+    """Weight-only NF12-AD linear layer.
+
+    The packed representation is the checkpoint format. ``decode`` is exact,
+    so this path is numerically identical to running the original BF16
+    weights apart from the kernel's accumulation order.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.NF12_AD]
+    SUPPORTS_METHODS = [METHOD.NF12_AD]
+    SUPPORTS_FORMATS = {FORMAT.NF12_AD: 100}
+    SUPPORTS_BITS = [12]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
+
+    REQUIRES_FORMAT_V2 = False
+
+    QUANT_TYPE = "nf12_ad"
+
+    def __init__(
+        self,
+        bits: int,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        register_buffers: bool = True,
+        group_size: int = -1,
+        desc_act: bool = False,
+        sym: bool = True,
+        exp_base: Optional[int] = None,
+        dtype: Optional[torch.dtype] = None,
+        **kwargs,
+    ):
+        del group_size, desc_act, sym, dtype
+        super().__init__(
+            bits=int(bits),
+            in_features=int(in_features),
+            out_features=int(out_features),
+            bias=bias,
+            backend=kwargs.pop("backend", BACKEND.NF12_AD),
+            adapter=adapter,
+            register_buffers=False,
+            pack_dtype=pack_dtype,
+            **kwargs,
+        )
+        self._compiled_forward = None
+        self.requested_exp_base = exp_base
+        self._exp_base_value: int | None = None
+        if not bias:
+            self.bias = None
+        if register_buffers:
+            self._allocate_buffers(bias=bias)
+
+    @classmethod
+    def _validate(cls, bits=12, group_size=-1, desc_act=False, sym=True, pack_dtype=None,
+                  dtype=None, dynamic=None, in_features=None, out_features=None,
+                  device=None, trainable=None, adapter=None):
+        del group_size, desc_act, sym, dynamic
+        ok, err = cls._validate_shared(
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        if bits not in cls.SUPPORTS_BITS:
+            return False, NotImplementedError(
+                f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
+            )
+        return cls._validate_shape_constraints(
+            in_features=in_features,
+            out_features=out_features,
+        )
+
+    # ------------------------------------------------------------------
+    # storage
+    # ------------------------------------------------------------------
+    def _allocate_buffers(self, *, bias: bool) -> None:
+        qweight = torch.zeros(
+            (self.out_features, self.in_features * 3 // 2),
+            dtype=torch.uint8,
+        )
+        escapes = torch.zeros((0, 8), dtype=torch.int16)
+        exp_base = torch.zeros((1,), dtype=torch.uint8)
+        self.register_buffer("qweight", qweight)
+        self.register_buffer("nf12_escapes", escapes)
+        self.register_buffer("nf12_exp_base", exp_base)
+        if bias:
+            self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.bfloat16))
+        else:
+            self.bias = None
+
+    def list_buffers(self):
+        buffers = []
+        for name in ("qweight", "nf12_escapes", "nf12_exp_base", "bias"):
+            tensor = getattr(self, name, None)
+            if isinstance(tensor, torch.Tensor):
+                buffers.append(tensor)
+        return buffers
+
+    def runtime_device(self):
+        qweight = getattr(self, "qweight", None)
+        return qweight.device if isinstance(qweight, torch.Tensor) else None
+
+    def _invalidate_compiled(self) -> None:
+        self._compiled_forward = None
+
+    def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
+        return weight_to_matrix(linear)
+
+    def _exp_base(self) -> int:
+        if self._exp_base_value is None:
+            self._exp_base_value = int(self.nf12_exp_base.item())
+        return self._exp_base_value
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        # The buffer may have been copied into without replacing the object.
+        self._exp_base_value = None
+
+    def pack(self, linear, scales=None, zeros=None, g_idx=None, **kwargs):
+        self.pack_original(linear, scales, zeros, g_idx, **kwargs)
+
+    def pack_block(self, linear, scales=None, zeros=None, g_idx=None, block_in=8192, workers=1, **kwargs):
+        del block_in, workers
+        self.pack_original(linear, scales, zeros, g_idx, **kwargs)
+
+    def pack_gpu(self, linear, scales=None, zeros=None, g_idx=None, block_in=8192, device=None, **kwargs):
+        del block_in, device
+        self.pack_original(linear, scales, zeros, g_idx, **kwargs)
+
+    @torch.inference_mode()
+    def pack_original(self, linear, scales=None, zeros=None, g_idx=None, *, smooth=None):
+        """Encode ``linear.weight`` into the packed NF12-AD buffers."""
+
+        del scales, zeros, g_idx
+        if smooth is not None:
+            raise ValueError(
+                "NF12-AD is a lossless format and does not support smoothing; "
+                "disable `smooth` for this method."
+            )
+        weight = weight_to_matrix(linear)
+        result = quantize_nf12_ad_weight(weight, exp_base=self.requested_exp_base)
+        self._install_result(result, linear=linear)
+
+    @torch.inference_mode()
+    def load_quant_result(self, result: NF12ADQuantResult, *, bias: torch.Tensor | None = None):
+        """Install a quantizer result without recomputing the encoding."""
+
+        if result.packed.shape != (self.out_features, self.in_features * 3 // 2):
+            raise ValueError(
+                f"NF12ADLinear `{self.name}`: packed shape {tuple(result.packed.shape)} "
+                f"does not match {(self.out_features, self.in_features * 3 // 2)}"
+            )
+        self._install_result(result, bias=bias)
+
+    def _install_result(self, result: NF12ADQuantResult, *, linear=None, bias=None):
+        if hasattr(self, "qweight"):
+            target_device = self.qweight.device
+        elif isinstance(getattr(self, "bias", None), torch.Tensor):
+            target_device = self.bias.device
+        else:
+            target_device = torch.device("cpu")
+        packed = result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
+        escapes = result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
+        if "qweight" in self._buffers:
+            self.qweight = packed
+        else:
+            self.register_buffer("qweight", packed)
+        if "nf12_escapes" in self._buffers:
+            self.nf12_escapes = escapes
+        else:
+            self.register_buffer("nf12_escapes", escapes)
+        base = torch.tensor([result.exp_base], dtype=torch.uint8, device=packed.device)
+        if "nf12_exp_base" in self._buffers:
+            self.nf12_exp_base = base
+        else:
+            self.register_buffer("nf12_exp_base", base)
+        self._exp_base_value = int(result.exp_base)
+
+        source_bias = bias
+        if source_bias is None and linear is not None:
+            source_bias = getattr(linear, "bias", None)
+        if source_bias is not None:
+            value = source_bias.detach().to(device=packed.device, dtype=torch.bfloat16).contiguous()
+            if "bias" in self._buffers:
+                self.bias = value
+            else:
+                self.register_buffer("bias", value)
+        else:
+            self.bias = None
+        self._invalidate_compiled()
+
+    # ------------------------------------------------------------------
+    # export / inference
+    # ------------------------------------------------------------------
+    @torch.inference_mode()
+    def dequantize_weight(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        """Return the exact decoded BF16 matrix.
+
+        This is an explicit export API: callers receive a dense tensor, but it
+        is never installed as an inference cache.
+        """
+
+        target = self.qweight.device if device is None else torch.device(device)
+        packed = self.qweight.to(device=target)
+        escapes = self.nf12_escapes.to(device=target)
+        if target.type == "cuda" and _hip_path(target):
+            try:
+                weight = nf12_ad_hip_runtime.decode(packed, escapes, self._exp_base())
+            except Exception as exc:  # noqa: BLE001 - fall back to the codec
+                log.warn.once(
+                    f"NF12-AD HIP decode failed ({type(exc).__name__}: {exc}); "
+                    "using the Torch codec."
+                )
+                weight = nf12_codec.decode(
+                    packed, escapes, self._exp_base(), self.out_features, self.in_features
+                )
+        elif target.type == "cuda" and nf12_ad_runtime.available():
+            try:
+                weight = nf12_ad_runtime.decode(packed, escapes, self._exp_base())
+            except Exception as exc:  # noqa: BLE001 - fall back to the codec
+                log.warn.once(
+                    f"NF12-AD native decode failed ({type(exc).__name__}: {exc}); "
+                    "using the Torch codec."
+                )
+                weight = nf12_codec.decode(
+                    packed, escapes, self._exp_base(), self.out_features, self.in_features
+                )
+        else:
+            weight = nf12_codec.decode(
+                packed, escapes, self._exp_base(), self.out_features, self.in_features
+            )
+        return weight.to(dtype=dtype).contiguous()
+
+    def dequantize(self, *, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        return self.dequantize_weight(dtype=dtype)
+
+    def _native_forward(self, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
+        if not x.is_cuda or x.dtype != torch.bfloat16:
+            return None
+        if self.qweight.device != x.device:
+            return None
+        # RDNA4 has no mma.sync/wgmma, so the HIP port decodes to exact BF16 and
+        # uses rocBLAS (SPEC.md 6.5). CUDA hosts keep the fused MMA kernel.
+        if _hip_path(x.device):
+            if not nf12_ad_hip_runtime.available(x.device):
+                return None
+            try:
+                return nf12_ad_hip_runtime.linear(
+                    x.contiguous(),
+                    self.qweight,
+                    self.nf12_escapes,
+                    self._exp_base(),
+                    bias,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional accelerator
+                log.warn.once(
+                    f"NF12-AD HIP linear failed ({type(exc).__name__}: {exc}); "
+                    "using decode + matmul."
+                )
+                return None
+        if not nf12_ad_runtime.available():
+            return None
+        try:
+            return nf12_ad_runtime.linear(
+                x.contiguous(),
+                self.qweight,
+                self.nf12_escapes,
+                self._exp_base(),
+                bias,
+            )
+        except Exception as exc:  # noqa: BLE001 - native kernels are optional
+            log.warn.once(
+                f"NF12-AD native linear failed ({type(exc).__name__}: {exc}); "
+                "using decode + matmul."
+            )
+            return None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.online_full_had or self.online_partial_had:
+            x = self._apply_rotation_to_input(x)
+
+        bias = getattr(self, "bias", None)
+        if self.input_rows(x) == 0:
+            out = self.empty_linear_output(x)
+            if self.adapter is not None:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(dtype=x.dtype)
+
+        out = self._native_forward(x, bias)
+        if out is None:
+            # Bounded scratch: the decoded matrix lives only for this forward.
+            weight = self.dequantize_weight(device=x.device, dtype=x.dtype)
+            out = linear_fp32_reduce(x, weight, bias)
+            del weight
+
+        if self.adapter is not None:
+            out = self.adapter.apply(x=x, out=out)
+        return out
+
+    def post_init(self):
+        super().post_init()
+        # Validate the loaded checkpoint's packing geometry once.
+        if self.qweight.shape != (self.out_features, self.in_features * 3 // 2):
+            raise ValueError(
+                f"NF12ADLinear `{self.name}`: unexpected `qweight` shape "
+                f"{tuple(self.qweight.shape)}"
+            )
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"bias={getattr(self, 'bias', None) is not None}, "
+            f"exp_base={self._exp_base()}"
+        )
+
+
+__all__ = ["NF12ADLinear"]

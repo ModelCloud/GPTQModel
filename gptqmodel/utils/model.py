@@ -2539,6 +2539,78 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
     return converted_path
 
 
+def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
+    """Read tensor shapes from a safetensors file, directory, or index.
+
+    NF12-AD stores a data-dependent escape table. The module cannot know its
+    row count from `in_features`/`out_features` alone, so the loader must size
+    that buffer before accelerate assigns checkpoint tensors.
+    """
+
+    if checkpoint is None:
+        return {}
+    path = os.fspath(checkpoint)
+    if isinstance(path, bytes):
+        path = path.decode()
+    files: List[str] = []
+    if os.path.isdir(path):
+        files = [
+            os.path.join(path, name)
+            for name in os.listdir(path)
+            if name.endswith(".safetensors")
+        ]
+    elif path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+        except (OSError, ValueError):
+            return {}
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+    elif path.endswith(".safetensors"):
+        files = [path]
+
+    shapes: Dict[str, Tuple[int, ...]] = {}
+    for file in files:
+        try:
+            with safe_open(file, framework="pt", device="cpu") as handle:
+                for key in handle.keys():
+                    shapes[key] = tuple(handle.get_slice(key).get_shape())
+        except Exception:
+            # A malformed or non-safetensors shard is accelerate's problem to
+            # report; shape discovery is best effort.
+            continue
+    return shapes
+
+
+def _prepare_variable_quant_buffers(model, checkpoint) -> None:
+    """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
+
+    shapes = _checkpoint_tensor_shapes(checkpoint)
+    if not shapes:
+        return
+    # Only the escape table is data-dependent. `qweight`, `nf12_exp_base`, and
+    # `bias` shapes follow from the module geometry the model was built with.
+    suffixes = (".nf12_escapes", ".nf12_exp_base")
+    for key, shape in shapes.items():
+        suffix = next((item for item in suffixes if key.endswith(item)), None)
+        if suffix is None:
+            continue
+        module_name = key[: -len(suffix)]
+        try:
+            module = model.get_submodule(module_name)
+        except AttributeError:
+            continue
+        if getattr(module, "QUANT_TYPE", None) != "nf12_ad":
+            continue
+        buffer_name = suffix[1:]
+        current = getattr(module, buffer_name, None)
+        if not isinstance(current, torch.Tensor) or tuple(current.shape) == shape:
+            continue
+        dtype = current.dtype
+        module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype))
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
@@ -2550,6 +2622,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         if converted_checkpoint is not None:
             kwargs["checkpoint"] = converted_checkpoint
     try:
+        _prepare_variable_quant_buffers(
+            model,
+            kwargs.get("checkpoint", checkpoint),
+        )
         accelerate.load_checkpoint_in_model(model, *args, **kwargs)
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:

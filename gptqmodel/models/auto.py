@@ -509,6 +509,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.VPTQ,
+        METHOD.NF12_AD,
         METHOD.EXL3,
     ):
         return True
@@ -523,6 +524,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.VPTQ,
+        METHOD.NF12_AD,
         METHOD.EXL3,
     ):
         return True
@@ -969,6 +971,8 @@ class GPTQModel:
             backend = BACKEND.PAROQUANT_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH
+        elif normalized_method == METHOD.NF12_AD.value:
+            backend = BACKEND.NF12_AD
         elif normalized_method == METHOD.EXL3.value:
             backend = BACKEND.EXL3_TORCH
         else:

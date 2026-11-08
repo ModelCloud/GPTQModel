@@ -30,6 +30,7 @@ from .config import (
                      MSEConfig,
                      NormConfig,
                      NormType,
+                     NF12ADConfig,
                      ParoConfig,
                      PreProcessorCode,
                      PreProcessorConfig,
