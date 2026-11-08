@@ -166,6 +166,87 @@ The line references in this table refer to the implementation immediately
 before the gradient change. First-order gradients are covered; higher-order
 autograd is outside this contract.
 
+## AWQ GEMV Triton bias and input gradients
+
+`AwqGEMVTritonLinear.forward` uses the packed GEMV layout and keeps the same
+kernel for decode and larger row counts. When bias is present, it asks
+`awq_gemv_triton` for its FP32 accumulated result, adds the bias in FP32, then
+casts once to the input dtype. When the input requires a gradient,
+`_AwqGemvTritonFn` supplies a first-order backward. Its backward reads the
+saved packed buffers, unpacks at most 128 output columns at a time, and uses
+each temporary tile to accumulate the input gradient in FP32. The ordinary
+bias addition supplies the bias gradient. An empty input remains connected to
+both requested gradients without a Triton launch.
+
+```mermaid
+flowchart TD
+    A["AwqGEMVTritonLinear.forward"] --> B{"input_rows == 0?"}
+    B -- "Yes" --> C["empty_linear_output"]
+    C --> D["Connect bias when it needs a gradient"]
+    D --> R["Return input dtype output"]
+    B -- "No" --> E{"Bias present?"}
+    E -- "Yes" --> F["Request FP32 output"]
+    E -- "No" --> G["Request FP16 output"]
+    F --> H{"Input needs a gradient?"}
+    G --> H
+    H -- "Yes" --> I["_AwqGemvTritonFn.apply"]
+    H -- "No" --> J["awq_gemv_triton"]
+    I --> K{"awq_gemv_triton validates packed buffers?"}
+    J --> K
+    K -- "No" --> X["Raise ValueError"]
+    K -- "Yes" --> Z["Launch _awq_gemv_kernel"]
+    Z --> L{"Bias present?"}
+    L -- "Yes" --> M["Add bias in FP32"]
+    L -- "No" --> N["Use kernel output"]
+    M --> O["Cast to input dtype"]
+    N --> O
+    O --> R
+    R --> P{"Backward called?"}
+    P -- "Yes" --> W{"Requested gradient routes"}
+    W -- "Nonempty input" --> Q["_AwqGemvTritonFn.backward"]
+    Q --> T["Unpack 128-column tiles and accumulate input gradient"]
+    W -- "Empty input" --> Y["empty_linear_output backward"]
+    W -- "Bias" --> U["Torch bias-add backward"]
+    P -- "No" --> V["Finish"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Biased GEMV | `gemv_awq.py:390-401` requested FP16 output and added bias afterward | FP32 kernel result and bias sum, then one cast to the input dtype |
+| Training input | `gemv_awq.py:386-401` called Triton directly, so the output had no input gradient despite `SUPPORTS_TRAINING=True` | `_AwqGemvTritonFn.backward` computes the input gradient from bounded temporary unpacked tiles |
+| Empty bias gradient | `gemv_awq.py:362-366` returned an empty output without connecting bias | Empty output includes a zero bias gradient when requested |
+
+The line references are from before this change. This flow was introduced by
+PR #TBD. No dequantized or expanded weight is retained by the module.
+
+On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132 and Triton 3.9.0,
+packed-unit-weight 1×128×128 and 9×128×128 FP16/BF16 biased outputs matched
+an independent FP64 Torch oracle after rounding. The old output was `inf`;
+the corrected FP16 result was `65024`. Random 2×3×128 inputs with 256 outputs
+and group size 64 matched the independently unpacked FP64 oracle: maximum
+visible-output differences were `1.91e-6` in FP16 and `0` in BF16. Maximum
+input-gradient differences after visible rounding were `0` in FP16 and
+`0.125` (within one BF16 ULP) in BF16; bias gradients matched exactly.
+The related AWQ suite completed with 91 passed and 38 skipped; the skips
+require AMD ROCm or NVIDIA Ada hardware.
+
+Resident FP16 inference timing used five warmups and the median of seven sets
+of 30 CUDA-event timed calls. The direct old FP16-output-plus-bias and new
+FP32-output-plus-bias sequences measured:
+
+| Shape (M×K×N) | Old | New | Old peak allocator delta | New peak allocator delta |
+| --- | ---: | ---: | ---: | ---: |
+| 1×1024×1024 | 0.0640 ms | 0.0794 ms | <0.01 MiB | 0.01 MiB |
+| 9×1024×1024 | 0.0653 ms | 0.0806 ms | 0.04 MiB | 0.07 MiB |
+
+The first-order forward-and-backward path for 6×1024×1024 took `3.01 ms`
+with a `33.56 MiB` peak allocator delta under the same timing method using
+ten calls per set. There was no prior input-gradient path to compare. The peak
+includes temporary unpacked tiles and library scratch; no expanded weight
+remains after backward.
+
 ## Previous and current behavior
 
 | Path | Previous mechanism | Current mechanism |

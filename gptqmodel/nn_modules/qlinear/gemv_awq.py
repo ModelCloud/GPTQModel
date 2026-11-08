@@ -290,6 +290,45 @@ class AwqGEMVLinear(AWQuantLinear):
 __all__ = ["AWQ_GEMV_ROCM_UNSUPPORTED", "AwqGEMVLinear"]
 
 
+class _AwqGemvTritonFn(torch.autograd.Function):
+    """Differentiate the packed GEMV without retaining a dense weight."""
+
+    @staticmethod
+    def forward(ctx, inputs, qweight, scales, qzeros, group_size, output_dtype):
+        from ...quantization.awq.modules.triton.gemv import awq_gemv_triton
+
+        ctx.save_for_backward(qweight, scales, qzeros)
+        ctx.group_size = group_size
+        ctx.input_dtype = inputs.dtype
+        return awq_gemv_triton(
+            inputs, qweight, scales, qzeros, group_size, output_dtype=output_dtype,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if not ctx.needs_input_grad[0]:
+            return None, None, None, None, None, None
+
+        qweight, scales, qzeros = ctx.saved_tensors
+        n, words = qweight.shape
+        k = words * 8
+        shifts = torch.arange(8, device=qweight.device, dtype=torch.int32) * 4
+        groups = torch.arange(k, device=qweight.device) // ctx.group_size
+        grad_input = torch.zeros(
+            (grad_output.shape[0], k), device=grad_output.device, dtype=torch.float32,
+        )
+        # Unpack bounded output-column tiles only for backward. The temporary
+        # dense tile is released each iteration; no expanded weight survives.
+        for start in range(0, n, 128):
+            stop = min(start + 128, n)
+            codes = ((qweight[start:stop, :, None] >> shifts) & 15).reshape(stop - start, k)
+            zeros = ((qzeros[start:stop, :, None] >> shifts) & 15).reshape(stop - start, -1)
+            zeros = zeros.index_select(1, groups)
+            weights = (codes - zeros).float() * scales[start:stop].index_select(1, groups).float()
+            grad_input.addmm_(grad_output[:, start:stop].float(), weights)
+        return grad_input.to(ctx.input_dtype), None, None, None, None, None
+
+
 class AwqGEMVTritonLinear(AwqGEMVLinear):
     """AWQ GEMV layout with a portable Triton decode kernel.
 
@@ -364,7 +403,10 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         if self.input_rows(x) == 0:
-            return self.empty_linear_output(x)
+            out = self.empty_linear_output(x)
+            if self.bias is not None and self.bias.requires_grad:
+                out = (out.float() + self.bias.float()).to(x.dtype)
+            return out
 
         for name in ("qweight", "qzeros", "scales"):
             tensor = getattr(self, name, None)
@@ -386,19 +428,20 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
             inputs = inputs.contiguous()
 
         group_size = self.in_features if self.group_size == -1 else self.group_size
-        out = awq_gemv_triton(
-            inputs,
-            self.qweight,
-            self.scales,
-            self.qzeros,
-            group_size,
-            output_dtype=torch.float16,
-        )
-
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
+        output_dtype = torch.float32 if self.bias is not None else torch.float16
+        if torch.is_grad_enabled() and inputs.requires_grad:
+            out = _AwqGemvTritonFn.apply(
+                inputs, self.qweight, self.scales, self.qzeros, group_size, output_dtype,
+            )
+        else:
+            out = awq_gemv_triton(
+                inputs, self.qweight, self.scales, self.qzeros, group_size,
+                output_dtype=output_dtype,
+            )
         if self.bias is not None:
-            out = out + self.bias
+            out = out + self.bias.float()
+        if out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
         return out.reshape(out_shape)
