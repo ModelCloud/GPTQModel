@@ -52,6 +52,8 @@ class TestMoEExpertBatching(unittest.TestCase):
         )
         # Mock processor tasks
         self.processor.tasks = {}
+        self.processor.begin_shared_input_capture.return_value = {}
+        self.processor.end_shared_input_capture.return_value = None
 
         # Create fake subset
         self.subset = {f"expert.{i}": MagicMock() for i in range(10)}
