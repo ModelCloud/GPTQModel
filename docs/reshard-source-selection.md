@@ -43,3 +43,5 @@ selected path at `gptqmodel/reshard.py:279-293`; `_scan_checkpoint` uses it at
 An explicitly selected index must pass the same shard and tensor-name checks
 as a standard index. If it is invalid, resharding fails before publishing the
 destination.
+See [PR #3589](https://github.com/ModelCloud/GPTQModel/pull/3589) for the
+reproducer and rationale.
