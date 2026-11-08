@@ -176,6 +176,32 @@ def test_exponent_cache_tracks_versioned_updates_and_explicit_clear():
         assert module._exp_base() == 57
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_pack_and_reload_preserve_source_bias_precision(dtype):
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    source = torch.nn.Linear(64, 16, bias=True).to(dtype)
+    with torch.no_grad():
+        source.weight.fill_(2.0**-12)
+        source.weight[:, ::2].neg_()
+        source.bias.fill_(100.25)
+
+    packed = NF12ADLinear(bits=12, in_features=64, out_features=16,
+                          bias=True, dtype=dtype, exp_base=54)
+    packed.pack_original(source)
+    x = torch.zeros((2, 64), dtype=dtype)
+    expected = source(x)
+    assert torch.equal(packed(x), expected)
+    assert packed.bias.dtype == dtype
+    assert torch.equal(packed.bias, source.bias)
+
+    reloaded = NF12ADLinear(bits=12, in_features=64, out_features=16,
+                            bias=True, dtype=dtype)
+    reloaded.load_state_dict(packed.state_dict())
+    assert reloaded.bias.dtype == dtype
+    assert torch.equal(reloaded(x), expected)
+
+
 def test_loader_resizes_data_dependent_escape_buffer(tmp_path):
     """The escape table has a checkpoint-dependent row count, not a config size."""
 

@@ -91,7 +91,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
-        del group_size, desc_act, sym, dtype
+        del group_size, desc_act, sym
         super().__init__(
             bits=int(bits),
             in_features=int(in_features),
@@ -111,7 +111,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         if not bias:
             self.bias = None
         if register_buffers:
-            self._allocate_buffers(bias=bias)
+            self._allocate_buffers(bias=bias, bias_dtype=dtype or torch.bfloat16)
 
     @classmethod
     def _validate(cls, bits=12, group_size=-1, desc_act=False, sym=True, pack_dtype=None,
@@ -139,7 +139,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
     # ------------------------------------------------------------------
     # storage
     # ------------------------------------------------------------------
-    def _allocate_buffers(self, *, bias: bool) -> None:
+    def _allocate_buffers(self, *, bias: bool, bias_dtype: torch.dtype) -> None:
         packed = torch.zeros(
             (self.out_features, self.in_features * 3 // 2),
             dtype=torch.uint8,
@@ -150,7 +150,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         self.register_buffer("nf12_escapes", escapes)
         self.register_buffer("nf12_exp_base", exp_base)
         if bias:
-            self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.bfloat16))
+            self.register_buffer("bias", torch.zeros(self.out_features, dtype=bias_dtype))
         else:
             self.bias = None
 
@@ -260,7 +260,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         if source_bias is None and linear is not None:
             source_bias = getattr(linear, "bias", None)
         if source_bias is not None:
-            value = source_bias.detach().to(device=packed.device, dtype=torch.bfloat16).contiguous()
+            value = source_bias.detach().to(device=packed.device).contiguous()
             if "bias" in self._buffers:
                 self.bias = value
             else:
