@@ -100,6 +100,20 @@ class ExllamaV3Linear(nn.Module):
             tensors=tensors,
         )
 
+    def _bias_version(self) -> Optional[int]:
+        """Version counter of the logical bias owned by this module.
+
+        ``_ensure_inner`` hands ``LinearEXL3`` a *widened copy* of ``bias`` when
+        ``out_features`` is padded, so the kernel no longer aliases the live
+        parameter. In-place writes (``bias.add_``, adapter merges, scale
+        folding) would then be invisible. ``Tensor._version`` bumps on every
+        in-place mutation, so it cheaply distinguishes "alias" from "stale copy".
+        """
+        bias = getattr(self, "bias", None)
+        if bias is None or bias.device.type == "meta":
+            return None
+        return int(bias._version)
+
     def _current_signature(self) -> tuple[Any, ...]:
         trellis = getattr(self, "trellis", None)
         if trellis is None or trellis.device.type == "meta":
@@ -112,6 +126,8 @@ class ExllamaV3Linear(nn.Module):
                 signature.append(None)
                 continue
             signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
+        # Only the padded path copies the bias, so only that path needs liveness.
+        signature.append(self._bias_version())
         return tuple(signature)
 
     def _drop_inner(self) -> None:
@@ -123,6 +139,22 @@ class ExllamaV3Linear(nn.Module):
                 pass
         self._inner = None
         self._inner_signature = None
+
+    def _stored_features(self) -> tuple[int, int]:
+        """Infer storage geometry; architecture dimensions remain logical."""
+        trellis = getattr(self, "trellis", None)
+        if trellis is None or trellis.ndim != 3:
+            raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry")
+        inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
+        padded_outputs = ((self.out_features + 127) // 128) * 128
+        if (inputs != self.in_features or outputs not in (self.out_features, padded_outputs)
+                or outputs < self.out_features):
+            raise ValueError(f"EXL3 module `{self.name}` storage differs from logical dimensions")
+        for suffix, expected in (("suh", inputs), ("svh", outputs)):
+            scale = getattr(self, suffix, None)
+            if scale is not None and tuple(scale.shape) != (expected,):
+                raise ValueError(f"EXL3 module `{self.name}` has invalid {suffix} geometry")
+        return inputs, outputs
 
     def _coerce_buffer_dtypes(self) -> None:
         """Restore the dtypes the EXL3 kernels require after a model-wide cast.
@@ -155,10 +187,16 @@ class ExllamaV3Linear(nn.Module):
             return self._inner
 
         self._drop_inner()
+        stored_inputs, stored_outputs = self._stored_features()
+        bias = getattr(self, "bias", None)
+        if bias is not None and stored_outputs != self.out_features:
+            if tuple(bias.shape) != (self.out_features,):
+                raise ValueError(f"EXL3 module `{self.name}` has invalid logical bias geometry")
+            bias = torch.nn.functional.pad(bias, (0, stored_outputs - self.out_features))
         self._inner = LinearEXL3(
             config=None,
-            in_features=self.in_features,
-            out_features=self.out_features,
+            in_features=stored_inputs,
+            out_features=stored_outputs,
             scale=None,
             su=getattr(self, "su", None),
             sv=getattr(self, "sv", None),
@@ -167,7 +205,7 @@ class ExllamaV3Linear(nn.Module):
             trellis=trellis,
             mcg=getattr(self, "mcg", None),
             mul1=getattr(self, "mul1", None),
-            bias=getattr(self, "bias", None),
+            bias=bias,
             out_dtype=self.out_dtype,
             transformers_fix=True,
             key=self.name,
@@ -181,21 +219,24 @@ class ExllamaV3Linear(nn.Module):
         if getattr(self, "trellis", None) is not None and self.trellis.device.type != "meta":
             self._ensure_inner()
 
-    def _apply(self, fn):
+    def _apply(self, fn, recurse=True):
         self._drop_inner()
-        result = super()._apply(fn)
+        result = super()._apply(fn, recurse=recurse)
         self._coerce_buffer_dtypes()
         return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         inner = self._ensure_inner()
         input_dtype = x.dtype
-        return inner.forward(x.half(), {}).to(input_dtype)
+        return inner.forward(x.half(), {})[..., :self.out_features].to(input_dtype)
 
     def _multiplier_value(self, name: str) -> Optional[int]:
         tensor = getattr(self, name, None)
         if tensor is None:
             return None
+        if tensor.device.type == "meta":
+            stored = self.tensor_storage.get(f"{name}_multiplier")
+            return int(stored) if stored is not None else None
         return int(tensor.view(torch.uint32).item())
 
     def tensor_storage_entry(self) -> Dict[str, Any]:
