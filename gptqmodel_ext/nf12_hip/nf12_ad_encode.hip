@@ -4,24 +4,18 @@
 // ---------------------------------------------------------------------------
 // NF12-AD (NyoomFloat12) encode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
 //
-// Algorithm: "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit
-// Weight Compression", Liberman, Fang, Zhang, Dao, and Fu (Together AI, 2026).
-// Together AI: https://www.together.ai/
+// Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
+// (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
+// and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
 //
-// Original NF12 reference implementation and CUDA kernels:
-//   https://github.com/dphnAI/nf12
-//   Copyright (c) 2026 AlpinDale and the nf12 contributors.
-//   Licensed under the Apache License, Version 2.0.
+// It is a direct transliteration of the vendored CUDA encoder
+// (gptqmodel_ext/nf12/csrc/codec/encode.cu) and produces BYTE-IDENTICAL
+// output: the same exp_base, the same packed bytes and the same escape order.
+// It replaces the pure-Torch ``nf12_codec.encode`` fallback that previously ran
+// this stage on the CPU (~691 ms for a 4096x4096 matrix).
 //
-// This HIP port was written for GPT-QModel (ModelCloud.ai). It is a direct
-// transliteration of the vendored CUDA encoder in
-// gptqmodel_ext/nf12/csrc/codec/encode.cu and produces BYTE-IDENTICAL output:
-// the same exp_base, the same packed bytes and the same escape order. It
-// replaces the pure-Torch ``nf12_codec.encode`` fallback that previously ran
-// this stage entirely on the CPU (~691 ms for a 4096x4096 matrix).
-//
-// Why the port is not a copy
-// --------------------------
+// Port notes
+// ----------
 // The CUDA pipeline uses three CUB block primitives (BlockLoad/BlockScan/
 // BlockStore). The ROCm SDK here ships no thrust/CUB, so scan_kernel is
 // replaced by a hand-written block-wide exclusive scan with the same

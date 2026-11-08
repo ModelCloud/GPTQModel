@@ -2,21 +2,15 @@
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) format + decode for AMD RDNA4 (gfx1200/gfx1200/gfx1250).
+// NF12-AD (NyoomFloat12) format + decode for AMD RDNA4 (gfx1200/gfx1201/gfx1250).
 //
-// Algorithm: "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit
-// Weight Compression", Liberman, Fang, Zhang, Dao, and Fu (Together AI, 2026).
-// Together AI: https://www.together.ai/
+// Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
+// (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
+// and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
 //
-// Original NF12 reference implementation and CUDA kernels:
-//   https://github.com/dphnAI/nf12
-//   Copyright (c) 2026 AlpinDale and the nf12 contributors.
-//   Licensed under the Apache License, Version 2.0.
-//
-// This HIP port was written for GPT-QModel (ModelCloud.ai). It decodes the
-// identical NF12-AD tiled byte stream that the CUDA kernels produce, so a
-// checkpoint is portable between NVIDIA and AMD hosts. The bit layout is
-// specified in gptqmodel_ext/nf12/docs/SPEC.md sections 2-4.
+// It decodes the identical NF12-AD tiled byte stream that the CUDA kernels
+// produce, so a checkpoint is portable between NVIDIA and AMD hosts. The bit
+// layout is specified in gptqmodel_ext/nf12/docs/SPEC.md sections 2-4.
 //
 // PORTING NOTES (NVIDIA -> AMD), all verified on gfx1201 hardware:
 //
