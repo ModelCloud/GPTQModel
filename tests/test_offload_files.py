@@ -2091,6 +2091,42 @@ def test_streaming_state_dict_to_shards_reuses_only_authenticated_shards(tmp_pat
     assert shard_path.read_bytes() == original
 
 
+def test_streaming_state_dict_to_shards_rewrites_when_source_changes(tmp_path):
+    tensor = torch.arange(32, dtype=torch.int16).reshape(4, 8)
+    arguments = {
+        "state_dict": {
+            "weight": TensorSource(
+                name="weight",
+                torch_dtype=tensor.dtype,
+                shape=tuple(tensor.shape),
+                source=tensor,
+            ),
+        },
+        "save_dir": str(tmp_path),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+    shard_path = tmp_path / expected_files[0]
+    original = shard_path.read_bytes()
+
+    changed = tensor.clone()
+    changed[0, 0] = 999
+    arguments["state_dict"] = {
+        "weight": TensorSource(
+            name="weight",
+            torch_dtype=changed.dtype,
+            shape=tuple(changed.shape),
+            source=changed,
+        ),
+    }
+    streaming_state_dict_to_shards(**arguments)
+
+    assert shard_path.read_bytes() != original
+
+
 def test_streaming_state_dict_to_shards_reuses_legacy_unhashed_offload(tmp_path, monkeypatch):
     model = _LinearWithBuffers(in_features=128, out_features=96)
     offload_root = tmp_path / "offload_root"

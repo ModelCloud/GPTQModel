@@ -2681,6 +2681,7 @@ def _safetensors_header(
         header_bytes += b" " * header_padding
     return header, header_bytes, offset
 
+
 class _Sha256Writer:
     def __init__(self) -> None:
         self.digest = hashlib.sha256()
@@ -2688,6 +2689,7 @@ class _Sha256Writer:
     def write(self, payload) -> int:
         self.digest.update(payload)
         return len(payload)
+
 
 def _tensor_payload_sha256(entry: TensorSource) -> str | None:
     source = entry.source
@@ -2724,6 +2726,7 @@ def _tensor_payload_sha256(entry: TensorSource) -> str | None:
     writer = _Sha256Writer()
     _write_tensor_bytes(writer, source.detach(), entry.torch_dtype)
     return writer.digest.hexdigest()
+
 
 def _existing_shard_matches(
     path: str, entries: List[TensorSource], metadata: Dict[str, str]
@@ -2766,6 +2769,7 @@ def _existing_shard_matches(
             return source.read(1) == b""
     except (OSError, TypeError, ValueError, struct.error):
         return False
+
 
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
     _, header_bytes, _ = _safetensors_header(entries, metadata)
