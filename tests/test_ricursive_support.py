@@ -459,6 +459,31 @@ def test_generate_patch_distinguishes_new_blocks_from_full_prompts(
     assert out["position_ids"].tolist() == [expected_positions]
 
 
+@pytest.mark.parametrize("capacity", [10, 12])
+def test_generate_patch_full_prompt_with_capacity_padded_mask(capacity):
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    class _Dummy:
+        device = torch.device("cpu")
+
+    class _Cache:
+        def get_seq_length(self):
+            return 4
+
+    out = _prepare_inputs_for_generation(
+        _Dummy(),
+        torch.tensor([[1, 2, 3, 4, 17, 18]]),
+        past_key_values=_Cache(),
+        attention_mask=torch.tensor([[1] * 6 + [0] * (capacity - 6)]),
+        position_ids=torch.arange(6).unsqueeze(0),
+        cache_position=None,
+        use_cache=True,
+    )
+    assert out["input_ids"].tolist() == [[17, 18]]
+    assert out["cache_position"].tolist() == [4, 5]
+    assert out["position_ids"].tolist() == [[4, 5]]
+
+
 def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
     ref_dir = _reference_dir()
     if ref_dir is None:
