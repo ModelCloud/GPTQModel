@@ -124,3 +124,5 @@ differentiable full-FP32-operand reference; the measured allocator peak delta
 was `99.0 MiB` versus `167.0 MiB`. Its maximum input-gradient difference
 was `5.96e-8`, with zero weight- and bias-gradient difference. These are
 training-graph measurements; inference still uses the prior no-grad path.
+
+The gradient flow was introduced by [PR #3651](https://github.com/ModelCloud/GPTQModel/pull/3651).
