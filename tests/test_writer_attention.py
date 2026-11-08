@@ -112,6 +112,13 @@ def test_save_quantized_strips_attention_before_serialization(tmp_path, monkeypa
 
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
 
+    def stop_after_checks(model, _save_dir, _source_model_dir):
+        tracker["config_snapshot"] = dict(model.config.__dict__)
+        tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
+        raise RuntimeError("stop after checks")
+
+    monkeypatch.setattr("gptqmodel.models.writer._save_model_configs_without_weights", stop_after_checks)
+
     with pytest.raises(RuntimeError, match="stop after checks"):
         writer.save_quantized(save_dir=str(tmp_path))
 

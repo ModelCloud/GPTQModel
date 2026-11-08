@@ -18,6 +18,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
@@ -115,6 +116,92 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     if normalized not in SUPPORTED_SPLIT_BY:
         raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
     return normalized
+
+
+# Source-only config fields are preserved, but a live value always wins. These
+# keys are excluded because they are either stripped on purpose or are fully
+# regenerated for the export.
+_CONFIG_MERGE_SKIP_KEYS = frozenset(
+    {
+        "attn_implementation",
+        "_attn_implementation",
+        "quantization_config",
+        "quantize_config",
+    }
+)
+
+
+def _merge_missing_config_fields(saved: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Fill keys the saved config dropped, recursively, without overriding live values."""
+    for key, value in source.items():
+        if key in _CONFIG_MERGE_SKIP_KEYS:
+            continue
+        if key not in saved:
+            saved[key] = value
+        elif isinstance(saved[key], dict) and isinstance(value, dict):
+            _merge_missing_config_fields(saved[key], value)
+
+
+def _save_model_configs_without_weights(
+        model: torch.nn.Module,
+        save_dir: str,
+        source_model_dir: Optional[str] = None,
+) -> None:
+    """Serialize HF model metadata without invoking weight-file cleanup.
+
+    ``PreTrainedModel.save_pretrained(state_dict={})`` is not a config-only
+    operation: Transformers treats the empty dictionary as the complete weight
+    set and removes pre-existing checkpoint shards. Quantized exports write
+    their weights separately below, so use the same metadata preparation as
+    Transformers and call the config serializers directly.
+    """
+
+    os.makedirs(save_dir, exist_ok=True)
+    config = model.config
+
+    dtype = getattr(model, "dtype", None)
+    if dtype is not None:
+        config.dtype = str(dtype).split(".")[-1]
+    config.architectures = [model.__class__.__name__.removeprefix("FSDP")]
+
+    is_remote_code = getattr(model, "is_remote_code", None)
+    if callable(is_remote_code) and is_remote_code():
+        custom_object_save(model, save_dir, config=config)
+
+    # Read the source config before serializing: an in-place export overwrites
+    # ``config.json`` and would otherwise lose the fields we are trying to keep.
+    source_config: Optional[Dict[str, Any]] = None
+    if source_model_dir is not None:
+        source_config_path = os.path.join(source_model_dir, "config.json")
+        if os.path.isfile(source_config_path):
+            with open(source_config_path, "r", encoding="utf-8") as handle:
+                source_config = json.load(handle)
+            if not isinstance(source_config, dict):
+                raise ValueError("Model config.json must contain a JSON object.")
+
+    config.save_pretrained(save_dir)
+
+    # Some remote model configurations contain runtime-significant extension
+    # fields that their registered Transformers config class does not declare.
+    # Loading and reserializing such a config silently drops those fields (for
+    # example DeepSeek V4's ``num_hash_layers``). Preserve source-only fields,
+    # including ones nested in sub-configs such as ``text_config``, while
+    # allowing the live serialized config—including the new
+    # quantization_config—to override every field it knows about.
+    if source_config is not None:
+        saved_config_path = os.path.join(save_dir, "config.json")
+        with open(saved_config_path, "r", encoding="utf-8") as handle:
+            saved_config = json.load(handle)
+        if not isinstance(saved_config, dict):
+            raise ValueError("Model config.json must contain a JSON object.")
+        _merge_missing_config_fields(saved_config, source_config)
+        with open(saved_config_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+
+    can_generate = getattr(model, "can_generate", None)
+    generation_config = getattr(model, "generation_config", None)
+    if callable(can_generate) and can_generate() and generation_config is not None:
+        generation_config.save_pretrained(save_dir)
 
 
 def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtle_model) -> int:
@@ -1048,8 +1135,8 @@ def ModelWriter(cls):
             _normalize_legacy_tied_weights_keys(self.model)
 
             # Save model config, including generation_config
-            # Use empty state_dict hack to bypass saving weights
-            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+            # Serialize metadata directly so existing resumable shards survive.
+            _save_model_configs_without_weights(self.model, save_dir, self.model_local_path)
         finally:
             for attr, value in removed_config_attention_attrs.items():
                 setattr(self.model.config, attr, value)
