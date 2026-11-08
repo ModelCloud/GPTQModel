@@ -1,4 +1,4 @@
-# CUDA quantized linear bias epilogue
+# CUDA quantized linear epilogue
 
 GPT-QModel's portable GPTQ, AWQ, FP8, and GGUF linear backends may use an FP32
 accumulator with FP16 or BF16 activations on NVIDIA CUDA. When a layer has a
@@ -18,7 +18,10 @@ flowchart TD
     B -- "Yes" --> D{"Backend path"}
     D -- "GPTQ eager, AWQ, FP8 dense, GGUF dense" --> E["matmul_fp32_reduce"]
     D -- "GPTQ streaming" --> F["matmul_fp32_reduce per tile with optional bias slice"]
-    D -- "FP8 native" --> G["_forward_scaled_mm with FP32 output when biased"]
+    D -- "FP8 native candidate" --> R{"x_flat.numel() > 0?"}
+    R -- "Yes" --> G["_forward_scaled_mm with FP32 output when biased"]
+    R -- "No" --> S["Use FP8 dense fallback; keep native enabled"]
+    S --> E
     E --> H{"Bias present?"}
     F --> H
     G --> I["Add bias in FP32"]
@@ -39,6 +42,9 @@ NVIDIA tile, with or without bias, and keeps the wide value only for that tile;
 it does not retain an expanded weight. FP8 native scaled
 matmul requests FP32 output only when a bias is present. The output still has
 the activation dtype, and unsupported native FP8 calls use the dense fallback.
+An empty FP8 activation uses the dense fallback without calling `_scaled_mm`.
+It does not set `_scaled_mm_hard_disabled`, so a later nonempty activation can
+still use the native path.
 
 ## Gradient flow
 
@@ -94,11 +100,13 @@ autograd is outside this contract.
 | GPTQ streaming with bias | `torch.addmm` wrote an FP16/BF16 output tile at `torch.py:571`; `torch.py:591` added bias afterward | Each NVIDIA tile computes and adds bias in FP32 before copying to the output |
 | GPTQ streaming without bias | `torch.py:536` selected the wide tile only when bias existed; `torch.py:576` and `torch.py:577` wrote the unbiased GEMM directly to an FP16/BF16 output tile, producing `NaN` for a cancelled FP16 reduction | Every NVIDIA FP16/BF16 tile uses `matmul_fp32_reduce` and rounds once when copied to the output |
 | FP8 native scaled matmul | `fp8.py:614` requested low-precision output; `fp8.py:648` added bias afterward | Biased NVIDIA calls request FP32 output, add bias, then cast once |
+| FP8 native empty input | `fp8.py:540` admitted zero-element activations; `fp8.py:534` raised in `amax()`, and `fp8.py:634` permanently disabled native scaled matmul | `_can_use_scaled_mm` rejects empty activations; the dense path returns the empty output and later nonempty calls retain native eligibility |
 | Native FP8 unavailable | `fp8.py:625` selected dense fallback after a failed scaled matmul | The fallback passes bias into the wide dense epilogue |
 
 The bias rows cite the implementation before PR #3649; the unbiased streaming
-row cites the implementation before the current change. The ROCm and CPU
-matmul paths retain their existing arithmetic and dtype behavior.
+row cites the implementation before PR #3654; the empty FP8 row cites the
+implementation before PR #3655. The ROCm and CPU matmul paths retain
+their existing arithmetic and dtype behavior.
 
 ## Validation contract
 
@@ -148,3 +156,30 @@ had approximately `32.5 MiB` measured peak allocator delta, including CUDA
 library scratch; no expanded weight persists between forwards.
 
 The unbiased streaming flow was introduced by [PR #3654](https://github.com/ModelCloud/GPTQModel/pull/3654).
+
+## Empty FP8 activation contract
+
+`tests/kernels/test_fp8_kernel.py` checks FP16 and BF16, biased and unbiased,
+and 2D and 3D zero-row activations on the NVIDIA GB10. Before the empty-input
+gate, `_can_use_scaled_mm` admitted the empty activation, `amax()` raised, and
+the catch block set `_scaled_mm_hard_disabled=True`. The empty output still had
+the requested shape, but all later nonempty forwards used dense dequantization.
+With the gate, all eight cases return an empty output without calling native
+scaled matmul, release any temporary dense weight, and use the native path for
+the next nonempty forward.
+
+Resident-input FP16 timing used five warmups and the median of five runs of ten
+forwards with CUDA synchronization. The comparison toggled the module's native
+path flag after warmup, reproducing the state caused by the previous empty
+forward. The peak allocator delta includes CUDA library scratch.
+
+| Shape (M×K×N) | Native path after empty input | Dense path after the old disable |
+| --- | --- | --- |
+| 128×1024×1024 | 0.177 ms; 1.5 MiB peak | 0.091 ms; 34.5 MiB peak |
+| 128×4096×4096 | 0.187 ms; 6.0 MiB peak | 1.733 ms; 160.0 MiB peak |
+
+Native FP8 is slower for the smaller benchmark and faster for the larger one;
+the regression is that one empty request permanently changes the execution
+path for later requests.
+
+The empty FP8 flow was introduced by [PR #3655](https://github.com/ModelCloud/GPTQModel/pull/3655).

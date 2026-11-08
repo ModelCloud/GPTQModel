@@ -91,7 +91,8 @@ without version counters. Normal tensor mutations, checkpoint loads, and
 device/dtype moves invalidate this metadata automatically.
 The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
-rounding, and CUDA gradient propagation for the portable backends.
+rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
+portable backends.
 
 `BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
 8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime
