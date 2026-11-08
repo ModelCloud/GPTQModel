@@ -550,6 +550,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             not self._scaled_mm_hard_disabled
             and hasattr(torch, "_scaled_mm")
             and x_flat.device.type == "cuda"
+            # Tensorwise amax on an empty input would disable this path permanently.
+            and x_flat.numel() > 0
             and self.weight_scale_method == "tensor"
             and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
