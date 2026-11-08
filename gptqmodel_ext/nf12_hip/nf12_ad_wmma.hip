@@ -73,12 +73,24 @@ namespace {
 constexpr int kMaxTiles = 8;
 constexpr int kMaxTokens = kMaxTiles * 16;
 
+// Shared-memory row stride for the decoded super-atom. A plain 64 (128 bytes)
+// makes every lane in a row group hit the same LDS banks: the 16x64 store is
+// 8-way conflicted and the B-fragment load 16-way. Eight bf16 of padding
+// (144 bytes) turns 144/4 = 36 banks-per-row, so consecutive rows rotate by
+// four banks.
+//
+// The padding costs 4 KiB of LDS per CTA (36 vs 32 KiB), which drops the
+// resident CTAs per CU from 4 to 3. That is free while the whole launch fits
+// in three CTAs per CU and a loss beyond it, so the launcher picks kPad from
+// the grid size (n_blocks * m_blocks <= 96) rather than paying it always.
+constexpr int kLdPadded = kSuperAtomCols + 8;
+
 // Maximum K split used by the launcher. Each split walks a disjoint slice of
 // the K walk, so this multiplies the CTA count without duplicating any read.
 constexpr int kMaxSplits = 8;
 
 // kMt is the number of 16-token tiles this instantiation covers.
-template <int kMt, int kSplits, bool kDbl>
+template <int kMt, int kSplits, bool kDbl, bool kPad>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     wmma_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                 const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
@@ -91,6 +103,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   (void)out; (void)bias; (void)partial;
   if (blockIdx.x == 0xffffffffu && threadIdx.x == 0xffffffffu) out[0] = __float2bfloat16(0.f);
 #else
+  constexpr int kLd = kPad ? kLdPadded : kSuperAtomCols;
   const int lane = threadIdx.x % kWarpSize;
   const int warp = threadIdx.x / kWarpSize;
   const int64_t n0 = (int64_t(blockIdx.x) * kWarpsPerBlock + warp) * kSuperAtomRows;
@@ -127,7 +140,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // ~20 VGPRs (measured 169-188 vs 67-167), which lowers the resident CTA count
   // per CU, so the launcher enables it only where that still pays (kMt <= 6).
   __shared__ __align__(16) __hip_bfloat16 tile[kDbl ? 2 : 1][kWarpsPerBlock]
-                                                 [kSuperAtomRows * kSuperAtomCols];
+                                                 [kSuperAtomRows * kLd];
 
   // Output column this lane owns, and its bias, constant across the K walk.
   const int col = int(n0) + (lane & 15);
@@ -182,7 +195,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     }
     // Tile-local offset: `sh` holds ONE super-atom, so the n-block field is 0
     // (passing the absolute super-atom would write past the 16x64 tile).
-    store_row_tile(dst, row_tile_offset(SuperAtom{0, 0}, kSuperAtomCols, lane), kSuperAtomCols, xr);
+    store_row_tile(dst, row_tile_offset(SuperAtom{0, 0}, kLd, lane), kLd, xr);
   };
 
   // 4 k-chunks of 16, each feeding one B fragment. A depends on both the token
@@ -194,7 +207,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   auto do_mma = [&](__hip_bfloat16* sh, int64_t kb) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      const WmmaA b = wmma_row_frag(sh + 16 * j, kSuperAtomCols, lane);
+      const WmmaA b = wmma_row_frag(sh + 16 * j, kLd, lane);
 #pragma unroll
       for (int t = 0; t < kMt; ++t) {
         // `wmma_row_frag` supplies the tile's own row ((lane & 15)) itself, so
@@ -362,21 +375,31 @@ static hipError_t ensure_partial(size_t bytes) {
   return hipSuccess;
 }
 
-// Split count for a given problem. Measured on gfx1201 (see README):
-//   * Below ~4 waves of CTAs (a wave is one CTA per CU, 32 CUs) the kernel is
-//     latency-starved, and splitting K is nearly free because each split still
-//     reads a DISJOINT k slice.
-//   * At or above ~4 waves the machine is already saturated and the extra
-//     partial planes and reduce pass cost more than the parallelism buys.
-// So the split is chosen from the CTA count only.
-static int pick_splits(int64_t blocks_x, int64_t m) {
-  // gfx1201 has 32 CUs, so 32 CTAs is one wave. Only the single-wave case is
-  // latency-starved enough for split-K to pay. Measured at N=11008 (86 CTAs,
-  // ~2.7 waves) split-K LOSES: 146 us unsplit vs 182 us at split 2. So the
-  // rule is "split only when the launch is under ~1.2 waves".
+// Split count for a given problem. A split reads a DISJOINT k slice, so the
+// packed weight is never read twice; the cost is the per-split FP32 partial
+// plane plus the reduce pass.
+static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
+  // gfx1201 has 32 CUs, so 32 CTAs is one wave. Split-K is only worth its
+  // partial planes and reduce pass when the unsplit launch is short of a wave
+  // AND each CTA still has enough K work to amortise the extra pass. Measured
+  // on gfx1201 at m=16 and m=128 (best split in brackets):
+  //
+  //   4096x4096   32 CTAs,  64 k-blocks   s1 (m=16) / s2 (m=128)
+  //   14336x4096  32 CTAs, 224 k-blocks   s2 / s1
+  //   25600x5120  40 CTAs, 400 k-blocks   s2 / s1
+  //   896x4864     7 CTAs,  76 k-blocks   s8 / s8
+  //
+  // So: at most four token tiles per CTA, long K means there is real work to
+  // spread; at eight tiles the CTA is already tile-heavy and the m*n partial
+  // plane doubles, so only a short K still benefits from a split.
   constexpr int64_t kOneWave = 32;
   if (blocks_x > kOneWave + kOneWave / 4) return 1;
-  return (m <= 64) ? 4 : 2;
+  // A narrow N (896 rows -> 7 CTAs) is still under one wave at 4x. Every extra
+  // CTA is free because each split reads a DISJOINT k slice: 7 x 8 = 56 CTAs
+  // took 896x4864 m=128 from ~95 to 32 us.
+  if (blocks_x * 4 < kOneWave) return 8;
+  const bool long_k = k_blocks >= 128;
+  return (m > 64) ? (long_k ? 1 : 2) : (long_k ? 2 : 1);
 }
 
 // `out` is [m, n] row-major BF16; `x` is [m, k].
@@ -417,7 +440,7 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   const int64_t m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
-  const int splits = pick_splits(n_blocks * m_blocks, m);
+  const int splits = pick_splits(n_blocks * m_blocks, m, k_blocks);
 
   float* partial = nullptr;
   if (splits > 1) {
@@ -430,22 +453,24 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),
                   static_cast<unsigned>(splits));
 
-#define NF12_AD_LAUNCH(T, S, D)                                                             \
-  wmma_kernel<T, S, D><<<grid, kThreadsPerBlock, 0, stream>>>(                              \
+#define NF12_AD_LAUNCH(T, S, D, P)                                                          \
+  wmma_kernel<T, S, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(                           \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
       escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),    \
       reinterpret_cast<const __hip_bfloat16*>(bias), partial)
 
   // (tile count, split count) pairs the dispatcher can reach. Split 1 needs no
   // reduce pass; every other case reduces from a partial plane.
-#define NF12_AD_DISPATCH(T, D)                  \
+#define NF12_AD_DISPATCH(T, D, P)               \
   do {                                          \
     if (splits == 1) {                          \
-      NF12_AD_LAUNCH(T, 1, D);                  \
+      NF12_AD_LAUNCH(T, 1, D, P);               \
     } else if (splits == 2) {                   \
-      NF12_AD_LAUNCH(T, 2, D);                  \
+      NF12_AD_LAUNCH(T, 2, D, P);               \
+    } else if (splits == 4) {                   \
+      NF12_AD_LAUNCH(T, 4, D, P);               \
     } else {                                    \
-      NF12_AD_LAUNCH(T, 4, D);                  \
+      NF12_AD_LAUNCH(T, 8, D, P);               \
     }                                           \
   } while (0)
 
@@ -453,16 +478,30 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   // for more than one CTA per CU; above six tiles they do not (m=128 at
   // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
   // exactly one of the two variants, so the kernel count is unchanged.
+  //
+  // The padded shared stride (36 KiB/CTA instead of 32) costs one resident CTA
+  // per CU. That is free while the whole launch fits under three CTAs per CU
+  // and a loss beyond it, so the launcher picks the variant from the grid size.
+  const bool pad = n_blocks * m_blocks <= 96;
+#define NF12_AD_TILES(T, D)                                                     \
+  do {                                                                          \
+    if (pad) {                                                                  \
+      NF12_AD_DISPATCH(T, D, true);                                             \
+    } else {                                                                    \
+      NF12_AD_DISPATCH(T, D, false);                                            \
+    }                                                                           \
+  } while (0)
   switch (tiles) {
-    case 1: NF12_AD_DISPATCH(1, true); break;
-    case 2: NF12_AD_DISPATCH(2, true); break;
-    case 3: NF12_AD_DISPATCH(3, true); break;
-    case 4: NF12_AD_DISPATCH(4, true); break;
-    case 5: NF12_AD_DISPATCH(5, true); break;
-    case 6: NF12_AD_DISPATCH(6, true); break;
-    case 7: NF12_AD_DISPATCH(7, false); break;
-    default: NF12_AD_DISPATCH(kMaxTiles, false); break;
+    case 1: NF12_AD_TILES(1, true); break;
+    case 2: NF12_AD_TILES(2, true); break;
+    case 3: NF12_AD_TILES(3, true); break;
+    case 4: NF12_AD_TILES(4, true); break;
+    case 5: NF12_AD_TILES(5, true); break;
+    case 6: NF12_AD_TILES(6, true); break;
+    case 7: NF12_AD_TILES(7, false); break;
+    default: NF12_AD_TILES(kMaxTiles, false); break;
   }
+#undef NF12_AD_TILES
 #undef NF12_AD_DISPATCH
 #undef NF12_AD_LAUNCH
 
