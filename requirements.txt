@@ -26,3 +26,4 @@ pyarrow>=26.0.0; python_version >= "3.11"
 dill>=0.4.1
 torchao>=0.18.0
 defuser>=0.0.29
+xxhash>=4.0.2
