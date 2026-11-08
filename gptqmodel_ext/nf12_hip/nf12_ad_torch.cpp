@@ -4,18 +4,13 @@
 // ---------------------------------------------------------------------------
 // Torch bindings for the NF12-AD HIP port (AMD RDNA4: gfx1200/gfx1201/gfx1250).
 //
-// Algorithm: "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit
-// Weight Compression", Liberman, Fang, Zhang, Dao, and Fu (Together AI, 2026).
-// Together AI: https://www.together.ai/
+// Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
+// (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
+// and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
 //
-// Original NF12 reference implementation and CUDA kernels:
-//   https://github.com/dphnAI/nf12
-//   Copyright (c) 2026 AlpinDale and the nf12 contributors.
-//   Licensed under the Apache License, Version 2.0.
-//
-// Written for GPT-QModel (ModelCloud.ai). Registers `torch.ops.nf12_ad_hip`
-// with the same decode/linear contract as the CUDA `nf12` namespace so the
-// Python layer routes by device family without changing callers.
+// Registers `torch.ops.nf12_ad_hip` with the same decode/linear contract as
+// the CUDA `nf12` namespace so the Python layer routes by device family
+// without changing callers.
 //
 // Host-only translation unit: the ROCm SDK here ships no thrust, so the .hip
 // files must not see torch/ATen. Mirrors allspark_torch_hip.cpp.
