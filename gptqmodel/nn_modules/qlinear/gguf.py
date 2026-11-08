@@ -35,6 +35,7 @@ from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from ._numerics import matmul_fp32_reduce
+from ._runtime_cache import tensor_cache_key
 
 
 try:
@@ -1170,6 +1171,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
         self.gguf_fused_chunk_bytes = self.GGUF_FUSED_CHUNK_BYTES
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
+        self._k_scale_overflow_cache_source_key = None
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
@@ -1216,6 +1218,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
     def clear_weight_cache(self) -> None:
         self._k_scale_overflow_cache = {}
+        self._k_scale_overflow_cache_source_key = None
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1696,9 +1699,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         return min(num_blocks, max(1, budget_blocks))
 
     def _k_scale_overflows(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        # `_version` advances on in-place writes, so an overwritten weight
-        # invalidates the cached answer even when the storage address is reused.
-        key = (blocks.data_ptr(), blocks._version, blocks.shape, target_dtype)
+        # Cache by the packed source, not by this temporary blocks view. The
+        # shared key tracks normal in-place writes and supports inference
+        # tensors, which have no version counter and require an explicit clear.
+        source_key = tensor_cache_key(self.qweight)
+        if source_key != self._k_scale_overflow_cache_source_key:
+            self._k_scale_overflow_cache.clear()
+            self._k_scale_overflow_cache_source_key = source_key
+        key = (blocks.shape, target_dtype)
         cached = self._k_scale_overflow_cache.get(key)
         if cached is None:
             cached = self._compute_k_scale_overflow(blocks, target_dtype)
