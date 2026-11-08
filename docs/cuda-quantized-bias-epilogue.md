@@ -293,8 +293,9 @@ flowchart TD
 | Bias backward | Bias was outside the custom function and could not complete backward while its input-gradient arity was wrong | Reduce the bias gradient in FP32 inside `QuantLinearFunction.backward` |
 
 The line references are from before this change. This flow was introduced by
-PR #TBD. After repeated forwards and backward, the module retains 0 bytes of
-expanded weight; the dequantized matrix lives only for its current matmul.
+[PR #3661](https://github.com/ModelCloud/GPTQModel/pull/3661). After repeated
+forwards and backward, the module retains 0 bytes of expanded weight; the
+dequantized matrix lives only for its current matmul.
 
 On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132 and Triton 3.9.0,
 packed-unit-weight 1×128×128 and 2×3×128 FP16/BF16 biased outputs matched an
