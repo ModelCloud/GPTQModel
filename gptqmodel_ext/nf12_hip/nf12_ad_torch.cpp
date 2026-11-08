@@ -201,10 +201,15 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
   // Prefer the fused small-M kernel: it reads only the packed weight
   // (K*3/2 bytes per row) and keeps the decoded super-atom in registers.
   // Decode-then-GEMM below moves packed + dense write + dense read, which at
-  // M <= 16 is dominated by materialising a matrix the GEMM immediately
+  // M <= 15 is dominated by materialising a matrix the GEMM immediately
   // re-reads, so it cannot reach BF16 parity. Large M still wants the GEMM.
+  //
+  // m == 16 is exactly one matrix-core tile and measured faster than the fused
+  // kernel on every shape (see the RDNA4 README table), so the fused route
+  // stops at 15 and 16 joins the wmma route below.
   const int64_t m = x.numel() / k;
-  if (x.dim() == 2 && x.is_contiguous() && nf12_ad_linear_fused_small_m_supported(m)) {
+  if (x.dim() == 2 && x.is_contiguous() && m < 16 &&
+      nf12_ad_linear_fused_small_m_supported(m)) {
     check_arch(packed);
     TORCH_CHECK(packed.is_contiguous() && escapes.is_contiguous(),
                 "nf12_ad_hip.linear: packed and escapes must be contiguous");
