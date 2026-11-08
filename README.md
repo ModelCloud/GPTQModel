@@ -882,6 +882,9 @@ The packed weight is saved as `nf12_packed` (uint8, `N x K*3/2`) with
 `nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
 checkpoint rather than a dense weight.
 
+The [NF12 validation backend flow](docs/nf12-validation-backends.md) explains
+how `scripts/validate_nf12_ad.py` treats explicit CUDA/HIP and automatic selection.
+
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 
 W4A quantizes activations while leaving the saved GPTQ checkpoint in its native

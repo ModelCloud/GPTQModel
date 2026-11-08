@@ -166,6 +166,9 @@ def backend_module(backend: str, device: str):
 
     if cuda_rt.load():
         return cuda_rt, "cuda"
+    if backend == "cuda":
+        reason = cuda_rt.last_error() or "the native extension did not load"
+        raise RuntimeError(f"NF12-AD CUDA extension unavailable: {reason}")
     if torch.version.hip is not None:
         from gptqmodel.utils import nf12_ad_hip as hip
 
@@ -380,6 +383,12 @@ def measure_cache_size(device: str, repetitions: int = 20) -> tuple[float, list]
 
 
 def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
+    rt, active = backend_module(backend, device)
+    results["backend"] = active
+    if rt is None:
+        results["notes"].append({"item": "perf skipped", "error": "no native kernel"})
+        return
+
     props = torch.cuda.get_device_properties(device)
     name = torch.cuda.get_device_name(device)
     bandwidth = measure_bandwidth(device)
@@ -399,11 +408,6 @@ def run_perf(device: str, backend: str, quick: bool, results: dict) -> None:
         "hip": torch.version.hip,
         "backend": results.get("backend"),
     }
-
-    rt, active = backend_module(backend, device)
-    if rt is None:
-        results["notes"].append({"item": "perf skipped", "error": "no native kernel"})
-        return
 
     def encode(w):
         if active == "cuda":
@@ -596,6 +600,7 @@ def main() -> int:
         except Exception:
             traceback.print_exc()
             results["notes"].append({"item": "perf crashed", "trace": traceback.format_exc()[-2000:]})
+            ok = False
 
     results["accuracy_ok"] = ok
     print_reports(results)
