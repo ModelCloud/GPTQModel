@@ -146,12 +146,21 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 //
 // Decoded super-atoms are still reused across every token in flight, so the
 // packed weight is read once per launch rather than once per token.
+template <int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                   const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n,
-                  int64_t k, int64_t m, __hip_bfloat16* __restrict__ out,
+                  int64_t k, __hip_bfloat16* __restrict__ out,
                   const __hip_bfloat16* __restrict__ bias) {
-  __shared__ float part[kWarpsPerBlock][kFusedMaxM][kSuperAtomRows];
+  // The warp-partial plane is sized for the tokens actually in flight, except
+  // at kM == 1 where it is deliberately over-allocated. That kernel carries two
+  // accumulators and no decode reuse, so left alone it runs eight CTAs per CU
+  // and 256 concurrent packed streams, which thrashes the 64 MiB LLC:
+  // 4096x4096 m=1 measured 28.6 us at eight CTAs per CU against 20.5 us at two,
+  // and 2048x8192 28.8 us against 18.5 us. 32 KiB of shared memory is the
+  // occupancy throttle; at kM >= 2 the plane is genuinely used and not padded.
+  constexpr int kPartTokens = (kM == 1) ? 64 : kM;
+  __shared__ float part[kWarpsPerBlock][kPartTokens][kSuperAtomRows];
 
   const int lane = threadIdx.x % kWarpSize;
   const int warp = threadIdx.x / kWarpSize;
@@ -170,15 +179,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Every warp's slot is read by the final reduction, but a warp whose K slice
   // is empty (few super-atoms along K) never publishes. Zero first so those
   // slots contribute exactly nothing instead of uninitialised shared memory.
-  for (int64_t idx = threadIdx.x; idx < kWarpsPerBlock * kFusedMaxM * kSuperAtomRows;
+  for (int64_t idx = threadIdx.x; idx < kWarpsPerBlock * kM * kSuperAtomRows;
        idx += kThreadsPerBlock) {
     (&part[0][0][0])[idx] = 0.0f;
   }
   __syncthreads();
 
-  float acc[kFusedMaxM][2];
+  float acc[kM][2];
 #pragma unroll
-  for (int mi = 0; mi < kFusedMaxM; ++mi) {
+  for (int mi = 0; mi < kM; ++mi) {
     acc[mi][0] = 0.0f;
     acc[mi][1] = 0.0f;
   }
@@ -210,7 +219,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     const __hip_bfloat162* xrow =
         reinterpret_cast<const __hip_bfloat162*>(x + kb * kSuperAtomCols);
 
-    for (int64_t mi = 0; mi < m; ++mi) {
+    for (int mi = 0; mi < kM; ++mi) {
       const __hip_bfloat162* xp = xrow + mi * (k / 2) + t;
       const __hip_bfloat162 c0 = xp[0];    // cols 2t, 2t+1
       const __hip_bfloat162 c8 = xp[4];    // cols 2t+8, 2t+9
@@ -247,7 +256,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
   // Collapse the four t lanes of this quad (fixed xor order 1 then 2), then
   // publish the two owned rows for every token to shared memory.
-  for (int64_t mi = 0; mi < m; ++mi) {
+  for (int mi = 0; mi < kM; ++mi) {
     float hi = acc[mi][0];
     float lo = acc[mi][1];
     hi += __shfl_xor(hi, 1);
@@ -262,7 +271,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   __syncthreads();
 
   // Sum the warp partials in fixed warp order so the result is deterministic.
-  const int64_t total = m * kSuperAtomRows;
+  const int64_t total = int64_t(kM) * kSuperAtomRows;
   for (int64_t idx = threadIdx.x; idx < total; idx += kThreadsPerBlock) {
     const int64_t mi = idx / kSuperAtomRows;
     const int64_t row = idx % kSuperAtomRows;
@@ -337,10 +346,34 @@ hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uin
   if (blocks == 0) return hipSuccess;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
 
-  linear_kernel<<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), escapes,
-      exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),
-      reinterpret_cast<const __hip_bfloat16*>(bias));
+  // The token count is a template parameter so `acc` and the warp-partial
+  // plane are compile-time sized: with a runtime `m` the accumulator array is
+  // dynamically indexed, which keeps it out of VGPRs, and the shared plane is
+  // sized for 16 tokens even when only one is in flight.
+#define NF12_AD_FUSED_LAUNCH(K)                                                                \
+  linear_kernel<K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(            \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),       \
+      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),            \
+      reinterpret_cast<const __hip_bfloat16*>(bias))
+  switch (m) {
+    case 1: NF12_AD_FUSED_LAUNCH(1); break;
+    case 2: NF12_AD_FUSED_LAUNCH(2); break;
+    case 3: NF12_AD_FUSED_LAUNCH(3); break;
+    case 4: NF12_AD_FUSED_LAUNCH(4); break;
+    case 5: NF12_AD_FUSED_LAUNCH(5); break;
+    case 6: NF12_AD_FUSED_LAUNCH(6); break;
+    case 7: NF12_AD_FUSED_LAUNCH(7); break;
+    case 8: NF12_AD_FUSED_LAUNCH(8); break;
+    case 9: NF12_AD_FUSED_LAUNCH(9); break;
+    case 10: NF12_AD_FUSED_LAUNCH(10); break;
+    case 11: NF12_AD_FUSED_LAUNCH(11); break;
+    case 12: NF12_AD_FUSED_LAUNCH(12); break;
+    case 13: NF12_AD_FUSED_LAUNCH(13); break;
+    case 14: NF12_AD_FUSED_LAUNCH(14); break;
+    case 15: NF12_AD_FUSED_LAUNCH(15); break;
+    default: NF12_AD_FUSED_LAUNCH(16); break;
+  }
+#undef NF12_AD_FUSED_LAUNCH
   return hipGetLastError();
 }
 
