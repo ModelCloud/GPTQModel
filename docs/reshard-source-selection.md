@@ -54,3 +54,5 @@ destination. An unrelated invalid standard index does not override a named
 standalone file.
 See [PR #3589](https://github.com/ModelCloud/GPTQModel/pull/3589) for the
 reproducer and rationale.
+The indexed-shard compatibility rule is covered by
+[PR #3590](https://github.com/ModelCloud/GPTQModel/pull/3590).
