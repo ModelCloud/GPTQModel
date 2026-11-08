@@ -130,7 +130,8 @@ flowchart TD
 | Bias backward | `gemm_awq_triton.py:152-155` returned `None` for bias, including zero-row input | `AwqGemmTritonFn.backward` returns an FP32-reduced bias gradient |
 
 The line references in this table refer to the implementation before the AWQ
-Triton epilogue change. This flow was introduced by PR #TBD.
+Triton epilogue change. This flow was introduced by
+[PR #3658](https://github.com/ModelCloud/GPTQModel/pull/3658).
 
 On an NVIDIA GB10 (SM 12.1), PyTorch 2.15.0+cu132, and Triton 3.9.0, the
 packed-unit-weight FP16 cases at 1×128×128 (fused) and 129×128×128 (dense)
