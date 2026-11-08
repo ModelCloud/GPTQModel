@@ -75,6 +75,28 @@ def test_qqq_small_activation_scale(device, dtype, value):
     torch.testing.assert_close(q.float() * s, x.float(), rtol=1e-6, atol=0)
 
 
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('dtype', DTYPES)
+@pytest.mark.parametrize('shape', [(1, 128), (2, 3, 128)])
+def test_qqq_bias_cancellation_stays_finite(device, dtype, shape):
+    from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
+
+    linear = torch.nn.Linear(128, 128, bias=True, dtype=torch.float16)
+    linear.weight.data.fill_(1)
+    linear.bias.data.fill_(-1024)
+    module = QQQTorchLinear(
+        bits=4, group_size=-1, sym=True, desc_act=False,
+        in_features=128, out_features=128, bias=True, register_buffers=False,
+    )
+    module.pack(linear, torch.ones((128, 1), dtype=torch.float16))
+    module = module.to(device).eval()
+    x = torch.full(shape, 516, dtype=dtype, device=device)
+    # The packed source represents every weight as 1. Compute the expected
+    # biased matmul independently in FP64, then round only the visible output.
+    oracle = x.double() @ torch.ones((128, 128), dtype=torch.float64, device=device)
+    check(module, x, oracle - 1024)
+
+
 @pytest.mark.parametrize('dtype', DTYPES)
 @pytest.mark.parametrize('backend', ['gptq', 'awq', 'awq_fused'])
 @pytest.mark.parametrize('scale', [16384., 9358.5, 2**-30])

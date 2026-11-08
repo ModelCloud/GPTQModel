@@ -410,3 +410,37 @@ the regression is that one empty request permanently changes the execution
 path for later requests.
 
 The empty FP8 flow was introduced by [PR #3655](https://github.com/ModelCloud/GPTQModel/pull/3655).
+
+## Portable QQQ bias epilogue
+
+`QQQTorchLinear.forward` multiplies the INT8 dot product by activation and
+channel scales in FP32. A bias is now added to that FP32 result before the
+single cast to the activation dtype. This is a local numerical ordering
+change within the portable QQQ function; packed CPU and Torch fallback
+dispatch are unchanged.
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| QQQ Torch bias | `qqq.py:722-727` cast the FP32 scaled accumulator to FP16/BF16 and then added bias | Add bias to the FP32 accumulator at `qqq.py`, then cast once |
+
+The line reference is from before this change. This correction was introduced
+by [PR #3662](https://github.com/ModelCloud/GPTQModel/pull/3662). The native
+QQQ CUDA extension has a separate FP16 output contract.
+
+On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132, eight packed QQQ
+cases across CPU/CUDA, FP16/BF16, and 2D/3D inputs exactly matched an
+independent FP64 Torch oracle after rounding. With 128 unit weights, inputs
+of `516`, and bias `-1024`, the old FP16 result was `inf`; the corrected result
+was `65024`. Repeated forwards retained no expanded weight. The portable QQQ
+subset completed with 28 passed and 52 skipped; the skipped cases require
+unavailable native extensions or CPU instructions.
+
+Full-module resident FP16 timing used five warmups and the median of seven
+sets of 20 CUDA-event timed calls. Both runs used 1024 input and output
+features; the peak allocator delta includes temporary weight and library
+scratch.
+
+| Rows | Old bias after cast | New bias before cast | Old peak | New peak |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.5655 ms | 0.5820 ms | 37.01 MiB | 37.01 MiB |
+| 16 | 0.5679 ms | 0.5811 ms | 37.15 MiB | 37.15 MiB |
