@@ -146,3 +146,5 @@ warmups, and the median of seven runs of thirty calls with CUDA synchronization,
 the streaming forward took `0.799 ms` before and `0.887 ms` after. Both runs
 had approximately `32.5 MiB` measured peak allocator delta, including CUDA
 library scratch; no expanded weight persists between forwards.
+
+The unbiased streaming flow was introduced by [PR #3654](https://github.com/ModelCloud/GPTQModel/pull/3654).
