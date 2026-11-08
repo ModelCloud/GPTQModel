@@ -16,6 +16,16 @@ from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
 
 _installed_alloc_conf = apply_default_alloc_conf()
 
+# Still before any other Torch use: HIP reports no last-level cache, so on
+# RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
+# Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
+# from L2 then measures a warm cache. This back-ports the Python half of
+# https://github.com/pytorch/pytorch/pull/203965 and has to run before a device
+# property is read or an Inductor benchmarker caches its size hint.
+from .rocm_llc import apply as _apply_rocm_llc  # noqa: E402
+
+_rocm_llc_status = _apply_rocm_llc()
+
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
@@ -26,6 +36,9 @@ from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 
 log = setup_logger()
+
+if any(result.startswith("applied") for result in _rocm_llc_status.values()):
+    log.debug("rocm_llc: %s", _rocm_llc_status)
 
 if _installed_alloc_conf is not None:
     log.info(
