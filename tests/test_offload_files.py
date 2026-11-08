@@ -1993,9 +1993,12 @@ def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
         torch.testing.assert_close(handler.get_tensor("weight"), model.weight.detach())
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
-    tensor = torch.randn(8, 16, dtype=torch.float32).to(torch.float8_e4m3fn)
+@pytest.mark.parametrize("dtype_name", ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path, dtype_name):
+    if not hasattr(torch, dtype_name):
+        pytest.skip(f"{dtype_name} dtype not available")
+    dtype = getattr(torch, dtype_name)
+    tensor = torch.randn(8, 16, dtype=torch.float32).to(dtype)
     state_dict = {
         "fp8_weight": TensorSource(
             name="fp8_weight",
@@ -2016,7 +2019,7 @@ def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
     with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
         saved = handler.get_tensor("fp8_weight")
 
-    assert saved.dtype is torch.float8_e4m3fn
+    assert saved.dtype is dtype
     assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
 
 
@@ -2367,12 +2370,16 @@ def test_reference_export_preflight_checks_symlink_path_and_target(tmp_path, lin
     assert link.is_symlink()
 
 
-def test_safetensors_reference_offload_supports_float8(tmp_path):
+@pytest.mark.parametrize("dtype_name", ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+def test_safetensors_reference_offload_supports_float8(tmp_path, dtype_name):
+    if not hasattr(torch, dtype_name):
+        pytest.skip(f"{dtype_name} dtype not available")
+    dtype = getattr(torch, dtype_name)
     model = _LinearWithBuffers(in_features=8, out_features=4)
     weight = model.linear.weight
     model.linear.weight = nn.Parameter(
         torch.arange(weight.numel(), dtype=torch.float32)
-        .to(torch.float8_e4m3fn)
+        .to(dtype)
         .reshape(weight.shape),
         requires_grad=False,
     )
@@ -2387,7 +2394,7 @@ def test_safetensors_reference_offload_supports_float8(tmp_path):
         disk_path=str(tmp_path / "offload_root"),
     )
 
-    assert index["weight"]["dtype"] == "float8_e4m3fn"
+    assert index["weight"]["dtype"] == dtype_name
     save_dir = tmp_path / "saved"
     save_dir.mkdir()
     state_dict = get_state_dict_for_save(model, offload_root=str(tmp_path / "offload_root"))
@@ -2401,7 +2408,7 @@ def test_safetensors_reference_offload_supports_float8(tmp_path):
     )
     with safe_open(str(save_dir / expected_files[0]), framework="pt", device="cpu") as handler:
         exported = handler.get_tensor("linear.weight")
-    assert exported.dtype == torch.float8_e4m3fn
+    assert exported.dtype == dtype
     assert torch.equal(exported.view(torch.uint8), original_state["weight"].view(torch.uint8))
 
 
