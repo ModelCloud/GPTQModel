@@ -178,7 +178,10 @@ def _load_installed() -> bool:
     if Path(nf12.__file__).resolve().is_relative_to(_source_root()):
         return False
     nf12.load()
-    return hasattr(torch.ops, "nf12")
+    # PyTorch creates an operator namespace on attribute access, so checking
+    # `hasattr(torch.ops, "nf12")` succeeds even when it contains no operators.
+    namespace = torch.ops.nf12
+    return all(callable(getattr(namespace, name, None)) for name in ("encode", "decode", "linear"))
 
 
 def _build_and_load() -> None:
