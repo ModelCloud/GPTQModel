@@ -133,6 +133,10 @@ directories but never the single global shard. Set
 `config.json` or uses a custom architecture. Pass `overwrite=True` to replace an
 existing non-empty destination.
 
+Pass a specific `.safetensors` or `.safetensors.index.json` path to reshard
+only that file or index's shards. See [reshard source selection](reshard-source-selection.md)
+for the directory and file selection rules.
+
 Resharding reads only safetensors headers, copies payloads byte-for-byte through
 an 8 MiB buffer, and keeps at most one source shard open at a time. It does not
 mmap source weights, so peak host RAM stays bounded even for multi-hundred-GB

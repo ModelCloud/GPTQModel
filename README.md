@@ -104,6 +104,8 @@ Start with the **[quantization guide and end-to-end recipes](docs/quantization-g
 to choose weight and activation precision, prepare calibration data, quantize,
 save, reload, and validate a model. It also maps advanced features to their guides.
 
+For checkpoint reshaping, see [reshard source selection](docs/reshard-source-selection.md).
+
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts.
