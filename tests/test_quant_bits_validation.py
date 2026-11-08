@@ -29,7 +29,7 @@ from gptqmodel.quantization.config import (
 SUPPORTED_BITS = {
     GPTQConfig: (2, 3, 4, 5, 6, 7, 8),
     RTNConfig: (2, 3, 4, 5, 6, 7, 8),
-    AWQConfig: (4, 8),
+    AWQConfig: (2, 3, 4, 8),
     QQQConfig: (4,),
     ParoConfig: (4,),
     FP8Config: (8,),
@@ -93,8 +93,8 @@ def test_integer_valued_float_is_accepted(config_cls, bits):
 def test_awq_qqq_paro_reject_unsupported_bit_widths():
     """The config used to accept the full 2-8 GPTQ range for every method."""
 
-    for bits in (2, 3, 5, 6, 7):
-        with pytest.raises(ValueError, match=r"supported bit widths are `\[4, 8\]`"):
+    for bits in (5, 6, 7):
+        with pytest.raises(ValueError, match=r"supported bit widths are `\[2, 3, 4, 8\]`"):
             _build(AWQConfig, bits)
 
     for config_cls in (QQQConfig, ParoConfig):
@@ -107,7 +107,7 @@ def test_awq_accepts_eight_bit_marlin_weights():
     _build(AWQConfig, 8)
 
 
-@pytest.mark.parametrize("config_cls", [AWQConfig, QQQConfig, ParoConfig])
+@pytest.mark.parametrize("config_cls", [QQQConfig, ParoConfig])
 def test_dynamic_width_must_match_method_support(config_cls):
     with pytest.raises(ValueError, match="supported bit widths"):
         _build(config_cls, 4, dynamic={"model.layers.0.mlp.down_proj": {"bits": 3}})
@@ -115,11 +115,12 @@ def test_dynamic_width_must_match_method_support(config_cls):
     _build(config_cls, 4, dynamic={"model.layers.0.mlp.down_proj": {"bits": 4}})
 
 
-def test_awq_dynamic_eight_bit_width_is_accepted():
+@pytest.mark.parametrize("bits", [2, 3, 8])
+def test_awq_dynamic_supported_width_is_accepted(bits):
     _build(
         AWQConfig,
         4,
-        dynamic={"model.layers.0.mlp.down_proj": {"bits": 8}},
+        dynamic={"model.layers.0.mlp.down_proj": {"bits": bits}},
     )
 
 
@@ -171,16 +172,16 @@ def test_dynamic_error_names_the_layer_and_field():
         _build(
             AWQConfig,
             4,
-            dynamic={"model.layers.0.mlp.down_proj": {"bits": 3}},
+            dynamic={"model.layers.0.mlp.down_proj": {"bits": 5}},
         )
 
 
 def test_quantize_config_dispatcher_uses_method_support():
     with pytest.raises(
         ValueError,
-        match=r"`bits=2` is not supported for method `awq`",
+        match=r"`bits=5` is not supported for method `awq`",
     ):
-        QuantizeConfig(quant_method=METHOD.AWQ, bits=2, offload_to_disk=False)
+        QuantizeConfig(quant_method=METHOD.AWQ, bits=5, offload_to_disk=False)
 
     with pytest.raises(
         ValueError,
@@ -196,6 +197,9 @@ def test_quantize_config_dispatcher_uses_method_support():
 
     cfg = QuantizeConfig(quant_method=METHOD.AWQ, bits=4, offload_to_disk=False)
     assert isinstance(cfg, AWQConfig)
+
+    for bits in (2, 3):
+        assert isinstance(QuantizeConfig(quant_method=METHOD.AWQ, bits=bits, offload_to_disk=False), AWQConfig)
 
     cfg = QuantizeConfig(quant_method=METHOD.AWQ, bits=8, offload_to_disk=False)
     assert isinstance(cfg, AWQConfig)
@@ -306,7 +310,7 @@ def test_from_quant_config_rejects_fractional_bits(payload):
 @pytest.mark.parametrize(
     "payload",
     [
-        {"quant_method": "awq", "bits": 3},
+        {"quant_method": "awq", "bits": 5},
         {"quant_method": "qqq", "bits": 8},
         {"quant_method": "paroquant", "bits": 2},
         {"quant_method": "fp8", "bits": 4},

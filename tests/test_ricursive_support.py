@@ -303,6 +303,27 @@ def _build_tiny_fixture(ref_dir: Path, model_dir: Path) -> None:
     AutoModelForCausalLM.from_config(config, trust_remote_code=True).save_pretrained(str(model_dir))
 
 
+def _apply_compat_patch_for_test(model) -> None:
+    """Exercise the legacy checkpoint path even when the reference is fixed."""
+    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
+
+    # The reference repository is a moving target. Its current custom code
+    # declares native TF5 fixes, so production correctly skips these shims.
+    # Clear only the fixture class's marker to keep the compatibility tests
+    # exercising GPT-QModel's patch on current and older reference snapshots.
+    cls = type(model)
+    had_marker = "_ricursive_tf5_native_fix" in vars(cls)
+    original_marker = vars(cls).get("_ricursive_tf5_native_fix")
+    try:
+        cls._ricursive_tf5_native_fix = None
+        apply_ricursive_generate_patch(model)
+    finally:
+        if had_marker:
+            cls._ricursive_tf5_native_fix = original_marker
+        else:
+            del cls._ricursive_tf5_native_fix
+
+
 def test_tiny_ricursive_gptq_quantization_smoke(tmp_path: Path):
     ref_dir = _reference_dir()
     if ref_dir is None:
@@ -420,7 +441,7 @@ def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
 
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
     # The class may already carry the patch if an earlier test loaded through GPTQModel.
-    apply_ricursive_generate_patch(model)
+    _apply_compat_patch_for_test(model)
     assert getattr(type(model), _PATCH_FLAG, False) is True
     # Idempotent.
     assert not apply_ricursive_generate_patch(model)
@@ -514,7 +535,7 @@ def test_ricursive_generate_with_padding_matches_unpadded(tmp_path: Path):
     _build_tiny_fixture(ref_dir, model_dir)
 
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
-    apply_ricursive_generate_patch(model)
+    _apply_compat_patch_for_test(model)
     assert getattr(type(model.model), _MASK_PATCH_FLAG, False) is True
     assert not apply_ricursive_generate_patch(model)
 
@@ -551,17 +572,15 @@ def test_sliding_window_mask_fast_path_matches_upstream(tmp_path: Path):
 
     from transformers import AutoModelForCausalLM
 
-    from gptqmodel.utils.ricursive_patch import (
-        _WINDOW_PATCH_FLAG,
-        apply_ricursive_generate_patch,
-    )
+    from gptqmodel.utils.ricursive_patch import _WINDOW_PATCH_FLAG
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
     _build_tiny_fixture(ref_dir, model_dir)
 
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
-    apply_ricursive_generate_patch(model)
+    native_fix = bool(getattr(type(model), "_ricursive_tf5_native_fix", False))
+    _apply_compat_patch_for_test(model)
 
     attn = model.model.layers[0].self_attn
     cls = type(attn)
@@ -571,12 +590,15 @@ def test_sliding_window_mask_fast_path_matches_upstream(tmp_path: Path):
     original = patched._gptqmodel_original
     window = attn.config.sliding_window
 
-    # Decode step well inside the window, unpadded: upstream builds an all-True mask,
-    # the fast path returns None so SDPA keeps its no-mask path.
+    # Decode inside the window: older upstream builds an all-True mask; the
+    # current native fix and our fast path both return None.
     cache_position = torch.tensor([7])
     upstream = original(attn, None, 1, 8, torch.float32, torch.device("cpu"), cache_position)
-    assert upstream.dtype == torch.bool
-    assert bool(upstream.all()), "precondition: window must admit every key here"
+    if native_fix:
+        assert upstream is None
+    else:
+        assert upstream.dtype == torch.bool
+        assert bool(upstream.all()), "precondition: window must admit every key here"
     assert patched(attn, None, 1, 8, torch.float32, torch.device("cpu"), cache_position) is None
 
     # Padded decode: upstream leaves the float mask untouched, the fast path returns it.
@@ -603,14 +625,12 @@ def test_sliding_window_fast_path_preserves_generation(tmp_path: Path):
 
     from transformers import AutoModelForCausalLM
 
-    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
-
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
     _build_tiny_fixture(ref_dir, model_dir)
 
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
-    apply_ricursive_generate_patch(model)
+    _apply_compat_patch_for_test(model)
     model.generation_config.pad_token_id = 0
 
     cls = type(model.model.layers[0].self_attn)
@@ -644,14 +664,12 @@ def test_sliding_window_mask_trims_evicted_keys(tmp_path: Path):
 
     from transformers import AutoModelForCausalLM
 
-    from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
-
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
     _build_tiny_fixture(ref_dir, model_dir)
 
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
-    apply_ricursive_generate_patch(model)
+    _apply_compat_patch_for_test(model)
 
     attn = model.model.layers[0].self_attn
     cls = type(attn)
