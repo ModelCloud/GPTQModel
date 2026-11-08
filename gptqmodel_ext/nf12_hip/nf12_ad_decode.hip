@@ -262,6 +262,11 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
                         const void* x, void* out, int64_t n, int64_t k, int64_t m,
                         const void* bias, hipStream_t stream) {
   if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
+  // n / 16 below would otherwise round a 24-row weight down to one 16-row block
+  // and write only part of the caller's output.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+    return hipErrorInvalidValue;
+  }
   const int64_t blocks = n / kSuperAtomRows;
   if (blocks == 0) return hipSuccess;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
@@ -314,6 +319,11 @@ hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t 
                           hipStream_t stream) {
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
+  // SPEC.md 4 geometry; n / 16 and k / 64 below would otherwise truncate and
+  // decode a smaller matrix than the caller asked for.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldo < k) {
+    return hipErrorInvalidValue;
+  }
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
   const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
   if (blocks == 0) return hipSuccess;
@@ -330,6 +340,9 @@ hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t 
 hipError_t nf12_ad_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
                                  int64_t ldo, hipStream_t stream) {
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldo < k) {
+    return hipErrorInvalidValue;
+  }
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
   const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
   if (blocks == 0) return hipSuccess;

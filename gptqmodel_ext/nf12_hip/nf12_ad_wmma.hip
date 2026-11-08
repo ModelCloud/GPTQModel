@@ -53,6 +53,7 @@ extern "C" size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 
 #include <hip/hip_runtime_api.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace nf12_hip {
@@ -88,6 +89,10 @@ constexpr int kLdPadded = kSuperAtomCols + 8;
 
 // CTAs resident on all 32 CUs at one per CU: one wave on this part.
 constexpr int64_t kCtasPerWave = 32;
+
+// Slots for the per-device capability cache in `wmma_available`. A host with
+// more devices than this simply re-probes, which is correct, only slower.
+constexpr int kMaxDevices = 64;
 
 // Row mapping for the routed (mixture-of-experts) launch. A dense launch passes
 // an all-null route and the kernel addresses `x`/`out` directly; a routed launch
@@ -433,15 +438,29 @@ static int wmma_arch_ok(int device) {
           arch[4] == '2' && arch[5] == '0' && (arch[6] == '0' || arch[6] == '1'));
 }
 
-// True when the current device has wmma-128b-insts. Cached for the process:
-// the arch of a device never changes, and the routed MoE route is hot enough
-// that a per-launch runtime query would show up.
+// True when the CURRENT device has wmma-128b-insts.
+//
+// Cached per device, not per process. The arch of a given device never changes,
+// so caching is safe, but a single process can see a mix of gfx1201 and gfx1250
+// (two cards, or a container that maps a subset). A process-wide bool captured
+// from whichever device happened to be current on the first call would then
+// send the other device down a matrix-core route it cannot run -- the same
+// class of bug as a shared scratch buffer, just in the capability check.
+//
+// Cached because hipGetDeviceProperties is not free and this sits on the launch
+// path of the hottest kernels. 0 = not yet probed, 1 = yes, -1 = no; two
+// threads racing on the same slot compute the same answer and store it twice,
+// which is harmless.
 static bool wmma_available() {
-  static const bool ok = []() {
-    int device = 0;
-    return hipGetDevice(&device) == hipSuccess && wmma_arch_ok(device) != 0;
-  }();
-  return ok;
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= kMaxDevices) return false;
+  static std::atomic<int8_t> state[kMaxDevices];
+  int8_t ok = state[device].load(std::memory_order_acquire);
+  if (ok == 0) {
+    ok = wmma_arch_ok(device) ? 1 : -1;
+    state[device].store(ok, std::memory_order_release);
+  }
+  return ok > 0;
 }
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
@@ -470,12 +489,13 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // Very wide N: the weight is HBM-resident and a 2-way split hides the extra
   // latency (8192x57344 m=128: 2598 -> 2418 us). It costs 0.3% at m=16.
   if (blocks_x >= 8 * kOneWave) return 2;
-  if (blocks_x > kOneWave + kOneWave / 4) {
-    // Wide but short K still benefits from more CTAs at small M
-    // (5120x25600 m=16: 371 -> 360 us); a long K does not.
-    if (m <= 64 && k_blocks < kOneWave * 4 && blocks_x >= 4 * kOneWave) return 4;
-    return 1;
-  }
+  // Wide N already fills the machine several times over, so a split only adds
+  // the reduce pass. Measured on gfx1201 against the same launch with one K
+  // pass: 4096x28672 (224 CTAs) lost 6.5% / 11.1% / 23.7% at m=16/32/64 when
+  // split four ways, and 5120x25600 (200 CTAs) lost 1.5% / 10.8% at m=32/64 for
+  // a 4.1% gain at m=16. The previous rule required blocks_x >= 128, so it only
+  // ever fired on shapes that were already 6-7 waves deep.
+  if (blocks_x > kOneWave + kOneWave / 4) return 1;
   // One wave or less. Split only when there is enough K to give every split a
   // real slice: 4096x4096 (64 k-blocks) goes 27.3 -> 25.7 us at m=16, while
   // 896x4864 (14 k-blocks) is faster unsplit because the per-CTA prologue
@@ -556,7 +576,11 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   if constexpr (Src == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
-  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+  // Both strides are used as k / 64 and n / 16 below, so a shape that is not a
+  // multiple would truncate rather than fail.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+    return hipErrorInvalidValue;
+  }
 
   int tiles, splits;
   int64_t m_blocks;
@@ -698,7 +722,8 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                                   int64_t max_assignments, const float* row_scale, void* out,
                                   int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
   if (!wmma_available()) return hipErrorNotSupported;
-  if (n % kSuperAtomRows != 0 || num_experts < 1 || max_assignments <= 0) {
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 ||
+      num_experts < 1 || max_assignments <= 0) {
     return hipErrorInvalidValue;
   }
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;

@@ -256,6 +256,12 @@ size_t nf12_ad_encode_workspace_bytes(int64_t n, int64_t k) {
 hipError_t nf12_ad_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_t ldw, void* workspace,
                                   size_t /*workspace_bytes*/, uint8_t* exp_base_out,
                                   uint32_t* num_escapes_out, hipStream_t stream) {
+  // SPEC.md 4 geometry. Without this a k that is not a multiple of 64 is
+  // truncated by k / kSuperAtomCols and the encoder silently writes a matrix
+  // covering only part of the caller's K, which then reads back as garbage.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldw < k) {
+    return hipErrorInvalidValue;
+  }
   const auto* w = reinterpret_cast<const __hip_bfloat16*>(w_in);
   const int64_t num_sa = g_num_super_atoms(n, k);
   auto* hist = static_cast<unsigned long long*>(workspace);
@@ -298,6 +304,9 @@ hipError_t nf12_ad_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_
 hipError_t nf12_ad_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base,
                           uint8_t* packed, uint4* escapes, uint32_t escapes_capacity,
                           void* workspace, size_t /*workspace_bytes*/, hipStream_t stream) {
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldw < k) {
+    return hipErrorInvalidValue;
+  }
   const auto* w = reinterpret_cast<const __hip_bfloat16*>(w_in);
   if (exp_base > kMaxExpBase) return hipErrorInvalidValue;
   const int64_t num_sa = g_num_super_atoms(n, k);
