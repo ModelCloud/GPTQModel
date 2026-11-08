@@ -2789,8 +2789,8 @@ def _existing_shard_matches(
 
 
 @contextmanager
-def _atomic_shard_file(path: str):
-    """Keep the current shard and any mapped source tensors alive until commit."""
+def _atomic_shard_path(path: str):
+    """Stage a shard beside its destination and publish it only on success."""
     directory = os.path.dirname(os.path.abspath(path))
     try:
         existing_mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -2818,16 +2818,23 @@ def _atomic_shard_file(path: str):
     try:
         if existing_mode is not None:
             os.chmod(temporary, existing_mode)
-        handle = os.fdopen(descriptor, "wb")
+        os.close(descriptor)
         descriptor = None
-        with handle:
-            yield handle
+        yield temporary
         os.replace(temporary, path)
     finally:
         if descriptor is not None:
             os.close(descriptor)
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+@contextmanager
+def _atomic_shard_file(path: str):
+    """Keep the current shard and any mapped source tensors alive until commit."""
+    with _atomic_shard_path(path) as temporary:
+        with open(temporary, "wb") as handle:
+            yield handle
 
 
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:

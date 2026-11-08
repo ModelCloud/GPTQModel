@@ -54,6 +54,7 @@ from ..utils.hf import (
 from ..utils.logger import setup_logger
 from ..utils.model import (
     TensorSource,
+    _atomic_shard_path,
     _validate_offload_sources_outside_save_dir,
     copy_py_files,
     find_modules,
@@ -445,7 +446,8 @@ def _save_module_replacement_safetensors(
         for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
             tensors[tensor_name] = tensor
             tensor_to_filename[tensor_name] = shard_name
-        save_file(tensors, target_path, metadata=metadata)
+        with _atomic_shard_path(target_path) as temporary:
+            save_file(tensors, temporary, metadata=metadata)
         rewritten_files.append(shard_name)
         total_size_bytes += os.path.getsize(target_path)
     return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
