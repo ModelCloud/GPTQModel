@@ -342,26 +342,28 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     return out
 
 
-def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
+def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False, bias=None):
     W = dequant(input.dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
     weight = W.t() if transpose else W
     # Match every other low-precision inference kernel: keep the reduction in
     # FP32 and round once at the epilogue. A plain `input @ W` accumulates in
     # the activation dtype and loses ~1 ulp per output element versus the Torch
     # backend, which uses the same FP32-reduce helper.
-    return matmul_fp32_reduce(input, weight)
+    return matmul_fp32_reduce(input, weight, bias=bias)
 
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(device_type="xpu" if HAS_XPU else "cuda")
-    def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
+    def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, bias=None):
         # Declared source leaves can be column views of a fused allocation.
         # The raw-pointer decoder requires compact operands for direct/fallback
         # calls. These packed temporaries live only for this computation.
         qweight, scales, qzeros = qweight.contiguous(), scales.contiguous(), qzeros.contiguous()
-        output = quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
+        output = quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, bias=bias)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
         ctx.bits, ctx.maxq, ctx.pack_bits = bits, maxq, pack_bits
+        ctx.bias_shape = None if bias is None else bias.shape
+        ctx.bias_dtype = None if bias is None else bias.dtype
         return output
 
     @staticmethod
@@ -373,4 +375,8 @@ class QuantLinearFunction(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             grad_input = quant_matmul(grad_output, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=True)
-        return grad_input, None, None, None, None, None, None
+        grad_bias = None
+        if len(ctx.needs_input_grad) > 8 and ctx.needs_input_grad[8]:
+            grad_bias = grad_output.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
+        gradients = (grad_input, None, None, None, None, None, None, None, grad_bias)
+        return gradients[:len(ctx.needs_input_grad)]
