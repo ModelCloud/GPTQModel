@@ -248,6 +248,77 @@ ten calls per set. There was no prior input-gradient path to compare. The peak
 includes temporary unpacked tiles and library scratch; no expanded weight
 remains after backward.
 
+## GPTQ TritonV2 bias and backward
+
+`TritonV2Linear` dequantizes a temporary weight with Triton and then calls
+`QuantLinearFunction`. In eval mode, bias is now passed into that function,
+which asks `matmul_fp32_reduce` to add it in the FP32 CUDA reduction before
+the FP16 or BF16 output cast. `QuantLinearFunction.backward` returns one
+gradient slot per supplied argument, including an FP32-reduced bias gradient.
+The eight-argument direct-call form still works without bias. Training mode
+continues to use `TorchLinear.forward`.
+
+```mermaid
+flowchart TD
+    P["TritonV2Linear.post_init"] --> Q{"g_idx in range?"}
+    Q -- "No" --> X["Raise ValueError"]
+    Q -- "Yes" --> A["TritonV2Linear.forward"]
+    A --> B{"Training mode?"}
+    B -- "Yes" --> C["TorchLinear.forward"]
+    B -- "No" --> D["QuantLinearFunction.apply with optional bias"]
+    D --> E["quant_matmul dequantizes temporary weight"]
+    E --> F{"Bias present?"}
+    F -- "Yes" --> G["matmul_fp32_reduce uses FP32-output addmm"]
+    F -- "No" --> H["matmul_fp32_reduce uses FP32-output mm"]
+    G --> I["Cast once to input dtype"]
+    H --> I
+    I --> J{"Backward called?"}
+    J -- "No" --> K["Finish"]
+    J -- "Yes" --> L["QuantLinearFunction.backward"]
+    L --> M{"Input gradient requested?"}
+    M -- "Yes" --> N["quant_matmul with transpose"]
+    M -- "No" --> O{"Bias gradient requested?"}
+    N --> O
+    O -- "Yes" --> R["FP32 sum_to_size for bias"]
+    O -- "No" --> S["Return matching gradient slots"]
+    R --> S
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Path | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Eval bias | `tritonv2.py:190-202` rounded the GEMM output, then added bias in FP16/BF16 | Pass bias into `QuantLinearFunction` and the wide `matmul_fp32_reduce` epilogue |
+| Direct backward | `dequant.py:375` returned seven gradients for eight inputs, causing a runtime error | Return the required number of slots for eight- or nine-argument calls |
+| Bias backward | Bias was outside the custom function and could not complete backward while its input-gradient arity was wrong | Reduce the bias gradient in FP32 inside `QuantLinearFunction.backward` |
+
+The line references are from before this change. This flow was introduced by
+[PR #3661](https://github.com/ModelCloud/GPTQModel/pull/3661). After repeated
+forwards and backward, the module retains 0 bytes of expanded weight; the
+dequantized matrix lives only for its current matmul.
+
+On an NVIDIA GB10 (SM 12.1) with PyTorch 2.15.0+cu132 and Triton 3.9.0,
+packed-unit-weight 1×128×128 and 2×3×128 FP16/BF16 biased outputs matched an
+independent FP64 Torch oracle after rounding. The old FP16 output was `inf`;
+the corrected result was `65024`. Random packed 2×3×256 inputs and 128
+outputs matched the independent Torch oracle after rounding with maximum
+visible-output difference `0` in both dtypes. Maximum input-gradient
+difference was `0.001953125` in FP16 and `0` in BF16; bias gradients matched
+exactly. The relevant CUDA/Triton suite completed with 89 passed.
+
+Resident FP16 timing used five warmups and the median of seven sets of 30
+CUDA-event timed direct `quant_matmul` calls. The peak allocator delta includes
+temporary output, dequantization, and library scratch.
+
+| Shape (M×K×N) | Old bias after rounding | New bias before rounding | Old peak | New peak |
+| --- | ---: | ---: | ---: | ---: |
+| 1×1024×1024 | 0.1001 ms | 0.1061 ms | 34.00 MiB | 3.01 MiB |
+| 128×1024×1024 | 0.1059 ms | 0.1082 ms | 34.50 MiB | 3.50 MiB |
+
+The newly working 6×1024×1024 first-order backward took 1.96–2.52 ms across
+two repeated process runs, with a 34.03 MiB peak allocator delta. There was
+no valid old backward to compare.
+
 ## Previous and current behavior
 
 | Path | Previous mechanism | Current mechanism |
