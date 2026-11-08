@@ -89,6 +89,9 @@ constexpr int kLdPadded = kSuperAtomCols + 8;
 // the K walk, so this multiplies the CTA count without duplicating any read.
 constexpr int kMaxSplits = 8;
 
+// CTAs resident on all 32 CUs at one per CU: one wave on this part.
+constexpr int64_t kCtasPerWave = 32;
+
 // kMt is the number of 16-token tiles this instantiation covers.
 template <int kMt, int kSplits, bool kDbl, bool kPad>
 __global__ void __launch_bounds__(kThreadsPerBlock)
@@ -387,7 +390,7 @@ int nf12_ad_wmma_supported(int64_t m) {
 //   2048x8192    64 CTAs,  32 k-blocks   s1 / s1
 //   896x4864     38 CTAs,  14 k-blocks   s1 / s2
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
-  constexpr int64_t kOneWave = 32;  // 32 CUs, one CTA per CU
+  constexpr int64_t kOneWave = kCtasPerWave;
   // Narrow N: 7 CTAs is under a quarter wave, and every extra CTA is free
   // because the splits read disjoint k slices.
   if (blocks_x * 4 < kOneWave) return 8;
@@ -404,7 +407,12 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // real slice: 4096x4096 (64 k-blocks) goes 27.3 -> 25.7 us at m=16, while
   // 896x4864 (14 k-blocks) is faster unsplit because the per-CTA prologue
   // dominates once each split only walks three super-atoms.
-  if (k_blocks >= kOneWave && k_blocks < kOneWave * 4) return (m <= 16) ? 4 : 2;
+  //
+  // Four ways pays up to m=32 and not beyond. At kMt <= 2 the VGPR budget
+  // leaves room for the extra CTAs (4096x4096 m=32: 30.1 -> 27.1 us), but from
+  // kMt = 4 the ~135 VGPRs already cap a CU at three CTAs, so the fourth split
+  // only queues (m=64: 38.2 -> 43.3 us).
+  if (k_blocks >= kOneWave && k_blocks < kOneWave * 4) return (m <= 32) ? 4 : 2;
   if (m > 64 && k_blocks < kOneWave) return 2;
   return 1;
 }
@@ -508,6 +516,30 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
   // per CU. That is free while the whole launch fits under three CTAs per CU
   // and a loss beyond it, so the launcher picks the variant from the grid size.
   const bool pad = n_blocks * m_blocks <= 96;
+  // Double buffering is only worth its shared memory where shared memory is the
+  // binding occupancy limit, and that is only true for the smallest tile counts.
+  // A padded CTA is 18 KiB single-buffered and 36 KiB double-buffered against
+  // 128 KiB per CU, so it holds 7 or 3 CTAs. At kMt <= 2 the accumulator is
+  // small enough that the VGPR budget allows well over three CTAs, so the LDS
+  // footprint decides; from kMt = 3 up the ~135 VGPRs already cap the CU at
+  // three CTAs and dropping the buffer buys nothing (25600x5120 m=128 measured
+  // 447 us buffered against 479 us not).
+  //
+  // Where LDS does bind, dropping the buffer only helps in a narrow band: the
+  // launch must be starved enough that one extra resident CTA matters, but not
+  // so starved that the buffer's own latency hiding is the bigger win.
+  // 4096x4096 m=16 is 128 CTAs = four waves against a cap of three, and the
+  // buffer costs 28.4 -> 23.5 us. The wide shapes are 14-28 waves deep, where
+  // the cap does not bite at all and removing the buffer only loses
+  // (4096x28672 m=16 measured 1.14 -> 1.08x). 2048x8192 m=16 is two waves, the
+  // three still fit, and the buffer is worth 30.5 -> 25.9 us.
+  const int64_t ctas = n_blocks * m_blocks * splits;
+  const int lds_kib = pad ? 36 : 32;
+  const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
+  const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
+  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
+  // Only the two smallest tile counts get the runtime buffer choice; from three
+  // tiles up the buffer is unconditional, so those stay single-instantiation.
 #define NF12_AD_TILES(T, D)                                                     \
   do {                                                                          \
     if (pad) {                                                                  \
@@ -516,9 +548,17 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
       NF12_AD_DISPATCH(T, D, false);                                            \
     }                                                                           \
   } while (0)
+#define NF12_AD_TILES_DYN(T)                                                    \
+  do {                                                                          \
+    if (dbl) {                                                                  \
+      NF12_AD_TILES(T, true);                                                   \
+    } else {                                                                    \
+      NF12_AD_TILES(T, false);                                                  \
+    }                                                                           \
+  } while (0)
   switch (tiles) {
-    case 1: NF12_AD_TILES(1, true); break;
-    case 2: NF12_AD_TILES(2, true); break;
+    case 1: NF12_AD_TILES_DYN(1); break;
+    case 2: NF12_AD_TILES_DYN(2); break;
     case 3: NF12_AD_TILES(3, true); break;
     case 4: NF12_AD_TILES(4, true); break;
     case 5: NF12_AD_TILES(5, true); break;
@@ -526,6 +566,7 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
     case 7: NF12_AD_TILES(7, false); break;
     default: NF12_AD_TILES(kMaxTiles, false); break;
   }
+#undef NF12_AD_TILES_DYN
 #undef NF12_AD_TILES
 #undef NF12_AD_DISPATCH
 #undef NF12_AD_LAUNCH
