@@ -702,8 +702,11 @@ if _TRITON_AVAILABLE:
                     other=0.0,
                 )
 
-                weight = (tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]).to(tl.float16)
-                accumulator += tl.dot(a, weight)
+                weight = tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]
+                if scale_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a.to(tl.float32), weight, input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -801,8 +804,11 @@ if _TRITON_AVAILABLE:
                     other=0.0,
                 )
 
-                weight = (tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]).to(tl.float16)
-                accumulator += tl.dot(a, weight)
+                weight = tl.cast(q, scale.dtype) * scale[None, :] - min_value[None, :]
+                if scale_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a.to(tl.float32), weight, input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,

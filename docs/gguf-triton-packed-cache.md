@@ -71,11 +71,12 @@ This cache contract was corrected in
 
 The packed `d` and `dmin` values are FP16, but their products with 6-bit
 subscales can exceed FP16 range. A later subtraction can still leave a finite
-weight. `_build_triton_cache` now uses the shared `_k_scale_overflows` guard
-to keep those two compact metadata arrays in FP32 for such blocks. The fused
-Q4_K and Q5_K kernels reconstruct the weight in the metadata dtype, then
-cast the completed weight to FP16 for `tl.dot`. Ordinary packed weights keep
-FP16 metadata and the existing fast kernel path.
+weight. Some completed weights also exceed FP16 even though a small activation
+gives a finite output. `_build_triton_cache` now uses the shared
+`_k_scale_overflows` guard to keep the compact metadata arrays in FP32 for
+such blocks. The fused Q4_K and Q5_K kernels reconstruct the weight in that
+dtype and use an IEEE FP32 dot. Ordinary packed weights keep FP16 metadata
+and the existing FP16 dot path.
 
 ```mermaid
 flowchart TD
@@ -84,11 +85,10 @@ flowchart TD
     C --> D{"FP16 intermediate can exceed range?"}
     D -- "Yes" --> E["Build FP32 scale and minimum metadata"]
     D -- "No" --> F["Build FP16 scale and minimum metadata"]
-    E --> G["Fused kernel reconstructs weight in FP32"]
-    F --> H["Fused kernel reconstructs weight in FP16"]
-    G --> I["Cast completed weight once to FP16 for tl.dot"]
-    H --> I
-    I --> J["Accumulate output in FP32"]
+    E --> G["Fused kernel reconstructs weight and dots in FP32"]
+    F --> H["Fused kernel reconstructs weight and dots in FP16"]
+    G --> J["Accumulate output in FP32"]
+    H --> J
     K["In-place packed weight update"] --> A
     B -. "Old FP16-only path" .-> X["Infinite cached minimum and wrong output"]
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
@@ -98,7 +98,7 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | K scale metadata | `gguf_triton.py:1796-1826` multiplied `d` and `dmin` by subscales in FP16, so Q5_K could cache an infinite minimum | `_build_triton_cache` keeps the compact scale/minimum arrays in FP32 when `_k_scale_overflows` flags the packed weight |
-| Weight reconstruction | `gguf_triton.py:702,801` used FP16 scale/minimum values before the Q4_K/Q5_K dot product | The fused kernels use the metadata dtype for reconstruction and round only the completed weight to FP16 |
+| Weight reconstruction | `gguf_triton.py:702,801` used FP16 scale/minimum values before the Q4_K/Q5_K dot product | The fused kernels reconstruct and dot in FP32 for flagged blocks, so even a completed weight above FP16 range can contribute to a finite output |
 
 The old line references describe the code before this range correction. On
 the NVIDIA GB10, a crafted Q5_K block with `d=74`, 6-bit scale and minimum
@@ -106,7 +106,8 @@ the NVIDIA GB10, a crafted Q5_K block with `d=74`, 6-bit scale and minimum
 though an independent NumPy GGUF decoder and FP64 Torch dot product gave a
 finite `58.5625`. The corrected Q4_K and Q5_K results both gave `58.5625`.
 The GPU regression covers FP16/BF16 inputs, one and eight rows, bias,
-repeatability, and packed-weight replacement. For the 64×256 case, the wide
+repeatability, completed weights above FP16 range, direct wrapper calls,
+and packed-weight replacement. For the 64×256 case, the wide
 scale and minimum arrays add 2,048 bytes to the compact cache; no expanded
 weight is retained.
 

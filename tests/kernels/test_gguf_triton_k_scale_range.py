@@ -10,7 +10,11 @@ from gptqmodel.nn_modules.qlinear.gguf import (
     GGUFTorchLinear,
     _dequantize_gguf_tensor_numpy,
 )
-from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.gguf_triton import (
+    GGUFTritonKernel,
+    fused_q4_k_matmul,
+    fused_q5_k_matmul,
+)
 
 
 requires_gpu = pytest.mark.skipif(
@@ -83,6 +87,56 @@ def test_finite_k_weight_after_out_of_range_intermediate(bits, dtype, rows, bias
         value.numel() < module.in_features * module.out_features
         for value in cache.values() if torch.is_tensor(value)
     )
+
+
+@requires_gpu
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", ["q4_k", "q5_k"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_out_of_fp16_weight_still_has_finite_dot_product(bits, dtype):
+    source = GGUFTorchLinear(
+        bits=bits, group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=False,
+    ).eval()
+    blocks = np.zeros((64, source.gguf_type_size), dtype=np.uint8)
+    blocks[:, :2] = np.array([1000], dtype=np.float16).view(np.uint8)
+    blocks[:, 4:8] = 63
+    if bits == "q4_k":
+        blocks[:, 16:] = 0xFF
+    else:
+        blocks[:, 16:48] = 0xFF
+        blocks[:, 48:] = 0xFF
+    source.qweight.copy_(torch.from_numpy(blocks))
+    module = GGUFTritonKernel(
+        bits=bits, group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=False,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    inputs = torch.full((1, 256), 2**-16, device="cuda", dtype=dtype)
+    dense = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(blocks, module.gguf_tensor_qtype)
+    ).to(device="cuda", dtype=torch.float64)
+    assert dense.abs().max() > torch.finfo(torch.float16).max
+    oracle = inputs.to(torch.float16).to(torch.float64) @ dense.T
+    assert oracle.abs().max() < torch.finfo(torch.float16).max
+
+    actual = module(inputs)
+    cache = module._get_triton_cache(inputs.device)
+    x_half = inputs.to(torch.float16)
+    if bits == "q4_k":
+        direct = fused_q4_k_matmul(
+            x_half, cache["qs"], cache["scale"], cache["min"], output_dtype=torch.float32,
+        )
+    else:
+        direct = fused_q5_k_matmul(
+            x_half, cache["qs"], cache["qh"], cache["scale"], cache["min"],
+            output_dtype=torch.float32,
+        )
+
+    assert cache["scale"].dtype == torch.float32
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, oracle.to(dtype), rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(direct, oracle.to(torch.float32), rtol=2e-3, atol=2e-3)
 
 
 @requires_gpu
