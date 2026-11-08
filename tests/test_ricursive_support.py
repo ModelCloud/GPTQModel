@@ -459,7 +459,8 @@ def test_generate_patch_distinguishes_new_blocks_from_full_prompts(
     assert out["position_ids"].tolist() == [expected_positions]
 
 
-def test_generate_patch_full_prompt_with_capacity_padded_mask():
+@pytest.mark.parametrize("capacity", [10, 12])
+def test_generate_patch_full_prompt_with_capacity_padded_mask(capacity):
     from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
 
     class _Dummy:
@@ -473,7 +474,7 @@ def test_generate_patch_full_prompt_with_capacity_padded_mask():
         _Dummy(),
         torch.tensor([[1, 2, 3, 4, 17, 18]]),
         past_key_values=_Cache(),
-        attention_mask=torch.tensor([[1] * 6 + [0] * 6]),
+        attention_mask=torch.tensor([[1] * 6 + [0] * (capacity - 6)]),
         position_ids=torch.arange(6).unsqueeze(0),
         cache_position=None,
         use_cache=True,

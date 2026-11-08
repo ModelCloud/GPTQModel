@@ -188,17 +188,19 @@ def _prepare_inputs_for_generation(
         # A full prompt can include cached tokens, while verification may pass
         # only a new token block. A block no longer than the cache must be new;
         # for a longer block, a mask with exactly the cached prefix plus new
-        # tokens identifies new-only input. A longer mask may be padded to a
-        # static cache's capacity, so it cannot identify a new-only block.
+        # tokens identifies new-only input when its final slot is populated.
+        # A longer mask, or one with unused capacity at the end, may be padded
+        # to a static cache's capacity and describes a full prompt instead.
         input_length = input_ids.shape[1]
-        full_prompt = (
-            past_length > 0
-            and input_length > past_length
-            and (
-                attention_mask is None
-                or attention_mask.shape[-1] != past_length + input_length
-            )
+        candidate_full_prompt = past_length > 0 and input_length > past_length
+        new_block_mask = (
+            candidate_full_prompt
+            and attention_mask is not None
+            and attention_mask.dim() == 2
+            and attention_mask.shape[-1] == past_length + input_length
+            and bool(attention_mask[..., -1].any())
         )
+        full_prompt = candidate_full_prompt and not new_block_mask
         new_len = input_length - past_length if full_prompt else input_length
         cache_position = torch.arange(past_length, past_length + new_len, device=input_ids.device)
 
