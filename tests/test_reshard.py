@@ -581,6 +581,51 @@ def test_reshard_named_shard_keeps_its_complete_indexed_checkpoint(tmp_path):
     _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
 
 
+def test_reshard_named_shard_rejects_conflicting_standard_indexes(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    state = {
+        "shared.weight": torch.ones(2),
+        "a.weight": torch.full((2,), 2.0),
+        "b.weight": torch.full((2,), 3.0),
+    }
+    for key, tensor in state.items():
+        save_file({key: tensor}, str(source / f"{key.split('.')[0]}.safetensors"))
+    first = {"shared.weight": "shared.safetensors", "a.weight": "a.safetensors"}
+    second = {"shared.weight": "shared.safetensors", "b.weight": "b.safetensors"}
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": first}), encoding="utf-8"
+    )
+    second_index = source / "pytorch_model.safetensors.index.json"
+    second_index.write_text(json.dumps({"weight_map": second}), encoding="utf-8")
+
+    target = tmp_path / "target"
+    with pytest.raises(ValueError, match="conflicting checkpoint indexes"):
+        reshard(source / "shared.safetensors", target, ShardLayout.SINGLE)
+    assert not target.exists()
+
+    # Naming the intended index explicitly remains unambiguous.
+    reshard(second_index, target, ShardLayout.SINGLE)
+    _assert_tensors_equal(
+        load_file(str(target / "model.safetensors")),
+        {key: state[key] for key in second},
+    )
+
+
+def test_reshard_named_shard_accepts_equivalent_standard_indexes(tmp_path):
+    source = tmp_path / "source"
+    state = _build_source(source)
+    first = _read_index(source)
+    same_paths = {key: f"./{path}" for key, path in first["weight_map"].items()}
+    (source / "pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": same_paths}), encoding="utf-8"
+    )
+
+    target = tmp_path / "target"
+    reshard(source / "model-00001-of-00002.safetensors", target, ShardLayout.SINGLE)
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
+
+
 def test_reshard_standalone_file_ignores_unrelated_invalid_index(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
