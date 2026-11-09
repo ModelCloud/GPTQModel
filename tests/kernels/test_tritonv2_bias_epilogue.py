@@ -126,3 +126,38 @@ def test_tritonv2_direct_function_keeps_eight_argument_backward():
     )
     output.float().sum().backward()
     torch.testing.assert_close(x.grad, torch.full_like(x, 128), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("operand", ["g_idx", "qweight", "scales", "qzeros"])
+def test_tritonv2_dequant_accepts_strided_packed_operands(dtype, operand):
+    from gptqmodel.nn_modules.triton_utils.dequant import dequant
+
+    in_features, out_features = 128, 64
+    # Every nibble is one; the two group scales independently specify weights 1 and 2.
+    qweight = torch.full((in_features // 8, out_features), 0x11111111, device="cuda", dtype=torch.int32)
+    qzeros = torch.zeros((2, out_features // 8), device="cuda", dtype=torch.int32)
+    scales = torch.stack((
+        torch.ones((out_features,), device="cuda", dtype=dtype),
+        torch.full((out_features,), 2, device="cuda", dtype=dtype),
+    ))
+    g_idx = torch.arange(in_features, device="cuda", dtype=torch.int32) // 64
+    arguments = {"qweight": qweight, "scales": scales, "qzeros": qzeros, "g_idx": g_idx}
+    source = arguments[operand]
+    if operand == "g_idx":
+        storage = torch.zeros((in_features * 2,), device="cuda", dtype=source.dtype)
+        view = storage[::2]
+    else:
+        storage = torch.empty((source.shape[0], source.shape[1] + 8), device="cuda", dtype=source.dtype)
+        storage.fill_(-1 if operand == "qzeros" else 0)
+        view = storage[:, :source.shape[1]]
+    view.copy_(source)
+    assert not view.is_contiguous()
+    arguments[operand] = view
+
+    actual = dequant(dtype, arguments["qweight"], arguments["scales"], arguments["qzeros"],
+                     arguments["g_idx"], 4, 32, 15)
+    expected = torch.where(g_idx[:, None] == 0, 1.0, 2.0).expand(in_features, out_features).to(dtype)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

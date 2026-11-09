@@ -314,6 +314,12 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     out_features = scales.shape[1]
     in_features = g_idx.shape[0]
 
+    # The decoder uses dense offsets for every packed operand and group index.
+    qweight = qweight.contiguous()
+    scales = scales.contiguous()
+    qzeros = qzeros.contiguous()
+    g_idx = g_idx.contiguous()
+
     out = torch.empty((in_features, out_features), device=qweight.device, dtype=dtype)
     out_dtype = dtype
 
