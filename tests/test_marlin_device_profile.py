@@ -67,6 +67,7 @@ def test_explicit_device_zero_is_not_treated_as_unset(monkeypatch):
 
     calls = []
     monkeypatch.setattr(marlin_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(marlin_mod.torch.cuda, "device_count", lambda: 4)
     monkeypatch.setattr(marlin_mod.torch.cuda, "current_device", lambda: 3)
     monkeypatch.setattr(
         marlin_mod,
@@ -104,6 +105,22 @@ def test_non_cuda_device_is_rejected(monkeypatch):
         marlin_mod.marlin_device_profile("cpu")
 
 
+@pytest.mark.parametrize("device", ["cuda:256", "cuda:999", torch.device("cuda:1")])
+def test_explicit_device_index_is_validated_before_profile(monkeypatch, device):
+    from gptqmodel.utils import marlin as marlin_mod
+
+    monkeypatch.setattr(marlin_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(marlin_mod.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        marlin_mod,
+        "_marlin_resolve_op",
+        lambda **_kwargs: pytest.fail("invalid device index reached the extension"),
+    )
+
+    with pytest.raises(ValueError, match="out of range"):
+        marlin_mod.marlin_device_profile(device)
+
+
 @requires_cuda
 def test_out_of_range_index_raises_with_the_number_the_caller_passed():
     """999 would wrap to -25 inside torch's int8 device index; report 999."""
@@ -124,3 +141,5 @@ def test_extension_rejects_an_out_of_range_index_directly():
     op = torch.ops.gptqmodel_marlin_fp16.marlin_device_profile
     with pytest.raises(RuntimeError, match="out of range"):
         op(torch.cuda.device_count() + 4096)
+    with pytest.raises(RuntimeError, match="out of range"):
+        op(1 << 32)
