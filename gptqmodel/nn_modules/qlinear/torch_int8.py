@@ -5,6 +5,7 @@
 # Credit: int8 kernel sync adapted from Yintong Lu (yintong-lu), vLLM PR #35697.
 
 
+import threading
 from typing import Optional, Tuple
 
 import torch
@@ -16,10 +17,12 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._runtime_cache import tensor_cache_key
 
 
 INT8_WEIGHT_BUFFER_NAME = "int8_weight_nk"
 INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
+_INT8_REBUILD_LOCK = threading.Lock()
 
 
 def _require_native_int8(bits: int) -> None:
@@ -159,6 +162,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.int8_module: Optional[Int8PackedModule] = None
+        self._int8_source_signature = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -176,13 +180,35 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def post_init(self):
         super().post_init()
-        # One-time conversion: GPTQ 8-bit storage -> int8 packed CPU kernel storage.
-        # Keep only int8 tensors after conversion to reduce memory footprint.
+        # The GPTQ tensors are the checkpoint. Native INT8 is a derived,
+        # non-persistent runtime layout and must never replace those tensors.
         self.transform_cpu(dtype=torch.float32)
-        self._empty_gptq_only_weights()
-        self._drop_unpack_buffers()
-        self.int8_module = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
         self.optimize()
+
+    def _source_signature(self):
+        return tuple(tensor_cache_key(getattr(self, name, None)) for name in self.GPTQ_BUFFER_NAMES)
+
+    def clear_weight_cache(self):
+        """Invalidate the derived INT8 binding after a source edit or load."""
+        self._int8_source_signature = None
+        self.int8_module = None
+
+    def _refresh_int8_runtime(self):
+        if getattr(self, "_int8_fusion_view", False):
+            return self.int8_module
+        signature = self._source_signature()
+        if self.int8_module is not None and signature == self._int8_source_signature:
+            return self.int8_module
+        # A post-load first forward can run from several free-threaded workers.
+        # Serialize only this cold rebuild; steady-state forwards remain lock-free.
+        with _INT8_REBUILD_LOCK:
+            signature = self._source_signature()
+            if self.int8_module is not None and signature == self._int8_source_signature:
+                return self.int8_module
+            if not self._has_all_gptq_buffers():
+                raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+            self.transform_cpu(dtype=torch.float32)
+            return self.int8_module
 
     def optimize(self):
         if self.optimized:
@@ -228,14 +254,17 @@ class TorchInt8Linear(GPTQQuantLinear):
             self._delete_attr_if_exists(name)
 
     def dequantize_weight(self, num_itr: int = 1):
-        # Int8 fallback for dequantized export path after original GPTQ tensors are released.
-        dequantized = _cached_int8_dequantize(self)
-        if dequantized is not None and not self._has_all_gptq_buffers():
-            return dequantized
-
         if num_itr != 1:
             raise NotImplementedError("TorchInt8Linear dequantize_weight only supports num_itr == 1.")
+        # Explicit dequantized export still reflects the native INT8 runtime
+        # when it is current; conversion always decodes the GPTQ source below.
+        if self.int8_module is not None and self._int8_source_signature == self._source_signature():
+            dequantized = _cached_int8_dequantize(self)
+            if dequantized is not None:
+                return dequantized
+        return self._dequantize_gptq_source_weight()
 
+    def _dequantize_gptq_source_weight(self):
         if not self._has_all_gptq_buffers():
             raise RuntimeError("TorchInt8Linear missing GPTQ buffers for dequantization.")
 
@@ -287,8 +316,13 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def transform_cpu(self, dtype: torch.dtype):
         _require_native_int8(self.bits)
-        float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
+        if not self._has_all_gptq_buffers():
+            raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+        float_weight = self._dequantize_gptq_source_weight().to(torch.float32)
         _write_int8_buffers(self, float_weight=float_weight, dtype=dtype)
+        self._drop_unpack_buffers()
+        self.int8_module = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
+        self._int8_source_signature = self._source_signature()
 
     def transform(self, dtype: torch.dtype, device: str):
         if device != "cpu":
@@ -299,9 +333,6 @@ class TorchInt8Linear(GPTQQuantLinear):
         _require_native_int8(self.bits)
         if self.training:
             raise NotImplementedError("TorchInt8Linear does not support training mode.")
-        if self.int8_module is None:
-            raise RuntimeError("TorchInt8Linear int8 module is not initialized. Ensure post_init() has been called.")
-
         # Common decode path is 2D [M, K]. Skip reshape/out-shape overhead on this hot path.
         if x.dim() == 2:
             out = self._fused_op_forward(x, bias=self.bias)
@@ -324,13 +355,10 @@ class TorchInt8Linear(GPTQQuantLinear):
     ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise NotImplementedError("TorchInt8Linear fused path is CPU-only.")
-        if self.int8_module is None:
+        int8_module = self._refresh_int8_runtime()
+        if int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
-        return self.int8_module(x.contiguous(), bias=bias)
-
-    def _empty_gptq_only_weights(self):
-        for name in self.GPTQ_BUFFER_NAMES:
-            self._delete_attr_if_exists(name)
+        return int8_module(x.contiguous(), bias=bias)
 
 
 def dequantize_model(model: PreTrainedModel):

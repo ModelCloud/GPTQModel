@@ -122,6 +122,8 @@ are retired and fail with migration guidance. Use `BACKEND.AUTO` to select a
 compatible packed kernel or `BACKEND.TORCH` for a portable fallback. Native
 8-bit GPTQ still uses the existing per-channel INT8 requantizer; it is not a
 lossless repacking of arbitrary grouped/asymmetric GPTQ weights.
+See [Torch INT8 checkpoint lifecycle](docs/torch-int8-checkpoint-lifecycle.md)
+for save/reload ownership and runtime cache invalidation.
 
 ## Quantization Support 🛠️
 
