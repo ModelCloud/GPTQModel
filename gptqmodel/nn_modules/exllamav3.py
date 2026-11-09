@@ -269,15 +269,20 @@ class ExllamaV3Linear(nn.Module):
             name: getattr(self, name, None)
             for name in _EXL3_BUFFER_NAMES
         }
-        self._torch_inner = ExllamaV3TorchLinear(
+        torch_inner = ExllamaV3TorchLinear(
             in_features=self.in_features,
             out_features=self.out_features,
             name=self.name,
             tensors=tensors,
             out_dtype=self.out_dtype,
         )
+        # This helper borrows our checkpoint buffers. Registering it as a child
+        # would serialize the same packed tensors twice and make strict reload
+        # depend on whether a wide-input forward has run. _apply and
+        # clear_weight_cache explicitly discard it before its buffers can move.
+        object.__setattr__(self, "_torch_inner", torch_inner)
         self._torch_inner_signature = signature
-        return self._torch_inner
+        return torch_inner
 
     def post_init(self) -> None:
         self._drop_inner()

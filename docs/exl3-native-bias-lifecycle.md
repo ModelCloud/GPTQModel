@@ -1,4 +1,10 @@
-# EXL3 native buffer lifecycle
+# EXL3 inference buffer lifecycle
+
+`ExllamaV3Linear` owns the checkpoint's packed tensors. Its native handle and
+Torch wide-input helper are derived runtime objects; neither owns a second
+checkpoint representation.
+
+## Native handle
 
 `ExllamaV3Linear` keeps the quantized trellis and metadata as checkpoint
 buffers. `LinearEXL3` reads the trellis through its original tensor, but it
@@ -58,3 +64,54 @@ run on a host with the native EXL3 extension to establish device accuracy.
 
 Bias normalization was introduced in [PR #3625](https://github.com/ModelCloud/GPTQModel/pull/3625).
 Packed metadata normalization is added in [PR #3732](https://github.com/ModelCloud/GPTQModel/pull/3732).
+
+## Torch wide-input helper
+
+BF16 and FP32 activations use `ExllamaV3TorchLinear` for bounded FP32
+reconstruction. `_ensure_torch_inner()` gives that helper references to the
+parent's packed buffers. It stores the helper outside `nn.Module._modules`, so
+`state_dict()` has the same checkpoint keys before and after a wide-input
+forward. The helper's temporary decoded output tiles are released after the
+forward; no dense weight is retained. `_current_signature()` replaces the
+helper when packed metadata changes or buffers are replaced. `_apply()` and
+`clear_weight_cache()` discard it before a move or explicit cache reset.
+
+```mermaid
+flowchart TD
+    A["ExllamaV3Linear.forward"] --> B{"Input dtype is FP16?"}
+    B -- Yes --> C["_ensure_inner: native handle"]
+    B -- No --> D["_ensure_torch_inner"]
+    D --> E["_current_signature"]
+    E --> F{"Matches _torch_inner_signature?"}
+    F -- Yes --> G["Reuse unregistered ExllamaV3TorchLinear"]
+    F -- No --> H["Build helper with parent packed buffers"]
+    H --> I["object.__setattr__: keep helper out of _modules"]
+    I --> G
+    G --> J["ExllamaV3TorchLinear.forward"]
+    J --> K["_forward_chunked: decode bounded output tiles"]
+    K --> L{"Packed storage valid and materialized?"}
+    L -- No --> X["ValueError or RuntimeError"]
+    L -- Yes --> M["Return output; state_dict has parent keys only"]
+    N["load_state_dict: copy or assign"] --> D
+    O["_apply or clear_weight_cache"] --> P["_drop_inner"]
+    P --> D
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Wide-input helper ownership | `self._torch_inner = ExllamaV3TorchLinear(...)` registered an `nn.Module` child (`gptqmodel/nn_modules/exllamav3.py:272` before this change). | `object.__setattr__` stores a runtime helper without child registration (`gptqmodel/nn_modules/exllamav3.py:272-285`). |
+| Checkpoint keys | The first BF16 or FP32 forward added `_torch_inner.*` packed-buffer keys; a pre-forward checkpoint failed strict reload. | `state_dict()` retains only parent keys; the same checkpoint strictly reloads before and after forward. |
+| Buffer move and replacement | The child also appeared in module traversal even though it borrowed parent buffers. | `_apply()` drops the helper before moving parent buffers; a signature change after `load_state_dict(assign=True)` rebuilds it from the new packed tensors. |
+
+The CPU regression exercises BF16 and FP32 at 128 input by 576 logical output
+channels, compares against an independent Torch bitstream/FP32 oracle at
+`rtol=atol=2e-3`, and checks strict reload, in-place mutation, assignment,
+dtype move, and explicit cache clear. The fixture retains 23,168 checkpoint
+bytes before and after forward; changing the logical bias to FP32 during a
+model-wide cast changes that to 24,320 bytes. The helper retains no additional
+packed copy or dense weight.
+
+Checkpoint-stable Torch fallback ownership was added in
+[PR #3738](https://github.com/ModelCloud/GPTQModel/pull/3738).
