@@ -232,7 +232,7 @@ def _absmax_fp32(quant_state) -> torch.Tensor:
 
     absmax = quant_state.absmax
     if absmax.dtype != torch.uint8:
-        return absmax.reshape(-1).float()
+        return absmax.reshape(-1).float().contiguous()
 
     state2 = getattr(quant_state, "state2", None)
     if state2 is None:
@@ -250,7 +250,7 @@ def _codebook(quant_state, device) -> torch.Tensor:
         import bitsandbytes as bnb
 
         code = bnb.functional.get_4bit_type(quant_state.quant_type, device="cpu")
-    return code.to(device=device, dtype=torch.float32).reshape(-1)
+    return code.to(device=device, dtype=torch.float32).reshape(-1).contiguous()
 
 
 def dequantize_4bit(qweight: torch.Tensor, quant_state, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -262,7 +262,7 @@ def dequantize_4bit(qweight: torch.Tensor, quant_state, out_dtype: Optional[torc
     bk = min(128, max(32, 1 << (in_features - 1).bit_length()))
     grid = (triton.cdiv(out_features, 16), triton.cdiv(in_features, bk))
     _bnb_4bit_dequant_kernel[grid](
-        qweight.reshape(-1), _absmax_fp32(quant_state), _codebook(quant_state, qweight.device), out,
+        qweight.reshape(-1).contiguous(), _absmax_fp32(quant_state), _codebook(quant_state, qweight.device), out,
         in_features, out_features, int(quant_state.blocksize), 16, bk,
         num_warps=4,
     )
@@ -286,8 +286,8 @@ def matmul_4bit(
     cfg = gemm_launch(x.device)
     grid = (triton.cdiv(x2.shape[0], cfg.block_m), triton.cdiv(out_features, cfg.block_n))
     _bnb_4bit_gemm_kernel[grid](
-        x2, qweight.reshape(-1), _absmax_fp32(quant_state), _codebook(quant_state, x.device),
-        bias if bias is not None else x, out, x2.shape[0],
+        x2, qweight.reshape(-1).contiguous(), _absmax_fp32(quant_state), _codebook(quant_state, x.device),
+        bias.contiguous() if bias is not None else x, out, x2.shape[0],
         in_features, out_features, int(quant_state.blocksize),
         cfg.block_m, cfg.block_n, cfg.block_k, bias is not None,
         num_warps=cfg.num_warps, num_stages=cfg.num_stages,
