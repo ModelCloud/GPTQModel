@@ -5,8 +5,11 @@ inputs are new, which cache slots are visible, and which outputs the caller
 requested. The hooks recognize native contract version `2026-11-09`; older
 `2026-11-05` checkpoints still receive the generation and masking fixes.
 
-Implemented in [GPT-QModel #3703](https://github.com/ModelCloud/GPTQModel/pull/3703)
-and [Ripple HF #11](https://huggingface.co/ricursiveAI/Ripple-65B-Preview/discussions/11).
+The initial warm-cache fix was introduced in
+[GPT-QModel #3703](https://github.com/ModelCloud/GPTQModel/pull/3703). The complete
+modeling fixes and regression suite are in
+[GPT-QModel #3709](https://github.com/ModelCloud/GPTQModel/pull/3709) and
+[Ripple HF #11](https://huggingface.co/ricursiveAI/Ripple-65B-Preview/discussions/11).
 **All unit tests live in GPT-QModel.** The test file previously added to HF #11
 has been removed; the HF PR contains only the native modeling implementation.
 
@@ -164,4 +167,4 @@ On PyTorch 2.15.0 with an NVIDIA RTX 4090:
   execution, and an AMD ROCm device were not exercised in this validation.
 
 The code-only fixture is pinned to native commit
-`bad8b0179bb3824317096c81b0315c5ac1681686` from HF #11.
+`948fa2689b50ce2f713f573682632fe0fad0118d` from HF #11.
