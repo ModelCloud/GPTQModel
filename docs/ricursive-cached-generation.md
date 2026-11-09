@@ -2,7 +2,7 @@
 
 Ripple's native model and GPT-QModel's compatibility hooks must agree on which
 inputs are new, which cache slots are visible, and which outputs the caller
-requested. The hooks recognize native contract version `2026-11-09`; older
+requested. The compatibility layer recognizes native contract version `2026-11-09.1`; older
 `2026-11-05` checkpoints still receive the generation and masking fixes.
 
 The initial warm-cache fix was introduced in
@@ -97,12 +97,40 @@ keeps KV heads grouped. Requested attention weights need an explicit query-head
 axis, but the SDPA output remains unchanged, avoiding BF16 rounding drift when
 turning diagnostics on.
 
-For older forwards, `_patch_logits_to_keep` registers a projection hook on the
-actual instance for the duration of the call and removes it in `finally`. It
-works for subsequent model instances and replacement heads. Labeled calls keep
-all positions until FP32 loss is computed; dict and tuple outputs are both
-trimmed afterward. Current native forwards need no logits wrapper. These changes
-do not introduce persistent expanded or dequantized weight storage.
+For older forwards, `_patch_logits_to_keep` installs a class forward that calls
+`self.model` and slices hidden-state rows using local call variables. It never
+installs LM-head hooks. Concurrent calls, including full-logit and labeled calls,
+therefore cannot inherit another request's row selection. Replacement heads and
+subsequent model instances use the same contract. Labeled calls project every
+position, compute FP32 loss, then trim returned logits. Current native forwards
+need no replacement. No persistent expanded or dequantized weights are introduced.
+
+```mermaid
+flowchart TD
+    A["_patch_logits_to_keep"] --> B{"Current native contract?"}
+    B -->|Yes| N["Keep native forward"]
+    B -->|No| C["Install forward with local call state; no shared head hooks"]
+    C --> D["self.model returns hidden states"]
+    N --> D
+    D --> E{"labels supplied?"}
+    E -->|No| F["Select requested hidden-state rows before self.lm_head"]
+    E -->|Yes| G["Project all rows; shifted FP32 cross-entropy"]
+    G --> H{"num_items_in_batch supplied?"}
+    H -->|Yes| I["Sum loss and divide by accumulation-wide token count"]
+    H -->|No| J["Mean loss"]
+    I --> K["Trim returned logits; preserve tuple or ModelOutput"]
+    J --> K
+    F --> K
+    D -->|Model or head raises| X["Propagate exception; no shared hook state to clean up"]
+    style X fill:#ffe1e1,stroke:#b42318
+```
+
+Tensor-parallel attention derives head counts from local projection widths and
+KV grouping from the resulting tensors. The same code handles an unsharded
+model. Sliding layers intersect caller masks with the window using boolean AND
+or additive `-inf`, so an empty visibility row stays empty. The tied-weight map
+identifies `lm_head.weight` as sharing `model.embed_tokens.weight`; Transformers
+5 consumes the map and Transformers 4 consumes its keys.
 
 ## Before and after
 
@@ -122,8 +150,22 @@ compatibility references are `gptqmodel/utils/ricursive_patch.py` at `4e174cb53`
 | Native line 841: cross-entropy reduces in activation dtype. | Reduce loss in FP32. |
 | Native line 595: every cache layer grows without a sliding limit. | Build a cache from the layer configuration on supported Transformers versions. |
 | Native line 330: full static capacity is expanded before trimming. | Trim unwritten cache slots before head expansion. |
-| Compatibility line 790: a class flag skips head setup on later instances. | Each call installs and removes its own instance hook. |
+| Compatibility line 790: a class flag skips head setup on later instances. | Local forward state slices the current instance's head input without hooks. |
 | Compatibility line 818: only dictionary logits are trimmed. | Preserve the requested shape for tuple outputs too. |
+
+
+The subsequent clean review fixes and their 38 new regression cases are in
+[GPT-QModel #3710](https://github.com/ModelCloud/GPTQModel/pull/3710).
+That review compared native `948fa2689` and compatibility
+`1efaf4a298` and added these regressions:
+
+| Previous behavior and source | Current behavior |
+| --- | --- |
+| Native `modeling_ricursive.py:895` and compatibility `ricursive_patch.py:894`: always reduce mean loss. | Honor `num_items_in_batch` using summed loss divided by the shared token count. |
+| Native `modeling_ricursive.py:299` and compatibility `ricursive_patch.py:690`: reshape using global head counts after TP sharding. | Infer local heads and grouping from projection tensors. |
+| Native `modeling_ricursive.py:269`: replace existing `-inf` exclusions with finite minima. | Preserve exclusions with `-inf`, including completely blocked query rows. |
+| Compatibility `ricursive_patch.py:883`: register request-specific hooks on a shared head. | Replace the forward once and keep all request-specific slicing state local. |
+| Native `modeling_ricursive.py:811`: list-valued tied metadata crashes on Transformers 5. | Target-to-source mapping supports tying, resizing, and save/load on both versions. |
 
 ## Tests and reproduction
 
@@ -134,6 +176,8 @@ compatibility references are `gptqmodel/utils/ricursive_patch.py` at `4e174cb53`
 | `tests/test_ricursive_modeling_contracts.py` | All 13 review findings, checkpoint recomputation/gradient parity, compatibility generation, head replacement, and exception cleanup. |
 | `tests/test_ricursive_modeling_numerics.py` | Independent FP32 model oracle, head-width variants, window eviction, block decoding, MLP chunking, static/dynamic caches, greedy/beam generation, and chunked prefill. |
 | `tests/test_ricursive_modeling_precision.py` | CPU and active CUDA/ROCm runtime checks in FP32, FP16, and BF16, including the 80-query/8-KV head layout. |
+| `tests/test_ricursive_review_regressions.py` | 38 cases: all five clean-review defects, actual historical source, real Trainer updates, concurrent labeled/full/sliced requests, tied resize/save/load, and real two-rank TP. |
+| `tests/ricursive_tp_worker.py`, `tests/ricursive_tp_oracle.py` | Distributed loader, dynamic/static cache and generation checks, independent partition-aware arithmetic, and separately measured fused-backend rounding. |
 | `tests/ricursive_test_utils.py` | Isolated tiny-model fixtures and standalone compatibility-module loading for Transformers 4.57. |
 
 All tests run without the 65B weights. `GPTQMODEL_RIPPLE_REF` selects a local
@@ -146,7 +190,8 @@ GPTQMODEL_RIPPLE_REF=/path/to/ripple/source OMP_NUM_THREADS=1 python -m pytest -
   tests/test_ricursive_native_generation.py \
   tests/test_ricursive_modeling_contracts.py \
   tests/test_ricursive_modeling_numerics.py \
-  tests/test_ricursive_modeling_precision.py
+  tests/test_ricursive_modeling_precision.py \
+  tests/test_ricursive_review_regressions.py
 ```
 
 For Transformers 4.57, omit `test_ricursive_support.py`: that older integration
@@ -156,15 +201,37 @@ compatibility shim tests, run on both versions.
 
 ## Measured validation
 
-On PyTorch 2.15.0 with an NVIDIA RTX 4090:
+PyTorch 2.15.0, CPU, and two NVIDIA RTX 4090 devices:
 
-- Transformers 5.22.1: **313 passed** across all five test files above.
-- Transformers 4.57.6: **230 passed** across the four standalone modeling suites.
-- Precision coverage includes FP32, FP16, and BF16 on CPU and the CUDA runtime.
-- Both reentrant and non-reentrant checkpointing match ordinary backward gradients,
-  with value residuals enabled and disabled.
-- Tests use tiny deterministic models. The full 65B checkpoint, distributed
-  execution, and an AMD ROCm device were not exercised in this validation.
+- Transformers 5.22.1: **351 passed** across the six test files above
+  (313 existing cases plus 38 new cases).
+- Transformers 4.57.6: **265 passed, 3 skipped** across the five standalone
+  suites. The three CPU TP cases are skipped because that version's loader
+  selects CUDA on a CUDA-enabled Torch build even when given a CPU mesh.
+  All nine GPU TP cases pass. The isolated Trainer environment uses datasets 3.6.0.
+- Real Trainer SGD updates agree across batch/accumulation layouts on both
+  versions, including actual historical source with the compatibility patch.
+- Tensor-parallel configurations use two ranks, hidden width 32, 8 query heads,
+  2 KV heads, head dimension 8, two decoder layers, and a four-token window.
+  Tests cover FP32, FP16, and BF16, prefill, chunked cached decoding, and greedy
+  generation. Token comparisons are exact.
+- The independent dense TP oracle explicitly rounds each shard's GEMM result
+  before summation. With math SDPA to isolate that arithmetic, the largest FP32
+  logit error is `2.28e-7`; FP16 and BF16 oracle error is zero for these fixtures.
+- Default fused-backend projection errors against that oracle peak at
+  `1.23e-4` for BF16 (`7.63e-6` for FP16), below `atol=rtol=2e-3`.
+  Whole-model BF16 logits differ from the unsharded fused baseline by up to
+  `0.00341796875`; this is reported separately from arithmetic error because
+  shard reduction and fused SDPA rounding accumulate through PeriNorm blocks.
+  No widened floating tolerance is used, and generated tokens match exactly.
+- Existing single-device checks cover CPU/GPU FP32, FP16, BF16, and both
+  checkpointing modes with value residuals enabled and disabled.
+- No persistent dense/expanded weight cache or dequantization scratch is added.
+  The change retains only normal checkpoint weights, existing KV-cache state,
+  and call-local activations.
+- Tiny deterministic models were used. Full 65B quantized accuracy, distributed
+  training, and AMD ROCm hardware were not exercised.
 
 The code-only fixture is pinned to native commit
-`948fa2689b50ce2f713f573682632fe0fad0118d` from HF #11.
+`fe7117095c985351aa06fcf906a7da830b06b441` from HF #11. Historical compatibility
+coverage also loads `da94cc013a8fda04a502f0a185083c7099ea06c1` directly.

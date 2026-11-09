@@ -49,15 +49,14 @@ build may bake the fast paths into its own ``modeling_ricursive.py``; the
 upstream file must not.
 """
 
-from functools import wraps
-
 import torch
 import torch.nn.functional as F
 from transformers.generation.utils import GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 _PATCH_FLAG = "_gptqmodel_ricursive_generate_patched"
-_NATIVE_CONTRACT_VERSION = "2026-11-09"
+_NATIVE_CONTRACT_VERSION = "2026-11-09.1"
 
 # set on the inner `RicursiveModel` class once `_update_causal_mask` is wrapped
 _MASK_PATCH_FLAG = "_gptqmodel_ricursive_mask_patched"
@@ -426,41 +425,73 @@ def _patch_sliding_window_mask(model) -> bool:
         return False
 
     def _apply_sliding_window_mask(
-        self, attention_mask, q_len, kv_len, dtype, device, cache_position, total_kv=None
+        self,
+        attention_mask,
+        q_len: int,
+        kv_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        cache_position,
+        total_kv=None,
     ):
+        if self.layer_type != "sliding_attention":
+            return attention_mask
+
+        # transformers >= 5 builds a hybrid cache: a sliding layer holds at most
+        # `sliding_window` keys while a full-attention layer keeps growing, so the
+        # shared mask produced by `_update_causal_mask` can be longer than this
+        # layer's key tensor. Keep only the keys this layer actually holds.
         if attention_mask is not None and attention_mask.shape[-1] > kv_len:
-            # transformers 5 builds a hybrid cache: sliding layers get a
-            # DynamicSlidingWindowLayer that evicts from the left, so they hold only
-            # the most recent `sliding_window` keys while full layers keep growing.
-            # The causal mask is built once per forward from the full span, so trim it
-            # to the keys this layer actually holds.
-            #
-            # The retained keys sit at the absolute positions
-            # `[total_kv - kv_len, total_kv)`. Slicing `[-kv_len:]` is only correct
-            # when the mask length equals `total_kv`; with a mask sized to the
-            # allocated cache capacity it selects the unwritten tail instead.
             mask_len = attention_mask.shape[-1]
             if total_kv is not None:
+                # The retained keys sit at `[total_kv - kv_len, total_kv)`.
                 start = max(0, min(total_kv - kv_len, mask_len - kv_len))
                 attention_mask = attention_mask[..., start : start + kv_len]
             else:
                 attention_mask = attention_mask[..., -kv_len:]
 
-        window = getattr(self.config, "sliding_window", None)
-        if window is not None and kv_len <= window:
-            # The window cannot bind, so the tensor would come out all-True.
+        if cache_position is not None:
+            query_positions = cache_position.to(device=device).reshape(-1)
+        else:
+            query_positions = torch.arange(kv_len - q_len, kv_len, device=device)
+
+        window = self.config.sliding_window
+        if window is None:
+            return attention_mask
+        if kv_len <= window:
+            # The window cannot exclude any key, so the result is either the
+            # unchanged (already causal) mask or, without one, plain causal
+            # attention -- which SDPA applies through `is_causal`.
             if attention_mask is None:
-                # SDPA's implicit causal mask is aligned top-left, which only
+                # SDPA's implicit causal mask is top-left aligned. It only
                 # matches this query block when it is the whole sequence
-                # (prefill) or a single position (decode). A multi-token block
-                # verified against a warm cache sits at the *end* of the key
-                # span, so the implicit mask would hide valid context; fall
-                # through to the explicit offset-aware mask.
+                # (`q_len == kv_len`) or a single decode position
+                # (`q_len == 1`). A multi-token block verified against a warm
+                # cache sits at the *end* of the key span, so fall through and
+                # build the end-anchored mask below.
                 if q_len == 1 or q_len == kv_len:
                     return None
             if q_len == 1:
                 return attention_mask
-        return original(self, attention_mask, q_len, kv_len, dtype, device, cache_position)
+
+        # Keys are contiguous and end at the newest query position. After the cache
+        # evicts from the left they no longer start at position 0, so anchor the
+        # range at the first key the layer holds instead of at zero.
+        key_positions = torch.arange(kv_len, device=device) + (
+            query_positions[-1] - kv_len + 1
+        )
+
+        allowed = (
+            (key_positions[None, :] <= query_positions[:, None])
+            & (key_positions[None, :] >= query_positions[:, None] - (window - 1))
+        )[None, None, :, :]
+
+        if attention_mask is None:
+            return allowed
+        if attention_mask.dtype == torch.bool:
+            return attention_mask & allowed
+        # Finite minima would reopen an existing -inf exclusion on an empty row.
+        return attention_mask.masked_fill(~allowed, float("-inf"))
 
     cls._apply_sliding_window_mask = _apply_sliding_window_mask
     # Keep the upstream implementation reachable so tests can compare the two paths.
@@ -687,9 +718,9 @@ def _patch_gqa_attention(model) -> bool:
             )
         v = self.v_proj(value_states)
 
-        q = self.q_norm(q.view(bsz, q_len, self.num_heads, self.head_dim))
-        k = self.k_norm(k.view(bsz, q_len, self.num_kv_heads, self.head_dim))
-        v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim)
+        q = self.q_norm(q.view(bsz, q_len, -1, self.head_dim))
+        k = self.k_norm(k.view(bsz, q_len, -1, self.head_dim))
+        v = v.view(bsz, q_len, -1, self.head_dim)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -748,6 +779,8 @@ def _patch_gqa_attention(model) -> bool:
                 # Unknown cache: the keys are the trailing window.
                 attention_mask = attention_mask[..., -kv_len_now:]
 
+        # Projection widths are local to a tensor-parallel rank.
+        num_kv_groups = q.shape[1] // k.shape[1]
         # No repeat_kv: SDPA broadcasts the grouped heads itself.
         mask_kwargs = {
             "attention_mask": attention_mask,
@@ -794,12 +827,12 @@ def _patch_gqa_attention(model) -> bool:
         # the output from rounded BF16 probabilities changes logits and token IDs.
         attn_output = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attention_mask, dropout_p=0.0, is_causal=is_causal,
-            enable_gqa=self.num_kv_groups > 1,
+            enable_gqa=num_kv_groups > 1,
         )
         attn_weights = None
         if output_attentions:
             # SDPA does not expose weights; compute them separately only on request.
-            weight_keys = k.repeat_interleave(self.num_kv_groups, dim=1)
+            weight_keys = k.repeat_interleave(num_kv_groups, dim=1)
             with torch.autocast(device_type=q.device.type, enabled=False):
                 scores = torch.matmul(q.float(), weight_keys.float().transpose(-1, -2)) * self.head_dim**-0.5
                 if is_causal:
@@ -839,11 +872,10 @@ def _patch_logits_to_keep(model) -> bool:
     """Honour ``logits_to_keep`` on older remote forwards and every model instance.
 
     ``[upstream-eligible: contract + memory]``
-    A temporary hook selects the LM head input on unlabeled calls. Labeled
-    calls retain all rows for FP32 loss, then trim returned logits in either
-    dict or tuple outputs. Each call uses its own instance's current head and
-    removes the hook even on failure. Current native forwards already implement
-    this contract and are left intact.
+    The replacement forward selects hidden-state rows using only local call
+    state. Labeled calls retain all rows for FP32 loss, then trim returned
+    logits in either dict or tuple outputs. No shared module hooks are installed.
+    Current native forwards already implement this contract and are left intact.
     """
 
     if model is None:
@@ -860,52 +892,86 @@ def _patch_logits_to_keep(model) -> bool:
 
     original = cls.forward
 
-    @wraps(original)
-    def forward(self, *args, **kwargs):
-        keep = kwargs.pop("logits_to_keep", None)
-        head = getattr(self, "lm_head", None)
-        # A labeled call needs the full sequence: the causal-LM loss shifts logits
-        # and labels by one position, so trimming the LM head input to a short
-        # window leaves the shift empty (and the loss NaN). `labels` is positional
-        # argument 5 in the reference forward, or a keyword argument.
-        labels = kwargs.get("labels")
-        if labels is None and len(args) > 5:
-            labels = args[5]
-        slice_input = bool(keep) and head is not None and labels is None
-        hook = None
-        if slice_input:
-            # Bind the hook to this instance and this call. A class-level
-            # installation flag must not leave later instances unwrapped.
-            def select_rows(_module, inputs):
-                hidden_states, *rest = inputs
-                return (hidden_states[:, -int(keep):, :], *rest)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        cache_position=None,
+        logits_to_keep=None,
+        num_items_in_batch=None,
+        **kwargs,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-            hook = head.register_forward_pre_hook(select_rows)
-        try:
-            outputs = original(self, *args, **kwargs)
-        finally:
-            if hook is not None:
-                hook.remove()
-        logits_index = 1 if labels is not None else 0
-        logits = outputs[logits_index] if isinstance(outputs, tuple) else outputs.logits
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        hidden_states = outputs[0]
+        # Honour `logits_to_keep` by slicing the LM head *input*. Projecting the
+        # full `[batch, seq, vocab]` tensor only to discard all but the last row
+        # costs several GiB of transient memory at prefill batch sizes.
+        #
+        # When `labels` are supplied the full sequence must be kept: the causal-LM
+        # loss shifts logits and labels by one position, so trimming both to the
+        # same short window leaves the shift empty (and the loss NaN). Labeled
+        # calls therefore project the full sequence to get a defined loss, then
+        # trim only the *returned* logits so the output shape still honours
+        # `logits_to_keep`. The generation path, which never passes labels, keeps
+        # the memory win from slicing the LM head input.
+        keep = (
+            int(logits_to_keep)
+            if logits_to_keep is not None and logits_to_keep > 0
+            else 0
+        )
+        if keep and labels is None and hidden_states.shape[1] > keep:
+            hidden_states = hidden_states[:, -keep:, :]
+        logits = self.lm_head(hidden_states)
+
+        loss = None
         if labels is not None:
-            # Old remote forwards reduce loss in activation dtype. FP16 CPU
-            # reduction can overflow even though every individual logit is finite.
+            shift_logits = logits[..., :-1, :].float().contiguous()
+            shift_labels = labels[..., 1:].to(logits.device).contiguous()
             loss = F.cross_entropy(
-                logits[..., :-1, :].float().reshape(-1, logits.shape[-1]),
-                labels[..., 1:].to(logits.device).reshape(-1),
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="sum" if num_items_in_batch is not None else "mean",
             )
-            if isinstance(outputs, tuple):
-                outputs = (loss,) + outputs[1:]
-            else:
-                outputs.loss = loss
-        if keep:
-            logits = logits[..., -int(keep):, :]
-            if isinstance(outputs, tuple):
-                outputs = outputs[:logits_index] + (logits,) + outputs[logits_index + 1:]
-            else:
-                outputs.logits = logits
-        return outputs
+            if num_items_in_batch is not None:
+                # Trainer supplies the token count across all accumulated microbatches.
+                loss = loss / torch.as_tensor(num_items_in_batch, device=loss.device)
+            if keep:
+                # Loss used the full sequence; only the returned tensor is trimmed.
+                logits = logits[..., -keep:, :]
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     forward._gptqmodel_original = original
     cls.forward = forward
@@ -922,6 +988,10 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     cls = model_cls if model_cls is not None else type(model)
     if cls is None:
         return False
+
+    # Transformers 5 expects target-to-source metadata; dict keys also work on 4.x.
+    if hasattr(cls, "_tied_weights_keys"):
+        cls._tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     # Two disjoint patch classes -- see the module docstring.
     #
