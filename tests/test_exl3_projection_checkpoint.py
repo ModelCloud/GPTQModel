@@ -320,6 +320,51 @@ def test_projection_checkpoint_prune_removes_only_validated_tensor_orphans(
     assert unexpected.read_text(encoding="utf-8") == "do not delete"
 
 
+def test_projection_checkpoint_reservation_ignores_interrupted_tensor_orphan(
+    tmp_path,
+) -> None:
+    store = EXL3ProjectionCheckpointStore(tmp_path / "checkpoints")
+    request = _request()
+    _manifest_path, tensor_path = store._paths(request["request_sha256"])
+    tensor_path.parent.mkdir(parents=True)
+    tensor_path.write_bytes(b"interrupted-commit")
+
+    # The manifest is the commit marker; a tensor without one is an
+    # interrupted commit and must not block a resumed coordinator.
+    assert list(store.inspect_committed_manifests()) == []
+    store.reserve_module_request(request)
+
+    summary = store.prune(max_entries=2)
+    assert summary["removed_orphans"] == 1
+    assert not tensor_path.exists()
+
+
+def test_projection_checkpoint_commit_rejects_mismatched_request_digest(
+    tmp_path,
+) -> None:
+    store = EXL3ProjectionCheckpointStore(tmp_path / "checkpoints")
+    request = dict(_request())
+    request["sample_count"] += 1
+
+    with pytest.raises(ValueError, match="invalid EXL3 module checkpoint request"):
+        store.commit(request, _tensors(), _result())
+    assert not store.root.exists()
+
+
+def test_projection_checkpoint_collision_rejects_a_different_tensor_set(
+    tmp_path,
+) -> None:
+    store = EXL3ProjectionCheckpointStore(tmp_path / "checkpoints")
+    request = _request()
+    store.commit(request, _tensors(), _result())
+
+    different = {
+        name: tensor for name, tensor in _tensors().items() if name != "mcg"
+    }
+    with pytest.raises(ValueError, match="collision"):
+        store.commit(request, different, _result())
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="EXL3 requires CUDA")
 def test_packed_replay_matches_exllamav3_runtime_reconstruction() -> None:
     from gptqmodel.exllamav3.modules.quant.exl3 import LinearEXL3
