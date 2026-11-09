@@ -75,6 +75,11 @@ namespace {
 constexpr int kMaxTiles = 8;
 constexpr int kMaxTokens = kMaxTiles * 16;
 
+// Grid limits for the supported gfx1200/gfx1201 WMMA devices. Index arithmetic
+// widens blockIdx to int64_t before multiplying by the tile dimensions.
+constexpr int64_t kMaxWmmaGridX = 0x7fffffffLL;
+constexpr int64_t kMaxWmmaGridY = 0xffffLL;
+
 // Shared-memory row stride for the decoded super-atom. A plain 64 (128 bytes)
 // makes every lane in a row group hit the same LDS banks: the 16x64 store is
 // 8-way conflicted and the B-fragment load 16-way. Eight bf16 of padding
@@ -628,7 +633,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   m_blocks = plan.m_blocks;
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
-  if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
+  if (n_blocks > kMaxWmmaGridX || m_blocks > kMaxWmmaGridY) return hipErrorNotSupported;
 
   float* partial = nullptr;
   if (splits > 1) {
@@ -764,7 +769,7 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
   if (n_blocks == 0) return hipSuccess;
-  if (n_blocks > 0x7fffLL || m_tiles > 0x7fffLL) return hipErrorInvalidValue;
+  if (n_blocks > kMaxWmmaGridX || m_tiles > kMaxWmmaGridY) return hipErrorNotSupported;
 
   WmmaRoute route{};
   route.gather = gather;
