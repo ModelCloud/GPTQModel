@@ -87,3 +87,32 @@ keeps rejecting a padded `ldx` explicitly; only the torch op normalizes.
 `tests/test_nf12_ad_codec.py` asserts the 3-D shape round-trip, the padded
 row-slice result against `F.linear`, and the `NF12ADLinear` module shape on a
 RDNA4 host.
+
+## Bounded WMMA capability cache
+
+`wmma_available()` keeps 64 atomic slots for frequently queried HIP device
+ordinals. A host exposing a larger ordinal still needs the same architecture
+answer: it probes `wmma_arch_ok(device)` for that call instead of treating the
+device as unsupported. A failed `hipGetDevice` or negative ordinal remains
+unsupported. This preserves the WMMA route for a capable device beyond the
+cache's capacity without changing the cached fast path.
+
+```mermaid
+flowchart TD
+    A["wmma_available"] --> B["hipGetDevice(device)"]
+    B --> C{"query succeeds and device >= 0?"}
+    C -- No --> X["return false"]
+    C -- Yes --> D{"device < kMaxDevices?"}
+    D -- Yes --> E["wmma_arch_cached(device)"]
+    D -- No --> F["wmma_arch_ok(device) on this call"]
+    E --> G["return architecture support"]
+    F --> G
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Mechanism | Before (`eeab711:gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:463-467`) | Current |
+| --- | --- | --- |
+| Ordinal below 64 | Cached architecture answer | Same cached answer |
+| Ordinal 64 or above | Returned false before probing, despite the cache comment promising a fresh probe | Calls `wmma_arch_ok(device)` without indexing the bounded cache |
+| Invalid device query | Returned false | Returns false |
