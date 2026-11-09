@@ -1684,9 +1684,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K") and x_flat.dtype in (torch.float16, torch.bfloat16):
-            # BF16 weight rounding can amplify cancellation across signed
-            # subblocks. FP16 needs a wide path only for out-of-range terms.
+        if x_flat.dtype == torch.bfloat16 or (
+            x_flat.dtype == torch.float16 and self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K")
+        ):
+            # BF16 weight rounding can amplify cancellation for any GGUF
+            # format. FP16 K-quants need a wide path for out-of-range terms.
             use_fp32 = x_flat.dtype == torch.bfloat16
             if not use_fp32:
                 blocks, _, _ = self._reshape_blocks(device=x_flat.device)
