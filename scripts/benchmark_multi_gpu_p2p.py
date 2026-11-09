@@ -15,12 +15,12 @@ For every ordered device pair this reports, in both directions:
   staging copy; this is the real non-peer reference
 * ``gate``    - the ``PeerStatus`` state (``enabled`` / ``unsupported`` / ``degraded``)
 
-A capability bit is never treated as proof: with ``GPTQMODEL_P2P_PROBE=1`` a pair
+A capability bit is never treated as proof: with ``P2PConfig(probe=True)`` a pair
 that reports ``can_device_access_peer == True`` but measures below the gate is
 classified ``degraded``. That verdict is diagnostic only -- PyTorch peer access
 cannot be revoked, and no production path inserts a host relay.
-``--min-gbps`` is exported to that variable before enablement, so the gate and
-this benchmark agree.
+``--min-gbps`` is installed as ``P2PConfig.min_gbps`` before enablement, so the
+gate and this benchmark agree.
 
 ``--sku 4090`` only prints consumer-card caveats (Ada consumer parts often report
 peer capability while direct throughput is limited); it never hard-codes a
@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 import sys
 import time
@@ -55,6 +54,12 @@ DEFAULT_MIB = 256
 DEFAULT_ITERS = 20
 
 
+def _default_min_gbps() -> float:
+    from gptqmodel.utils.p2p import P2PConfig
+
+    return P2PConfig().min_gbps
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P2P vs host-staged GPU copy bandwidth benchmark.")
     parser.add_argument("--devices", default="0,1", help="Comma-separated device indices, e.g. 0,1.")
@@ -65,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--min-gbps",
         type=float,
         default=None,
-        help="Exported to GPTQMODEL_P2P_MIN_GBPS: below it a peer link is `degraded`.",
+        help="Installed as P2PConfig.min_gbps: below it a peer link is `degraded`.",
     )
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit 0.")
@@ -127,7 +132,7 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         "iters": args.iters,
         "sku": args.sku,
         "sku_notes": _sku_notes(args.sku),
-        "min_gbps": args.min_gbps if args.min_gbps is not None else os.getenv("GPTQMODEL_P2P_MIN_GBPS", "<default>"),
+        "min_gbps": args.min_gbps if args.min_gbps is not None else _default_min_gbps(),
         "directions": [f"{src}->{dst}" for src in devices for dst in devices if src != dst],
         "measured_per_direction": [
             "pre_enable GB/s",
@@ -139,15 +144,13 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         "sequence": [
             "probe peer matrix (directed, both directions)",
             "measure pre_enable_gbps: dst.copy_(src) before enable_peer_access (PyTorch may already be peering)",
-            "export GPTQMODEL_P2P_MIN_GBPS from --min-gbps, then enable_peer_access(devices)",
+            "configure_p2p(P2PConfig(probe=True, min_gbps=--min-gbps)), then enable_peer_access(devices)",
             "measure p2p_on: dst.copy_(src) after enablement",
             "measure host: ordered src -> pinned CPU -> dst",
         ],
-        "env": {
-            "GPTQMODEL_P2P": os.getenv("GPTQMODEL_P2P", "auto"),
-            "GPTQMODEL_P2P_MIN_GBPS": os.getenv("GPTQMODEL_P2P_MIN_GBPS", "<unset>"),
-            "GPTQMODEL_P2P_PROBE": os.getenv("GPTQMODEL_P2P_PROBE", "<unset>"),
-            "GPTQMODEL_P2P_PROBE_MIB": os.getenv("GPTQMODEL_P2P_PROBE_MIB", "<unset>"),
+        "p2p_config": {
+            "probe": True,
+            "min_gbps": args.min_gbps if args.min_gbps is not None else _default_min_gbps(),
         },
         # Hardware metadata is collected in ``run()``: ``--dry-run`` must not
         # initialize a CUDA/HIP context just to print a plan.
@@ -261,10 +264,9 @@ def run(args: argparse.Namespace) -> int:
     for note in notes:
         print(f"sku-note: {note}", flush=True)
 
-    if args.min_gbps is not None:
-        os.environ[p2p.ENV_P2P_MIN_GBPS] = str(args.min_gbps)
-        p2p.clear_p2p_cache()
-        print(f"exported {p2p.ENV_P2P_MIN_GBPS}={args.min_gbps}", flush=True)
+    min_gbps = args.min_gbps if args.min_gbps is not None else p2p.P2PConfig().min_gbps
+    p2p.configure_p2p(p2p.P2PConfig(probe=True, min_gbps=min_gbps))
+    print(f"configured P2PConfig(probe=True, min_gbps={min_gbps})", flush=True)
 
     capability = p2p.peer_matrix(devices)
     print("peer matrix (rows=src, cols=dst):", flush=True)
@@ -292,8 +294,6 @@ def run(args: argparse.Namespace) -> int:
     # Enablement happens after every baseline measurement, because peer access
     # cannot be revoked inside a process. This script exists to report link
     # quality, so always run the bandwidth classification here.
-    os.environ[p2p.ENV_P2P_PROBE] = "1"
-    p2p.clear_p2p_cache()
     status = p2p.enable_peer_access(devices)
     print(f"peer status: {status.summary()}", flush=True)
 
@@ -322,7 +322,7 @@ def run(args: argparse.Namespace) -> int:
         "iters": args.iters,
         "sku": args.sku,
         "sku_notes": notes,
-        "min_gbps": args.min_gbps if args.min_gbps is not None else os.getenv("GPTQMODEL_P2P_MIN_GBPS"),
+        "min_gbps": p2p.get_p2p_config().min_gbps,
         "min_ratio": p2p._min_ratio(),
         "probe": p2p.probe_enabled(),
         "peer_status": status.summary(),

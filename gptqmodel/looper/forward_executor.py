@@ -19,6 +19,7 @@ from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     forward_batch_worker,
+    move_nested_to_device,
     rehome_module_to_device,
     select_forward_devices,
 )
@@ -355,10 +356,10 @@ class ForwardExecutor:
                 cached_layer_kwargs = layer_input_kwargs[batch_idx]
                 input_device = cached_layer_inputs[0].device if cached_layer_inputs else cur_layer_device
 
-                layer_input = [nested_move_to(inp, device=exec_device) for inp in cached_layer_inputs]
+                layer_input = move_nested_to_device(cached_layer_inputs, device=exec_device)
 
                 raw_mask = attention_masks[batch_idx]
-                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)
+                attn_tensor = raw_mask if raw_mask is None else move_nested_to_device(raw_mask, device=exec_device)
 
                 keep_mask = None
                 if attn_tensor is not None:
@@ -374,15 +375,15 @@ class ForwardExecutor:
                 if position_ids:
                     pos = position_ids[batch_idx]
                     if pos is not None:
-                        additional_inputs["position_ids"] = move_to(pos, device=exec_device)
+                        additional_inputs["position_ids"] = move_nested_to_device(pos, device=exec_device)
 
                 for key, value in cached_layer_kwargs.items():
                     if key in ["past_key_values", "past_key_value"]:
                         continue
-                    additional_inputs[key] = nested_move_to(value, device=exec_device)
+                    additional_inputs[key] = move_nested_to_device(value, device=exec_device)
 
                 if reuse_kv and prev_kv is not None:
-                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
+                    additional_inputs["kv_last_layer"] = move_nested_to_device(prev_kv, device=exec_device)
 
                 additional_inputs["use_cache"] = False
                 additional_inputs = self.looper.gptq_model.prepare_layer_replay_kwargs(

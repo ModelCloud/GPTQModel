@@ -396,6 +396,7 @@ from .quantization import (
 )
 from .reshard import ShardConfig, ShardLayout, reshard
 from .utils import BACKEND, PROFILE
+from .utils.p2p import P2PConfig
 from .version import __version__
 
 

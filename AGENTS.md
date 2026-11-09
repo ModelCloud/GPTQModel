@@ -79,6 +79,36 @@ GPT-QModel depends on [ModelCloud/Tokenicer](https://github.com/ModelCloud/Token
 
 Establish a non-quantized baseline before treating bad generation or evaluation scores as a quantization regression. Compare exact rendered prompts and input IDs as well as aggregate scores.
 
+## Free-threaded (GIL=0) PyTorch safety
+
+Multi-GPU quantization and inference run with `PYTHON_GIL=0` on free-threaded
+CPython builds. A `3.14t` wheel is not evidence that an API is thread-safe: we
+have measured PyTorch entry points that hang or return corrupted data when
+called concurrently on both ROCm and CUDA.
+
+Before writing, reviewing, or debugging any PyTorch code that can execute on
+more than one thread, read `pytorch_gil_0_compat.md` at the repository root and
+follow `$gptqmodel-pytorch-gil0` in
+`.agents/skills/gptqmodel-pytorch-gil0/SKILL.md`.
+
+- Never call `torch.cuda.comm.*` from worker threads; use
+  `gptqmodel.utils.p2p.peer_copy_batch`, which drives the runtime peer-copy
+  API through `ctypes` with the GIL released.
+- Configure P2P through `BaseQuantizeConfig.p2p` (`P2PConfig`) or
+  `GPTQModel.load(..., p2p=...)`, never through environment variables. Do not
+  add `GPTQMODEL_*` switches for new runtime behavior; extend the config object.
+- `torch.nn.parallel.replicate` internally uses `broadcast_coalesced`. It is
+  serialized by `_THREAD_SAFE_PARALLEL` today, and `clone_module_for_devices`
+  skips it when the GIL is disabled in favour of the deepcopy +
+  `move_module_to_device` path. `use_torch_replicate` is off by default; turn
+  it on only after qualifying replicate for the target build.
+- Treat any API missing from the ledger as UNVERIFIED. Add a probe with
+  `scripts/gil0_api_probe.py` and record the result before relying on it from
+  threads.
+- Keep the ledger current in the same change that introduces or removes a
+  threaded PyTorch call. A concurrency behaviour change found during review
+  belongs in the ledger, not only in the pull request description.
+
 ## Logic-flow change documentation
 
 For any change that alters control flow, replaces a decision mechanism (for

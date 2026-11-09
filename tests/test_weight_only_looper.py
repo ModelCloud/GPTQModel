@@ -505,8 +505,7 @@ def test_weight_only_looper_skips_dynamic_exclusions_before_device_scheduling(mo
     monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
     monkeypatch.setattr(weight_only_looper_module, "select_forward_devices", lambda _device: devices)
     monkeypatch.setattr(weight_only_looper_module, "device_ctx", lambda _device: nullcontext())
-    monkeypatch.setattr(weight_only_looper_module, "move_to", lambda obj, *, device, dtype=None: obj)
-    monkeypatch.setattr(weight_only_looper_module, "rehome_module_to_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(weight_only_looper_module, "move_module_to_device", lambda obj, *args, **kwargs: obj)
     monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
     monkeypatch.setattr(
         weight_only_looper_module,
@@ -589,8 +588,7 @@ def test_weight_only_looper_quantizes_subset_across_multiple_devices(monkeypatch
     monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
     monkeypatch.setattr(weight_only_looper_module, "select_forward_devices", lambda _device: devices)
     monkeypatch.setattr(weight_only_looper_module, "device_ctx", lambda _device: nullcontext())
-    monkeypatch.setattr(weight_only_looper_module, "move_to", lambda obj, *, device, dtype=None: obj)
-    monkeypatch.setattr(weight_only_looper_module, "rehome_module_to_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(weight_only_looper_module, "move_module_to_device", lambda obj, *args, **kwargs: obj)
     monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
     monkeypatch.setattr(
         weight_only_looper_module,
@@ -665,8 +663,7 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
     monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
     monkeypatch.setattr(weight_only_looper_module, "select_forward_devices", lambda _device: devices)
     monkeypatch.setattr(weight_only_looper_module, "device_ctx", lambda _device: nullcontext())
-    monkeypatch.setattr(weight_only_looper_module, "move_to", lambda obj, *, device, dtype=None: obj)
-    monkeypatch.setattr(weight_only_looper_module, "rehome_module_to_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(weight_only_looper_module, "move_module_to_device", lambda obj, *args, **kwargs: obj)
     monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
     monkeypatch.setattr(
         weight_only_looper_module,
