@@ -319,6 +319,9 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
         raise ValueError("Malformed NVFP4 block scales.")
     output = torch.empty((rows, width), device=codes.device, dtype=output_dtype)
     if rows:
+        # The decoder addresses packed codes and swizzled scales as dense arrays.
+        codes = codes.contiguous()
+        scales = scales.contiguous()
         with _launch_device(codes.device):
             _decode_nvfp4[(rows, width // 128)](
                 codes.view(torch.uint8), scales, global_scale, output, rows, width, padded_rows, num_warps=4,
