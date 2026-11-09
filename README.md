@@ -1524,3 +1524,4 @@ The following reference pages document features proposed from the working fork.
 - [retain restart-idempotent projection and route ledgers](docs/exl3-error-ledgers.md)
 - [checkpoint completed projections atomically](docs/exl3-projection-checkpoints.md)
 - [persist authenticated capture frontiers](docs/exl3-capture-frontiers.md)
+- [resume capture at calibration-batch boundaries](docs/exl3-capture-batch-spool.md)
