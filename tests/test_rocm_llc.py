@@ -39,7 +39,8 @@ def test_apply_is_idempotent_and_never_raises():
     first = rocm_llc.apply()
     second = rocm_llc.apply()
     assert first == second
-    assert set(first) == {"props", "benchmarker", "cudagraph"}
+    expected = {"props", "benchmarker", "cudagraph"} if torch.version.hip else {"props"}
+    assert set(first) == expected
     for value in first.values():
         assert isinstance(value, str) and value
 
