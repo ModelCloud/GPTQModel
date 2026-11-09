@@ -7,6 +7,8 @@ longer than that prefix are new-only blocks. Attention masks may span allocated
 cache capacity, so neither their width nor their final bit identifies the input
 layout.
 
+Introduced in [GPT-QModel #3703](https://github.com/ModelCloud/GPTQModel/pull/3703).
+
 ```mermaid
 flowchart TD
     A["_prepare_inputs_for_generation"] --> B{"cache_position supplied?"}
