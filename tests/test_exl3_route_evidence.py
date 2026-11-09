@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -13,8 +13,8 @@ from gptqmodel.looper.exllamav3_processor import (
     _router_recovery_candidates,
 )
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.exl3_error_ledger import ROUTE_EVIDENCE_SCHEMA
 from gptqmodel.utils.exl3_capture_batch_spool import CAPTURE_BATCH_SPOOL_ENV
+from gptqmodel.utils.exl3_error_ledger import ROUTE_EVIDENCE_SCHEMA
 
 
 class _Router(nn.Module):

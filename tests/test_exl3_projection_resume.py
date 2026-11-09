@@ -9,25 +9,25 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
 from safetensors.torch import save_file as save_safetensors_file
+from torch import nn
 
 import gptqmodel.looper.exllamav3_processor as processor_module
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
-from gptqmodel.utils.exl3_error_ledger import append_exl3_error_journal
 from gptqmodel.utils.exl3_capture_frontier import EXL3CaptureRecord
-from gptqmodel.utils.exl3_projection_checkpoint import (
-    CHECKPOINT_CONTRACT,
-    EXL3ProjectionCheckpointStore,
-    build_projection_request,
-)
+from gptqmodel.utils.exl3_error_ledger import append_exl3_error_journal
 from gptqmodel.utils.exl3_inline_mixed import (
     INLINE_MIXED_META_KEY,
     InlineMixedPolicy,
     InlineMixedTierPlanStore,
     build_layer_tier_plan,
+)
+from gptqmodel.utils.exl3_projection_checkpoint import (
+    CHECKPOINT_CONTRACT,
+    EXL3ProjectionCheckpointStore,
+    build_projection_request,
 )
 
 

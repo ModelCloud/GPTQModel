@@ -6,6 +6,9 @@ import struct
 
 import pytest
 import torch
+from safetensors.torch import save_file
+from torch import nn
+
 from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import (
     reconstruction_error_metrics,
 )
@@ -23,8 +26,6 @@ from gptqmodel.utils.exllamav3 import (
     replace_exllamav3_placeholders,
 )
 from gptqmodel.utils.model_dequant import detect_format
-from safetensors.torch import save_file
-from torch import nn
 
 
 @pytest.mark.parametrize("codebook", ["3inst", "mcg", "mul1"])
