@@ -79,6 +79,12 @@ def _fake_topology(monkeypatch, capability, *, ndev=2, bandwidth=None, enabled=N
         return bandwidth(src, dst)
 
     monkeypatch.setattr(p2p, "_probe_bandwidth", fake_bandwidth)
+
+    def fake_validation(src, dst, **_kwargs):
+        direct, staged = fake_bandwidth(src, dst)
+        return True, direct, staged, ""
+
+    monkeypatch.setattr(p2p, "_validate_peer_copy_pair", fake_validation)
     return calls
 
 
@@ -436,6 +442,9 @@ def test_clone_skips_nccl_replicate_on_asymmetric_topology(monkeypatch, broken_s
     monkeypatch.setattr(looper_helpers, "enable_for_devices", lambda devices: status)
     p2p.configure_p2p(p2p.P2PConfig(use_torch_replicate=True))
     monkeypatch.setattr(looper_helpers, "_REPLICATE_DISABLED", False)
+    # Exercise the replicate decision even when the test interpreter has the GIL
+    # disabled (where clone_module_for_devices intentionally skips replicate).
+    monkeypatch.setattr(looper_helpers, "has_gil_disabled", lambda: False)
     monkeypatch.setattr(
         looper_helpers,
         "torch_replicate",
@@ -462,6 +471,7 @@ def test_clone_disables_replicate_after_nccl_failure(monkeypatch):
     monkeypatch.setattr(looper_helpers, "enable_for_devices", lambda devices: status)
     p2p.configure_p2p(p2p.P2PConfig(use_torch_replicate=True))
     monkeypatch.setattr(looper_helpers, "_REPLICATE_DISABLED", False)
+    monkeypatch.setattr(looper_helpers, "has_gil_disabled", lambda: False)
     monkeypatch.setattr(
         looper_helpers,
         "torch_replicate",
@@ -591,7 +601,9 @@ def test_p2p_probe_is_opt_in(monkeypatch):
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.state(1, 0) == p2p.STATE_ENABLED
-    assert status.bandwidth_gbps == {}
+    # ``auto`` still runs its small correctness/benefit validation; the full
+    # 64 MiB diagnostic probe remains opt-in and must not run here.
+    assert set(status.bandwidth_gbps) == {(0, 1), (1, 0)}
 
 
 def test_indexless_string_and_device_mean_current_device(monkeypatch):
@@ -671,3 +683,91 @@ def test_device_map_targets_are_normalized():
         torch.device("cuda:0"),
         torch.device("cuda:1"),
     ]
+
+
+def test_p2p_auto_validates_the_runtime_peer_copy_without_probe(monkeypatch):
+    """``auto`` must exercise the real copy path before trusting a pair."""
+
+    validated = []
+    _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+
+    def fake_validation(src, dst, **_kwargs):
+        validated.append((src, dst))
+        return True, 100.0, 50.0, ""
+
+    monkeypatch.setattr(p2p, "_validate_peer_copy_pair", fake_validation)
+    status = p2p.enable_peer_access([0, 1])
+
+    assert sorted(validated) == [(0, 1), (1, 0)]
+    assert status.state(0, 1) == p2p.STATE_ENABLED
+    assert status.can_copy(0, 1) is True
+
+
+def test_p2p_auto_disables_a_pair_whose_peer_copy_is_broken(monkeypatch):
+    """A capability bit or rc=0 is not enough: mismatched bytes disable the pair."""
+
+    _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+    monkeypatch.setattr(
+        p2p,
+        "_validate_peer_copy_pair",
+        lambda *a, **k: (False, None, None, "runtime peer copy returned mismatched bytes"),
+    )
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert status.state(0, 1) == p2p.STATE_DEGRADED
+    assert status.can_copy(0, 1) is False
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1", status) is False
+
+
+def test_p2p_auto_disables_a_pair_that_is_not_faster_than_staging(monkeypatch):
+    """``auto`` keeps only links that beat the fallback."""
+
+    _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+    monkeypatch.setattr(
+        p2p,
+        "_validate_peer_copy_pair",
+        lambda *a, **k: (True, 10.0, 50.0, ""),
+    )
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert status.state(0, 1) == p2p.STATE_DEGRADED
+    assert status.can_copy(0, 1) is False
+    assert status.bandwidth_gbps[(0, 1)] == 10.0
+    assert status.host_staged_gbps[(0, 1)] == 50.0
+
+
+def test_p2p_validates_only_after_every_direction_is_enabled(monkeypatch):
+    """A validation copy needs the reverse direction enabled to read the source."""
+
+    calls = _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+    seen = []
+
+    def fake_validation(src, dst, **_kwargs):
+        seen.append((src, dst, set(calls)))
+        return True, 100.0, 50.0, ""
+
+    monkeypatch.setattr(p2p, "_validate_peer_copy_pair", fake_validation)
+    p2p.enable_peer_access([0, 1])
+
+    assert len(seen) == 2
+    for _src, _dst, enabled_at_validation in seen:
+        assert (0, 1) in enabled_at_validation
+        assert (1, 0) in enabled_at_validation
+
+
+def test_p2p_validation_rejects_a_noop_copy(monkeypatch):
+    """A successful return code is not enough: random content must match."""
+
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("requires >= 2 CUDA devices")
+
+    monkeypatch.setattr(p2p, "_PEER_VALIDATION_CACHE", {})
+    monkeypatch.setattr(p2p, "_peer_copy_batch_enqueue", lambda sources, targets: True)
+
+    usable, direct, staged, reason = p2p._validate_peer_copy_pair(0, 1, probe_mib=1)
+
+    assert usable is False
+    assert direct is None and staged is None
+    assert "mismatched bytes" in reason

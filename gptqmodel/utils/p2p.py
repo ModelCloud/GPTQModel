@@ -225,6 +225,13 @@ _PEER_ALREADY_ENABLED = 704
 
 _STATUS_CACHE: dict[tuple[str, bool, tuple[int, ...]], "PeerStatus"] = {}
 _BANDWIDTH_CACHE: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+# Result of actually exercising the runtime peer-copy path for a directed pair:
+# ``(usable, direct_gbps, host_staged_gbps, reason)``. Capability bits and
+# ``copy_`` speed are not evidence that ``cudaMemcpyPeerAsync`` /
+# ``hipMemcpyPeerAsync`` works; this cache records a real copy-and-compare.
+_PEER_VALIDATION_CACHE: dict[
+    tuple[int, int], tuple[bool, float | None, float | None, str]
+] = {}
 # Raw ``can_device_access_peer`` answers, cached per directed pair.  This is the
 # fallback used by :func:`safe_move_to` when no probe status covers the pair.
 _CAPABILITY_CACHE: dict[tuple[int, int], bool] = {}
@@ -331,6 +338,7 @@ def clear_p2p_cache() -> None:
     global _LAST_STATUS
     _STATUS_CACHE.clear()
     _BANDWIDTH_CACHE.clear()
+    _PEER_VALIDATION_CACHE.clear()
     _CAPABILITY_CACHE.clear()
     _STAGED_DIRECTIONS.clear()
     _LAST_STATUS = None
@@ -454,8 +462,58 @@ def peer_matrix(devices: Iterable | None = None) -> list[list[bool]]:
     return matrix
 
 
+def _loaded_hip_runtime_path() -> str | None:
+    """Return the HIP runtime PyTorch already mapped, if it is discoverable.
+
+    Loading a *second* HIP runtime and enabling peer access there does not
+    affect the runtime PyTorch uses. ``hipMemcpyPeerAsync`` then returns
+    success while copying nothing (or faults), which is exactly the failure
+    seen on the R9700 rig. Prefer the already-loaded library.
+    """
+
+    try:
+        with open("/proc/self/maps", "r", encoding="utf-8", errors="replace") as maps:
+            for line in maps:
+                if "libamdhip64.so" not in line:
+                    continue
+                candidate = line.split()[-1]
+                if os.path.isfile(candidate):
+                    return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _hip_runtime_candidates():
+    """Yield HIP runtime paths, preferring the one PyTorch is using."""
+
+    loaded = _loaded_hip_runtime_path()
+    if loaded is not None:
+        yield loaded
+
+    roots: list[str] = []
+    with contextlib.suppress(Exception):
+        roots.extend(site.getsitepackages())
+    with contextlib.suppress(Exception):
+        roots.append(site.getusersitepackages())
+    with contextlib.suppress(Exception):
+        roots.append(os.path.dirname(os.path.dirname(torch.__file__)))
+
+    for root in dict.fromkeys(roots):
+        if not root or not os.path.isdir(root):
+            continue
+        # ROCm wheels ship the runtime in ``_rocm_sdk_core/lib``; some builds
+        # place it under ``torch/lib`` instead.
+        for pattern in ("_rocm_sdk_core/lib/libamdhip64.so*", "torch/lib/libamdhip64.so*"):
+            yield from sorted(glob.glob(os.path.join(root, pattern)))
+
+    yield "libamdhip64.so"
+    yield "libamdhip64.so.7"
+    yield "libamdhip64.so.6"
+
+
 def _load_hip():
-    for name in ("libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6"):
+    for name in dict.fromkeys(_hip_runtime_candidates()):
         try:
             lib = ctypes.CDLL(name)
             lib.hipDeviceEnablePeerAccess.argtypes = [ctypes.c_int, ctypes.c_uint]
@@ -768,6 +826,106 @@ def _probe_bandwidth(src: int, dst: int) -> tuple[float | None, float | None]:
     return direct, staged
 
 
+_AUTO_VALIDATION_MIB = 4
+
+
+def _verify_peer_payloads(sources, targets, dst: int) -> tuple[bool, str]:
+    """Copy ``sources -> targets`` and verify exact size and random content."""
+
+    for source, target in zip(sources, targets):
+        if torch.equal(source.cpu(), target.cpu()):
+            # CUDA/HIP RNG state is per device and starts from the same seed,
+            # so independently generated buffers can be identical. A no-op
+            # copy would then pass the comparison.
+            return False, "validation payloads are identical before the copy"
+    if not _peer_copy_batch_enqueue(sources, targets):
+        return False, "runtime peer copy could not be enqueued"
+    torch.cuda.current_stream(dst).synchronize()
+    for source, target in zip(sources, targets):
+        expected = source.numel() * source.element_size()
+        actual = target.numel() * target.element_size()
+        if actual != expected:
+            return False, f"payload size mismatch ({actual} != {expected})"
+        if not torch.equal(source.cpu(), target.cpu()):
+            return False, "runtime peer copy returned mismatched bytes"
+    return True, ""
+
+
+def _validate_peer_copy_pair(
+    src: int,
+    dst: int,
+    *,
+    probe_mib: int | None = None,
+) -> tuple[bool, float | None, float | None, str]:
+    """Exercise the runtime peer-copy path and measure whether it helps.
+
+    A capability bit and a successful return code are not proof that
+    ``cudaMemcpyPeerAsync``/``hipMemcpyPeerAsync`` moved anything. On ROCm with
+    ``PYTORCH_ALLOC_CONF=expandable_segments:True`` the call returns success but
+    copies no data, so this function copies random buffers and compares the
+    exact byte count and content before the pair is ever used. The destination
+    is pre-filled with different random bytes, so a no-op copy cannot pass by
+    accident.
+
+    It also measures the validated path against ordered pinned-host staging, so
+    ``auto`` mode can keep a pair enabled only when the direct copy is at least
+    as fast as the fallback. Results are cached per directed pair.
+    """
+
+    key = (src, dst)
+    cached = _PEER_VALIDATION_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    mib = _AUTO_VALIDATION_MIB if probe_mib is None else min(int(probe_mib), _AUTO_VALIDATION_MIB)
+    mib = max(1, mib)
+    nbytes = mib * 1024 * 1024
+    try:
+        source = torch.randint(0, 256, (nbytes,), dtype=torch.uint8, device=f"cuda:{src}")
+        # Complement the destination so it can never equal the source, even
+        # when both devices' RNGs produce the same sequence.
+        target = torch.randint(0, 256, (nbytes,), dtype=torch.uint8,
+                               device=f"cuda:{dst}").bitwise_not_()
+        ok, reason = _verify_peer_payloads([source], [target], dst)
+
+        # Also exercise the multi-tensor batch shape used by the module and
+        # nested movers, with different payload sizes. The nested fast path is
+        # disabled on ROCm by default, so this extra check runs only where the
+        # shape is actually reachable.
+        if ok and not _ROCM_NESTED_PEER_DISABLED:
+            sizes = (64 * 1024, 256 * 1024, 1024 * 1024)
+            batch_sources = [
+                torch.randint(0, 256, (size,), dtype=torch.uint8,
+                              device=f"cuda:{src}")
+                for size in sizes
+            ]
+            batch_targets = [
+                torch.randint(0, 256, (size,), dtype=torch.uint8,
+                              device=f"cuda:{dst}").bitwise_not_()
+                for size in sizes
+            ]
+            ok, reason = _verify_peer_payloads(batch_sources, batch_targets, dst)
+
+        if not ok:
+            result = (False, None, None, reason)
+        else:
+            direct = _timed_gbps(
+                lambda: _peer_copy_batch_enqueue([source], [target]),
+                src,
+                dst,
+                nbytes,
+                iterations=3,
+            )
+            staged = _measure_host_staged_gbps(src, dst, nbytes, iterations=3)
+            result = (True, direct, staged, "")
+    except Exception as exc:  # pragma: no cover - runtime dependent
+        result = (False, None, None, f"runtime peer copy validation failed: {exc}")
+
+    _PEER_VALIDATION_CACHE[key] = result
+    log.debug("P2P validation %s->%s: %s", src, dst, result[3] or "ok")
+    return result
+
+
 def _warn_degraded_once(status: PeerStatus) -> None:
     """Log one actionable warning when a multi-GPU run lacks full P2P.
 
@@ -866,6 +1024,12 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
         original_device = None
 
     try:
+        # Pass 1: enable every available directed pair before validating any of
+        # them. A validation copy is issued on the destination device, so it
+        # also needs the reverse direction enabled to read the source mapping.
+        # Validating inside the enablement loop made the first direction look
+        # broken on asymmetric topologies.
+        pairs_to_validate: list[tuple[int, int]] = []
         for row, src in enumerate(indices):
             for col, dst in enumerate(indices):
                 if src == dst:
@@ -904,26 +1068,37 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                     )
                     continue
 
-                if not diagnose:
-                    status.pairs[(src, dst)] = STATE_ENABLED
-                    continue
+                pairs_to_validate.append((src, dst))
 
-                measured, staged = _probe_bandwidth(src, dst)
-                status.bandwidth_gbps[(src, dst)] = measured
+        # Pass 2: validate and classify the pairs that were enabled.
+        for src, dst in pairs_to_validate:
+            # A capability bit and a successful enablement call do not prove
+            # that the runtime peer copy moves bytes. Validate the actual
+            # path before any caller can use it.
+            usable, direct, staged, validation_reason = _validate_peer_copy_pair(
+                src, dst
+            )
+            if not usable:
+                status.pairs[(src, dst)] = STATE_DEGRADED
+                log.debug(
+                    "P2P %s->%s disabled: %s", src, dst, validation_reason
+                )
+                continue
+
+            if mode == _MODE_AUTO and not diagnose:
+                # ``auto`` must not enable a link that is no faster than the
+                # regular copy path. This is the default, so it runs without
+                # the opt-in full diagnostic.
+                status.bandwidth_gbps[(src, dst)] = direct
                 status.host_staged_gbps[(src, dst)] = staged
                 reason = None
-                if measured is None:
-                    # An unmeasurable direct link is not evidence of a fast one.
-                    reason = "direct probe failed"
-                elif measured < threshold:
-                    reason = f"{measured:.2f} GB/s < {threshold:.2f} GB/s gate"
-                elif staged and mode != _MODE_ON and measured < staged * min_ratio:
-                    # ``mode='on'`` is an explicit request for the direct
-                    # path, so the relative comparison must not veto it. The
-                    # absolute floor above still catches a link that is not
-                    # moving data at all.
+                if direct is None:
+                    reason = "auto validation could not measure the direct path"
+                elif direct < threshold:
+                    reason = f"{direct:.2f} GB/s < {threshold:.2f} GB/s gate"
+                elif staged and direct < staged * min_ratio:
                     reason = (
-                        f"{measured:.2f} GB/s direct < {min_ratio:.2f}x host staging "
+                        f"{direct:.2f} GB/s direct < {min_ratio:.2f}x host staging "
                         f"({staged:.2f} GB/s): the peer link is not faster than the fallback"
                     )
                 if reason is not None:
@@ -931,6 +1106,38 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                     log.debug("P2P %s->%s degraded: %s", src, dst, reason)
                 else:
                     status.pairs[(src, dst)] = STATE_ENABLED
+                continue
+
+            if not diagnose:
+                # ``mode='on'`` is an explicit request to force the direct
+                # path; correctness was validated above, but the relative
+                # speed gate is intentionally skipped.
+                status.pairs[(src, dst)] = STATE_ENABLED
+                continue
+
+            measured, staged = _probe_bandwidth(src, dst)
+            status.bandwidth_gbps[(src, dst)] = measured
+            status.host_staged_gbps[(src, dst)] = staged
+            reason = None
+            if measured is None:
+                # An unmeasurable direct link is not evidence of a fast one.
+                reason = "direct probe failed"
+            elif measured < threshold:
+                reason = f"{measured:.2f} GB/s < {threshold:.2f} GB/s gate"
+            elif staged and mode != _MODE_ON and measured < staged * min_ratio:
+                # ``mode='on'`` is an explicit request for the direct
+                # path, so the relative comparison must not veto it. The
+                # absolute floor above still catches a link that is not
+                # moving data at all.
+                reason = (
+                    f"{measured:.2f} GB/s direct < {min_ratio:.2f}x host staging "
+                    f"({staged:.2f} GB/s): the peer link is not faster than the fallback"
+                )
+            if reason is not None:
+                status.pairs[(src, dst)] = STATE_DEGRADED
+                log.debug("P2P %s->%s degraded: %s", src, dst, reason)
+            else:
+                status.pairs[(src, dst)] = STATE_ENABLED
     finally:
         if original_device is not None:
             try:
@@ -1229,11 +1436,11 @@ def _peer_copy_runtime() -> tuple[ctypes.CDLL, str] | None:
         return _PEER_COPY_RUNTIME
 
 
-def peer_copy_batch(
+def _peer_copy_batch_enqueue(
     sources: Sequence[torch.Tensor],
     targets: Sequence[torch.Tensor],
 ) -> bool:
-    """Enqueue runtime peer-to-peer copies for ``sources -> targets``.
+    """Enqueue runtime peer-to-peer copies without consulting peer status.
 
     PyTorch's ``torch.cuda.comm.broadcast_coalesced`` funnels into
     ``torch._C._broadcast_coalesced``. That entry point is not safe to call
@@ -1249,9 +1456,9 @@ def peer_copy_batch(
     (which normal PyTorch code on the destination device does).
 
     Returns ``True`` when all copies were enqueued. Returns ``False`` when the
-    runtime is unavailable, P2P is not enabled for the pair, a tensor is not
-    contiguous, or the group is not a simple two-device batch, so callers can
-    fall back to ``Tensor.to()``.
+    runtime is unavailable, a tensor is not contiguous, or the group is not a
+    simple two-device batch. The caller is responsible for checking that peer
+    access is enabled and validated for the pair.
     """
 
     if not sources or len(sources) != len(targets):
@@ -1269,9 +1476,6 @@ def peer_copy_batch(
         return False
     if any(tensor.device != target_device for tensor in targets):
         return False
-    if not _can_peer_copy(source_device.index, target_device.index):
-        return False
-
     runtime = _peer_copy_runtime()
     if runtime is None:
         return False
@@ -1323,11 +1527,47 @@ def peer_copy_batch(
                     # would otherwise surface from an unrelated PyTorch call.
                     _clear_last_error_for_backend(lib)
                     return False
+                # The raw runtime copy is invisible to PyTorch's caching
+                # allocator. Without this the source block can be freed and
+                # reused on the source stream while the destination stream is
+                # still reading it, which shows up as an async
+                # HSA_STATUS_ERROR_MEMORY_FAULT on ROCm and torn bytes on
+                # CUDA. Recording the target stream defers reuse until the
+                # copy has completed.
+                source.record_stream(target_stream)
+                target.record_stream(target_stream)
     except Exception:
         _clear_last_error_for_backend(lib)
         return False
 
     return True
+
+
+def peer_copy_batch(
+    sources: Sequence[torch.Tensor],
+    targets: Sequence[torch.Tensor],
+) -> bool:
+    """Enqueue validated runtime peer-to-peer copies for ``sources -> targets``.
+
+    The pair must have been enabled and validated by :func:`enable_peer_access`
+    (which ``auto`` mode does automatically). ``False`` tells the caller to use
+    its regular ``Tensor.to`` path instead.
+    """
+
+    if not sources or len(sources) != len(targets):
+        return False
+    source_device = sources[0].device
+    target_device = targets[0].device
+    if (
+        source_device.type != "cuda"
+        or target_device.type != "cuda"
+        or source_device.index is None
+        or target_device.index is None
+    ):
+        return False
+    if not _can_peer_copy(source_device.index, target_device.index):
+        return False
+    return _peer_copy_batch_enqueue(sources, targets)
 
 
 def _contiguous_like(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -1348,6 +1588,17 @@ def _contiguous_like(tensor: torch.Tensor, device: torch.device) -> torch.Tensor
 # because each leaf needs an extra allocation plus an event join. 256 KiB sits
 # between the measured win and loss regions.
 _PEER_COPY_MAX_AVG_LEAF_BYTES = 256 * 1024
+
+# ROCm's HIP runtime can fault the GPU (``HSA_STATUS_ERROR_MEMORY_FAULT``) and
+# wedge the process when a small VMM peer copy targets an expandable-segment
+# mapping that the executing device was never granted. The per-tensor nested
+# path is the only caller that hits that shape; the module path copies larger,
+# validated ranges. Disable the nested fast path on ROCm until the runtime VMM
+# peer-access fix is available. Set ``GPTQMODEL_P2P_NESTED_ROCM=1`` to opt in
+# on a runtime that carries the fix.
+_ROCM_NESTED_PEER_DISABLED = torch.version.hip is not None and os.environ.get(
+    "GPTQMODEL_P2P_NESTED_ROCM", ""
+).strip().lower() not in ("1", "true", "yes", "on")
 
 
 def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) -> bool:
@@ -1478,6 +1729,9 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
         or target.index is None
         or not isinstance(value, (torch.Tensor, dict, list, tuple))
     ):
+        return _P2P_NOT_APPLICABLE
+
+    if _ROCM_NESTED_PEER_DISABLED:
         return _P2P_NOT_APPLICABLE
 
     tensors: list[torch.Tensor] = []

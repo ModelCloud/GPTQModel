@@ -79,6 +79,11 @@ def _require_p2p_both_ways(src=0, dst=1):
     return status
 
 
+def _require_nested_p2p():
+    if p2p_mod._ROCM_NESTED_PEER_DISABLED:
+        pytest.skip("nested VMM peer copies are disabled on ROCm")
+
+
 def test_p2p_all_enabled_matches_status():
     _require_p2p_both_ways()
     assert p2p_all_enabled([0, 1]) is True
@@ -202,6 +207,7 @@ def test_p2p_move_nested_is_ordered_on_destination_stream():
     memory. ``torch.cuda.synchronize(target)`` did not fix it; synchronising the
     source did, which is what pinned the copy to the wrong queue.
     """
+    _require_nested_p2p()
     _require_p2p(0, 1)
 
     for _ in range(5):
@@ -224,6 +230,7 @@ def _small_leaves(count: int = 5):
 
 
 def test_p2p_move_nested_coalesces_multiple_tensors():
+    _require_nested_p2p()
     _require_p2p(0, 1)
 
     values = _small_leaves()
@@ -241,6 +248,14 @@ def test_p2p_move_nested_skips_non_contiguous():
     base = torch.randn(256, 256, device="cuda:0")
     values = _small_leaves(4) + [base.t()]
     assert not values[-1].is_contiguous()
+    assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
+
+
+def test_p2p_move_nested_falls_back_when_rocm_nested_is_disabled(monkeypatch):
+    """ROCm disables the small VMM batch shape that can fault the GPU."""
+
+    monkeypatch.setattr(p2p_mod, "_ROCM_NESTED_PEER_DISABLED", True)
+    values = _small_leaves()
     assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
 
 
@@ -271,6 +286,7 @@ def test_move_nested_to_device_cpu_fallback():
 
 def test_p2p_moves_are_thread_safe():
     _require_p2p_both_ways()
+    _require_nested_p2p()
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -301,6 +317,7 @@ def test_p2p_fast_path_does_not_use_torch_cuda_comm(monkeypatch):
     """Guard the GIL=0 fix: torch.cuda.comm.* hangs or tears under threads."""
 
     _require_p2p_both_ways()
+    _require_nested_p2p()
 
     import torch.cuda.comm as cuda_comm
 
