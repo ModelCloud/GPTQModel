@@ -280,7 +280,8 @@ def matmul_4bit(
 
     out_features, in_features = quant_state.shape
     out_dtype = out_dtype or x.dtype
-    x2 = x.reshape(-1, in_features)
+    # The GEMM kernel addresses x2 with a dense row-major stride.
+    x2 = x.reshape(-1, in_features).contiguous()
     out = torch.empty((x2.shape[0], out_features), device=x.device, dtype=out_dtype)
     cfg = gemm_launch(x.device)
     grid = (triton.cdiv(x2.shape[0], cfg.block_m), triton.cdiv(out_features, cfg.block_n))
