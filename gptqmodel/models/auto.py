@@ -779,16 +779,27 @@ class GPTQModel:
                 **_get_config_load_kwargs(kwargs),
             )
 
+        native_floatx_source = (
+            native_floatx_source_format(model_cfg, model_local_path=model_id_or_path)
+            if model_cfg is not None
+            else None
+        )
         if (
             quantize_config is not None
             and model_cfg is not None
-            and native_floatx_source_format(model_cfg, model_local_path=model_id_or_path) is not None
+            and native_floatx_source is not None
         ):
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif (model_cfg is not None and _is_supported_quantization_config(model_cfg)
-              and not _uses_auto_module_decoder(quantize_config)):
+        elif (
+            model_cfg is not None
+            and _is_supported_quantization_config(model_cfg)
+            and (
+                not _uses_auto_module_decoder(quantize_config)
+                or native_floatx_source is None
+            )
+        ):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
@@ -880,14 +891,21 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             **_get_config_load_kwargs(model_init_kwargs),
         )
+        native_floatx_source = native_floatx_source_format(
+            config,
+            model_local_path=model_id_or_path,
+        )
         if (
             quantize_config is not None
-            and native_floatx_source_format(config, model_local_path=model_id_or_path) is not None
+            and native_floatx_source is not None
         ):
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif _is_supported_quantization_config(config) and not _uses_auto_module_decoder(quantize_config):
+        elif _is_supported_quantization_config(config) and (
+            not _uses_auto_module_decoder(quantize_config)
+            or native_floatx_source is None
+        ):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")

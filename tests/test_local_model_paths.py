@@ -311,6 +311,85 @@ def test_gptqmodel_from_pretrained_allows_supported_floatx_source_with_auto_deco
     assert GPTQModel.from_pretrained("native-floatx-source", quantize_config=target_config) is sentinel
 
 
+def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quantized(
+    monkeypatch, tmp_path
+):
+    model_dir = tmp_path / "gptq-source"
+    model_dir.mkdir()
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
+    target_config = EXL3Config(
+        bits=2.0,
+        preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
+    )
+    sentinel = object()
+    captured = {}
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: True)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_pretrained",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected source load"))),
+    )
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(
+            lambda cls, model_id_or_path, **kwargs: captured.update(
+                path=model_id_or_path,
+                kwargs=kwargs,
+            )
+            or sentinel
+        ),
+    )
+
+    result = GPTQModel.load(str(model_dir), quantize_config=target_config)
+
+    assert result is sentinel
+    assert captured["path"] == str(model_dir)
+    assert captured["kwargs"]["trust_remote_code"] is False
+
+
+def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_from_quantized(
+    monkeypatch,
+):
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
+    target_config = EXL3Config(
+        bits=2.0,
+        preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
+    )
+    sentinel = object()
+    captured = {}
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(
+        auto,
+        "check_and_get_model_definition",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected source load")),
+    )
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(
+            lambda cls, model_id_or_path, **kwargs: captured.update(
+                path=model_id_or_path,
+                kwargs=kwargs,
+            )
+            or sentinel
+        ),
+    )
+
+    result = GPTQModel.from_pretrained("gptq-source", quantize_config=target_config)
+
+    assert result is sentinel
+    assert captured == {
+        "path": "gptq-source",
+        "kwargs": {"trust_remote_code": False},
+    }
+
+
 def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
     sentinel = object()
