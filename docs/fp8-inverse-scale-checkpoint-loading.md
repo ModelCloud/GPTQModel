@@ -43,3 +43,5 @@ For example, an E5M2 code of `57344` with inverse scale `65792` produces
 produces `0.875`, a measured relative difference of about `0.00448`.
 
 Packed FP8 weight dtype handling is outside this scale restoration flow.
+
+Introduced in [PR #3741](https://github.com/ModelCloud/GPTQModel/pull/3741).
