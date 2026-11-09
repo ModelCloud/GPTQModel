@@ -40,6 +40,7 @@ from .exl3_projection_checkpoint import (
     tensor_identity,
 )
 
+
 REMOTE_CONTRACT = "ds4rt.exl3-remote-worker-v1"
 REMOTE_SCHEDULER = "dynamic-pipelined-slot-projection-v2"
 REMOTE_PIPELINE_DEPTH = 2
@@ -344,11 +345,11 @@ def validate_remote_inputs(
         or not isinstance(contract.get("bits"), int)
         or contract["bits"] < 1
         or contract["bits"] > 8
-        or contract.get("codebook") not in {"mcg", "mul1"}
+        or contract.get("codebook") not in ("mcg", "mul1")
         or contract.get("hessian_capture") != EXL3_HESSIAN_CAPTURE_CONTRACT
         or contract.get("hessian_numerical") != EXL3_HESSIAN_NUMERICAL_CONTRACT
         or contract.get("hessian_symmetry") != EXL3_HESSIAN_SYMMETRY_CONTRACT
-        or contract.get("apply_out_scales") not in {None, True, False}
+        or contract.get("apply_out_scales") not in (None, True, False)
         or isinstance(contract.get("sigma_reg"), bool)
         or not isinstance(contract.get("sigma_reg"), (int, float))
         or not isinstance(contract.get("seed"), int)
@@ -374,16 +375,17 @@ def validate_remote_output_tensors(
     shape = weight_spec.get("shape")
     bits = contract.get("bits")
     codebook = contract.get("codebook")
-    expected_names = {"trellis", "suh", "svh", codebook}
     if (
         not isinstance(shape, list)
         or len(shape) != 2
         or any(isinstance(value, bool) or not isinstance(value, int) for value in shape)
         or isinstance(bits, bool)
         or not isinstance(bits, int)
-        or codebook not in {"mcg", "mul1"}
-        or set(tensors) != expected_names
+        or codebook not in ("mcg", "mul1")
     ):
+        raise ValueError("EXL3 remote output tensor contract is invalid")
+    expected_names = {"trellis", "suh", "svh", codebook}
+    if set(tensors) != expected_names:
         raise ValueError("EXL3 remote output tensor contract is invalid")
     rows, columns = shape
     trellis = tensors["trellis"]

@@ -9,10 +9,10 @@ import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
-import gptqmodel.utils.exl3_remote as exl3_remote
 import pytest
 import torch
 
+import gptqmodel.utils.exl3_remote as exl3_remote
 from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_NUMERICAL_CONTRACT,
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
@@ -22,10 +22,10 @@ from gptqmodel.utils.exl3_projection_checkpoint import (
     build_projection_request,
 )
 from gptqmodel.utils.exl3_remote import (
-    CoordinatorSlot,
     REMOTE_CONTRACT,
     REMOTE_RESULT_SCHEMA,
     REMOTE_SCHEDULER,
+    CoordinatorSlot,
     EXL3RemoteClient,
     RemoteEndpoint,
     decode_tensor_envelope,
@@ -312,6 +312,20 @@ def test_output_geometry_is_bound_to_request() -> None:
     tensors["trellis"] = torch.zeros((8, 8, 16), dtype=torch.int16)
     with pytest.raises(ValueError, match="geometry"):
         validate_remote_output_tensors(request, tensors)
+
+
+def test_output_validation_rejects_unhashable_codebook() -> None:
+    endpoint = _endpoint("spark-a")
+    weight, hessian = _inputs()
+    request = _request(weight, hessian, endpoint)
+    request["quantizer_contract"]["codebook"] = ["mcg"]
+    body = {key: value for key, value in request.items() if key != "request_sha256"}
+    request["request_sha256"] = exl3_remote._sha256(
+        exl3_remote.canonical_json_bytes(body)
+    )
+
+    with pytest.raises(ValueError, match="output tensor contract"):
+        validate_remote_output_tensors(request, _packed_tensors())
 
 
 def test_hessian_metrics_bind_fp64_congruence_contract() -> None:
