@@ -146,6 +146,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             packed = wrapper.model.get_submodule(name)
             assert torch.equal(packed.weight.cpu().view(torch.uint8), fitted_weight.view(torch.uint8))
             assert torch.equal(packed.weight_scale_inv.cpu(), fitted_scale)
+            assert packed.weight_scale_inv.dtype == torch.float32
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         before = wrapper.model(ids, use_cache=False).logits.detach()
@@ -160,6 +161,11 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             assert torch.equal(saved[f"{name}.weight_scale_inv"], fitted_scale)
     loaded = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
                             dtype=torch.float16, attn_implementation="eager")
+    if method == "fp8_calibrated":
+        for name, (_, fitted_scale) in fitted_payloads.items():
+            reloaded = loaded.model.get_submodule(name)
+            assert reloaded.weight_scale_inv.dtype == torch.float32
+            assert torch.equal(reloaded.weight_scale_inv.cpu(), fitted_scale)
     assert loaded.quantize_config.gsq == gsq
     if method.startswith("fp8"):
         assert loaded.quantize_config.gsq_calibration == (method == "fp8_calibrated")
