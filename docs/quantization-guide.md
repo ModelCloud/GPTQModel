@@ -224,7 +224,7 @@ converted to FP32. `quantize_fp8_weight` rejects Inf, NaN, and values outside
 FP32's range by checking the already-computed absolute maxima before inverse
 scales. `TorchFP8Linear.pack_original` checks the source before an optional
 smoother and before MLX dispatch; the ordinary Torch path uses the direct
-quantizer's check.
+quantizer's check. This contract was introduced in PR #3742.
 
 | Previous path | Current path |
 | --- | --- |
