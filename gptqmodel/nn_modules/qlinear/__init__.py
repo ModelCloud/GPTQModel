@@ -32,6 +32,7 @@ from ...utils.planar_packing import (
     planar_unpack_rows,
 )
 from ...utils.safe import THREADPOOLCTL
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -1039,6 +1040,28 @@ class PackableQuantLinear(GPTQQuantLinear):
     def __init__(self, *args, enable_wf_unsqueeze: bool = False, **kwargs):
         self.enable_wf_unsqueeze = enable_wf_unsqueeze
         super().__init__(*args, **kwargs)
+
+    def _ret_idx_is_identity(self) -> bool:
+        """Whether the activation-reorder index is the identity permutation.
+
+        ``ret_idx`` is derived from ``g_idx``; when ``g_idx`` is the canonical
+        ``arange(total) // group_size`` (``desc_act=False``), the permutation
+        is the identity and callers can skip both the gather and its copy.
+        The answer is cached under the same key as ``ret_idx`` so repeated
+        forwards stay O(1).
+
+        Subclasses that reorder activations must implement ``_build_ret_idx``.
+        """
+        cached = getattr(self, "_ret_idx_identity", None)
+        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
+            return cached
+        ret_idx = self._build_ret_idx()
+        identity = t.equal(
+            ret_idx,
+            t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+        )
+        self._ret_idx_identity = identity
+        return identity
 
     def _wf_device(self):
         if hasattr(self, "g_idx") and self.g_idx is not None:

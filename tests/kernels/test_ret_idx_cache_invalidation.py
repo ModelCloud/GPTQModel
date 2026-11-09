@@ -17,6 +17,7 @@ import pytest
 import torch
 from test_torch_weight_storage import state_tensors
 
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 
@@ -109,6 +110,172 @@ def test_in_place_g_idx_mutation_is_observed(cls):
 
     rebuilt = module._build_ret_idx()
     assert torch.equal(rebuilt, _oracle_ret_idx(module.g_idx, GROUP_SIZE))
+
+
+def test_ret_idx_is_identity_lives_on_the_packable_base():
+    assert TorchFusedLinear._ret_idx_is_identity is PackableQuantLinear._ret_idx_is_identity
+    assert TorchAtenLinear._ret_idx_is_identity is PackableQuantLinear._ret_idx_is_identity
+
+
+def test_fused_op_skips_the_gather_for_an_identity_ret_idx():
+    """``desc_act=False`` must not pay for ``x[:, arange].contiguous()``.
+
+    The fused op is stubbed so the captured tensor shows whether
+    ``_fused_op_forward`` reordered/copied the activation.
+    """
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+
+    # A contiguous activation is forwarded unchanged: no gather, no copy.
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    module._fused_op_forward(x)
+    assert captured["x"] is x
+
+    # A strided activation is still made contiguous for the fused kernel.
+    strided = torch.randn(IN_FEATURES, 4, dtype=torch.bfloat16).t()
+    assert not strided.is_contiguous()
+    module._fused_op_forward(strided)
+    assert captured["x"] is not strided
+    assert captured["x"].is_contiguous()
+
+
+def test_fused_op_gathers_for_a_non_identity_ret_idx():
+    module = _module(TorchFusedLinear)
+    module.g_idx = _group_labels((3, 0, 2, 1))
+    assert not module._ret_idx_is_identity()
+
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    module._fused_op_forward(x)
+
+    assert captured["x"] is not x
+    assert captured["x"].is_contiguous()
+
+
+def test_xpu_keeps_the_main_branch_gather_for_an_identity_ret_idx():
+    """XPU must not take the CPU-only identity fast path.
+
+    The XPU kernel has no coverage for activation views with a non-zero storage
+    offset, so it keeps the main-branch unconditional gather even when the
+    permutation is the identity.
+    """
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+    assert module._needs_activation_gather("xpu") is True
+    assert module._needs_activation_gather("cpu") is False
+
+
+def test_identity_fast_path_forwards_a_storage_offset_fp16_activation():
+    """A contiguous FP16 view with a non-zero storage offset is forwarded as-is.
+
+    The old unconditional ``x[:, arange].contiguous()`` always materialized a
+    zero-offset copy, so a fused kernel that quietly required offset-zero
+    storage would have been masked. The fast path hands the original view to
+    ``torch_fused_op``; pin both the identity of the forwarded tensor and its
+    numerical equivalence with the forced-gather path.
+    """
+    storage = torch.randn(10, IN_FEATURES, dtype=torch.float16)
+    activation = storage[2:6]
+    assert activation.storage_offset() != 0
+    assert activation.is_contiguous()
+
+    # 1) The fast path forwards the same tensor object: no gather, no copy.
+    module = _fused_module(TorchFusedLinear, _fused_checkpoint(seed=5, order=(0, 1, 2, 3)))
+    assert module._ret_idx_is_identity()
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+    module._fused_op_forward(activation)
+
+    assert captured["x"] is activation
+
+    # 2) Same weights through the pre-change gather path: bit-exact outputs.
+    checkpoint = _fused_checkpoint(seed=5, order=(0, 1, 2, 3))
+
+    fast = _fused_module(TorchFusedLinear, checkpoint)
+    with torch.no_grad():
+        fast_out = fast(activation).clone()
+
+    gathered = _fused_module(TorchFusedLinear, checkpoint)
+    gathered._ret_idx_is_identity = lambda: False  # force the old gather
+    with torch.no_grad():
+        gathered_out = gathered(activation).clone()
+
+    torch.testing.assert_close(fast_out, gathered_out, rtol=0, atol=0)
+    assert fast_out.dtype is torch.float16
+
+    # 3) And the fast path still matches an independent float64 oracle.
+    oracle = _dense_oracle(checkpoint, activation)
+    torch.testing.assert_close(fast_out.float(), oracle, rtol=2e-3, atol=2e-3)
+
+
+def test_clear_weight_cache_drops_the_cached_identity_flag():
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+    assert module._ret_idx_identity is True
+
+    module.clear_weight_cache()
+
+    assert module.ret_idx is None
+    assert module._ret_idx_identity is None
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize("mutation", ["in_place", "replace"])
+def test_rebuilding_ret_idx_after_an_identity_forward_drops_the_identity_flag(cls, mutation):
+    """An explicit rebuild must not leave ``_ret_idx_identity`` stale.
+
+    ``forward`` caches ``True`` for a canonical ``g_idx``. Replacing ``g_idx``
+    and calling ``_build_ret_idx()`` refreshes ``_ret_idx_key``; if the cached
+    identity flag survives, the next forward skips a required gather and
+    silently returns wrong values.
+
+    The control omits the explicit rebuild: there the key mismatch forces
+    ``_ret_idx_is_identity()`` to recompute, which is the known-correct path.
+    """
+    activation = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+
+    def _run(explicit_rebuild):
+        module = _fused_module(cls, _fused_checkpoint(seed=7, order=(0, 1, 2, 3)))
+        with torch.no_grad():
+            module(activation)  # identity g_idx: caches the identity flag
+            assert module._ret_idx_is_identity()
+
+            new_g_idx = _group_labels((3, 0, 2, 1))
+            if mutation == "in_place":
+                module.g_idx.copy_(new_g_idx)
+            else:
+                module.g_idx = new_g_idx
+            if explicit_rebuild:
+                module._build_ret_idx()
+                assert not module._ret_idx_is_identity()
+            return module(activation).clone()
+
+    expected = _run(explicit_rebuild=False)
+    actual = _run(explicit_rebuild=True)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------

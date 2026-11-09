@@ -143,6 +143,7 @@ class TorchFusedLinear(PackableQuantLinear):
         """
         self.ret_idx = None
         self._ret_idx_key = None
+        self._ret_idx_identity = None
         self._fused_state_key = None
         self._refresh_fused_op()
 
@@ -185,6 +186,11 @@ class TorchFusedLinear(PackableQuantLinear):
 
         ret_idx = build_group_ret_idx(self.g_idx)
         self.ret_idx = ret_idx
+        # The permutation changed, so any cached identity verdict for the
+        # previous ``g_idx`` is stale. Callers may rebuild ``ret_idx``
+        # explicitly before the next forward; the base class recomputes the
+        # verdict from the new key.
+        self._ret_idx_identity = None
         self._ret_idx_key = key
         return ret_idx
 
@@ -308,10 +314,25 @@ class TorchFusedLinear(PackableQuantLinear):
 
         return out
 
+    def _needs_activation_gather(self, device_type: str) -> bool:
+        """Whether ``_fused_op_forward`` must gather with ``ret_idx``.
+
+        XPU keeps the main-branch behavior and always gathers, because that
+        path has no coverage for activation views with a non-zero storage
+        offset. CPU may skip the gather when the permutation is the identity.
+        """
+        return device_type == "xpu" or not self._ret_idx_is_identity()
+
     @torch.no_grad
     def _fused_op_forward(self, x):
         self._refresh_fused_op()
-        x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+        # The identity fast path is CPU-only. The XPU kernel has no coverage for
+        # activation views with a non-zero storage offset, so keep the
+        # main-branch unconditional gather (and its zero-offset copy) there.
+        if self._needs_activation_gather(x.device.type):
+            x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+        elif not x.is_contiguous():
+            x = x.contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":
