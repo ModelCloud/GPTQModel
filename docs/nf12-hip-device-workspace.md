@@ -119,6 +119,8 @@ flowchart TD
 
 ## Routing bounds and empty alignment
 
+Routing and encoder contract updates introduced in #3685.
+
 The vendored HIP MoE consumers follow CUDA's clamped running-maximum offset
 schedule. Starting at zero, `moe_next_offset` bounds each endpoint by the
 assignment count and the previous endpoint. Negative, decreasing, and oversized
@@ -151,7 +153,7 @@ BF16 output, so the former 32767-block limit rejected a small valid decode.
 | Routed expert intervals | Upper-only clamps allowed a negative row and decreasing intervals (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:159`; `gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:268`) | Shared running maximum (`gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh:61`), consumed by WMMA, decode, and grouped operands |
 | Grouped operands | Started at zero regardless of the first offset (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:324`) | Starts from normalized offset zero (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:326`) |
 | Empty routing | Workspace rejection preceded empty handling (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:407`) | Zero assignments publish zero offsets before scratch checks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:405`) |
-| Decode launch | Rejected more than 32767 X blocks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:493`) | Uses the signed 32-bit X limit (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:494`) |
+| Decode launch | Rejected more than 32767 X blocks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:495`) | Uses the signed 32-bit X limit (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:494`) |
 
 ## Exact-byte encoder scheduling
 
@@ -214,6 +216,8 @@ env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=2 PYTHON_GIL=0 \
   tests/test_nf12_hip_review_contracts.py tests/test_nf12_ad_codec.py \
   tests/test_nf12_ad_runtime_load.py tests/test_validate_nf12_ad.py -q -rs
 ```
+
+Result: **51 passed, 1 skipped in 25.84 seconds**.
 
 The multi-device test requires two visible AMD devices and is skipped under
 this isolation. CUDA, other AMD architectures, and full-model inference were
