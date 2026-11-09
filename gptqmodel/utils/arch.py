@@ -26,13 +26,18 @@ import torch
 __all__ = [
     "arch_class",
     "clear_arch_cache",
+    "cuda_arch",
+    "cuda_capability",
     "gate_limits",
     "gemm_fused_dtypes",
+    "gemm_fused_max_out_features",
+    "is_ada",
     "is_gfx950",
     "is_rdna4",
     "is_rocm_fused_arch",
     "normalize_arch",
     "rocm_arch",
+    "tuning_family",
     "wave_size",
 ]
 
@@ -50,6 +55,20 @@ _CDNA4_GATE = (16, 5120)
 # so RDNA4 keeps the full measured range while reusing the conservative
 # ``small_m_max`` (M>16 was not uniformly a win).
 _RDNA4_GATE = (16, 17408)
+# Ada (RTX 4090, SM 8.9) shape gate for the fused small-M GEMM, measured on a
+# 4090 (torch 2.15.0+cu132, Triton 3.9.0) with the (16, 16, 256, 4, 2) tile,
+# 4-bit gs=128, FP16 and BF16, M in {2, 8, 16}.  Inside the rectangle
+# K <= 2048 and N <= 2048 the fused kernel is never a material loss and is a
+# clear win on L2-flushed inputs: 1.09x-1.65x hot for K <= 2048 and N <= 1536
+# (1.10x-1.82x on the wider sweep), neutral-to-1.11x hot at the K=2048/N=2048
+# corner, and 1.10x-1.41x flushed everywhere in the rectangle.  Outside it the
+# serial K-loop and the grid width lose.  A second measured win band (K <= 1536, N <= 4096, min
+# 1.014x) is *not* enabled because the enclosing rectangle (K <= 2048,
+# N <= 4096) regresses (0.869x at 2048x3072), so the gate stays rectangular and
+# conservative instead of claiming a shape-dependent band the dispatcher cannot
+# express.  ``cdna4``/``rdna4`` values are unchanged.
+_ADA_GATE = (16, 2048)
+_ADA_MAX_OUT_FEATURES = 2048
 _DISABLED_GATE = (0, 0)
 
 # Activation dtypes the fused small-M GEMM is *measurably* faster in.  CDNA has
@@ -69,15 +88,29 @@ _DISABLED_GATE = (0, 0)
 # (FP16 1.64x-3.67x, BF16 1.40x-2.84x measured), so it is not gated here.
 _CDNA4_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
 _RDNA4_GEMM_DTYPES = frozenset({"float16"})
+# Ada was measured in *both* activation dtypes inside the gate above (same
+# shapes as FP16): FP16 1.10x-1.82x, BF16 1.11x-1.82x against
+# dequantize+matmul, so BF16 is a measured win there rather than an inherited
+# claim.  Outside the gate the fused kernel is disabled for both dtypes.
+_ADA_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
 
 _FUSED_ARCH_PREFIXES = ("gfx950", "gfx120", "gfx125")
 
 _ARCH_CACHE: dict[tuple[int, bool], str | None] = {}
+# CUDA compute capability is cached per device index for the same reason as
+# ``_ARCH_CACHE``: dispatch asks for it from the forward hot path.
+_CAPABILITY_CACHE: dict[int, tuple[int, int] | None] = {}
+
+# NVIDIA tuning families.  ``ada`` is the RTX 4090 / SM 8.9 class: it has
+# fourth-generation tensor cores and FP8 ``mma`` but predates Hopper's TMA and
+# warp-specialization, so it must never inherit an SM90+ launch table.
+_ADA_CAPABILITY = (8, 9)
 
 
 def clear_arch_cache() -> None:
     """Drop the cached architecture strings (used by tests and device hot-plug)."""
     _ARCH_CACHE.clear()
+    _CAPABILITY_CACHE.clear()
 
 
 def normalize_arch(name) -> str:
@@ -249,11 +282,13 @@ def gemm_fused_dtypes(device_or_arch=None) -> frozenset[str]:
     GEMM is disabled for that architecture (see :func:`gate_limits`).
     """
 
-    cls = arch_class(device_or_arch)
-    if cls == "cdna4":
+    family = tuning_family(device_or_arch)
+    if family == "cdna4":
         return _CDNA4_GEMM_DTYPES
-    if cls == "rdna4":
+    if family == "rdna4":
         return _RDNA4_GEMM_DTYPES
+    if family == "ada":
+        return _ADA_GEMM_DTYPES
     return frozenset()
 
 
@@ -265,9 +300,129 @@ def gate_limits(device_or_arch=None) -> tuple[int, int]:
     Unregistered architectures return ``(0, 0)``, which disables the shape gate.
     """
 
-    cls = arch_class(device_or_arch)
-    if cls == "cdna4":
+    family = tuning_family(device_or_arch)
+    if family == "cdna4":
         return _CDNA4_GATE
-    if cls == "rdna4":
+    if family == "rdna4":
         return _RDNA4_GATE
+    if family == "ada":
+        return _ADA_GATE
     return _DISABLED_GATE
+
+
+def gemm_fused_max_out_features(device_or_arch=None) -> int:
+    """Return the fused small-M GEMM output-width cap (``0`` disables the cap).
+
+    ``cdna4``/``rdna4`` measured uniform wins out to the widest projection they
+    tested, so their cap stays disabled.  Ada's fused tile wins only while the
+    grid stays narrow; see ``_ADA_GATE``.
+    """
+
+    if tuning_family(device_or_arch) == "ada":
+        return _ADA_MAX_OUT_FEATURES
+    return 0
+
+
+def cuda_capability(device: torch.device | str | int | None = None) -> tuple[int, int] | None:
+    """Return the NVIDIA compute capability for ``device``, or ``None`` off CUDA.
+
+    On ROCm this returns ``None``: HIP reuses the ``cuda`` device namespace but
+    reports a numeric pair that has nothing to do with the GPU generation, so
+    AMD dispatch must go through :func:`rocm_arch` instead.
+    """
+
+    if torch.version.hip is not None:
+        return None
+    try:
+        index = _device_index(device)
+    except Exception:
+        return None
+    if index is None:
+        return None
+    if index in _CAPABILITY_CACHE:
+        return _CAPABILITY_CACHE[index]
+    try:
+        capability = tuple(int(part) for part in torch.cuda.get_device_capability(index))
+    except Exception:
+        capability = None
+    _CAPABILITY_CACHE[index] = capability
+    return capability
+
+
+def cuda_arch(device: torch.device | str | int | None = None) -> str | None:
+    """Return ``sm_89``/``sm_90``-style name for ``device``, or ``None`` off CUDA."""
+
+    capability = cuda_capability(device)
+    if capability is None:
+        return None
+    return "sm_" + str(capability[0]) + str(capability[1])
+
+
+def is_ada(device_or_arch=None) -> bool:
+    """True for the Ada / RTX 4090 class (SM 8.9), the CUDA tuning baseline.
+
+    Accepts a device, an ``sm_89`` string, or a raw ``(8, 9)`` capability.
+    """
+
+    if isinstance(device_or_arch, tuple):
+        return tuple(device_or_arch[:2]) == _ADA_CAPABILITY
+    if isinstance(device_or_arch, str):
+        return normalize_arch(device_or_arch) in ("sm_89", "sm89")
+    return cuda_capability(device_or_arch) == _ADA_CAPABILITY
+
+
+def tuning_family(device_or_arch=None) -> str:
+    """Return the dispatch/tuning family used by every launch-constant table.
+
+    The vocabulary is shared by the ROCm tables (``cdna4``/``rdna4``/``rdna3``)
+    and the NVIDIA tables (``ada`` = RTX 4090 / SM 8.9, ``hopper`` = SM 9.x,
+    ``blackwell`` = SM 10.x+).  A pipeline that ships a tuned table must have an
+    entry for **both** ``ada`` and ``rdna4``; unregistered targets return
+    ``other`` and keep their portable fallback.
+
+    ``device_or_arch`` may be a device, a ``gfx*``/``sm_*`` string, or a
+    ``(major, minor)`` capability tuple.
+    """
+
+    # An explicit NVIDIA shape -- an ``sm_XX`` string or a ``(major, minor)``
+    # capability tuple -- is portable metadata and must classify the same way
+    # on a CUDA host and on a ROCm host.  Only a ``gfx*`` string or a real
+    # device is resolved through :func:`arch_class`, because that is where the
+    # host's own runtime decides what the target is.
+    if isinstance(device_or_arch, tuple):
+        return _cuda_family(tuple(device_or_arch[:2]))
+    if isinstance(device_or_arch, str):
+        lowered = device_or_arch.strip().lower()
+        if lowered.startswith("gfx"):
+            return arch_class(device_or_arch)
+        if lowered.startswith("sm_"):
+            return _tuning_family_from_sm(device_or_arch)
+    if torch.version.hip is not None:
+        return arch_class(device_or_arch)
+
+    capability = cuda_capability(device_or_arch)
+    if capability is None:
+        return "other"
+    return _cuda_family(capability)
+
+
+def _tuning_family_from_sm(name: str) -> str:
+    """Map an ``sm_89``/``sm_90a``/``sm_103a`` style string to a CUDA family."""
+
+    arch = normalize_arch(name)
+    # ``sm_103a`` and friends carry an architecture-suffix letter.
+    digits = arch.split("sm_", 1)[-1].rstrip("abcdefghijklmnopqrstuvwxyz")
+    if len(digits) < 2 or not digits.isdigit():
+        return "other"
+    return _cuda_family((int(digits[:-1]), int(digits[-1])))
+
+
+def _cuda_family(capability: tuple[int, int]) -> str:
+    major, minor = int(capability[0]), int(capability[1])
+    if (major, minor) == _ADA_CAPABILITY:
+        return "ada"
+    if major == 9:
+        return "hopper"
+    if major >= 10:
+        return "blackwell"
+    return "other"

@@ -4,9 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class PhiQModel(BaseQModel):
+    fusable = FusableConfig("phi").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "model.final_layernorm"
 
     module_tree = [

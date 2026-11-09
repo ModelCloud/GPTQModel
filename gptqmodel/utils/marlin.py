@@ -236,7 +236,8 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_diag_suppress=True,
     )
     # This flag is parsed by the local nvcc, not by the Torch wheel metadata.
-    if is_nvcc_compatible():
+    # A ROCm host can still have an nvcc on PATH; hipcc rejects the flag.
+    if not IS_ROCM and is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 
@@ -355,6 +356,63 @@ def marlin_scratch_sizes(
     if not isinstance(sizes, (tuple, list)) or len(sizes) != 2:
         raise RuntimeError(f"Marlin scratch size op returned invalid value: {sizes!r}")
     return int(sizes[0]), int(sizes[1])
+
+
+MARLIN_DEVICE_PROFILE_FIELDS = (
+    "sms",
+    "max_shared_mem",
+    "capability_major",
+    "capability_minor",
+    "l2_cache_size",
+    "max_threads_per_sm",
+    "has_tensor_memory",
+)
+
+
+def marlin_device_profile(
+        device: Optional[Union[int, str, torch.device]] = None,
+        dtype: torch.dtype = torch.float16,
+) -> Dict[str, int]:
+    """Return the cached device profile Marlin uses to pick a kernel.
+
+    Probed once per device inside the extension, so repeated calls are cheap.
+    ``has_tensor_memory`` reports tcgen05 tensor memory, which the datacenter
+    Blackwell parts have and the consumer ones do not.
+    """
+    if IS_ROCM or not torch.cuda.is_available():
+        raise RuntimeError("Marlin device profile requires CUDA.")
+    if device is None:
+        target = torch.device("cuda", torch.cuda.current_device())
+    else:
+        # Torch narrows device indices and wraps values such as
+        # `cuda:256` to device 0. Retain the original ordinal before parsing.
+        raw_index = device if isinstance(device, int) and not isinstance(device, bool) else None
+        if isinstance(device, str) and device.startswith("cuda:") and device[5:].isdecimal():
+            raw_index = int(device[5:])
+        target = torch.device(device)
+        if target.type != "cuda":
+            raise ValueError(
+                f"Marlin device profile requires a CUDA device, got {target!r}."
+            )
+        explicit_index = raw_index if raw_index is not None else target.index
+        if explicit_index is not None:
+            count = torch.cuda.device_count()
+            if explicit_index < 0 or explicit_index >= count:
+                raise ValueError(
+                    f"Marlin device profile: device index {explicit_index} is out of range "
+                    f"[0, {count})."
+                )
+    # An explicit index must survive as-is: `0` is falsy, and treating it as
+    # "unset" silently profiles whatever device happens to be current. `cuda`
+    # without an index follows torch's own convention and means the current one.
+    index = target.index if target.index is not None else torch.cuda.current_device()
+    op = _marlin_resolve_op(dtype=dtype, op_name="marlin_device_profile")
+    values = op(index)
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if not isinstance(values, (tuple, list)) or len(values) != len(MARLIN_DEVICE_PROFILE_FIELDS):
+        raise RuntimeError(f"Marlin device profile op returned invalid value: {values!r}")
+    return dict(zip(MARLIN_DEVICE_PROFILE_FIELDS, (int(value) for value in values)))
 
 
 # Validate marlin support
@@ -687,6 +745,11 @@ def apply_gptq_marlin_linear(
         use_atomics: bool = False,
 
 ) -> torch.Tensor:
+    # Source projections can be column views into fused packed storage.
+    # Materialize only for this separate call; never retain the copies.
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    weight_zp = weight_zp.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -771,10 +834,13 @@ def apply_awq_marlin_linear(
         input_size_per_partition: int,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = True) -> torch.Tensor:
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    weight_zp = weight_zp.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+    use_atomic_add = not use_fp32_reduce and should_use_atomic_add_reduce(m=reshaped_x.size(0),
                                                   n=output_size_per_partition,
                                                   k=reshaped_x.size(1),
                                                   device=input.device,

@@ -9,6 +9,12 @@ from functools import lru_cache
 import mlx.core as mx
 import mlx.nn as nn
 
+from .mlx_gptq import (
+    _group16_columns_kernel,
+    _mlx_forward,
+    _packed_columns_launch,
+    _uses_packed_columns,
+)
 from .mlx_group16 import MlxGroup16Linear
 
 
@@ -166,8 +172,20 @@ class MlxAWQGroup16Linear(MlxGroup16Linear):
                 return super().__call__(x)
             output = self._packed_prefill(x, rows, min(rows, 4))
             return output.reshape(output_shape)
-        threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         bias = self.bias if "bias" in self else self.zero_bias[0]
+        if _uses_packed_columns(output_dims):
+            output = _packed_columns_launch(
+                _group16_columns_kernel(
+                    "awq", x.dtype, 32 % self.bits != 0,
+                ),
+                [
+                    x, self.weight, self.scales_even, self.scales_odd,
+                    self.biases_even, self.biases_odd, bias,
+                ],
+                self.input_dims, output_dims, self.bits, x.dtype,
+            )
+            return output.reshape(output_shape)
+        threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         output = _awq_group16_kernel(x.dtype, self.bits)(
             inputs=[
                 x, self.weight, self.scales_even, self.scales_odd,
@@ -195,4 +213,4 @@ class MlxAWQLinear(nn.Module):
         self.freeze()
 
     def __call__(self, x):
-        return self.linear(x).astype(x.dtype)
+        return _mlx_forward(self.linear, x)

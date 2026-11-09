@@ -1,5 +1,6 @@
 // Adapted from https://github.com/HandH1998/QQQ
 
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/library.h>
 
 #include "qqq_gemm.h"
@@ -10,6 +11,12 @@ void qqq_gemm_dispatch(const torch::Tensor& A, const torch::Tensor& B, torch::Te
                        torch::Tensor& D, const torch::Tensor& s1, const torch::Tensor& s2,
                        const torch::Tensor& s3, torch::Tensor& workspace, int64_t thread_k,
                        int64_t thread_n, int64_t sms, int64_t max_par) {
+  // The kernel launches on the stream of A's device, so the calling thread's
+  // current device must match it. Without this guard, a module placed on a
+  // non-current device (e.g. cuda:1 while the thread is still on cuda:0, as in
+  // a device_map sharded model) launches into the wrong context and corrupts
+  // its output (NaNs) or raises an illegal memory access.
+  const c10::cuda::OptionalCUDAGuard device_guard(A.device());
   qqq_gemm(A, B, C, D, s1, s2, s3, workspace, static_cast<int>(thread_k),
            static_cast<int>(thread_n), static_cast<int>(sms), static_cast<int>(max_par));
 }

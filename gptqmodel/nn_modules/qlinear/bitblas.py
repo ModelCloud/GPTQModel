@@ -24,6 +24,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -241,6 +242,12 @@ BITBLAS_INSTALL_HINT = (
     f"Please install via `pip install bitblas>={MINIMUM_BITBLAS_VERSION}`."
 )
 
+BITBLAS_ROCM_UNSUPPORTED = (
+    "BitBLAS (BACKEND.GPTQ_BITBLAS / AWQ_BITBLAS) is CUDA-only: it emits "
+    "NVIDIA TensorCore code and has no ROCm backend. Use BACKEND.GPTQ_TORCH / "
+    "AWQ_GEMM_TRITON (or AUTO) on ROCm."
+)
+
 
 def import_bitblas():
     global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
@@ -357,16 +364,25 @@ def _normalize_bitblas_target(target):
 def unpack_gptq_qzeros(qzeros: torch.Tensor, bits: int, is_gptq_v2: bool = False) -> torch.Tensor:
     qzeros = qzeros.view(torch.int32)
     elems_per_int32 = 32 // bits
+    # int8 holds 0..15 with room to spare but cannot represent an 8-bit zero
+    # point above 127: 200 wraps to -56, and the caller then subtracts one and
+    # hands it to BitBLAS as a negative offset.
+    unpacked_dtype = torch.int16 if bits > 7 else torch.int8
     unpacked_zeros = torch.zeros(
         (qzeros.shape[0], qzeros.shape[1] * elems_per_int32),
-        dtype=torch.int8,
+        dtype=unpacked_dtype,
         device=qzeros.device,
         requires_grad=False,
     )
 
+    # Mask with the full field width. A hardcoded 0xF is only correct at
+    # bits == 4: at 8 bits it drops the high nibble (127 unpacks as 15), and at
+    # 2 bits it keeps two bits of the neighbouring field (0,1,2,3 unpacks as
+    # 4,9,14,3). Both are silent - the result is still a small integer.
+    mask = (1 << bits) - 1
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
+        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & mask
 
     if not is_gptq_v2:
         return unpacked_zeros + 1
@@ -591,6 +607,10 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # BitBLAS compiles TensorCore IR for NVIDIA targets; there is no ROCm
+        # backend, so report that instead of a misleading "not installed" hint.
+        if IS_ROCM:
+            return False, NotImplementedError(BITBLAS_ROCM_UNSUPPORTED)
         if not bitblas_available():
             return False, ValueError(BITBLAS_INSTALL_HINT)
 
@@ -926,7 +946,11 @@ class BitblasLinear(BitblasBaseQuantLinear):
                 and getattr(gptq_module, "qzero_format", lambda: 2)() == 1
             ):
                 intzeros = (intzeros + 1) & ((1 << bits) - 1)
-            intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
+            # Remove the unpacker's +1 and keep each code in its unsigned
+            # field. The v1 correction above wraps a maximum zero point to
+            # zero; subtracting one then leaves -1, whose sign bits would
+            # overwrite neighboring fields in BitBLAS's OR-based compressor.
+            intzeros = (intzeros - 1) & ((1 << bits) - 1)
 
         bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None
         self._load_bitblas_quant_state(

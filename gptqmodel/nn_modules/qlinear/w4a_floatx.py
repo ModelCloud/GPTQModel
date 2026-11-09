@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 
 import torch
 
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -16,6 +16,18 @@ from . import PackableQuantLinear
 
 
 log = setup_logger()
+
+# A saved W4A activation policy pins one of these kernels, so a HIP host has to
+# reject the checkpoint instead of selecting another backend: dropping the
+# policy silently changes the model's arithmetic.
+W4A_ROCM_UNSUPPORTED = (
+    "W4A activation policies are CUDA-only: the FP8 GEMM is a Gluon `mma_v2` "
+    "kernel that lowers to `ttg.nvidia_mma`, and the INT4->E4M3 packers emit "
+    "PTX (`cvt.rn.satfinite.e4m3x2.f32`). HIP supports neither, so these "
+    "checkpoints cannot run on ROCm (`Unsupported DotOp` on gfx1201). Re-export "
+    "the weights without a W4A activation policy and load them with "
+    "`backend=BACKEND.TORCH`."
+)
 
 
 class W4AFP8Linear(PackableQuantLinear):
@@ -89,10 +101,39 @@ class W4AFP8Linear(PackableQuantLinear):
         return cls.cached_validate_once()
 
     @classmethod
+    def _rocm_unsupported_error(cls, device=None) -> Optional[NotImplementedError]:
+        """Why this kernel cannot run on ``device``, or ``None`` when it can.
+
+        The FP8 GEMM is a Gluon ``mma_v2`` kernel: its operands carry
+        ``NVMMADistributedLayout``, so Triton emits ``ttg.nvidia_mma`` and the
+        AMD backend aborts with "Unsupported DotOp found when converting
+        TritonGPU to LLVM" (measured on gfx1201 / RDNA4). The INT4->E4M3
+        packer additionally emits PTX (``cvt.rn.satfinite.e4m3x2.f32``), which
+        hipcc cannot assemble. Both are CUDA-only by construction, so a HIP
+        host must load the checkpoint with the portable Torch GPTQ kernel.
+
+        The family comes from ``normalize_device`` so the decision is about the
+        requested target, not about which vendor this process happens to run
+        on. ``device=None`` asks about the default accelerator.
+
+        ``torch.cuda.is_available()`` is true on ROCm because HIP reuses the
+        CUDA device namespace, and ``get_device_capability`` reports a
+        synthetic SM version (``(12, 0)`` on gfx1201) that clears the FP8
+        floor, so neither can gate this backend.
+        """
+        family = normalize_device(0 if device is None else device)
+        if family != DEVICE.ROCM:
+            return None
+        return NotImplementedError(f"{cls.__name__}: {W4A_ROCM_UNSUPPORTED}")
+
+    @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate(**args)
         if not ok:
             return ok, err
+        rocm_error = cls._rocm_unsupported_error(args.get("device"))
+        if rocm_error is not None:
+            return False, rocm_error
         device = args.get("device")
         if not torch.cuda.is_available():
             return False, RuntimeError(
@@ -385,7 +426,7 @@ class W4AFP8Linear(PackableQuantLinear):
             from .w4a_triton import unpack_int4_to_e4m3
 
             return unpack_int4_to_e4m3(
-                self.qweight,
+                self.qweight.contiguous(),
                 torch.empty(
                     (self.in_features, self.out_features),
                     device=self.qweight.device,
@@ -417,7 +458,7 @@ class W4AFP8Linear(PackableQuantLinear):
                 x = pack_activation(rotated, "w4afp8", model_dtype=x.model_dtype)
             weight = self.fp8_weight_operand()
             result = fp8_linear_prepacked(
-                x.codes, x.scales, weight, self.scales, self.bias, torch.float32,
+                x.codes, x.scales, weight, self.scales.contiguous(), self.bias, torch.float32,
             )
             result = result.reshape(x.shape[:-1] + (self.out_features,))
             return result.to(x.model_dtype)
@@ -426,7 +467,7 @@ class W4AFP8Linear(PackableQuantLinear):
 
         x = self._apply_rotation_to_input(x)
         weight = self.fp8_weight_operand()
-        return fp8_linear(x, weight, self.scales, self.bias)
+        return fp8_linear(x, weight, self.scales.contiguous(), self.bias)
 
 
 def unpack_int4_codes(packed: torch.Tensor) -> torch.Tensor:

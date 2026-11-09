@@ -537,7 +537,17 @@ def _is_system_or_dependency_header(include_name: str) -> bool:
 
 
 def detected_cuda_wheel_include_paths() -> list[str]:
-    """Discover CUDA developer headers shipped via NVIDIA Python wheels."""
+    """Discover CUDA developer headers shipped via NVIDIA Python wheels.
+
+    NVIDIA wheel headers are for `nvcc` only. A ROCm host can still have the
+    `nvidia` namespace packages installed (for example through a
+    `torchao`/`vllm` dependency), but adding those `vector_types.h` and
+    `cuda_runtime.h` copies to a hipcc command line makes HIP and CUDA type
+    aliases (``uint1``, ``int2``, ...) collide. Never offer them on ROCm.
+    """
+
+    if IS_ROCM:
+        return []
 
     try:
         import nvidia  # type: ignore
@@ -675,10 +685,16 @@ def cuda_include_paths_with_fallback(
     *,
     required_header_names: Sequence[str] = (),
 ) -> list[str]:
-    """Append NVIDIA wheel headers when the local CUDA toolkit is absent or incomplete."""
+    """Append NVIDIA wheel headers when the local CUDA toolkit is absent or incomplete.
+
+    The fallback exists for `nvcc` builds that have no local CUDA toolkit. On
+    ROCm the only valid headers are the HIP/torch ones, so NVIDIA wheel headers
+    are never appended; mixing them breaks hipcc with conflicting CUDA/HIP
+    vector types.
+    """
 
     resolved_include_paths = _dedupe_path_strings(include_paths)
-    if not _detected_local_cuda_has_required_headers(required_header_names):
+    if not IS_ROCM and not _detected_local_cuda_has_required_headers(required_header_names):
         resolved_include_paths.extend(detected_cuda_wheel_include_paths())
     return _dedupe_path_strings(resolved_include_paths)
 
@@ -1414,6 +1430,53 @@ class TorchOpsJitExtension:
         self._op_cache = {op_name: getattr(namespace, op_name) for op_name in self.required_ops}
         return True
 
+    def _toolchain_diagnostic_lines(self) -> list[str]:
+        """Report the build tools torch will actually find.
+
+        torch's JIT build shells out to `ninja` and `cmake` through PATH. The
+        common failure is a conda env whose `ninja` lives in
+        `$CONDA_PREFIX/bin` while PATH omits it: the build dies in under a
+        second with `Ninja is required to load C++ extensions`, which does not
+        name the real cause. Surface what was found, where, and the versions.
+        """
+
+        lines: list[str] = []
+        for tool in ("ninja", "cmake"):
+            path = shutil.which(tool)
+            if path is None:
+                lines.append(f"{tool}=<not on PATH>")
+                continue
+            try:
+                proc = subprocess.run(
+                    [path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                version = (proc.stdout or proc.stderr or "").strip().splitlines()
+                first_line = version[0].strip() if version else f"exit={proc.returncode}"
+            except Exception as exc:  # pragma: no cover - host toolchain dependent
+                first_line = f"<version probe failed: {exc}>"
+            lines.append(f"{tool}={path} ({first_line})")
+
+        conda_prefix = os.getenv("CONDA_PREFIX")
+        if conda_prefix:
+            env_bin = Path(conda_prefix) / ("Scripts" if os.name == "nt" else "bin")
+            lines.append(f"CONDA_PREFIX={conda_prefix}")
+            if env_bin.is_dir() and str(env_bin) not in os.getenv("PATH", "").split(os.pathsep):
+                hint = f"{env_bin} is not on PATH"
+                if (env_bin / "ninja").exists():
+                    hint += f"; `ninja` exists at {env_bin / 'ninja'}"
+                lines.append(f"PATH_hint={hint}")
+
+        if shutil.which("ninja") is None:
+            lines.append(
+                "hint=torch JIT needs `ninja` on PATH; install it or add the "
+                "environment's bin directory (see PATH_hint) to PATH"
+            )
+        return lines
+
     def _candidate_binary_paths(self, build_root: Path) -> list[Path]:
         seen: set[Path] = set()
         candidates: list[Path] = []
@@ -1706,6 +1769,7 @@ class TorchOpsJitExtension:
                         f"TORCH_EXTENSIONS_DIR={os.getenv('TORCH_EXTENSIONS_DIR', '')}",
                         f"GPTQMODEL_TORCH_EXTENSIONS_DIR={os.getenv('GPTQMODEL_TORCH_EXTENSIONS_DIR', '')}",
                     ]
+                    diagnostic_lines.extend(self._toolchain_diagnostic_lines())
                     candidate_paths = self._candidate_binary_paths(build_root)
                     if candidate_paths:
                         diagnostic_lines.append(

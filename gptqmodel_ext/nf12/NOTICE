@@ -1,0 +1,13 @@
+NF12 / NyoomFloat12
+===================
+
+The files in this directory are derived from https://github.com/dphnAI/nf12,
+Copyright (c) 2026 AlpinDale and the nf12 contributors, licensed under the
+Apache License, Version 2.0.
+
+The NF12 format and algorithm are from "NyoomFloat12: Accelerating LLM
+Inference via Lossless 12-bit Weight Compression" by Liberman, Fang, Zhang,
+Dao, and Fu (Together AI, 2026).
+
+Modifications for GPT-QModel are Copyright (c) 2026 ModelCloud.ai and are
+licensed under the Apache License, Version 2.0.

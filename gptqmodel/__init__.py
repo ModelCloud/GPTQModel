@@ -8,6 +8,24 @@ import sys
 
 
 # isort: off
+# Must run before any submodule import: importing `.utils` initialises the CUDA
+# caching allocator, and Torch only reads the allocator configuration once. A
+# late assignment is silently ignored, which leaves large quantization runs
+# fragmenting a device until a single multi-GiB request can no longer be served.
+from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
+
+_installed_alloc_conf = apply_default_alloc_conf()
+
+# Still before any other Torch use: HIP reports no last-level cache, so on
+# RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
+# Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
+# from L2 then measures a warm cache. This back-ports the Python half of
+# https://github.com/pytorch/pytorch/pull/203965 and has to run before a device
+# property is read or an Inductor benchmarker caches its size hint.
+from .rocm_llc import apply as _apply_rocm_llc  # noqa: E402
+
+_rocm_llc_status = _apply_rocm_llc()
+
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
@@ -18,6 +36,15 @@ from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 
 log = setup_logger()
+
+if any(result.startswith("applied") for result in _rocm_llc_status.values()):
+    log.debug("rocm_llc: %s", _rocm_llc_status)
+
+if _installed_alloc_conf is not None:
+    log.info(
+        "ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.",
+        _installed_alloc_conf,
+    )
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()
@@ -217,6 +244,18 @@ def _default_cpu_workers() -> int:
     return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
 
 
+def _default_cuda_workers() -> int:
+    """Return the per-CUDA worker count, respecting an explicit env override."""
+
+    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
+    if env_workers is not None:
+        try:
+            return max(1, int(env_workers))
+        except ValueError:
+            pass
+    return 4
+
+
 def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
@@ -227,7 +266,7 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": 4,
+            "cuda:per": _default_cuda_workers(),
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
@@ -327,7 +366,15 @@ import torch
 from . import extension
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
-from .models import GPTQModel, get_best_device
+from .models import (
+    FusableConfig,
+    FusableProfile,
+    GPTQModel,
+    LlamaFusableConfig,
+    ModulePlan,
+    ModuleSpec,
+    get_best_device,
+)
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQConfig,
@@ -347,6 +394,7 @@ from .quantization import (
     TelemetryConfig,
     WeightOnlyConfig,
 )
+from .reshard import ShardConfig, ShardLayout, reshard
 from .utils import BACKEND, PROFILE
 from .utils.p2p import P2PConfig
 from .version import __version__

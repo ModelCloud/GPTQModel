@@ -182,6 +182,12 @@ def checkpoint_session(config, model):
                 signal.signal(sig, handler)
 
 
+# Architectures the checkpoint adapter has been validated on. The adapter walks
+# ``named_modules()`` and stores per-module state, so the gate is about proven
+# support rather than a structural requirement - see the PR that added qwen2.
+CHECKPOINT_MODEL_TYPES = frozenset({"llama", "qwen2", "qwen3_moe"})
+
+
 def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None):
     config = model.quantize_config
     if (
@@ -200,9 +206,12 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
             "checkpoint requires sequential quantization without dynamic exclusions, "
             "GPTAQ/FOEM, or embedding/lm_head quantization"
         )
-    if model.model.config.model_type not in {"llama", "qwen3_moe"}:
+    model_type = model.model.config.model_type
+    if model_type not in CHECKPOINT_MODEL_TYPES:
+        supported = ", ".join(sorted(CHECKPOINT_MODEL_TYPES))
         raise NotImplementedError(
-            "checkpoint state adapters currently support llama and qwen3_moe"
+            f"checkpoint state adapters currently support {supported}; "
+            f"got `{model_type}`"
         )
     if not config.offload_to_disk:
         raise ValueError("checkpoint currently requires offload_to_disk=True")

@@ -19,18 +19,18 @@ def _reference_qscales(scales: torch.Tensor, in_features: int, group_size: int, 
 
 
 def _reference_gemv_awq_pack(module, linear, scales, zeros, qscales):
-    """The hand-written per-column pack loop the vectorized packer replaces."""
+    """Scalar FP32 quantization and the original per-column layout."""
 
-    scale_zeros = zeros * scales
+    scale_zeros = zeros.float() * scales.float()
     pack_num = 32 // module.bits
 
     intweight = []
     for idx in range(module.in_features):
         intweight.append(
             torch.round(
-                (linear.weight.data[:, idx] + scale_zeros[:, idx // module.group_size])
-                / qscales[:, idx // module.group_size]
-            ).to(torch.int)[:, None]
+                (linear.weight.data[:, idx].float() + scale_zeros[:, idx // module.group_size])
+                / qscales[:, idx // module.group_size].float()
+            ).clamp(0, (1 << module.bits) - 1).to(torch.int)[:, None]
         )
     intweight = torch.cat(intweight, dim=1).to(dtype=torch.int32)
     qweight = torch.zeros(
@@ -59,7 +59,7 @@ def _reference_gemv_awq_pack(module, linear, scales, zeros, qscales):
     return qweight, qzeros
 
 
-def test_gemv_awq_pack_is_bit_exact_with_column_loop():
+def test_gemv_awq_pack_matches_scalar_fp32_reference():
     torch.manual_seed(0)
 
     # (out_features, in_features, group_size) with out_features % 64 == 0 to

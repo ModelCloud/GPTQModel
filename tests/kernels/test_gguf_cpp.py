@@ -7,8 +7,15 @@ import pytest
 import torch
 
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel, _get_ggml_bridge
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear, _normalize_gguf_bits
+from gptqmodel.nn_modules.qlinear.gguf_cpp import (
+    _GGML_CPU_MATMUL_UNSUPPORTED,
+    _GGML_CUDA_MATMUL_UNSUPPORTED,
+    GGUFCppKernel,
+    GGUFCudaKernel,
+    _get_ggml_bridge,
+)
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
@@ -91,7 +98,11 @@ def test_gguf_cpp_kernel_forward_matches_torch_kernel(bits: str):
     assert torch.allclose(cpp_out, torch_out, rtol=3e-2, atol=3e-2)
 
 
-@pytest.mark.parametrize("bits", ["q4_k_s", "q4_k_m", "q5_k_m", "q6_k"])
+@pytest.mark.parametrize(
+    "bits",
+    # 1-bit sign-only and 2-bit/K/IQ formats route through ggml CUDA.
+    ["q1_0", "q2_k_s", "iq1_s", "iq2_xs", "q4_k_s", "q4_k_m", "q5_k_m", "q6_k"],
+)
 def test_gguf_cuda_kernel_forward_matches_torch_kernel(bits: str):
     GGUFCudaKernel.cached_validate_once.cache_clear()
     ok, err = GGUFCudaKernel.cached_validate_once()
@@ -112,6 +123,121 @@ def test_gguf_cuda_kernel_forward_matches_torch_kernel(bits: str):
     assert cuda_out.device.type == "cuda"
     assert cuda_out.shape == torch_out.shape
     assert torch.allclose(cuda_out, torch_out, rtol=8e-2, atol=8e-2)
+
+
+@pytest.mark.parametrize("bits", ["tq1_0", "tq2_0"])
+def test_gguf_cpp_kernel_keeps_ternary_support(bits: str):
+    """The CUDA-only reject list must not disable a working CPU path."""
+
+    GGUFCppKernel.cached_validate_once.cache_clear()
+    ok, err = GGUFCppKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python unavailable: {err}")
+
+    assert bits not in _GGML_CPU_MATMUL_UNSUPPORTED
+    assert _normalize_gguf_bits(bits)[1] in _get_ggml_bridge().ggml_qtypes
+
+    torch_kernel, cpp_kernel, _ = _build_quant_modules(bits)
+    x = torch.randn(9, 64, dtype=torch.float32)
+
+    with torch.inference_mode():
+        torch_out = torch_kernel(x)
+        cpp_out = cpp_kernel(x)
+
+    assert torch.allclose(cpp_out, torch_out, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.parametrize("bits", ["tq1_0", "tq2_0", "q8_1", "q8_k"])
+def test_gguf_cuda_kernel_rejects_qtypes_without_gpu_kernels(bits: str):
+    """These qtypes make ggml-cuda abort the whole process, not just fail.
+
+    Upstream has no GPU convert/vec_dot kernel for TQ1_0/TQ2_0 and no F32
+    vec_dot for the Q8 auxiliary KV types, so `GGML_ASSERT(convert_func !=
+    nullptr)` kills the interpreter. The Python guard must reject them before
+    any graph is built.
+    """
+
+    GGUFCudaKernel.cached_validate_once.cache_clear()
+    ok, err = GGUFCudaKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
+
+    # The rejection must happen at construction so AUTO can retry the next
+    # candidate; `create_quant_layer` only falls through on NotImplementedError
+    # from construction, never from forward().
+    with pytest.raises(NotImplementedError, match="does not support"):
+        _build_quant_modules(bits, include_cuda=True)
+
+
+@pytest.mark.parametrize("bits", ["tq1_0", "tq2_0"])
+def test_gguf_auto_selection_falls_back_to_torch_for_ternary(bits: str):
+    """AUTO must land on GGUF_TORCH when no CUDA-capable kernel accepts the qtype.
+
+    `select_quant_linear` validates by `bits` only, so `GGUFCudaKernel` remains a
+    *candidate* for TQ1_0/TQ2_0. What matters is the outcome of
+    `create_quant_layer`, which constructs candidates in order and retries the
+    next one only on a NotImplementedError raised at construction. A guard that
+    fires in `forward()` is too late: the layer is already built and the failure
+    surfaces during inference.
+    """
+
+    GGUFCudaKernel.cached_validate_once.cache_clear()
+    GGUFTritonKernel.cached_validate_once.cache_clear()
+    ok, err = GGUFCudaKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
+
+    candidates = select_quant_linear(
+        bits=bits,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+    assert GGUFTorchLinear in candidates
+
+    # Mirror `create_quant_layer`: build candidates in priority order and skip
+    # the ones that raise NotImplementedError from their constructor.
+    selected = None
+    selected_kernel = None
+    for candidate in candidates:
+        try:
+            kernel = candidate(
+                bits=bits,
+                group_size=-1,
+                sym=True,
+                desc_act=False,
+                in_features=64,
+                out_features=48,
+                bias=True,
+                register_buffers=True,
+            )
+        except NotImplementedError:
+            continue
+        selected, selected_kernel = candidate, kernel
+        break
+
+    assert selected is GGUFTorchLinear
+    assert selected_kernel is not None
+    # Documents why neither optimized CUDA kernel may be chosen for this qtype.
+    assert selected_kernel.gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED
+
+    torch_kernel, _, _ = _build_quant_modules(bits)
+    selected_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
+    selected_kernel = selected_kernel.to(device="cuda").eval()
+    x = torch.randn(9, 64, dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        output = selected_kernel(x)
+
+    assert output.shape == (9, 48)
+    assert output.device.type == "cuda"
+    assert output.dtype == x.dtype
 
 
 def test_gguf_cuda_kernel_reuses_cached_plan():

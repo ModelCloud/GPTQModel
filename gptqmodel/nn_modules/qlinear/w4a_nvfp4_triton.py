@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+from ...utils.rocm import IS_ROCM
 from .w4a_triton import _launch_device, _to_e4m3_rn
 
 
@@ -235,6 +236,12 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     """Produce packed E2M1 input and all per-group swizzled E4M3 scales."""
     from ...quantization.activation_floatx import normalize_nvfp4_recipe
 
+    if IS_ROCM:
+        raise NotImplementedError(
+            "NVFP4 activation packing is CUDA-only: every block scale is rounded "
+            "through the PTX instruction `cvt.rn.satfinite.e4m3x2.f32`, which hipcc "
+            "cannot assemble. Use the portable Torch GPTQ kernel on ROCm."
+        )
     recipe = normalize_nvfp4_recipe(recipe)
     if x.ndim != 2 or x.shape[1] % 128 or x.device.type != "cuda":
         raise ValueError("NVFP4 packing expects CUDA [tokens, K] with K divisible by 128.")
@@ -246,6 +253,8 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     if rows == 0:
         return (torch.empty((0, width // 2), device=x.device, dtype=torch.float4_e2m1fn_x2),
                 torch.empty((width // 128, 0), device=x.device, dtype=torch.float8_e4m3fn))
+    # All three pack kernels address X as row * width + column.
+    x = x.contiguous()
     padded_rows = triton.cdiv(rows, 128) * 128
     packed = torch.empty((rows, width // 2), device=x.device, dtype=torch.uint8)
     scales = torch.empty((width // 128, padded_rows * 8), device=x.device, dtype=torch.float8_e4m3fn)
@@ -310,6 +319,9 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
         raise ValueError("Malformed NVFP4 block scales.")
     output = torch.empty((rows, width), device=codes.device, dtype=output_dtype)
     if rows:
+        # The decoder addresses packed codes and swizzled scales as dense arrays.
+        codes = codes.contiguous()
+        scales = scales.contiguous()
         with _launch_device(codes.device):
             _decode_nvfp4[(rows, width // 128)](
                 codes.view(torch.uint8), scales, global_scale, output, rows, width, padded_rows, num_warps=4,

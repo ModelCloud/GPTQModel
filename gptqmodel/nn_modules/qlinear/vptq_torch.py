@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -30,6 +29,7 @@ from ...utils.vptq import (
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
+from ._numerics import linear_fp32_reduce
 
 
 log = setup_logger()
@@ -466,7 +466,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
         selected = selected.view(
             self.group_num, self.num_indices, self.group_size, self.vector_len
         ).permute(0, 1, 3, 2)
-        qweight = selected.reshape(self.group_num, -1, self.group_size)
+        qweight = selected.float().reshape(self.group_num, -1, self.group_size)
         qweight = qweight.permute(1, 0, 2).reshape(-1, self.group_num * self.group_size)
 
         if self.enable_residual:
@@ -484,7 +484,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
             selected_res = selected_res.view(
                 self.group_num, self.num_indices, self.group_size, self.vector_len
             ).permute(0, 1, 3, 2)
-            res_qweight = selected_res.reshape(self.group_num, -1, self.group_size)
+            res_qweight = selected_res.float().reshape(self.group_num, -1, self.group_size)
             qweight = qweight + res_qweight.permute(1, 0, 2).reshape(
                 -1, self.group_num * self.group_size
             )
@@ -517,13 +517,13 @@ class VPTQLinear(WeightOnlyQuantLinear):
 
         if self.enable_norm:
             if self.norm_dim == 0:
-                qweight = qweight * self.weight_scale + self.weight_bias
+                qweight = qweight * self.weight_scale.float() + self.weight_bias.float()
             else:
-                qweight = qweight * self.weight_scale.unsqueeze(1) + self.weight_bias.unsqueeze(1)
+                qweight = qweight * self.weight_scale.float().unsqueeze(1) + self.weight_bias.float().unsqueeze(1)
 
         if qweight.device != device:
             qweight = qweight.to(device)
-        return qweight
+        return qweight.to(self.centroids.weight.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = getattr(self, "bias", None)
@@ -536,7 +536,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
         weight = self.dequantize().to(dtype=x.dtype, device=x.device)
         if bias is not None and bias.dtype != x.dtype:
             bias = bias.to(dtype=x.dtype)
-        out = F.linear(x, weight, bias)
+        out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
         return out

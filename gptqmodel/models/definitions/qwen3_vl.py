@@ -3,16 +3,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Qwen3_VLQModel(BaseQwen3VLGPTQ):
+    fusable = FusableConfig("qwen3_vl").merge(LlamaFusableConfig())
+
     pass
 
 
 class Qwen3_VL_MoeQModel(BaseQwen3VLGPTQ):
     """Qwen3-VL MoE decoder with defused per-expert linear projections."""
+    fusable = FusableConfig("qwen3_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
 
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"

@@ -64,7 +64,10 @@ _MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
 
 
 class MarlinLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+    # GPTQ sub-kernel of the shared Marlin backend. ``BACKEND.MARLIN`` plus the
+    # checkpoint method/format selects this class; no separate GPTQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.GPTQ_V2: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -122,14 +125,14 @@ class MarlinLinear(GPTQQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
-        selected_backend = kwargs.pop("backend", BACKEND.GPTQ_MARLIN)
+        selected_backend = kwargs.pop("backend", BACKEND.MARLIN)
         # Padding adds work to every forward, so automatic selection stays conservative.
         if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
             out_features, in_features
         ):
             raise NotImplementedError(
                 "Automatic Marlin selection keeps tile-misaligned shapes on "
-                "the next compatible backend; request GPTQ_MARLIN explicitly "
+                "the next compatible backend; request BACKEND.MARLIN explicitly "
                 "to enable runtime tile padding."
             )
 

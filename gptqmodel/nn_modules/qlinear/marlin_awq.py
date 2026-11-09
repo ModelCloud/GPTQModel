@@ -46,7 +46,10 @@ _AWQ_MARLIN_MIN_CAPABILITY = (8, 0)
 
 
 class AwqMarlinLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_MARLIN]
+    # AWQ sub-kernel of the shared Marlin backend. ``BACKEND.MARLIN`` plus the
+    # checkpoint method/format selects this class; no separate AWQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -92,14 +95,14 @@ class AwqMarlinLinear(AWQuantLinear):
         self.max_par = 8  # partitioning for large inputs
         self.compute_dtype = kwargs.get("dtype") or torch.float16
 
-        selected_backend = kwargs.pop("backend", BACKEND.AWQ_MARLIN)
+        selected_backend = kwargs.pop("backend", BACKEND.MARLIN)
         # Keep runtime padding opt-in until tail-shape performance is measured.
         if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
             out_features, in_features
         ):
             raise NotImplementedError(
                 "Automatic AWQ Marlin selection keeps tile-misaligned shapes "
-                "on the next compatible backend; request AWQ_MARLIN explicitly "
+                "on the next compatible backend; request BACKEND.MARLIN explicitly "
                 "to enable runtime tile padding."
             )
 

@@ -8,6 +8,8 @@ from . import LlamaQModel
 
 
 class DreamQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     loader = AutoModel
     # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
     support_batch_quantize = False

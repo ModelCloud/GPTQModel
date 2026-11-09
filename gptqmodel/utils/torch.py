@@ -38,6 +38,26 @@ HAS_NPU = False
 CPU = torch.device("cpu")
 META = torch.device("meta")
 
+
+def as_torch_device(device_like) -> torch.device:
+    """Resolve a device-like value without assigning an implicit ordinal.
+
+    GPT-QModel's ``DEVICE`` enum names a kernel support family, and its
+    ``DEVICE.ROCM`` member intentionally has the value ``"rocm"`` even though
+    PyTorch exposes ROCm through the ``cuda`` namespace.  ``torch.device``
+    therefore rejects it. Resolve enums through their runtime ``type`` while
+    keeping families indexless, just like ``torch.device("cuda")``. Calling
+    ``to_torch_device()`` here would pin family selectors to device 0 instead
+    of honoring the caller's current CUDA/XPU/NPU device.
+    """
+    if isinstance(device_like, torch.device):
+        return device_like
+    resolver = getattr(device_like, "to_torch_device", None)
+    if callable(resolver):
+        return torch.device(device_like.type)
+    return torch.device(device_like)
+
+
 class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
     GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization
@@ -484,7 +504,19 @@ def torch_empty_cache_any(
 def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
     return torch_empty_cache_any(device=device, gc=gc, sync=sync)
 
+def resolve_torch_device(device: Union[torch.device, str, int, None] = None):
+    """Resolve ``auto`` or a concrete device without assuming CUDA exists."""
+    if device is None or (isinstance(device, str) and device.lower() == "auto"):
+        return auto_select_torch_device()
+    return _normalize_device(device)
+
+
 def auto_select_torch_device(index: int = 0):
+    """Return the fastest available Torch accelerator, with CUDA precedence.
+
+    The ordering preserves existing multi-GPU defaults while allowing the same
+    callers to run on Apple MPS and CPU-only machines.
+    """
     assert index >= 0, f"device index should be a positive integer: actual = `{index}`"
 
     if HAS_CUDA:

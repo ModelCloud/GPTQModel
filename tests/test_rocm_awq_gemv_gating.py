@@ -57,9 +57,9 @@ def test_native_awq_gemv_validate_rejects_rocm_placement():
         assert isinstance(error, NotImplementedError), cls.__name__
 
 
-def test_native_awq_gemv_validate_still_accepts_cuda():
-    # The ROCm restriction must not change the CUDA contract, including packing
-    # on a ROCm host (packing is pure Torch and is used for conversion).
+def test_native_awq_gemv_validate_still_accepts_cuda(monkeypatch):
+    # Test the NVIDIA contract even when this suite runs on a HIP host.
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", False)
     for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
         ok, error = cls.validate(
             bits=4,
@@ -117,3 +117,35 @@ def test_loader_cuda_host_keeps_native_awq_gemv(monkeypatch):
 
     for fmt in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
         loader_module._reject_native_awq_gemv_on_rocm(METHOD.AWQ, fmt)
+
+
+def test_loader_allows_explicit_triton_gemv_on_rocm(monkeypatch):
+    # The portable Triton GEMV reads the same GEMV packing without the CUDA
+    # extension, so an explicit selection of it must not be refused.
+    import gptqmodel.models.loader as loader_module
+    from gptqmodel.utils.backend import BACKEND
+
+    monkeypatch.setattr(loader_module, "IS_ROCM", True)
+    loader_module._reject_native_awq_gemv_on_rocm(
+        __import__("gptqmodel.quantization", fromlist=["METHOD"]).METHOD.AWQ,
+        FORMAT.GEMV,
+        BACKEND.AWQ_GEMV_TRITON,
+    )
+    # Any other backend, including AUTO (None), still hits the actionable error.
+    import pytest as _pytest
+    with _pytest.raises(NotImplementedError):
+        loader_module._reject_native_awq_gemv_on_rocm(
+            __import__("gptqmodel.quantization", fromlist=["METHOD"]).METHOD.AWQ,
+            FORMAT.GEMV,
+            None,
+        )
+
+
+def test_triton_gemv_declares_rocm_and_native_stays_cuda_only():
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVTritonLinear
+
+    assert DEVICE.ROCM in AwqGEMVTritonLinear.SUPPORTS_DEVICES
+    # Priority 0 is the documented "supported but never AUTO-selected" marker.
+    assert AwqGEMVTritonLinear.SUPPORTS_FORMATS[FORMAT.GEMV] == 0
+    for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
+        assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES, cls.__name__

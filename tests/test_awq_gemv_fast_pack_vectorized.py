@@ -66,16 +66,16 @@ def test_pack_intweight_matches_numpy_reference():
 
 
 def _reference_gemv_fast_pack(module, linear, scales, zeros, qscales):
-    """The pre-vectorization per-column intweight loop plus numpy pack."""
+    """Scalar FP32 quantization followed by the original NumPy layout."""
 
-    scale_zeros = zeros * scales
+    scale_zeros = zeros.float() * scales.float()
     intweight = []
     for idx in range(module.in_features):
         intweight.append(
             torch.round(
-                (linear.weight.data[:, idx] + scale_zeros[:, idx // module.group_size])
-                / qscales[:, idx // module.group_size]
-            ).to(torch.int)[:, None]
+                (linear.weight.data[:, idx].float() + scale_zeros[:, idx // module.group_size])
+                / qscales[:, idx // module.group_size].float()
+            ).clamp(0, (1 << module.bits) - 1).to(torch.int)[:, None]
         )
     intweight = torch.cat(intweight, dim=1).to(dtype=torch.int32)
     qweight = _reference_pack_intweight(intweight.contiguous(), interleave=4, kstride=64)
@@ -88,7 +88,7 @@ def _reference_gemv_fast_pack(module, linear, scales, zeros, qscales):
     return qweight, qzeros.transpose(1, 0).contiguous()
 
 
-def test_gemv_fast_pack_is_bit_exact_with_column_loop():
+def test_gemv_fast_pack_matches_scalar_fp32_reference():
     torch.manual_seed(0)
 
     for out_features, in_features, group_size in (

@@ -19,12 +19,16 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
+from ...utils.arch import gemm_fused_max_out_features as _arch_gemm_max_out_features
+from ...utils.arch import is_ada as _arch_is_ada
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._numerics import _wants_fp32_reduce, autocast_active, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -57,6 +61,21 @@ log = setup_logger()
 def _rocm_arch_name(device: torch.device) -> str:
     """Normalized ROCm architecture (``gfx950``) or ``""`` when unavailable."""
     return rocm_arch(device) or ""
+
+
+def _fused_arch_key(device: torch.device) -> str:
+    """Architecture token for the fused-kernel tables (``gfx950``/``sm_89``).
+
+    The shared tables are keyed by the :func:`gptqmodel.utils.arch.tuning_family`
+    vocabulary, so CUDA devices must be probed through the compute capability
+    rather than ``gcnArchName`` (which is empty off ROCm).  ROCm behavior is
+    unchanged: the ``gfx*`` string is returned when present.
+    """
+
+    arch = _rocm_arch_name(device)
+    if arch:
+        return arch
+    return _arch_cuda_arch(device) or ""
 
 
 # One-shot diagnostics for fallbacks: the forward path is hot, so each reason is
@@ -357,11 +376,12 @@ class TorchLinear(PackableQuantLinear):
         if self._can_use_rocm_gemv(x):
             from ..triton_utils.gptq_gemv import gptq_gemv
 
+            out_dtype = self._fused_bias_out_dtype(x)
             out = gptq_gemv(
-                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
-            ).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
+                x, self.qweight, self.scales, self.qzeros, self.g_idx,
+                out_dtype=out_dtype, bits=self.bits,
+            )
+            out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -369,11 +389,12 @@ class TorchLinear(PackableQuantLinear):
         if self._can_use_rocm_gemm(x):
             from ..triton_utils.gptq_gemm import gptq_gemm
 
+            out_dtype = self._fused_bias_out_dtype(x)
             out = gptq_gemm(
-                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
-            ).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
+                x, self.qweight, self.scales, self.qzeros, self.g_idx,
+                out_dtype=out_dtype, bits=self.bits,
+            )
+            out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -385,18 +406,44 @@ class TorchLinear(PackableQuantLinear):
             # caller tensor during multi-device kernel validation; matmul still
             # needs both operands on the same device and dtype.
             weights = weights.to(device=x.device, dtype=x.dtype)
-        out = torch.matmul(x, weights).reshape(out_shape)
+        bias = self.bias
+        if bias is not None and (bias.device != x.device or bias.dtype != x.dtype):
+            bias = bias.to(device=x.device, dtype=x.dtype)
+        out = matmul_fp32_reduce(x, weights, bias=bias).reshape(out_shape)
         del weights
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != out.device or bias.dtype != out.dtype:
-                bias = bias.to(device=out.device, dtype=out.dtype)
-            out.add_(bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         return out
+
+    def _fused_bias_out_dtype(self, x: torch.Tensor):
+        """Request a wide fused-kernel output when a bias must be added first.
+
+        ``gptq_gemv``/``gptq_gemm`` store into the output tensor's dtype, so a
+        bias that cancels a large partial sum has to be applied to an FP32
+        output: adding it after the FP16/BF16 store rounds (and can overflow)
+        the partial sum first.  Autocast narrows the operands and lets the
+        standalone addition promote instead, so it keeps that expression.
+        """
+        if self.bias is None or x.dtype not in (torch.float16, torch.bfloat16):
+            return None
+        if autocast_active(x.device.type):
+            return None
+        return torch.float32
+
+    def _apply_fused_bias(self, out: torch.Tensor, x: torch.Tensor, *, wide: bool) -> torch.Tensor:
+        """Add the bias to a fused-kernel output, keeping a wide partial sum."""
+        bias = self.bias
+        if bias is None:
+            return out
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        if not wide:
+            # Preserve the previous in-place `out.add_(bias)` dtype even when
+            # the stored bias has a wider dtype than the activations.
+            return (out + bias).to(out.dtype)
+        return (out + bias.float()).to(x.dtype)
 
     def _can_use_rocm_gemv(self, x: torch.Tensor) -> bool:
         return (
@@ -413,7 +460,7 @@ class TorchLinear(PackableQuantLinear):
         """
         if _ROCM_GEMM_GATE_LIMITS is None:
             return _ROCM_GEMM_SMALL_M_MAX, _ROCM_GEMM_MAX_IN_FEATURES
-        return _ROCM_GEMM_GATE_LIMITS(_rocm_arch_name(x.device))
+        return _ROCM_GEMM_GATE_LIMITS(_fused_arch_key(x.device))
 
     def _rocm_gemm_dtype_supported(self, x: torch.Tensor) -> bool:
         """Return whether the fused GEMM is a measured win for this activation dtype.
@@ -423,7 +470,19 @@ class TorchLinear(PackableQuantLinear):
         the split path there.  CDNA keeps both dtypes (its historical values are
         unchanged).  Unregistered architectures have an empty set.
         """
-        return str(x.dtype).removeprefix("torch.") in _arch_gemm_fused_dtypes(_rocm_arch_name(x.device))
+        return str(x.dtype).removeprefix("torch.") in _arch_gemm_fused_dtypes(_fused_arch_key(x.device))
+
+    def _rocm_gemm_out_features_supported(self, x: torch.Tensor) -> bool:
+        """Return whether this output width is inside the measured fused win.
+
+        ``cdna4``/``rdna4`` measured uniform wins out to their widest tested
+        projection, so their cap is ``0`` (disabled) and this is a no-op.  Ada's
+        fused tile only beats the split path while the grid stays narrow, so the
+        cap is what excludes the wide-N regressions.
+        """
+
+        cap = _arch_gemm_max_out_features(_fused_arch_key(x.device))
+        return cap <= 0 or self.out_features <= cap
 
     def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
         small_m_max, max_in_features = self._rocm_gemm_gate(x)
@@ -432,14 +491,21 @@ class TorchLinear(PackableQuantLinear):
             and 2 <= x.shape[0] <= small_m_max
             and x.shape[1] == self.in_features
             and self.in_features <= max_in_features
+            and self._rocm_gemm_out_features_supported(x)
             and self._rocm_gemm_dtype_supported(x)
             and self._can_use_rocm_fused(x)
         )
 
     def _can_use_rocm_fused(self, x: torch.Tensor) -> bool:
-        """Preconditions shared by the fused ROCm GPTQ GEMV / small-M GEMM kernels."""
+        """Preconditions shared by the fused GPTQ GEMV / small-M GEMM kernels.
+
+        Enabled on ROCm for the registered ``gfx*`` families and on Ada
+        (RTX 4090 / SM 8.9), whose launch entries and gates are measured in the
+        `gptq_gemv`/`gptq_gemm` tables.  Every other CUDA family keeps the
+        portable dequantize + matmul path.
+        """
         return (
-            IS_ROCM
+            (IS_ROCM or _arch_is_ada(x.device))
             and self._triton_dequant_enabled
             and self._can_use_triton_dequant()
             and self.bits in (2, 4, 8)
@@ -466,6 +532,10 @@ class TorchLinear(PackableQuantLinear):
         behaviour and silently use dequantize + matmul.
         """
         if not IS_ROCM:
+            if _arch_is_ada(x.device):
+                # The Ada entry lives in the same tables; the shared precondition
+                # list above already covers it.
+                return True
             _log_fallback_once("rocm-not-rocm", "ROCm fused GPTQ kernel skipped: not a ROCm host.")
             return False
         arch = _rocm_arch_name(x.device)
@@ -493,6 +563,13 @@ class TorchLinear(PackableQuantLinear):
         widths = [0 for _ in range(self._stream_double_buffers)]
 
         compute_stream = torch.cuda.current_stream(device=device)
+        wide_reduce = _wants_fp32_reduce(x)
+        # Autocast narrows a fused `addmm` bias to the autocast dtype, so that
+        # context keeps the post-loop addition, where type promotion applies.
+        fuse_bias = not wide_reduce and not autocast_active(device.type)
+        bias = self.bias
+        if bias is not None and (bias.device != device or bias.dtype != x.dtype):
+            bias = bias.to(device=device, dtype=x.dtype)
         stream_dequant = self._stream_get_dequant_stream(device)
         zeros = self._stream_decode_qzeros()
         g_idx = self._stream_g_idx_long()
@@ -525,15 +602,17 @@ class TorchLinear(PackableQuantLinear):
             start = tile_idx * tile
 
             out_slice = out.narrow(1, start, width)
-            out_slice.zero_()
-            torch.addmm(
-                out_slice,
-                x,
-                buffers[buffer_idx].narrow(1, 0, width),
-                beta=0.0,
-                alpha=1.0,
-                out=out_slice,
-            )
+            weight_tile = buffers[buffer_idx].narrow(1, 0, width)
+            tile_bias = bias.narrow(0, start, width) if bias is not None else None
+            if wide_reduce:
+                out_slice.copy_(matmul_fp32_reduce(x, weight_tile, bias=tile_bias))
+            elif fuse_bias and tile_bias is not None:
+                # Fuse the bias into the GEMM epilogue; rounding `out` before
+                # `out.add_(bias)` overflows/cancels in the activation dtype.
+                torch.addmm(tile_bias, x, weight_tile, beta=1.0, alpha=1.0, out=out_slice)
+            else:
+                out_slice.zero_()
+                torch.addmm(out_slice, x, weight_tile, beta=0.0, alpha=1.0, out=out_slice)
             consumed[buffer_idx] = torch.cuda.Event()
             consumed[buffer_idx].record(compute_stream)
 
@@ -545,8 +624,8 @@ class TorchLinear(PackableQuantLinear):
         buffers.clear()
         out = out.reshape(out_shape)
 
-        if self.bias is not None:
-            out.add_(self.bias)
+        if bias is not None and not wide_reduce and not fuse_bias:
+            out.add_(bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -677,6 +756,10 @@ class TorchLinear(PackableQuantLinear):
             return False
         # Torch kernels with num_itr > 1 already tiled differently.
         if self.g_idx.shape[0] // x.shape[-1] != 1:
+            return False
+        if torch.is_grad_enabled() and (
+            x.requires_grad or self.scales.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        ):
             return False
         return True
 

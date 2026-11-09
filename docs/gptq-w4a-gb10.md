@@ -52,6 +52,23 @@ propagated through calibration replay, `HookedLinear` Hessian capture, runtime
 carriers, and fused packing so a saved checkpoint cannot silently switch
 scale selection.
 
+## Platform support
+
+Both policies are CUDA-only. The FP8 GEMM is a Triton Gluon `mma_v2` kernel
+whose operands carry `NVMMADistributedLayout`, so it lowers to
+`ttg.nvidia_mma`; the INT4-to-E4M3 packers additionally round through PTX
+(`cvt.rn.satfinite.e4m3x2.f32`). HIP supports neither: on gfx1201 Triton
+aborts with `Unsupported DotOp found when converting TritonGPU to LLVM`, and
+the unpacker that does compile returns wrong codes. `torch.cuda.is_available()`
+is true on ROCm and `get_device_capability` reports a synthetic SM version, so
+neither can gate this backend. The kernels are declared NVIDIA-only through
+`SUPPORTS_DEVICES`, and validation resolves the requested target with
+`normalize_device()`, so `W4AFP8Linear` and `W4ANVFP4Linear` reject a ROCm
+target even when the caller leaves the device at `AUTO`. A saved activation
+policy pins the W4A kernel, so the checkpoint is refused rather than silently
+reloaded with another kernel; re-export the weights without a W4A activation
+policy to load them with `backend=BACKEND.TORCH`.
+
 ## Activation stream boundaries
 
 Within a selected Llama decoder layer, `W4AActivation` carries codes, scales,
@@ -170,6 +187,44 @@ Hessian collector consumes ordinary tensors; inference passes codes and scales
 directly. Replay retains decoded GEMM operands in FP32 to avoid an extra
 FP16/BF16 round trip before the GEMM. Projection results return to the model
 dtype, matching inference.
+
+### Empty NVFP4 replay operands
+
+Runtime `pack_activation` gives a zero-row NVFP4 operand an FP32 global scale
+of `1` because no activation maximum exists. The two calibration replay
+rounders now use the same value when they need a dynamic scale. The default
+rounder returns an empty tensor with the original logical shape; replay GEMM
+operands retain FP32 dtype, as they do for nonempty operands.
+
+```mermaid
+flowchart TD
+    A["NVFP4 replay: round_w4a_activation or round_w4a_replay_operand"] --> B{"global_scale supplied?"}
+    B -- "Yes" --> C["Use supplied scale"]
+    B -- "No" --> D["_dynamic_nvfp4_global_scale"]
+    D --> E{"x.numel() == 0?"}
+    E -- "Yes" --> F["FP32 scalar 1 on x.device"]
+    E -- "No" --> G["amax then nvfp4_global_scale"]
+    C --> H{"Nonempty input and invalid scale?"}
+    F --> H
+    G --> H
+    H -- "Yes" --> I["nvfp4_block_qdq raises ValueError"]
+    H -- "No" --> J["Default rounder calls nvfp4_block_qdq"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class I failure
+```
+
+| Case | Before | Current behavior |
+| --- | --- | --- |
+| Empty operand with dynamic scale | `w4a_llama_replay.py:35` and `w4a_llama_replay.py:61` called `amax()` and raised | Both rounders receive the FP32 scalar `1`, matching `pack_activation` in `w4a_activation.py:138` |
+| Nonempty operand with dynamic scale | Reduce the input maximum, then derive the recipe scale | Same scale computation through `_dynamic_nvfp4_global_scale` |
+
+`tests/kernels/test_w4a_nvfp4_gb10.py` checks zero-row 2D and 3D operands
+for FP16 and BF16 on NVIDIA GB10. It compares replay shape and dtype with
+runtime transport and checks that the runtime global scale is `1`. This is a
+zero-row validity fix; a before/after timing comparison has no successful
+prior replay forward to measure.
+
+The empty replay flow was introduced by [PR #3656](https://github.com/ModelCloud/GPTQModel/pull/3656).
 
 ## Ordinary quantization compatibility
 

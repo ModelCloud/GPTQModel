@@ -81,6 +81,9 @@ def _gguf_q2_0_kernel():
     )
 
 
+_Q5_K_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_q5_k_kernel():
     import mlx.core as mx
@@ -90,27 +93,53 @@ def _gguf_q5_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            threadgroup float minima[8];
-            threadgroup float scales[8];
-            threadgroup uint scale_codes[8];
-            threadgroup uint min_codes[8];
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
-            float scale = 0.0f;
-            float minimum = 0.0f;
-            if (lane < 8) {
-                float low = float(weights[block * 256 + lane * 32]);
-                float high = low;
-                for (uint k = 1; k < 32; ++k) {
-                    float value = float(
-                        weights[block * 256 + lane * 32 + k]);
-                    low = metal::min(low, value);
-                    high = metal::max(high, value);
-                }
-                minimum = metal::max(-low, 0.0f);
-                scale = (high + minimum) / 31.0f;
-                minima[lane] = minimum;
-                scales[lane] = scale;
+            threadgroup float values[uint(WARPS) * 256u];
+            threadgroup float minima[uint(WARPS) * 8u];
+            threadgroup float scales[uint(WARPS) * 8u];
+            threadgroup uint scale_codes[uint(WARPS) * 8u];
+            threadgroup uint min_codes[uint(WARPS) * 8u];
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint slot = warp * 8u;
+            uint values_offset = warp * 256u;
+            uint weight_offset = block * 256;
+            // Read the block once, coalesced: every lane takes one element of
+            // each 32-element sub-block. Staging it in shared memory lets the
+            // min/max pass read four lanes per sub-block and the packing pass
+            // read lane `lane` of each sub-block, instead of the strided
+            // eight-lane scan this kernel used to issue from global memory.
+            #pragma unroll
+            for (uint group = 0; group < 8; ++group) {
+                values[values_offset + group * 32 + lane] =
+                    float(weights[weight_offset + group * 32 + lane]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // Four lanes per sub-block, eight elements each, so every lane
+            // participates and the serial scan is only eight steps deep.
+            uint group = lane >> 2;
+            uint part = lane & 3u;
+            uint start = values_offset + group * 32 + part * 8;
+            float low = values[start];
+            float high = low;
+            #pragma unroll
+            for (uint k = 1; k < 8; ++k) {
+                float value = values[start + k];
+                low = metal::min(low, value);
+                high = metal::max(high, value);
+            }
+            low = metal::min(low, simd_shuffle_xor(low, 1u));
+            high = metal::max(high, simd_shuffle_xor(high, 1u));
+            low = metal::min(low, simd_shuffle_xor(low, 2u));
+            high = metal::max(high, simd_shuffle_xor(high, 2u));
+            float minimum = metal::max(-low, 0.0f);
+            float scale = (high + minimum) / 31.0f;
+            if (part == 0) {
+                minima[slot + group] = minimum;
+                scales[slot + group] = scale;
             }
             float max_scale = simd_max(scale);
             float max_minimum = simd_max(minimum);
@@ -126,48 +155,73 @@ def _gguf_q5_k_kernel():
                 packed[offset + 3] = uchar(dmin >> 8);
             }
             if (lane < 8) {
-                scale_codes[lane] = base > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(scales[lane] / base)), 0, 63))
-                    : 0;
-                min_codes[lane] = min_base > 0.0f
+                scale_codes[slot + lane] = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(minima[lane] / min_base)), 0, 63))
+                        int(metal::rint(scales[slot + lane] / base)), 0, 63))
+                    : 0;
+                min_codes[slot + lane] = min_base > 0.0f
+                    ? uint(metal::clamp(
+                        int(metal::rint(minima[slot + lane] / min_base)), 0, 63))
                     : 0;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lane < 4) {
                 packed[offset + 4 + lane] = uchar(
-                    (scale_codes[lane] & 63) | ((scale_codes[lane + 4] & 48) << 2));
+                    (scale_codes[slot + lane] & 63)
+                    | ((scale_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 8 + lane] = uchar(
-                    (min_codes[lane] & 63) | ((min_codes[lane + 4] & 48) << 2));
+                    (min_codes[slot + lane] & 63)
+                    | ((min_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 12 + lane] = uchar(
-                    (scale_codes[lane + 4] & 15) | ((min_codes[lane + 4] & 15) << 4));
+                    (scale_codes[slot + lane + 4] & 15)
+                    | ((min_codes[slot + lane + 4] & 15) << 4));
             }
             uchar high_bits = 0;
-            for (uint group = 0; group < 8; group += 2) {
-                float step0 = base * float(scale_codes[group]);
-                float step1 = base * float(scale_codes[group + 1]);
-                float bias0 = min_base * float(min_codes[group]);
-                float bias1 = min_base * float(min_codes[group + 1]);
-                float shifted0 = float(
-                    weights[block * 256 + group * 32 + lane]) + bias0;
-                float shifted1 = float(weights[
-                    block * 256 + (group + 1) * 32 + lane]) + bias1;
+            #pragma unroll
+            for (uint pair = 0; pair < 8; pair += 2) {
+                float step0 = base * float(scale_codes[slot + pair]);
+                float step1 = base * float(scale_codes[slot + pair + 1]);
+                float bias0 = min_base * float(min_codes[slot + pair]);
+                float bias1 = min_base * float(min_codes[slot + pair + 1]);
+                float shifted0 =
+                    values[values_offset + pair * 32 + lane] + bias0;
+                float shifted1 =
+                    values[values_offset + (pair + 1) * 32 + lane] + bias1;
                 uint code0 = step0 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 31))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted0 / step0)), 0, 31))
                     : 0;
                 uint code1 = step1 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 31))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted1 / step1)), 0, 31))
                     : 0;
                 high_bits |= uchar(
-                    ((code0 >> 4) & 1) << group
-                    | ((code1 >> 4) & 1) << (group + 1));
-                packed[offset + 48 + group * 16 + lane] = uchar(
+                    ((code0 >> 4) & 1) << pair
+                    | ((code1 >> 4) & 1) << (pair + 1));
+                packed[offset + 48 + pair * 16 + lane] = uchar(
                     (code0 & 15) | ((code1 & 15) << 4));
             }
             packed[offset + 16 + lane] = high_bits;
         """,
     )
+
+
+def _packed_warp_launch(blocks, warps):
+    """Give each 256-element GGUF block one warp, packing `warps` per group.
+
+    A single-warp threadgroup keeps only one dependent 512-byte read in flight
+    per block, so packing several warps per threadgroup raises resident warps
+    per SM and hides that latency.
+    """
+    groups = (blocks + warps - 1) // warps
+    return {
+        "grid": (32 * warps, groups, 1),
+        "threadgroup": (32 * warps, 1, 1),
+        "template": [("WARPS", warps), ("BLOCKS", blocks)],
+    }
+
+
+_Q6_K_WARPS = 4
 
 
 @lru_cache(maxsize=1)
@@ -179,10 +233,26 @@ def _gguf_q6_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            threadgroup float scales[16];
-            threadgroup uint scale_codes[16];
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            threadgroup float scales[uint(WARPS) * 16u];
+            threadgroup uint scale_codes[uint(WARPS) * 16u];
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint scale_offset = warp * 16u;
+            // Cache this lane's eight weights for the block in registers so the
+            // packing pass below does not issue a second stream of global reads.
+            float own[8];
+            #pragma unroll
+            for (uint segment = 0; segment < 2; ++segment) {
+                #pragma unroll
+                for (uint value_lane = 0; value_lane < 4; ++value_lane) {
+                    own[segment * 4 + value_lane] = float(weights[
+                        block * 256 + segment * 128 + value_lane * 32 + lane]);
+                }
+            }
             float scale = 0.0f;
             if (lane < 16) {
                 float maximum = 0.0f;
@@ -192,7 +262,7 @@ def _gguf_q6_k_kernel():
                             weights[block * 256 + lane * 16 + k])));
                 }
                 scale = maximum / 31.0f;
-                scales[lane] = scale;
+                scales[scale_offset + lane] = scale;
             }
             float largest_scale = simd_max(scale);
             float base = largest_scale / 127.0f;
@@ -200,9 +270,10 @@ def _gguf_q6_k_kernel():
             if (lane < 16) {
                 uint code = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(scales[lane] / base)), 0, 127))
+                        int(metal::rint(scales[scale_offset + lane] / base)),
+                        0, 127))
                     : 0;
-                scale_codes[lane] = code;
+                scale_codes[scale_offset + lane] = code;
                 packed[offset + 192 + lane] = uchar(code);
             }
             if (lane == 0) {
@@ -216,10 +287,10 @@ def _gguf_q6_k_kernel():
                 for (uint value_lane = 0; value_lane < 4; ++value_lane) {
                     uint index = segment * 128 + value_lane * 32 + lane;
                     uint group = index / 16;
-                    float step = base * float(scale_codes[group]);
+                    float step = base * float(scale_codes[scale_offset + group]);
                     int code = step > 0.0f
                         ? metal::clamp(int(metal::rint(
-                            float(weights[block * 256 + index]) / step)), -32, 31)
+                            own[segment * 4 + value_lane] / step)), -32, 31)
                         : 0;
                     raw[value_lane] = uint(code + 32);
                 }
@@ -236,6 +307,9 @@ def _gguf_q6_k_kernel():
     )
 
 
+_Q4_K_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_q4_k_kernel():
     import mlx.core as mx
@@ -245,26 +319,53 @@ def _gguf_q4_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            threadgroup float minima[8];
-            threadgroup float scales[8];
-            threadgroup uint scale_codes[8];
-            threadgroup uint min_codes[8];
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
-            float scale = 0.0f;
-            float minimum = 0.0f;
-            if (lane < 8) {
-                float low = weights[block * 256 + lane * 32];
-                float high = low;
-                for (uint k = 1; k < 32; ++k) {
-                    float value = weights[block * 256 + lane * 32 + k];
-                    low = metal::min(low, value);
-                    high = metal::max(high, value);
-                }
-                minimum = metal::max(-low, 0.0f);
-                scale = (high + minimum) / 15.0f;
-                minima[lane] = minimum;
-                scales[lane] = scale;
+            threadgroup float values[uint(WARPS) * 256u];
+            threadgroup float minima[uint(WARPS) * 8u];
+            threadgroup float scales[uint(WARPS) * 8u];
+            threadgroup uint scale_codes[uint(WARPS) * 8u];
+            threadgroup uint min_codes[uint(WARPS) * 8u];
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint slot = warp * 8u;
+            uint values_offset = warp * 256u;
+            uint weight_offset = block * 256;
+            // Read the block once, coalesced: every lane takes one element of
+            // each 32-element sub-block. Staging it in shared memory lets the
+            // min/max pass read four lanes per sub-block and the packing pass
+            // read lane `lane` of each sub-block, instead of the strided
+            // eight-lane scan this kernel used to issue from global memory.
+            #pragma unroll
+            for (uint group = 0; group < 8; ++group) {
+                values[values_offset + group * 32 + lane] =
+                    float(weights[weight_offset + group * 32 + lane]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // Four lanes per sub-block, eight elements each, so every lane
+            // participates and the serial scan is only eight steps deep.
+            uint group = lane >> 2;
+            uint part = lane & 3u;
+            uint start = values_offset + group * 32 + part * 8;
+            float low = values[start];
+            float high = low;
+            #pragma unroll
+            for (uint k = 1; k < 8; ++k) {
+                float value = values[start + k];
+                low = metal::min(low, value);
+                high = metal::max(high, value);
+            }
+            low = metal::min(low, simd_shuffle_xor(low, 1u));
+            high = metal::max(high, simd_shuffle_xor(high, 1u));
+            low = metal::min(low, simd_shuffle_xor(low, 2u));
+            high = metal::max(high, simd_shuffle_xor(high, 2u));
+            float minimum = metal::max(-low, 0.0f);
+            float scale = (high + minimum) / 15.0f;
+            if (part == 0) {
+                minima[slot + group] = minimum;
+                scales[slot + group] = scale;
             }
             float max_scale = simd_max(scale);
             float max_minimum = simd_max(minimum);
@@ -280,38 +381,46 @@ def _gguf_q4_k_kernel():
                 packed[offset + 3] = uchar(dmin >> 8);
             }
             if (lane < 8) {
-                scale_codes[lane] = base > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(scales[lane] / base)), 0, 63))
-                    : 0;
-                min_codes[lane] = min_base > 0.0f
+                scale_codes[slot + lane] = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(minima[lane] / min_base)), 0, 63))
+                        int(metal::rint(scales[slot + lane] / base)), 0, 63))
+                    : 0;
+                min_codes[slot + lane] = min_base > 0.0f
+                    ? uint(metal::clamp(
+                        int(metal::rint(minima[slot + lane] / min_base)), 0, 63))
                     : 0;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lane < 4) {
                 packed[offset + 4 + lane] = uchar(
-                    (scale_codes[lane] & 63) | ((scale_codes[lane + 4] & 48) << 2));
+                    (scale_codes[slot + lane] & 63)
+                    | ((scale_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 8 + lane] = uchar(
-                    (min_codes[lane] & 63) | ((min_codes[lane + 4] & 48) << 2));
+                    (min_codes[slot + lane] & 63)
+                    | ((min_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 12 + lane] = uchar(
-                    (scale_codes[lane + 4] & 15) | ((min_codes[lane + 4] & 15) << 4));
+                    (scale_codes[slot + lane + 4] & 15)
+                    | ((min_codes[slot + lane + 4] & 15) << 4));
             }
-            for (uint group = 0; group < 8; group += 2) {
-                float step0 = base * float(scale_codes[group]);
-                float step1 = base * float(scale_codes[group + 1]);
-                float bias0 = min_base * float(min_codes[group]);
-                float bias1 = min_base * float(min_codes[group + 1]);
-                float shifted0 = weights[block * 256 + group * 32 + lane] + bias0;
-                float shifted1 = weights[
-                    block * 256 + (group + 1) * 32 + lane] + bias1;
+            #pragma unroll
+            for (uint pair = 0; pair < 8; pair += 2) {
+                float step0 = base * float(scale_codes[slot + pair]);
+                float step1 = base * float(scale_codes[slot + pair + 1]);
+                float bias0 = min_base * float(min_codes[slot + pair]);
+                float bias1 = min_base * float(min_codes[slot + pair + 1]);
+                float shifted0 =
+                    values[values_offset + pair * 32 + lane] + bias0;
+                float shifted1 =
+                    values[values_offset + (pair + 1) * 32 + lane] + bias1;
                 uint code0 = step0 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 15))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted0 / step0)), 0, 15))
                     : 0;
                 uint code1 = step1 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 15))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted1 / step1)), 0, 15))
                     : 0;
-                packed[offset + 16 + group * 16 + lane] = uchar(
+                packed[offset + 16 + pair * 16 + lane] = uchar(
                     code0 | (code1 << 4));
             }
         """,
@@ -435,6 +544,9 @@ def _gguf_tq1_0_kernel():
     )
 
 
+_TQ1_0_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_tq1_0_parallel_kernel():
     import mlx.core as mx
@@ -444,31 +556,54 @@ def _gguf_tq1_0_parallel_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            // Cache this lane's eight weights for the block in registers: the
+            // maximum pass and the first packing pass read exactly these
+            // elements, so they no longer issue a second stream of global
+            // reads.
+            float own[8];
+            #pragma unroll
+            for (uint g = 0; g < 8; ++g) {
+                own[g] = float(weights[block * 256 + g * 32 + lane]);
+            }
             float maximum = 0.0f;
-            for (uint k = lane; k < 256; k += 32) {
-                maximum = metal::max(
-                    maximum, metal::abs(float(weights[block * 256 + k])));
+            #pragma unroll
+            for (uint g = 0; g < 8; ++g) {
+                maximum = metal::max(maximum, metal::abs(own[g]));
             }
             maximum = simd_max(maximum);
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            // The two tail passes need lane `lane + 16` of sub-blocks 5..7 and
+            // lanes 16..31 of sub-block 7, so fetch them with warp shuffles.
+            // Hoisted out of the divergent branches below.
+            float s5 = simd_shuffle_xor(own[5], 16u);
+            float s6 = simd_shuffle_xor(own[6], 16u);
+            float t16 = simd_shuffle_xor(own[7], 16u);
+            float t20 = simd_shuffle_xor(own[7], 20u);
+            float t24 = simd_shuffle_xor(own[7], 24u);
+            float t28 = simd_shuffle_xor(own[7], 28u);
             uint offset = block * 54;
             uint powers[5] = {81, 27, 9, 3, 1};
             uint value = 0;
+            #pragma unroll
             for (uint digit = 0; digit < 5; ++digit) {
-                float normalized = float(weights[
-                    block * 256 + digit * 32 + lane]) * inverse;
+                float normalized = own[digit] * inverse;
                 uint code = normalized >= 0.5f
                     ? 2 : (normalized <= -0.5f ? 0 : 1);
                 value += code * powers[digit];
             }
             packed[offset + lane] = uchar((value * 256 + 242) / 243);
             if (lane < 16) {
+                float src[5] = {own[5], s5, own[6], s6, own[7]};
                 value = 0;
+                #pragma unroll
                 for (uint digit = 0; digit < 5; ++digit) {
-                    float normalized = float(weights[
-                        block * 256 + 160 + digit * 16 + lane]) * inverse;
+                    float normalized = src[digit] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -477,10 +612,11 @@ def _gguf_tq1_0_parallel_kernel():
                     (value * 256 + 242) / 243);
             }
             if (lane < 4) {
+                float src[4] = {t16, t20, t24, t28};
                 value = 0;
+                #pragma unroll
                 for (uint digit = 0; digit < 4; ++digit) {
-                    float normalized = float(weights[
-                        block * 256 + 240 + digit * 4 + lane]) * inverse;
+                    float normalized = src[digit] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -535,6 +671,9 @@ def _gguf_tq2_0_kernel():
     )
 
 
+_TQ2_0_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_tq2_0_parallel_kernel():
     import mlx.core as mx
@@ -544,22 +683,34 @@ def _gguf_tq2_0_parallel_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint base_index = block * 256;
+            // Keep this lane's eight weights in registers: the packing pass
+            // below would otherwise re-read the whole block from memory.
+            float own[8];
+            #pragma unroll
+            for (uint value_lane = 0; value_lane < 8; ++value_lane) {
+                own[value_lane] = float(
+                    weights[base_index + value_lane * 32 + lane]);
+            }
             float maximum = 0.0f;
-            for (uint k = lane; k < 256; k += 32) {
-                maximum = metal::max(
-                    maximum, metal::abs(float(weights[block * 256 + k])));
+            #pragma unroll
+            for (uint value_lane = 0; value_lane < 8; ++value_lane) {
+                maximum = metal::max(maximum, metal::abs(own[value_lane]));
             }
             maximum = simd_max(maximum);
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
             uint offset = block * 66;
             for (uint segment = 0; segment < 2; ++segment) {
                 uchar bits = 0;
+                #pragma unroll
                 for (uint value_lane = 0; value_lane < 4; ++value_lane) {
-                    float normalized = float(weights[
-                        block * 256 + segment * 128 + value_lane * 32 + lane])
-                        * inverse;
+                    float normalized = own[segment * 4 + value_lane] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     bits |= uchar(code << (2 * value_lane));
@@ -626,23 +777,29 @@ def _gguf_mxfp4_kernel():
                 if (maximum_bits >= ((maximum_bits & 0x7f800000u)
                     + 0x00800000u - cutoff)) power = next_power;
             }
-            uint exponent = uint(power + 125) & 255u;
+            uint exponent = uint(metal::clamp(power + 125, 0, 254));
             uint scale_bits = exponent < 2
                 ? (0x00200000u << exponent) : ((exponent - 1) << 23);
             float scale = as_type<float>(scale_bits);
-            // Metal flushes subnormal arithmetic. For e8m0 scales 0 and 1,
-            // move both operands into the normal range before comparison.
-            float multiplier = exponent < 2 ? 0x1p126f : 1.0f;
-            float comparison_scale = exponent < 2
-                ? (exponent == 0 ? 0.25f : 0.5f) : scale;
+            // Metal flushes subnormal arithmetic. Scale 2 also has a
+            // subnormal rounding midpoint, so compare in a normal range.
+            float multiplier = exponent <= 2 ? 0x1p126f : 1.0f;
+            float comparison_scale = exponent <= 2
+                ? (exponent == 0 ? 0.25f : (exponent == 1 ? 0.5f : 1.0f)) : scale;
             float fp4[8] = {
                 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f
             };
             uchar codes[32];
             for (uint k = 0; k < 32; ++k) {
-                float weight = float(weights[block * 32 + k]) * multiplier;
-                uint sign = as_type<uint>(weight) >> 31;
-                float magnitude = metal::abs(weight);
+                float weight = float(weights[block * 32 + k]);
+                uint weight_bits = as_type<uint>(weight);
+                uint sign = weight_bits >> 31;
+                uint magnitude_bits = weight_bits & 0x7fffffffu;
+                // Recover subnormal inputs from their mantissa; multiplying
+                // the original float would flush it before the rescaling.
+                float magnitude = exponent <= 2 && magnitude_bits < 0x00800000u
+                    ? float(magnitude_bits) * 0x1p-23f
+                    : metal::abs(weight) * multiplier;
                 uint best = 0;
                 float best_error = magnitude;
                 for (uint candidate = 1; candidate < 8; ++candidate) {
@@ -847,13 +1004,18 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
-    launch = (
-        {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-        if normalized.startswith(("Q4_K", "Q5_K", "Q6_K"))
-        or (normalized == "TQ1_0" and blocks >= 65536)
-        or (normalized == "TQ2_0" and blocks >= 65536)
-        else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
-    )
+    if normalized == "Q6_K":
+        launch = _packed_warp_launch(blocks, _Q6_K_WARPS)
+    elif normalized.startswith("Q4_K"):
+        launch = _packed_warp_launch(blocks, _Q4_K_WARPS)
+    elif normalized.startswith("Q5_K"):
+        launch = _packed_warp_launch(blocks, _Q5_K_WARPS)
+    elif normalized == "TQ1_0" and blocks >= 65536:
+        launch = _packed_warp_launch(blocks, _TQ1_0_WARPS)
+    elif normalized == "TQ2_0" and blocks >= 65536:
+        launch = _packed_warp_launch(blocks, _TQ2_0_WARPS)
+    else:
+        launch = {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
         or normalized in (

@@ -37,7 +37,14 @@ def _load_fetch_video():
 class BaseQwen3VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
-    pre_lm_head_norm_module = ["model.norm", "norm"]
+    # Wrapped Qwen3-VL layouts keep the text decoder under ``language_model``;
+    # direct layouts expose the same norm without the outer prefix.
+    pre_lm_head_norm_module = [
+        "model.language_model.norm",
+        "language_model.norm",
+        "model.norm",
+        "norm",
+    ]
 
     module_tree = [
         "model",

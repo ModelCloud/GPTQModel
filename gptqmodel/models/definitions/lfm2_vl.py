@@ -15,9 +15,12 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class LFM2VLQModel(BaseQModel):
+    fusable = FusableConfig("lfm2_vl").merge(LlamaFusableConfig())
+
     loader = AutoModelForImageTextToText
     HF_CONVERSION_MAP_REVERSED = (
         # LFM2-VL mounts `Siglip2VisionModel` directly at `model.vision_tower`.

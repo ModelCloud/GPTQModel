@@ -17,14 +17,19 @@ from ...utils.offload import offload_to_disk
 from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
 class Gemma3QModel(LlamaQModel):
+    fusable = FusableConfig("gemma3_text").merge(LlamaFusableConfig())
+
     shared_input_verified_model_types = frozenset({"gemma3_text"})
 
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
+    fusable = FusableConfig("gemma3").merge(Gemma3QModel.fusable)
+
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
 

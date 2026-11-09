@@ -5,9 +5,12 @@ import torch
 
 from ...utils.model import nested_move_to
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class JambaQModel(BaseQModel):
+    fusable = FusableConfig("jamba").merge(LlamaFusableConfig())
+
     require_pkgs = ["mamba-ssm"]
 
     # Jamba interleaves Mamba and attention decoder layers inside one `layers`

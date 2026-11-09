@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ...utils.rocm import IS_ROCM
+
 
 # The grouped FP8 GEMM is written in Gluon and needs ``mma_v2``, which not every
 # Triton build ships. The token quantizer above uses plain ``tl.jit`` and does
@@ -44,9 +46,22 @@ def _gluon_jit(fn):
 
 NATIVE_FP8_GEMM_MIN_TRITON = "3.6.0"
 
+# HIP builds cannot lower any kernel in this module: the GEMM operands carry an
+# ``NVMMADistributedLayout`` (``ttg.nvidia_mma``) and every E4M3 rounding step is
+# a PTX instruction. Both are rejected by the AMD backend at compile time, so
+# report the platform up front instead of surfacing a raw PassManager failure.
+_ROCM_UNSUPPORTED = (
+    "W4A Triton kernels are CUDA-only: the FP8 GEMM is a Gluon `mma_v2` kernel "
+    "that lowers to `ttg.nvidia_mma`, and the E4M3 rounding uses PTX "
+    "(`cvt.rn.satfinite.e4m3x2.f32`). HIP supports neither (`Unsupported DotOp` "
+    "on gfx1201). Use the portable Torch GPTQ kernel on ROCm."
+)
+
 
 def native_fp8_gemm_error() -> RuntimeError | None:
     """Return why the Gluon FP8 GEMM cannot run here, or ``None`` when it can."""
+    if IS_ROCM:
+        return RuntimeError(_ROCM_UNSUPPORTED)
     if mma_v2 is not None:
         return None
     return RuntimeError(
@@ -158,7 +173,9 @@ def fp8_linear(x: torch.Tensor, weight_e4m3: torch.Tensor, scales: torch.Tensor,
 
 @triton.jit
 def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
-                         BW: tl.constexpr, BN: tl.constexpr):
+                         BW: tl.constexpr, BN: tl.constexpr,
+                         PACKED_ROW_STRIDE: tl.constexpr, PACKED_COL_STRIDE: tl.constexpr,
+                         OUT_ROW_STRIDE: tl.constexpr, OUT_COL_STRIDE: tl.constexpr):
     """Expand packed GPTQ nibble words straight into E4M3.
 
     ``Packed`` is ``[K/8, N]`` int32 with eight codes per word, low nibble
@@ -172,7 +189,7 @@ def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
     word_row = tl.program_id(0) * BW + tl.arange(0, BW)
     cols = tl.program_id(1) * BN + tl.arange(0, BN)
     words = tl.load(
-        Packed + word_row[:, None] * N + cols[None, :],
+        Packed + word_row[:, None] * PACKED_ROW_STRIDE + cols[None, :] * PACKED_COL_STRIDE,
         mask=(word_row[:, None] < K // 8) & (cols[None, :] < N),
         other=0,
     )
@@ -181,7 +198,7 @@ def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
         centered = ((words >> (4 * nibble)) & 15).to(tl.float32) - 8.0
         row = word_row * 8 + nibble
         tl.store(
-            Out + row[:, None] * N + cols[None, :],
+            Out + row[:, None] * OUT_ROW_STRIDE + cols[None, :] * OUT_COL_STRIDE,
             _to_e4m3_rn(centered),
             mask=(row[:, None] < K) & codes_in_range,
         )
@@ -193,6 +210,8 @@ def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor
     The buffer is supplied by the caller so that this stays a bounded staging
     step owned by one forward: the module never keeps the result.
     """
+    if IS_ROCM:
+        raise NotImplementedError(_ROCM_UNSUPPORTED)
     if packed.device.type != "cuda":
         raise ValueError("Fused INT4 unpacking requires a CUDA tensor.")
     if out.dtype != torch.float8_e4m3fn:
@@ -207,13 +226,16 @@ def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor
     block_cols = 256 if n % 256 == 0 else (64 if n % 64 == 0 else 32)
     with _launch_device(packed.device):
         _unpack_int4_to_e4m3[(triton.cdiv(words, block_words), triton.cdiv(n, block_cols))](
-            packed, out, k, n, block_words, block_cols, num_warps=4,
+            packed, out, k, n, block_words, block_cols,
+            packed.stride(0), packed.stride(1), out.stride(0), out.stride(1), num_warps=4,
         )
     return out
 
 
 def fp8_pack(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode CUDA [rows, K] with one E4M3 scale per row."""
+    if IS_ROCM:
+        raise NotImplementedError(_ROCM_UNSUPPORTED)
     if x.ndim != 2 or x.device.type != "cuda":
         raise ValueError("FP8 packing expects a CUDA [rows, K] tensor.")
     rows, k = x.shape
@@ -245,6 +267,13 @@ def fp8_linear_prepacked(q: torch.Tensor, row_scale: torch.Tensor,
     output = torch.empty((rows, n), device=q.device, dtype=output_dtype)
     if not rows:
         return output
+    # The GEMM addresses every operand with dense row or element offsets.
+    q = q.contiguous()
+    row_scale = row_scale.contiguous()
+    weight_e4m3 = weight_e4m3.contiguous()
+    scales = scales.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
     tile_n = 32 if n % 64 else 64
     with _launch_device(q.device):
         _grouped_fp8_gemm[(triton.cdiv(rows, 16), triton.cdiv(n, tile_n))](

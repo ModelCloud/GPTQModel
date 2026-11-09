@@ -16,6 +16,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
 log = setup_logger()
@@ -37,6 +38,15 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
+def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros):
+    """Run BF16 int4pack with FP32 operands without expanding stored weights."""
+    compute_dtype = torch.float32 if x.dtype == torch.bfloat16 else scales_and_zeros.dtype
+    out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+        x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
+    )
+    return out.to(x.dtype)
+
+
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
         super().__init__()
@@ -45,10 +55,7 @@ class Int4PackedOp(torch.nn.Module):
         self.group_size = group_size
 
     def forward(self, x):
-        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x, self.qweight_uint8, self.group_size, self.scales_and_zeros
-        )
-        return out
+        return _cpu_int4pack_mm(x, self.qweight_uint8, self.group_size, self.scales_and_zeros)
 
 
 class TorchFusedLinear(PackableQuantLinear):
@@ -118,36 +125,73 @@ class TorchFusedLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def clear_weight_cache(self) -> None:
+        """Drop derived state that depends on the loaded packed buffers.
+
+        ``ret_idx`` is indexing metadata, not a packed weight, but it is only
+        valid for the ``g_idx`` it was built from. ``load_state_dict`` copies
+        into the existing buffers, so neither the object identity nor the
+        version of ``g_idx`` is guaranteed to change; the base class calls this
+        hook on load and on device/dtype moves instead.
+
+        Once transformed, the fused op also owns a ``scales_and_zeros`` tensor
+        derived from the checkpoint's scales and zero points. A state-dict load
+        copies those buffers in place, leaving that derived tensor stale. The
+        packed ``qweight`` stays valid, so ``linear_mode`` is preserved and the
+        op is simply rebuilt from the current packed weight and metadata; no
+        dense weight is created.
+        """
+        self.ret_idx = None
+        self._ret_idx_key = None
+        self._ret_idx_identity = None
+        self._fused_state_key = None
+        self._refresh_fused_op()
+
+    def _refresh_fused_op(self) -> None:
+        """Rebuild the packed fused op after its source buffers changed."""
+        if getattr(self, "linear_mode", None) != LinearMode.INFERENCE:
+            return
+        qweight = getattr(self, "qweight", None)
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if qweight is None or scales is None or qzeros is None:
+            return
+        if qweight.device.type != "cpu":
+            # The xpu path reads ``scales``/``qzeros`` directly; nothing derived.
+            return
+        key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
+        # Preserve the original compute precision, but do not narrow source
+        # metadata replaced by a load, move, or mutation at a wider dtype.
+        current = getattr(self, "scales_and_zeros", None)
+        dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
+        dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        self.torch_fused_op = Int4PackedOp(
+            self.qweight, self.scales_and_zeros, self.group_size
+        ).eval()
+        self._fused_state_key = key
+
     def _build_ret_idx(self) -> torch.Tensor:
+        key = tensor_cache_key(self.g_idx)
         existing = getattr(self, "ret_idx", None)
         total = self.g_idx.shape[0]
-        if isinstance(existing, torch.Tensor) and existing.numel() == total:
+        if (
+            isinstance(existing, torch.Tensor)
+            and existing.numel() == total
+            and getattr(self, "_ret_idx_key", None) == key
+        ):
             return existing
 
-        device = self.g_idx.device
-        ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
-        group_size = max(int(self.group_size), 1)
-        groups = total // group_size
-        remainder = total % group_size
-        g_idx = self.g_idx.to(torch.int32)
-        g_idx_2 = g_idx * group_size
-
-        if remainder > 0:
-            mask = g_idx == groups
-            if mask.any():
-                g_idx_2[mask] += torch.arange(remainder, device=device, dtype=torch.int32)
-
-        if groups > 0:
-            base = torch.arange(group_size, device=device, dtype=torch.int32)
-            for i in range(groups):
-                mask = g_idx == i
-                if not mask.any():
-                    continue
-                count = int(mask.sum().item())
-                g_idx_2[mask] += base[:count]
-
-        ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
+        ret_idx = build_group_ret_idx(self.g_idx)
         self.ret_idx = ret_idx
+        # The permutation changed, so any cached identity verdict for the
+        # previous ``g_idx`` is stale. Callers may rebuild ``ret_idx``
+        # explicitly before the next forward; the base class recomputes the
+        # verdict from the new key.
+        self._ret_idx_identity = None
+        self._ret_idx_key = key
         return ret_idx
 
     def train(self, mode: bool = True):
@@ -244,13 +288,7 @@ class TorchFusedLinear(PackableQuantLinear):
             self.transform(x.dtype, x.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
-                self.torch_fused_op = Int4PackedOp(
-                    self.qweight, self.scales_and_zeros, self.group_size
-                ).eval()
-                import torch._inductor.config as config
-                config.freezing = True
-                config.max_autotune = True
-                # Need to compile the whole model to get optimized performance for CPU
+                self._refresh_fused_op()
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
@@ -276,9 +314,25 @@ class TorchFusedLinear(PackableQuantLinear):
 
         return out
 
+    def _needs_activation_gather(self, device_type: str) -> bool:
+        """Whether ``_fused_op_forward`` must gather with ``ret_idx``.
+
+        XPU keeps the main-branch behavior and always gathers, because that
+        path has no coverage for activation views with a non-zero storage
+        offset. CPU may skip the gather when the permutation is the identity.
+        """
+        return device_type == "xpu" or not self._ret_idx_is_identity()
+
     @torch.no_grad
     def _fused_op_forward(self, x):
-        x = x[:, self.ret_idx.to(x.device)].contiguous()
+        self._refresh_fused_op()
+        # The identity fast path is CPU-only. The XPU kernel has no coverage for
+        # activation views with a non-zero storage offset, so keep the
+        # main-branch unconditional gather (and its zero-offset copy) there.
+        if self._needs_activation_gather(x.device.type):
+            x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+        elif not x.is_contiguous():
+            x = x.contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":

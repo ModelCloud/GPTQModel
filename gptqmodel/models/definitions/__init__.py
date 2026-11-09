@@ -23,6 +23,7 @@ from .deepseek_v3 import DeepSeekV3QModel
 from .deepseek_v32 import DeepSeekV32QModel
 from .raon1_mini import Raon1MiniQModel
 from .flint import FlintQModel
+from .ricursive import RicursiveQModel
 from .deepseek_v4 import DeepSeekV4QModel
 from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl import DeepSeekVLQModel
@@ -67,7 +68,11 @@ from .interns1 import InternS1QModel
 from .internvl import InternVLQModel
 from .internvl_chat import InternVLChatQModel
 from .k2_horizon import K2HorizonGPTQ, K2HorizonQModel
+from .kimi_k3 import KimiK3QModel, KimiLinearQModel
 from .lfm2_vl import LFM2VLQModel
+from .lfm3 import LFM3QModel
+from .lfm3_omni import LFM3OmniQModel
+from .lfm3_vl import LFM3VLQModel
 from .mage_vl import MageVLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel

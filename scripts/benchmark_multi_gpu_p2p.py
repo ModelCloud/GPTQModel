@@ -326,7 +326,12 @@ def run(args: argparse.Namespace) -> int:
         "min_ratio": p2p._min_ratio(),
         "probe": p2p.probe_enabled(),
         "peer_status": status.summary(),
-        "direct_copy_allowed": status.direct_copy_allowed(),
+        # Per-direction verdicts: an asymmetric link may allow one direction
+        # and require host staging for the reverse.
+        "copyable_directions": {
+            f"{src}->{dst}": status.can_copy(src, dst)
+            for (src, dst) in sorted(status.pairs)
+        },
         "rows": rows,
         "device_info": _device_report(devices),
     }

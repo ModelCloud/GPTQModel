@@ -12,7 +12,12 @@ import pytest
 import torch
 from safetensors.torch import load_file
 from test_tiny_moe_quant_smoke import _build_calibration_dataset, _build_local_tokenizer
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import (
+    LlamaConfig,
+    LlamaForCausalLM,
+    Qwen2Config,
+    Qwen2ForCausalLM,
+)
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
@@ -22,6 +27,37 @@ from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
 from gptqmodel.looper.gptq_checkpoint import GPTQCheckpointAdapter
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
+
+
+FAMILIES = ["llama", "qwen3_moe", "qwen2_tied", "qwen2_untied"]
+
+
+def build_native_model(family: str, config_args: dict, moe_intermediate_size: int):
+    """Tiny two-layer model for the family under test.
+
+    ``qwen2_tied`` and ``qwen2_untied`` differ only in whether the embedding and
+    lm_head share storage - the case where a resumed run has to re-tie weights
+    to match an uninterrupted one.
+    """
+    if family == "llama":
+        return LlamaForCausalLM(LlamaConfig(**config_args))
+    if family == "qwen3_moe":
+        return Qwen3MoeForCausalLM(
+            Qwen3MoeConfig(
+                **config_args,
+                moe_intermediate_size=moe_intermediate_size,
+                num_experts=4,
+                num_experts_per_tok=2,
+            )
+        )
+    if family in {"qwen2_tied", "qwen2_untied"}:
+        return Qwen2ForCausalLM(
+            Qwen2Config(
+                **config_args,
+                tie_word_embeddings=family == "qwen2_tied",
+            )
+        )
+    raise AssertionError(f"unknown family: {family}")
 
 
 def assert_identical_tensors(expected, actual):
@@ -40,6 +76,13 @@ def assert_identical_tensors(expected, actual):
 def run_guarded_driver(command, *, tmp_path, mode, timeout):
     stdout_path = tmp_path / f"{mode}.stdout.log"
     stderr_path = tmp_path / f"{mode}.stderr.log"
+    repo_root = str(Path(__file__).resolve().parents[1])
+    pythonpath = os.environ.get("PYTHONPATH")
+    env = {
+        **os.environ,
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": os.pathsep.join((repo_root, pythonpath)) if pythonpath else repo_root,
+    }
     # Files preserve diagnostics on timeout and avoid inherited pipe writers
     # keeping communicate() alive after a hostile kill of the driver.
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -48,7 +91,7 @@ def run_guarded_driver(command, *, tmp_path, mode, timeout):
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
-            env={**os.environ, "PYTHONHASHSEED": "0"},
+            env=env,
         )
         try:
             returncode = process.wait(timeout=timeout)
@@ -64,7 +107,7 @@ def run_guarded_driver(command, *, tmp_path, mode, timeout):
     )
 
 
-@pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
+@pytest.mark.parametrize("family", FAMILIES)
 @pytest.mark.parametrize(
     "mode",
     [
@@ -104,21 +147,15 @@ def test_subprocess_recovery(
     }
     if method in {"qqq", "exl3"} or format == "gemv_fast":
         args.update(hidden_size=128, intermediate_size=256)
-    if family == "llama":
-        model = LlamaForCausalLM(LlamaConfig(**args))
-    else:
-        model = Qwen3MoeForCausalLM(
-            Qwen3MoeConfig(
-                **args,
-                moe_intermediate_size=128
-                if method in {"qqq", "exl3"}
-                else 64
-                if method == "awq"
-                else 32,
-                num_experts=4,
-                num_experts_per_tok=2,
-            )
-        )
+    model = build_native_model(
+        family,
+        args,
+        moe_intermediate_size=128
+        if method in {"qqq", "exl3"}
+        else 64
+        if method == "awq"
+        else 32,
+    )
     if method in {"awq", "qqq", "paro", "exl3"}:
         model.half()
     if native_model is None:
@@ -293,7 +330,7 @@ def test_subprocess_recovery(
         )
 
 
-@pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
+@pytest.mark.parametrize("family", FAMILIES)
 def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
     torch.manual_seed(1234)
     native = tmp_path / "native"
@@ -308,17 +345,7 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
         "bos_token_id": 1,
         "eos_token_id": 2,
     }
-    if family == "llama":
-        native_model = LlamaForCausalLM(LlamaConfig(**config_args))
-    else:
-        native_model = Qwen3MoeForCausalLM(
-            Qwen3MoeConfig(
-                **config_args,
-                moe_intermediate_size=32,
-                num_experts=4,
-                num_experts_per_tok=2,
-            )
-        )
+    native_model = build_native_model(family, config_args, moe_intermediate_size=32)
     native_model.save_pretrained(native)
     tokenizer = _build_local_tokenizer(native)
     calibration = _build_calibration_dataset(tokenizer)

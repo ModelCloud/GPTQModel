@@ -257,6 +257,39 @@ def test_qqq_ready_flag_survives_deepcopy():
     assert clone.ready() is True
 
 
+def test_qqq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
+    """The per-device partial merge must not issue a raw cross-device copy.
+
+    Partials are keyed by the device that captured them, so the merge can move
+    a tensor between accelerators. On an asymmetric ROCm peer topology that
+    direct copy segfaults inside ``hipMemcpyPeerAsync``, so the merge goes
+    through ``safe_move_to`` even for a plain dtype cast.
+    """
+    from gptqmodel.quantization import qqq as qqq_module
+
+    quantizer = qqq_module.QQQ(torch.nn.Linear(6, 8, bias=False))
+
+    # A float64 partial forces the cast branch; the real device move is covered
+    # by the P2P tests.
+    partial = torch.full((6, 6), 8.0, dtype=torch.float64)
+    quantizer._device_hessian_partials[torch.device("cpu")] = partial
+    quantizer._device_sample_counts[torch.device("cpu")] = 4
+    quantizer.nsamples = 4
+
+    calls = []
+
+    def fake_move(tensor, device, *, dtype=None, **kwargs):
+        calls.append((tensor.dtype, torch.device(device), dtype))
+        return tensor.to(dtype=dtype)
+
+    monkeypatch.setattr(qqq_module, "safe_move_to", fake_move)
+
+    hessian = quantizer.materialize_hessian(torch.device("cpu"))
+
+    assert calls == [(torch.float64, torch.device("cpu"), torch.float32)]
+    assert torch.allclose(hessian, torch.full((6, 6), 4.0, dtype=torch.float32))
+
+
 @pytest.mark.parametrize("device", [
     "cpu", pytest.param("cuda", marks=pytest.mark.skipif(
         not torch.cuda.is_available(), reason="CUDA unavailable",

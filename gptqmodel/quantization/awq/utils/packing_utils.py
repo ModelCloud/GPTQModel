@@ -56,10 +56,9 @@ def pack_awq_columns(codes: torch.Tensor, bits: int, order=None) -> torch.Tensor
 
     ``codes`` is ``[rows, columns]``; every ``32 // bits`` consecutive columns
     collapse into one output word.  ``order`` optionally permutes the codes
-    inside each group (the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave).  The
-    int32 shift semantics (including sign extension for out-of-range codes)
-    match the hand-written per-column loops exactly, so packed output stays
-    bit-identical.  Any trailing columns that do not fill a whole group are
+    inside each group (the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave).
+    Codes are widened and masked before shifting so no field spills into its
+    neighbors. Any trailing columns that do not fill a whole group are
     ignored, mirroring the loop that iterates ``range(columns // pack_num)``.
     """
 
@@ -68,7 +67,8 @@ def pack_awq_columns(codes: torch.Tensor, bits: int, order=None) -> torch.Tensor
     pack_num = 32 // bits
     leading_shape = codes.shape[:-1]
     columns = codes.shape[-1] // pack_num
-    grouped = codes[..., : columns * pack_num].reshape(*leading_shape, columns, pack_num)
+    grouped = codes[..., : columns * pack_num].to(torch.int32) & ((1 << bits) - 1)
+    grouped = grouped.reshape(*leading_shape, columns, pack_num)
     if order is not None:
         grouped = grouped[..., order]
     packed = torch.zeros((*leading_shape, columns), dtype=torch.int32, device=codes.device)

@@ -92,11 +92,30 @@ def test_native_int8_codes_output_and_storage_oracle(group_size, dtype, monkeypa
     assert all(not hasattr(candidate, name) for name in candidate.GPTQ_BUFFER_NAMES)
     for current_dtype in (dtype, torch.bfloat16, torch.float32, dtype):
         activation = torch.arange(7 * source.in_features).reshape(7, -1).remainder(9).sub(4).to(current_dtype) / 16
-        raw = (activation.float() @ codes.float()) * channel_scale.to(current_dtype).float()
+        # The kernel multiplies the packed codes by the canonical FP32 channel
+        # scale and only rounds the final output, so the oracle must not
+        # pre-round the scale to the activation dtype.
+        arithmetic = (activation.double() @ codes.double()) * channel_scale.double()
+        expected = arithmetic.to(current_dtype)
         with torch.inference_mode():
             output = candidate(activation)
         assert output.dtype == current_dtype
-        torch.testing.assert_close(output, raw.to(current_dtype), rtol=2e-3, atol=2e-3)
+        # Visible error: what the low-precision output dtype can represent.
+        torch.testing.assert_close(output, expected, rtol=2e-3, atol=2e-3)
+        # Arithmetic error: the kernel performs one output rounding on top of an
+        # FP32 reduction, so it must stay inside half an output-dtype ulp plus
+        # the FP32 accumulation slack. This constrains the kernel itself -- an
+        # activation-dtype accumulation (or an FP32-scale pre-round) violates it.
+        bound = (
+            0.5 * torch.finfo(current_dtype).eps * arithmetic.abs()
+            + 8 * torch.finfo(torch.float32).eps
+            * ((activation.abs().double() @ codes.abs().double()) * channel_scale.double())
+        )
+        excess = (output.double() - arithmetic).abs() - bound
+        assert int((excess > 0).sum()) == 0, (
+            f"group_size={group_size} {current_dtype}: {(excess > 0).sum().item()}/{excess.numel()} "
+            f"outputs exceed the FP32-reduction bound; max excess={excess.max().item():.3e}"
+        )
         torch.testing.assert_close(candidate.int8_module.int8_channel_scale, channel_scale, rtol=0, atol=0)
         allowed = {candidate.int8_weight_nk.data_ptr(), candidate.int8_channel_scale.data_ptr()}
         assert all(tensor.untyped_storage().data_ptr() in allowed for tensor in state_tensors(candidate))

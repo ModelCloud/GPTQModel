@@ -18,8 +18,13 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from .torch_aten_kernel import TorchAtenLinear, _cpu_int4pack_zero_offsets, _has_local_int4pack_cpu_ops
-from .torch_fused import pack_scales_and_zeros
+from .torch_aten_kernel import (
+    TorchAtenLinear,
+    _cpu_int4pack_scale_dtype,
+    _cpu_int4pack_zero_offsets,
+    _has_local_int4pack_cpu_ops,
+)
+from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
 
 log = setup_logger()
@@ -154,11 +159,10 @@ class TorchAtenAwqLinear(AWQuantLinear):
         target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
         if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             target_dtype = torch.bfloat16
-        if self.scales.dtype != target_dtype:
-            self.scales = self.scales.to(target_dtype)
-        self.scales = self.scales.contiguous()
+        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros, self.bits, target_dtype)
+        self.scales = self.scales.to(compute_dtype).contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
-        self.qzeros = _cpu_int4pack_zero_offsets(izeros, self.scales, self.bits).contiguous()
+        self.qzeros = _cpu_int4pack_zero_offsets(izeros, self.scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
@@ -182,6 +186,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
     @torch.no_grad()
     def _fused_op_forward(self, x):
+        self._refresh_fused_state()
         if x.device.type != "cpu":
             raise NotImplementedError
 
@@ -190,13 +195,15 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
-        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x,
-            self.qweight,
-            self.group_size,
-            self.scales_and_zeros,
-        )
-        return out
+        return _cpu_int4pack_mm(x, self.qweight, self.group_size, self.scales_and_zeros)
+
+    # The native affine operand is derived metadata, shared with GPTQ's ATen
+    # implementation. Rebuild it after loads, moves or source mutations.
+    _refresh_fused_state = TorchAtenLinear._refresh_fused_state
+
+    def clear_weight_cache(self):
+        self._fused_state_key = None
+        self._refresh_fused_state()
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)

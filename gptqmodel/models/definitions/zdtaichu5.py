@@ -33,6 +33,8 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
     Qwen3.5 hybrid decoder tree is reused verbatim so both linear-attention
     and full-attention blocks retain their auxiliary norms and projections.
     """
+    fusable = None  # No qualified executor for this definition.
+
 
     loader = AutoModelForCausalLM
 

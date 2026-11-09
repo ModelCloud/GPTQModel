@@ -4,6 +4,8 @@
 
 #include "cuda/q_matrix.cuh"
 #include "cuda/q_gemm.cuh"
+#include "config.h"
+#include "q_matrix_clone.h"
 
 int64_t make_q_matrix(
     torch::Tensor q_weight,
@@ -14,8 +16,7 @@ int64_t make_q_matrix(
     std::optional<torch::Tensor> q_groups_opt,
     std::optional<torch::Tensor> gptq_qzeros_opt,
     std::optional<torch::Tensor> gptq_scales_opt,
-    std::optional<torch::Tensor> gptq_g_idx_opt,
-    torch::Tensor temp_dq
+    std::optional<torch::Tensor> gptq_g_idx_opt
 )
 {
     torch::Tensor q_perm = q_perm_opt.value_or(torch::Tensor());
@@ -68,7 +69,9 @@ int64_t make_q_matrix(
         height = q_weight.size(0) * 8;
     }
 
-    TORCH_CHECK(temp_dq.size(0) >= width * height, "Insufficient size of temp_dq buffer");
+    // No dense reconstruction buffer is attached: the quantized kernel above
+    // decodes inside its launch, and the dense fallback allocates a transient
+    // tensor per call in gemm_half_q_half().
 
     QMatrix* m = new QMatrix(
         device,
@@ -83,8 +86,7 @@ int64_t make_q_matrix(
         (!q_groups.defined() || q_groups.device().is_meta()) ? NULL : (uint16_t*) q_groups.data_ptr(),
         (!gptq_qzeros.defined() || gptq_qzeros.device().is_meta()) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
         (!gptq_scales.defined() || gptq_scales.device().is_meta()) ? NULL : (half*) gptq_scales.data_ptr(),
-        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
-        (half*) temp_dq.data_ptr()
+        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr()
     );
 
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
@@ -99,13 +101,33 @@ void gemm_half_q_half(
 {
     QMatrix* qm = reinterpret_cast<QMatrix*>(static_cast<uintptr_t>(b));
 
-    TORCH_CHECK_DTYPE(a, kHalf);
-    TORCH_CHECK_DTYPE(c, kHalf);
+    TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16 || a.scalar_type() == at::kFloat,
+                "ExLlamaV2 requires FP16, BF16 or FP32 activations");
+    TORCH_CHECK(c.scalar_type() == a.scalar_type(), "output dtype must match input");
     TORCH_CHECK_SHAPES(a, 0, c, 0, 1);
     TORCH_CHECK(qm->height == a.size(1), "a and b have incompatible shapes");
     TORCH_CHECK(qm->width == c.size(1), "b and c have incompatible shapes");
-
     const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+
+    if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
+        auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
+        qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
+        if (a.scalar_type() == at::kHalf) {
+            gemm_half_half_cuda(
+                at::cuda::getCurrentCUDABlasHandle(),
+                (const half*) a.data_ptr(),
+                (const half*) weights.data_ptr(),
+                (half*) c.data_ptr(),
+                c.size(0),
+                c.size(1),
+                a.size(1),
+                true
+            );
+        } else {
+            c.copy_(at::matmul(a.to(at::kFloat), weights.to(at::kFloat)));
+        }
+        return;
+    }
 
     gemm_half_q_half_cuda(
         at::cuda::getCurrentCUDABlasHandle(),
@@ -115,20 +137,21 @@ void gemm_half_q_half(
         c.size(0),
         c.size(1),
         a.size(1),
-        true,
-        NULL,
-        force_cuda
+        true
     );
 }
 
 TORCH_LIBRARY(gptqmodel_exllamav2, m)
 {
-    m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx, Tensor temp_dq) -> int");
+    m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx) -> int");
+    m.def("clone_q_matrix(int handle, Tensor weight, Tensor zeros, Tensor scales, Tensor? perm=None, Tensor? invperm=None) -> int");
+    m.def("free_q_matrix(int handle) -> ()", &free_q_matrix);
     m.def("gemm_half_q_half(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav2, CUDA, m)
 {
     m.impl("make_q_matrix", &make_q_matrix);
+    m.impl("clone_q_matrix", &clone_q_matrix);
     m.impl("gemm_half_q_half", &gemm_half_q_half);
 }

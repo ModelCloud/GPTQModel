@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
+from .._alloc_conf import apply_default_alloc_conf
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -23,9 +24,11 @@ ASCII_LOGO = r"""
 #     os.environ["PYTHON_GIL"] = '0'
 #     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
 
-if not os.environ.get("PYTORCH_ALLOC_CONF", None):
-    os.environ["PYTORCH_ALLOC_CONF"] = 'expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7'
-    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7' for memory saving.")
+# Normally already installed by `gptqmodel/__init__.py` before Torch touched
+# CUDA; repeated here so importing this module directly still gets the default.
+_installed_alloc_conf = apply_default_alloc_conf()
+if _installed_alloc_conf is not None:
+    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.", _installed_alloc_conf)
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
@@ -50,7 +53,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
-from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
+from ..quantization import AutoModuleDecoderConfig, METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
 from ..utils.env import env_flag  # noqa: E402
@@ -69,7 +72,7 @@ from ..utils.linalg_warmup import (  # noqa: E402
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
-from ._const import DEVICE  # noqa: E402
+from ._const import normalize_device  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .loader import native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
@@ -86,12 +89,14 @@ from .definitions.cohere2_moe import Cohere2MoeQModel  # noqa: E402
 from .definitions.cohere_compass import CohereCompassQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
+from .definitions.dots3_note import Dots3NoteQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
 from .definitions.raon1_mini import Raon1MiniQModel  # noqa: E402
 from .definitions.flint import FlintQModel  # noqa: E402
+from .definitions.ricursive import RicursiveQModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
@@ -147,10 +152,14 @@ from .definitions.jamba import JambaQModel  # noqa: E402
 from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
+from .definitions.kimi_k3 import KimiK3QModel, KimiLinearQModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
+from .definitions.lfm3 import LFM3QModel  # noqa: E402
+from .definitions.lfm3_omni import LFM3OmniQModel  # noqa: E402
+from .definitions.lfm3_vl import LFM3VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llava import LlavaQModel  # noqa: E402
@@ -166,7 +175,7 @@ from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
 from .definitions.minicpmv import MiniCPMVQModel  # noqa: E402
 from .definitions.minicpmv_4_6 import MiniCPMV4_6QModel  # noqa: E402
-from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.minimax_m2 import MiniMaxM2GPTQ, MiniMaxQModel  # noqa: E402
 from .definitions.minimax_m3_vl import MiniMaxM3VLGPTQ  # noqa: E402
 from .definitions.ministral3 import Ministral3GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
@@ -240,6 +249,7 @@ else:
 
 
 MODEL_MAP = {
+    "dots3_note": Dots3NoteQModel,
     "agnes": AgnesQModel,
     "apertus": ApertusQModel,
     "apertus1p5": Apertus1p5QModel,
@@ -252,6 +262,8 @@ MODEL_MAP = {
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "kimi_k25": KimiK25QModel,
+    "kimi_k3": KimiK3QModel,
+    "kimi_linear": KimiLinearQModel,
     "klear": KlearQModel,
     "laguna": LagunaQModel,
     "gpt_neox": GPTNeoXQModel,
@@ -335,7 +347,7 @@ MODEL_MAP = {
     "minicpmo": MiniCPMOQModel,
     "minicpmv": MiniCPMVQModel,
     "minicpmv4_6": MiniCPMV4_6QModel,
-    "minimax": MiniMaxM2GPTQ,
+    "minimax": MiniMaxQModel,
     "minimax_m2": MiniMaxM2GPTQ,
     "minimax_m3_vl": MiniMaxM3VLGPTQ,
     "muse_glimmer": MuseGlimmerQModel,
@@ -362,6 +374,7 @@ MODEL_MAP = {
     "deepseek_v32": DeepSeekV32QModel,
     "raon1_mini": Raon1MiniQModel,
     "flint": FlintQModel,
+    "ricursive": RicursiveQModel,
     "deepseek_v4": DeepSeekV4QModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
@@ -381,8 +394,10 @@ MODEL_MAP = {
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
+    "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
+    "helium": LlamaQModel, # 100% llama clone (HeliumModel == LlamaModel module layout)
     "olmoe": OlmoeQModel,
     "openvla": OpenVLAQModel,
     "ouro": OuroQModel,
@@ -422,9 +437,15 @@ MODEL_MAP = {
     "lfm2": LFM2QModel,
     "lfm2_moe": LFM2MoeQModel,
     "lfm2_vl": LFM2VLQModel,
+    "lfm3": LFM3QModel,
+    "lfm3_omni": LFM3OmniQModel,
+    "lfm3_vl": LFM3VLQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
+    # The published baidu/Unlimited-OCR config uses `unlimited_ocr`; keep the
+    # hyphenated key so older local configs keep resolving.
+    "unlimited_ocr": UnlimitedOCRQModel,
     "unlimited-ocr": UnlimitedOCRQModel,
     "voxtral": VoxtralGPTQ,
 }
@@ -441,6 +462,14 @@ if ZDTaichu5QModel is not None:
     MODEL_MAP["zdtaichu5_0"] = ZDTaichu5QModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
+
+# A few legacy registrations retain camelCase model types (for example
+# RefinedWeb). The casing of `config.model_type` is not part of the lookup
+# contract, so resolve definitions case-insensitively instead of letting
+# `.lower()` miss a registered key.
+MODEL_MAP_CASEFOLD = {
+    model_type.lower(): definition for model_type, definition in MODEL_MAP.items()
+}
 
 
 def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
@@ -497,6 +526,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.VPTQ,
+        METHOD.NF12_AD,
         METHOD.EXL3,
     ):
         return True
@@ -511,11 +541,23 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.VPTQ,
+        METHOD.NF12_AD,
         METHOD.EXL3,
     ):
         return True
 
     return False
+
+
+def _uses_auto_module_decoder(quantize_config: Optional[QuantizeConfig]) -> bool:
+    """Return whether an explicit target config decodes a floatx source checkpoint."""
+
+    if quantize_config is None:
+        return False
+    return any(
+        isinstance(preprocessor, AutoModuleDecoderConfig)
+        for preprocessor in (getattr(quantize_config, "preprocessors", None) or [])
+    )
 
 
 @contextmanager
@@ -569,11 +611,9 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
-    # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
-    if model_type not in SUPPORTED_MODELS:
-        return BaseQModel
-
-    return MODEL_MAP[model_type]
+    # Unsupported model types use BaseQModel and fail closed unless the caller
+    # supplies an explicit model definition/module tree.
+    return MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
 
 
 def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
@@ -593,7 +633,7 @@ def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
 def _config_prewarm_dtype(model_cfg, target: torch.device) -> Optional[torch.dtype]:
     """Mirror the loader's own dtype resolution so the prewarm warms the dtype the model will use."""
     try:
-        family = DEVICE(target.type)
+        family = normalize_device(target)
         return auto_dtype(config=model_cfg, device=family, quant_inference=False)
     except Exception as exc:
         log.debug(f"linear prewarm dtype unresolved for {model_cfg}: {exc}")
@@ -691,7 +731,6 @@ class GPTQModel:
             cls,
             model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
-            p2p: Optional[Union[P2PConfig, Dict]] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
@@ -700,8 +739,13 @@ class GPTQModel:
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
+            fuse: bool = False,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             **kwargs,
     ):
+        if type(fuse) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        kwargs["fuse"] = fuse
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool()
@@ -744,15 +788,27 @@ class GPTQModel:
                 **_get_config_load_kwargs(kwargs),
             )
 
+        native_floatx_source = (
+            native_floatx_source_format(model_cfg, model_local_path=model_id_or_path)
+            if model_cfg is not None
+            else None
+        )
         if (
             quantize_config is not None
             and model_cfg is not None
-            and native_floatx_source_format(model_cfg, model_local_path=model_id_or_path) is not None
+            and native_floatx_source is not None
         ):
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif model_cfg is not None and _is_supported_quantization_config(model_cfg):
+        elif (
+            model_cfg is not None
+            and _is_supported_quantization_config(model_cfg)
+            and (
+                not _uses_auto_module_decoder(quantize_config)
+                or native_floatx_source is None
+            )
+        ):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
@@ -810,10 +866,10 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
-            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
         if p2p is not None and quantize_config is not None:
@@ -850,14 +906,21 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             **_get_config_load_kwargs(model_init_kwargs),
         )
+        native_floatx_source = native_floatx_source_format(
+            config,
+            model_local_path=model_id_or_path,
+        )
         if (
             quantize_config is not None
-            and native_floatx_source_format(config, model_local_path=model_id_or_path) is not None
+            and native_floatx_source is not None
         ):
             log.info(
                 "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
             )
-        elif _is_supported_quantization_config(config):
+        elif _is_supported_quantization_config(config) and (
+            not _uses_auto_module_decoder(quantize_config)
+            or native_floatx_source is None
+        ):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
@@ -897,13 +960,13 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
-            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             **kwargs,
     ) -> BaseQModel:
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
@@ -968,6 +1031,8 @@ class GPTQModel:
             backend = BACKEND.PAROQUANT_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH
+        elif normalized_method == METHOD.NF12_AD.value:
+            backend = BACKEND.NF12_AD
         elif normalized_method == METHOD.EXL3.value:
             backend = BACKEND.EXL3_TORCH
         else:

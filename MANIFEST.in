@@ -1,4 +1,6 @@
 recursive-include gptqmodel_ext/awq *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/allspark *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/allspark_hip *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/exllamav3 *.h *.hpp *.cuh *.cu *.cpp *.c
 recursive-include gptqmodel_ext/exllamav2 *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/marlin *.h *.cuh *.cu *.cpp *.hpp
@@ -7,6 +9,12 @@ recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.
 recursive-include gptqmodel_ext/paroquant *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/vptq *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/nf12 *.h *.cuh *.cu *.cpp *.txt README.md NOTICE LICENSE
+include gptqmodel_ext/nf12/CMakeLists.txt
+include gptqmodel_ext/nf12/reference.py
+include gptqmodel_ext/nf12/docs/SPEC.md
+# NF12-AD HIP port (RDNA4). Sources only; the extension is always JIT-built.
+recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
 recursive-include gptqmodel_ext/gptq_block *.cu *.cpp
 recursive-include gptqmodel_ext/int4_qzero_group_scaled_cpu *.cpp *.hpp NOTICE
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE

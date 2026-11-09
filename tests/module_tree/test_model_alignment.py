@@ -245,9 +245,9 @@ class TestQwen3_5ModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.linear_attn, "conv1d"))
         self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_b"))
         self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_a"))
-        self.assertIn("conv1d:!", Qwen3_5QModel.module_tree[-1]["linear_attn"])
-        self.assertIn("in_proj_b:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
-        self.assertIn("in_proj_a:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
+        self.assertIn("conv1d:!", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
+        self.assertIn("in_proj_b:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
+        self.assertIn("in_proj_a:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
 
 
 class TestQwen3_5MoeModuleTree(ModelTest):

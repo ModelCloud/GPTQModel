@@ -30,6 +30,8 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 """
 
 import math
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -135,17 +137,31 @@ def vector_transport(optimizer, alpha, costs, weights=None):
 
 
 def round_with_budget(probs, weights, costs, target, resolution=500):
-    """Exact discrete assignment under the budget (multiple-choice knapsack).
+    """Decode probabilities with the legacy probability-input API.
 
-    Maximizes the total log-probability of the soft solution subject to the
-    discretized budget, so ``sum_i w_i * cost(choice_i) / sum_i w_i`` is as
-    close to ``target`` as the width grid allows. Returns option indices.
+    Use ``budget_constrained_argmax`` with the original logits during search
+    and final decoding. Once softmax underflows, probabilities cannot preserve
+    the relative scores needed by a budget-constrained assignment.
     """
-    if probs.ndim != 2:
-        raise ValueError('RCO rounding requires [layers, options] probabilities')
-    n_layers, n_options = probs.shape
-    if weights.shape != (n_layers,) or costs.shape != (n_options,):
-        raise ValueError('RCO rounding requires per-layer weights and per-option costs')
+    return budget_constrained_argmax(torch.log(probs.clamp_min(1e-30)), weights,
+                                     costs, target, resolution=resolution)
+
+
+def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
+    """Maximize additive logit scores under the discretized budget (RCO Eq. 4).
+
+    Accept raw perturbed logits during search and unperturbed logits for final
+    decoding. Subtracting a row constant (including logsumexp) does not change
+    the optimum, but clipping log-probabilities does. The DP may underspend:
+    discrete feasibility is an inequality, unlike the continuous manifold.
+    """
+    if scores.ndim != 2 or not scores.is_floating_point() or not torch.isfinite(scores).all():
+        raise ValueError('RCO scores must be finite floating [groups, options] logits')
+    n_layers, n_options = scores.shape
+    if not n_layers or not n_options:
+        raise ValueError('RCO assignment requires nonempty groups and options')
+    if weights.shape != (n_layers,) or costs.shape not in ((n_options,), (n_layers, n_options)):
+        raise ValueError('RCO assignment requires per-group weights and per-option costs')
 
     budget = round(target * resolution)
     totals = float(weights.sum())
@@ -155,9 +171,8 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
     # Compute the rounded unit costs on the caller's device, then read the
     # table on the host: the search calls this once per Gumbel draw, so a Python
     # loop over positions here would dominate the step time.
-    log_probs = torch.log(probs.clamp_min(1e-30))
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
-    gained = log_probs.detach().float().cpu().numpy()
+    gained = scores.detach().cpu().double().numpy()
     steps = unit_costs.detach().cpu().numpy()
 
     table = np.full(budget + 1, -np.inf, dtype=np.float64)
@@ -183,7 +198,7 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
         table = updated
 
     # Select the best objective over every feasible budget, not the largest
-    # feasible budget: the table entry is the total log-probability, and a
+    # feasible budget: the table entry is the total score, and a
     # lower-cost assignment can score better. Matches the reference solver.
     if not np.isfinite(table).any():
         raise RuntimeError('RCO rounding found no feasible assignment under the budget')
@@ -196,7 +211,7 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
         position -= int(steps[layer, option])
     # Return on the caller's device: the search indexes this alongside the
     # probability tensors it keeps on the accelerator.
-    return assignment.to(probs.device)
+    return assignment.to(scores.device)
 
 
 def achieved_bits(assignment, weights, costs):
@@ -235,7 +250,13 @@ class InterpolatedLlamaLayers:
         """
         self.model = model
         self.layer_weights = layer_weights
-        self.control_device = torch.device(control_device or 'cuda:0')
+        if control_device is None:
+            control_device = next(model.parameters()).device
+        elif isinstance(control_device, str) and control_device.lower() == 'auto':
+            from ..utils.torch import auto_select_torch_device
+
+            control_device = auto_select_torch_device()
+        self.control_device = torch.device(control_device)
         # Every control tensor must live on the same device as ``alpha``: the
         # budget helpers combine them elementwise, and the database is built on
         # the host while the search runs on an accelerator.
@@ -349,9 +370,85 @@ class _WeightInterpolation(torch.nn.Module):
         return mixed
 
 
+class LlamaTeacherKL:
+    """Mean-token KL from a frozen dense Llama teacher to the searched model.
+
+    Construct before installing weight interpolation. Cache final teacher
+    hidden states on the search device or disk, then reconstruct teacher
+    distributions with the unchanged LM head. Checkpoint token chunks of the KL
+    to bound vocabulary intermediates in both forward and backward; no
+    full-corpus logits cache.
+    Batches must contain fixed-length, unpadded token IDs. Every position is a
+    next-token context, including the last. The caller owns the cache directory
+    lifetime and must keep the embedding/output head outside the search.
+    """
+
+    def __init__(self, model, batches, directory, *, chunk_tokens=128, resident_cache=False):
+        if model.training or not batches:
+            raise ValueError('RCO teacher KL requires an eval model and nonempty batches')
+        if isinstance(chunk_tokens, bool) or not isinstance(chunk_tokens, int) or chunk_tokens < 1:
+            raise ValueError('RCO KL chunk_tokens must be a positive integer')
+        self.model, self.batches = model, batches
+        self.chunk_tokens = chunk_tokens
+        self.resident_cache = resident_cache
+        self._resident = []
+        self.head = model.get_output_embeddings()
+        if any(parameter.requires_grad for parameter in self.head.parameters()):
+            raise ValueError('RCO teacher KL requires a frozen output head')
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.paths = []
+        with torch.no_grad():
+            for index, ids in enumerate(batches):
+                if ids.ndim != 2 or ids.numel() == 0:
+                    raise ValueError('RCO KL batches require nonempty [batch, tokens] IDs')
+                hidden = model.model(input_ids=ids, use_cache=False).last_hidden_state
+                if self.resident_cache:
+                    self._resident.append(hidden.detach())
+                    self.paths.append(None)
+                else:
+                    path = directory / f'{index:05d}.pt'
+                    torch.save(hidden.detach().cpu(), path)
+                    self.paths.append(path)
+
+    def cleanup(self):
+        """Release teacher scratch; the caller owns the cache directory."""
+        self._resident.clear()
+        self.paths.clear()
+
+    def __call__(self, index):
+        from torch.utils.checkpoint import checkpoint
+
+        student = self.model.model(input_ids=self.batches[index], use_cache=False).last_hidden_state
+        if self.resident_cache:
+            reference = self._resident[index]
+        else:
+            reference = torch.load(self.paths[index], map_location='cpu', weights_only=True)
+        if reference.shape != student.shape:
+            raise ValueError('RCO teacher/student hidden shapes differ')
+        student = student.reshape(-1, student.shape[-1])
+        reference = reference.reshape_as(student)
+
+        def chunk_loss(hidden, teacher_hidden):
+            logits = self.head(hidden)
+            # FP32 softmax for low-precision models; retain FP64 oracle inputs.
+            dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+            log_student = torch.log_softmax(logits.to(dtype), dim=-1)
+            with torch.no_grad():
+                log_teacher = torch.log_softmax(self.head(teacher_hidden).to(dtype), dim=-1)
+            return (log_teacher.exp() * (log_teacher - log_student)).sum()
+
+        loss = student.new_zeros((), dtype=torch.float64 if student.dtype == torch.float64 else torch.float32)
+        for start in range(0, len(student), self.chunk_tokens):
+            stop = start + self.chunk_tokens
+            target = reference[start:stop].to(device=student.device, dtype=student.dtype)
+            loss = loss + checkpoint(chunk_loss, student[start:stop], target, use_reentrant=False)
+        return loss / len(student)
+
+
 def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
                             tau_init=1.0, tau_min=0.01, gumbel_samples=1,
-                            objective=None, log_every=25):
+                            objective=None, log_every=25, batch_weights=None):
     """Run the projected Gumbel-STE search and return per-layer probabilities.
 
     Each step draws Gumbel noise at an exponentially annealed temperature, solves
@@ -359,23 +456,32 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
     straight-through gradient through the softmax of the same perturbed logits.
     The gradient is projected off the budget normal, Adam takes the step, the
     retraction restores the budget exactly and momentum is transported.
+    Optional batch_weights make a partial final batch contribute by its token
+    count; omitted weights retain the equal-batch behavior.
     """
     import torch.nn.functional as F
 
     if objective is None:
         raise ValueError('RCO search requires an objective callable')
+    if not batches or steps < 1 or gumbel_samples < 1:
+        raise ValueError('RCO search requires batches, positive steps and Gumbel samples')
+    batch_weights = [1.] * len(batches) if batch_weights is None else list(batch_weights)
+    if (len(batch_weights) != len(batches)
+            or any(not math.isfinite(w) or w <= 0 for w in batch_weights)):
+        raise ValueError('RCO batch weights must be finite, positive and match the batches')
+    total_weight = sum(batch_weights)
+    batch_fractions = [w / total_weight for w in batch_weights]
     optimizer = torch.optim.Adam([interpolated.alpha], lr=lr)
     history = []
     for step in range(steps):
         progress = step / max(steps - 1, 1)
         tau = max(tau_min, tau_init * (tau_min / tau_init) ** progress)
         optimizer.zero_grad()
-        total, count = 0.0, 0
+        total = 0.0
         # Average the loss over every batch and Gumbel sample in the step, as
         # the reference implementation does. Summing instead would scale the
         # gradient by the batch count, making the configured learning rate
         # depend on how the corpus happens to be split.
-        scale = 1.0 / (len(batches) * gumbel_samples)
         for _sample in range(gumbel_samples):
             uniform = torch.rand_like(interpolated.alpha).clamp(1e-20, 1 - 1e-20)
             noise = -torch.log(-torch.log(uniform) + 1e-20)
@@ -385,29 +491,128 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
             # must be rebuilt per batch, since a second backward through a
             # retained logit graph would free the saved intermediates.
             with torch.no_grad():
-                detached = F.softmax((interpolated.alpha + noise) / tau, dim=-1)
-                hard = round_with_budget(detached, interpolated.weights,
-                                         interpolated.costs, target)
+                detached = (interpolated.alpha + noise) / tau
+                hard = budget_constrained_argmax(detached, interpolated.weights,
+                                                  interpolated.costs, target)
                 onehot = F.one_hot(hard, interpolated.n_options).float()
-            for batch in batches:
+            for batch, fraction in zip(batches, batch_fractions):
                 noisy = (interpolated.alpha + noise) / tau
                 soft = F.softmax(noisy, dim=-1)
                 interpolated.set_probs(onehot - soft.detach() + soft)
                 with torch.enable_grad():
                     loss = objective(batch)
+                scale = fraction / gumbel_samples
                 (loss * scale).backward()
-                total += float(loss.detach())
-                count += 1
+                total += float(loss.detach()) * scale
         interpolated.clear_probs()
         project_gradient(interpolated.alpha, interpolated.costs, interpolated.fraction)
         optimizer.step()
         achieved = interpolated.retract(target)
         vector_transport(optimizer, interpolated.alpha, interpolated.costs, interpolated.fraction)
         history.append({'step': step, 'tau': tau,
-                        'loss': total / max(count, 1),
+                        'loss': total,
                         'budget': achieved, 'drift': abs(achieved - target)})
         if log_every and (step % log_every == 0 or step == steps - 1):
             print(f'  rco step {step+1:4d}/{steps} tau={tau:.4f} '
                   f'loss={history[-1]["loss"]:.6f} bits={achieved:.6f} '
                   f'drift={history[-1]["drift"]:.2e}', flush=True)
     return torch.softmax(interpolated.alpha, dim=-1).detach(), history
+
+@dataclass(frozen=True)
+class RCOBlock:
+    """A decoder block and its declared allocatable, block-relative modules."""
+
+    index: int
+    path: str
+    projections: tuple[str, ...]
+
+    @property
+    def names(self):
+        return tuple(f'{self.path}.{name}' for name in self.projections)
+
+
+def discover_blocks(model, *, model_definition=None, quantize_config=None):
+    """Resolve RCO's inventory from the model definition, never from name heuristics.
+
+    Prefer a loaded BaseQModel wrapper: its effective tree includes per-instance
+    overrides. A bare Torch model requires its definition explicitly. The shared
+    tree parser honors exclusion/capture tags, aliases and expert placeholders;
+    the definition's layer/module hooks handle heterogeneous decoder blocks.
+    Only declared, live Linear (or staged TorchLinear) leaves are allocatable.
+    Non-strict definitions may omit alternatives in heterogeneous blocks. A
+    missing required leaf, empty block or unsupported declared leaf is an error.
+    """
+    from ..models.base import BaseQModel
+    from ..nn_modules.qlinear.torch import TorchLinear
+    from .config import dynamic_get
+
+    if isinstance(model, BaseQModel):
+        definition = type(model)
+        tree = model.effective_module_tree
+        quantize_config = model.quantize_config if quantize_config is None else quantize_config
+        model = model.model
+    else:
+        definition = model_definition
+        if (not isinstance(definition, type) or not issubclass(definition, BaseQModel)
+                or definition.module_tree is None):
+            raise ValueError('RCO discovery requires an explicit model definition or a loaded BaseQModel wrapper')
+        tree = definition._resolve_effective_module_tree(model, quantize_config)
+
+    if not tree:
+        raise ValueError('RCO discovery requires a nonempty model definition tree')
+    embeddings = set()
+    for getter in ('get_input_embeddings', 'get_output_embeddings'):
+        method = getattr(model, getter, None)
+        if callable(method):
+            embeddings.add(id(method()))
+
+    found = {}
+    for variant in definition._iter_module_tree_variants(tree):
+        if '#' not in variant:
+            raise ValueError('RCO model definition must declare its decoder boundary with #')
+        # Use the existing DSL parser with this variant, retaining the wrapper's
+        # effective tree rather than the class's unmodified declaration.
+        with definition._module_tree_context(variant):
+            prefixes = definition.extract_layers_node()
+            groups = definition.simple_layer_modules(model.config, quantize_config)
+            declared = tuple(dict.fromkeys(name for group in groups for name in group))
+            for prefix in prefixes:
+                container = model.get_submodule(prefix)
+                for local_index, (child, layer) in enumerate(container.named_children()):
+                    path = f'{prefix}.{child}'
+                    if not definition.should_quantize_layer(layer, path, local_index, quantize_config):
+                        raise ValueError(f'RCO staged arms do not support a skipped decoder block: {path}')
+                    projections = found.setdefault(path, [])
+                    for name in declared:
+                        try:
+                            module = layer.get_submodule(name)
+                        except AttributeError as exc:
+                            if definition.layer_modules_strict:
+                                raise ValueError(f'RCO declared projection is missing: {path}.{name}') from exc
+                            continue  # optional leaf in a heterogeneous decoder
+                        full_name = f'{path}.{name}'
+                        if (id(module) in embeddings
+                                or dynamic_get(getattr(quantize_config, 'dynamic', None), full_name) is False
+                                or not definition.should_quantize_module(model, full_name, module, quantize_config)):
+                            continue
+                        if not isinstance(module, (torch.nn.Linear, TorchLinear)):
+                            raise ValueError(f'RCO cannot restore declared projection {full_name}: {type(module).__name__}')
+                        if name not in projections:
+                            projections.append(name)
+    if not found or any(not names for names in found.values()):
+        raise ValueError('RCO model definition resolved no allocatable projections for one or more decoder blocks')
+    return tuple(RCOBlock(index, path, tuple(sorted(names)))
+                 for index, (path, names) in enumerate(found.items()))
+
+
+def discover_projections(model, *, model_definition=None, quantize_config=None, exclude=()):
+    """Return declared projection paths in decoder order, with exact exclusions."""
+    excluded = set(exclude)
+    return tuple(name for block in discover_blocks(
+        model, model_definition=model_definition, quantize_config=quantize_config)
+        for name in block.names if name not in excluded)
+
+
+def block_of(name, blocks):
+    """Look up a projection's decoder ordinal in a definition-derived inventory."""
+    return next((block.index for block in blocks if name in block.names), None)

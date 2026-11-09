@@ -489,7 +489,10 @@ def test_paroquant_cpu_caches_invalidate_on_rotation_and_weight_mutation():
     assert module._cpu_packed_key is None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant kernel accuracy test")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
 def test_paroquant_cuda_matches_upstream_transformers_contract():
     """Compare the internal CUDA kernel path to an upstream-style contract.
 
@@ -598,7 +601,10 @@ def test_paroquant_triton_backend_mapping():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant Triton kernel parity test")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant baseline required (unavailable on ROCm)",
+)
 def test_paroquant_triton_matches_existing_cuda_kernel():
     """Guard Triton runtime accuracy against the established CUDA implementation."""
     pytest.importorskip("triton")

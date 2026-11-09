@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from transformers import AutoModelForImageTextToText
 
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -13,6 +14,8 @@ class Qwen3_5QModel(LlamaQModel):
     ahead of the attention projections. We mark those helper modules as
     non-quantized so the layer walker captures the complete structure.
     """
+    fusable = FusableConfig("qwen3_5").merge(LlamaFusableConfig())
+
 
     loader = AutoModelForImageTextToText
 
@@ -37,7 +40,7 @@ class Qwen3_5QModel(LlamaQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_norm:!", "q_proj:0:in=x", "k_norm:!", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
-            "linear_attn": (
+            "linear_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",

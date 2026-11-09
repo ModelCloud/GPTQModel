@@ -33,12 +33,20 @@ log = setup_logger()
 # *placement* on ROCm is unsupported.  ``ModelLoader`` raises this message at
 # load time so a ROCm user gets an actionable error instead of the generic
 # "No valid quant linear".
+# ``AwqGEMVTritonLinear`` below runs the *same* packed GEMV layout with a
+# portable Triton kernel (``quantization/awq/modules/triton/gemv.py``), so a
+# decode-shaped GEMV checkpoint is usable on ROCm too.  The three native classes
+# stay CUDA-only and keep raising the message above; a ROCm user can now pick
+# the Triton backend explicitly (``BACKEND.AWQ_GEMV_TRITON``) and AUTO stays off
+# it so no existing checkpoint silently changes kernel.
 AWQ_GEMV_ROCM_UNSUPPORTED = (
     "AWQ GEMV/GEMV_FAST/LLM_AWQ kernels require the native CUDA AWQ extension, "
     "which is not available on ROCm (it includes cuda_fp16.h and CUDA-only inline "
     "asm, and its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM "
     "layout with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton "
-    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ."
+    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ. For a GEMV-layout "
+    "checkpoint, `BACKEND.AWQ_GEMV_TRITON` runs the same packed layout with a "
+    "portable Triton kernel on ROCm."
 )
 
 
@@ -215,10 +223,11 @@ class AwqGEMVLinear(AWQuantLinear):
                 inputs, self.qweight, self.scales, self.qzeros, self.group_size
             )
 
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
-
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # Preserve the FP16 kernel result and bias until after addition:
+            # rounding either operand to BF16 first can destroy cancellation.
+            out = out.float() + self.bias.float()
+        out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -228,7 +237,7 @@ class AwqGEMVLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -251,9 +260,9 @@ class AwqGEMVLinear(AWQuantLinear):
         # scales as [out_features, groups], so the group index selects columns.
         group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data + scale_zeros.index_select(1, group_index))
-            / self.scales.index_select(1, group_index)
-        ).to(torch.int32)
+            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            / self.scales.index_select(1, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
         zeros = zeros.to(dtype=torch.int32)
@@ -279,3 +288,167 @@ class AwqGEMVLinear(AWQuantLinear):
         )
 
 __all__ = ["AWQ_GEMV_ROCM_UNSUPPORTED", "AwqGEMVLinear"]
+
+
+class _AwqGemvTritonFn(torch.autograd.Function):
+    """Differentiate the packed GEMV without retaining a dense weight."""
+
+    @staticmethod
+    def forward(ctx, inputs, qweight, scales, qzeros, group_size, output_dtype):
+        from ...quantization.awq.modules.triton.gemv import awq_gemv_triton
+
+        ctx.save_for_backward(qweight, scales, qzeros)
+        ctx.group_size = group_size
+        ctx.input_dtype = inputs.dtype
+        return awq_gemv_triton(
+            inputs, qweight, scales, qzeros, group_size, output_dtype=output_dtype,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if not ctx.needs_input_grad[0]:
+            return None, None, None, None, None, None
+
+        qweight, scales, qzeros = ctx.saved_tensors
+        n, words = qweight.shape
+        k = words * 8
+        shifts = torch.arange(8, device=qweight.device, dtype=torch.int32) * 4
+        groups = torch.arange(k, device=qweight.device) // ctx.group_size
+        grad_input = torch.zeros(
+            (grad_output.shape[0], k), device=grad_output.device, dtype=torch.float32,
+        )
+        # Unpack bounded output-column tiles only for backward. The temporary
+        # dense tile is released each iteration; no expanded weight survives.
+        for start in range(0, n, 128):
+            stop = min(start + 128, n)
+            codes = ((qweight[start:stop, :, None] >> shifts) & 15).reshape(stop - start, k)
+            zeros = ((qzeros[start:stop, :, None] >> shifts) & 15).reshape(stop - start, -1)
+            zeros = zeros.index_select(1, groups)
+            weights = (codes - zeros).float() * scales[start:stop].index_select(1, groups).float()
+            grad_input.addmm_(grad_output[:, start:stop].float(), weights)
+        return grad_input.to(ctx.input_dtype), None, None, None, None, None
+
+
+class AwqGEMVTritonLinear(AwqGEMVLinear):
+    """AWQ GEMV layout with a portable Triton decode kernel.
+
+    The packed buffers are produced by :meth:`AwqGEMVLinear.pack`, so this class
+    reads exactly the checkpoint layout the native CUDA kernel reads; only the
+    compute path differs.  Weights stay packed between forwards.
+
+    Explicit selection only: ``SUPPORTS_FORMATS`` priority is 0, which keeps the
+    FORMAT.GEMV AUTO order unchanged (CUDA keeps the native kernel there, and
+    ROCm keeps refusing the native one with the actionable message above).
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV_TRITON]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    # 0 => usable format, never auto-selected. See select_quant_linear().
+    SUPPORTS_FORMATS = {FORMAT.GEMV: 0}
+    SUPPORTS_BITS = [4]
+    # Same packed layout as the native GEMV: only these normalized group sizes.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    # The group axis is padded to a whole int32 word, so N must be a multiple
+    # of 8 for the zero extraction to address complete words.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
+
+    QUANT_TYPE = "awq_gemv_triton"
+
+    @classmethod
+    def validate(cls, bits, group_size=-1, desc_act=False, sym=True, in_features=None,
+                 out_features=None, pack_dtype=None, dtype=None, dynamic=None,
+                 device=None, trainable=None, adapter=None):
+        """Reuse the native GEMV contract, then add the Triton kernel limits."""
+
+        ok, error = super().validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, error
+        if out_features is not None and out_features % 8:
+            return False, NotImplementedError(
+                "AwqGEMVTritonLinear requires out_features divisible by 8 "
+                f"(packed group words): actual={out_features}"
+            )
+        return True, None
+
+    def post_init(self):
+        # One packed GEMV layout is read for every row count; the fused kernel is
+        # only a decode win, so wider batches use the same kernel rather than a
+        # dequantize + matmul (no dense weight is ever materialized).
+        super().post_init()
+
+    def forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            out = self.empty_linear_output(x)
+            if self.bias is not None and self.bias.requires_grad:
+                out = (out.float() + self.bias.float()).to(x.dtype)
+            return out
+
+        for name in ("qweight", "qzeros", "scales"):
+            tensor = getattr(self, name, None)
+            if tensor is not None and tensor.device != x.device:
+                raise RuntimeError(
+                    f"AwqGEMVTritonLinear input and {name} must be on the same device: "
+                    f"input={x.device}, {name}={tensor.device}"
+                )
+
+        from ...quantization.awq.modules.triton.gemv import awq_gemv_triton
+
+        rows = self.input_rows(x)
+        inputs = x.reshape(rows, x.shape[-1])
+        input_dtype = inputs.dtype
+        if input_dtype != torch.float16:
+            # The packed AWQ codebook is FP16; compute there and cast back.
+            inputs = inputs.half()
+        if not inputs.is_contiguous():
+            inputs = inputs.contiguous()
+
+        group_size = self.in_features if self.group_size == -1 else self.group_size
+        output_dtype = torch.float32 if self.bias is not None else torch.float16
+        if torch.is_grad_enabled() and inputs.requires_grad:
+            out = _AwqGemvTritonFn.apply(
+                inputs, self.qweight, self.scales, self.qzeros, group_size, output_dtype,
+            )
+        else:
+            out = awq_gemv_triton(
+                inputs, self.qweight, self.scales, self.qzeros, group_size,
+                output_dtype=output_dtype,
+            )
+        if self.bias is not None:
+            out = out + self.bias.float()
+        if out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+        return out.reshape(out_shape)
+
+
+__all__ = [
+    "AWQ_GEMV_ROCM_UNSUPPORTED",
+    "AwqGEMVLinear",
+    "AwqGEMVTritonLinear",
+]

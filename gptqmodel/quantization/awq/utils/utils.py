@@ -8,6 +8,8 @@ import importlib
 import accelerate
 import torch
 
+from ....utils.model import get_module_by_name_suffix
+
 
 ipex_available = importlib.util.find_spec("intel_extension_for_pytorch") is not None
 try:
@@ -15,12 +17,6 @@ try:
 except ImportError:
     triton_available = False
 
-
-
-def get_module_by_name_suffix(model, module_name: str):
-    for name, module in model.named_modules():
-        if name.endswith(module_name):
-            return module
 
 
 def simple_dispatch_model(model, device_map):

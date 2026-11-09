@@ -12,9 +12,13 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig
+from .qwen3_5 import Qwen3_5QModel
 
 
 class MiniCPMV4_6QModel(BaseQModel):
+    fusable = FusableConfig("minicpmv4_6").merge(Qwen3_5QModel.fusable)
+
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = "model.language_model.norm"

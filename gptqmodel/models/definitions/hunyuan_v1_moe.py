@@ -4,9 +4,12 @@
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class HunYuanMoEV1QModel(BaseQModel):
+    fusable = FusableConfig("hunyuan_v1_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     dynamic_expert_index = "num_experts"
 
     pre_lm_head_norm_module = "model.norm"
@@ -16,7 +19,6 @@ class HunYuanMoEV1QModel(BaseQModel):
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
-    moe_lifecycle_hooks.shared_expert_block_names = ["shared_mlp"]
 
     module_tree = [
         "model",

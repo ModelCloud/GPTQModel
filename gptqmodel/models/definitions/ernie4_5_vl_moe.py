@@ -14,20 +14,23 @@ from transformers.masking_utils import create_causal_mask
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, get_module, get_module_by_name_prefix, move_to
+from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
+    fusable = FusableConfig("ernie4_5_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     loader = AutoModelForImageTextToText
 
     require_load_processor = True
     require_trust_remote_code = False
     layer_modules_strict = False
 
-    pre_lm_head_norm_module = ["model.norm", "model.language_model.norm", "language_model.norm"]
+    pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm", "model.norm"]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
@@ -155,18 +158,6 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             setattr(core_model, vision_module, move_to(vision_module, device=CPU))
         if resampler_module is not None:
             setattr(core_model, resampler_module, move_to(resampler_module, device=CPU))
-
-    def lm_head_pre_quantize_generate_hook(self, inputs):
-        norm, _ = get_module_by_name_prefix(self.model, ["model.norm", "model.language_model.norm"])
-        if norm is None:
-            return inputs
-
-        norm = self.pre_quantize(norm)
-        for element in inputs:
-            for index in range(len(element)):
-                element[index] = norm(element[index])
-        self.post_quantize(norm)
-        return inputs
 
     @staticmethod
     def _flatten_multimodal_features(features: Any) -> torch.Tensor:

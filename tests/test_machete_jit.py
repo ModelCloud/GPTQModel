@@ -21,6 +21,7 @@ import torch
 import gptqmodel.nn_modules.qlinear.machete as machete_linear_module
 import gptqmodel.utils.machete as machete_utils
 from gptqmodel import extension as extension_api
+from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
@@ -342,6 +343,7 @@ def test_machete_hopper_arch_cuda_cflags_skip_duplicate_sm90a(monkeypatch):
 
 
 def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatch):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setattr(machete_utils, "is_nvcc_compatible", lambda: False)
     monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
 
@@ -357,6 +359,7 @@ def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatc
 
 
 def test_machete_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible(monkeypatch):
+    monkeypatch.setattr(machete_utils, "IS_ROCM", False)
     monkeypatch.setattr(machete_utils, "is_nvcc_compatible", lambda: True)
     monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
 
@@ -364,6 +367,18 @@ def test_machete_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_
 
     assert flags[0] == "-static-global-template-stub=false"
     assert flags[1:4] == list(machete_utils._MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES)
+
+
+def test_machete_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm(monkeypatch):
+    """hipcc rejects ``-static-global-template-stub`` even when nvcc is on PATH."""
+
+    monkeypatch.setattr(machete_utils, "IS_ROCM", True)
+    monkeypatch.setattr(machete_utils, "is_nvcc_compatible", lambda: True)
+    monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
+
+    flags = machete_utils._machete_extra_cuda_cflags()
+
+    assert "-static-global-template-stub=false" not in flags
 
 
 def test_machete_extra_cuda_cflags_skip_static_global_template_stub_when_nvcc_is_incompatible(monkeypatch):
@@ -774,7 +789,10 @@ def _dense_asymmetric_gptq_reference(
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="NVIDIA CUDA required (Machete has no HIP kernel)",
+)
 def test_machete_cuda_smoke_build_only_with_forced_arch_override(tmp_path):
     if shutil.which("nvcc") is None:
         pytest.skip("nvcc required")

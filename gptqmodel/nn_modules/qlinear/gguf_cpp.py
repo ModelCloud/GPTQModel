@@ -121,6 +121,17 @@ class _GGMLMatmulPlan:
             pass
 
 
+# Q8_1 and Q8_K are KV-cache/auxiliary types upstream with no vec_dot kernel
+# for an F32 source, so the CPU backend must never hand them to ggml either:
+# ggml_mul_mat dereferences the missing pointer instead of raising.
+_GGML_CPU_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
+
+# The CUDA backend has no convert/vec_dot kernel for the ternary types on top of
+# the two above, and `GGML_ASSERT(convert_func != nullptr)` in ggml-cuda.cu
+# aborts the whole process rather than raising. The CPU backend does handle
+# TQ1_0/TQ2_0, so this set must not be reused there.
+_GGML_CUDA_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED | frozenset({"TQ1_0", "TQ2_0"})
+
 # Upstream enum ggml_type values for constants llama-cpp-python does not export
 # (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35).
 _GGML_TYPE_ID_FALLBACK = {
@@ -709,10 +720,9 @@ class _GGMLBridge:
         )
         return output
 
-    # Q8_1 and Q8_K are KV-cache/auxiliary types upstream with no vec_dot
-    # kernel for an F32 source, and ggml_mul_mat dereferences the missing
-    # pointer instead of erroring, so they must never reach graph compute.
-    _GGML_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
+    # CPU-side set, kept as a class attribute because callers read
+    # `_GGMLBridge._GGML_MATMUL_UNSUPPORTED`.
+    _GGML_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED
 
     def quantized_matmul_cpu(
         self,
@@ -766,6 +776,13 @@ class _GGMLBridge:
     ) -> tuple[torch.Tensor, _GGMLMatmulPlan]:
         if x.device.type != "cuda":
             raise RuntimeError("GGUFCudaKernel only supports CUDA input tensors.")
+        if gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED:
+            # ggml-cuda aborts the process on these (no convert/vec_dot kernel),
+            # so refuse them instead of building a graph.
+            raise NotImplementedError(
+                f"ggml CUDA matmul does not support `{gguf_tensor_qtype}` weights; "
+                "use BACKEND.GGUF_TORCH instead."
+            )
 
         device = x.device
         backend = self._get_cuda_backend(0 if device.index is None else device.index)
@@ -942,6 +959,11 @@ class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
+    # `bits` alone cannot express this: 1-bit Q1_0/IQ1_S/IQ1_M and 2-bit
+    # Q2_K/IQ2_* run through ggml CUDA, but TQ1_0 (1-bit) and TQ2_0 (2-bit)
+    # have no GPU convert kernel and abort the process. `__init__` rejects them
+    # with NotImplementedError so AUTO can fall back to GGUF_TORCH, and
+    # `quantized_matmul_cuda` re-checks as defence in depth.
     SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -993,6 +1015,15 @@ class GGUFCudaKernel(GGUFTorchLinear):
             **kwargs,
         )
         self._ggml_cuda_plans: Dict[tuple[int, int, torch.dtype, int], _GGMLMatmulPlan] = {}
+        # Reject at construction: `create_quant_layer` retries the next AUTO
+        # candidate only on a NotImplementedError raised here. A guard in
+        # `forward()` is too late to fall back and would surface as a runtime
+        # failure on an already-built layer.
+        if self.gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED:
+            raise NotImplementedError(
+                f"ggml CUDA matmul does not support `{self.gguf_tensor_qtype}` weights; "
+                "use BACKEND.GGUF_TORCH instead."
+            )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

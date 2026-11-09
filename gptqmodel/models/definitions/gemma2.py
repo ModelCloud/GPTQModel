@@ -5,6 +5,7 @@
 
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
@@ -14,6 +15,8 @@ SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly
 
 
 class Gemma2QModel(LlamaQModel):
+    fusable = FusableConfig("gemma2").merge(LlamaFusableConfig())
+
     shared_input_verified_model_types = frozenset({"gemma2"})
 
     def __init__(self, *args, **kwargs):

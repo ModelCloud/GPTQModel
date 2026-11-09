@@ -82,7 +82,10 @@ def test_awq_gemm_validate_once_reports_rocm_gap(monkeypatch):
     assert "ROCm" in str(err)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2 or torch.version.hip is not None,
+    reason="requires two NVIDIA CUDA devices (the native AWQ kernel is CUDA-only)",
+)
 def test_awq_gemv_uses_tensor_device_instead_of_current_device():
     from gptqmodel.utils.awq import (
         awq_gemmv2_forward,

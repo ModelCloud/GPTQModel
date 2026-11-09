@@ -254,7 +254,7 @@ def run_child(name: str) -> int:
         else:
             with ThreadPoolExecutor(max_workers=THREADS) as pool:
                 list(pool.map(lambda index: fn(), range(THREADS * ITERS)))
-    except BaseException as exc:  # noqa: BLE001 - report, never re-raise
+    except Exception as exc:  # noqa: BLE001 - report, never re-raise
         print(json.dumps({"status": "ERROR", "detail": f"{type(exc).__name__}: {exc}"}))
         return 0
     print(json.dumps({"status": "PASS"}))

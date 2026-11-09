@@ -4,11 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen2MoeQModel(BaseQModel):
     """Qwen2 MoE definition aligned to the upstream HF forward execution order."""
+    fusable = FusableConfig("qwen2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
 
     shared_input_verified_model_types = frozenset({"qwen2_moe"})
 

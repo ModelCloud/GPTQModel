@@ -239,7 +239,24 @@ struct marlin_device_info_t {
   int max_shared_mem = 0;
   int major_capability = 0;
   int minor_capability = 0;
+  // Probed once per device and read by the shape planner, so kernel selection
+  // describes what the card can do instead of naming an architecture.
+  int l2_cache_size = 0;
+  int max_threads_per_sm = 0;
+  bool has_tensor_memory = false;
 };
+
+// Tensor memory (tcgen05) exists on the datacenter Blackwell parts only.
+// Consumer Blackwell (sm_120 and friends) does not have it.
+inline bool has_tensor_memory_arch(int major_capability) {
+  return major_capability == 10 || major_capability == 11;
+}
+
+// Ada's narrow-projection split path. Named so the planner can widen it later
+// without another literal in the hot path.
+inline bool narrow_splitk_arch(const marlin_device_info_t& info) {
+  return info.major_capability == 8 && info.minor_capability == 9;
+}
 
 marlin_device_info_t query_marlin_device_info(int device) {
   marlin_device_info_t info;
@@ -250,10 +267,35 @@ marlin_device_info_t query_marlin_device_info(int device) {
                          cudaDevAttrComputeCapabilityMajor, device);
   cudaDeviceGetAttribute(&info.minor_capability,
                          cudaDevAttrComputeCapabilityMinor, device);
+  cudaDeviceGetAttribute(&info.l2_cache_size, cudaDevAttrL2CacheSize, device);
+  cudaDeviceGetAttribute(&info.max_threads_per_sm,
+                         cudaDevAttrMaxThreadsPerMultiProcessor, device);
+  info.has_tensor_memory = has_tensor_memory_arch(info.major_capability);
   return info;
 }
 
+int marlin_device_count() {
+  static std::mutex mutex;
+  static int count = -1;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (count < 0) {
+    int detected = 0;
+    if (cudaGetDeviceCount(&detected) != cudaSuccess || detected < 0) {
+      detected = 0;
+    }
+    count = detected;
+  }
+  return count;
+}
+
 marlin_device_info_t get_marlin_device_info(int device) {
+  // The cache is indexed by the caller's device number, and this is the first
+  // caller that can receive an arbitrary Python integer: a negative index or a
+  // huge one used to read/resize out of bounds.
+  const int device_count = marlin_device_count();
+  TORCH_CHECK(device >= 0 && device < device_count,
+              "marlin device index ", device, " is out of range [0, ",
+              device_count, ")");
   static std::mutex mutex;
   static std::vector<marlin_device_info_t> cache;
   std::lock_guard<std::mutex> lock(mutex);
@@ -862,7 +904,19 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
-  int max_thread_m_blocks = 4;
+  // Ada's narrow AWQ projections have too few independent output tiles for
+  // the default 64-row tile. Avoid long chains of ordered FP32 reductions.
+  const bool narrow_fp32_awq =
+      narrow_splitk_arch(device_info) &&
+      q_type == vllm::kU4 && !has_act_order && !is_zp_float &&
+      group_size == 128 && use_fp32_reduce && !use_atomic_add &&
+      thread_k_init == -1 && thread_n_init == -1 &&
+      prob_m <= 128 && prob_n <= 2048 && prob_n % 128 == 0 &&
+      prob_k >= 2048 && prob_k <= 8192;
+  // Exact 16-row multiples can use smaller M tiles in one launch. Keep the
+  // normal tile selection for row tails rather than adding remainder launches.
+  const bool narrow_small_m_tiles = narrow_fp32_awq && prob_m % 16 == 0;
+  int max_thread_m_blocks = narrow_small_m_tiles ? 1 : 4;
   bool full_sm80 =
       marlin_prefers_full_sm80(major_capability, minor_capability, sms);
   bool disable_full_sm80_exact_split = false;
@@ -898,7 +952,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (narrow_small_m_tiles) {
+      exec_cfg = exec_config_t{1, thread_config_t{128, 128, 256}};
+      thread_tfg = exec_cfg.tb_cfg;
+    } else if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
@@ -934,6 +991,15 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
+
+    // Keep FP32 reduction, with longer K stripes and fewer lock waiters.
+    if (narrow_fp32_awq) {
+      const int tile_m = m_block_size_8 ? 8 : 16 * thread_m_blocks;
+      const int output_tiles = std::max(1, prob_m_split / tile_m) *
+                               (prob_n / thread_n);
+      const int max_splits = (thread_m_blocks >= 2 && prob_k >= 4096) ? 8 : 4;
+      blocks = std::min(blocks, output_tiles * max_splits);
+    }
 
     TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
@@ -1463,6 +1529,19 @@ std::tuple<int64_t, int64_t> MARLIN_SCRATCH_SIZES_EXPORT_NAME(
   marlin::checked_scratch_mul(std::get<1>(sizes), a.element_size(),
                               "a_tmp byte capacity");
   return sizes;
+}
+
+std::vector<int64_t> gptq_marlin_device_profile(int64_t device) {
+  TORCH_CHECK(device >= 0 && device <= INT_MAX,
+              "marlin device index ", device, " is out of range");
+  const auto info = marlin::get_marlin_device_info(static_cast<int>(device));
+  return {info.sms,
+          info.max_shared_mem,
+          info.major_capability,
+          info.minor_capability,
+          info.l2_cache_size,
+          info.max_threads_per_sm,
+          info.has_tensor_memory ? 1 : 0};
 }
 
 #endif

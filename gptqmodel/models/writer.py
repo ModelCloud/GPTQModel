@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import shutil
+from contextlib import nullcontext
 from os.path import isfile, join
 from typing import Any, Dict, List, Optional, Union
 
@@ -18,6 +19,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
@@ -41,6 +43,7 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..utils.backend import BACKEND
+from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
@@ -52,7 +55,10 @@ from ..utils.hf import (
 )
 from ..utils.logger import setup_logger
 from ..utils.model import (
+    OffloadTensorRef,
     TensorSource,
+    _atomic_shard_path,
+    _validate_offload_sources_outside_save_dir,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -65,7 +71,7 @@ from ..utils.model import (
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
 
 
 log = setup_logger()
@@ -74,6 +80,7 @@ PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
 PROCESS_LOG_MODULE = "module"
 QUANT_LOG_LOSS = "loss"
+QUANT_LOG_LOSS_KIND = "loss_kind"
 QUANT_LOG_NSAMPLES = "samples"
 QUANT_LOG_DAMP = "damp"
 PROCESS_LOG_TIME = "time"
@@ -115,6 +122,103 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     if normalized not in SUPPORTED_SPLIT_BY:
         raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
     return normalized
+
+
+# Source-only config fields are preserved, but a live value always wins. These
+# keys are excluded because they are either stripped on purpose or are fully
+# regenerated for the export.
+_CONFIG_MERGE_SKIP_KEYS = frozenset(
+    {
+        "attn_implementation",
+        "_attn_implementation",
+        "quantization_config",
+        "quantize_config",
+    }
+)
+
+
+def _merge_missing_config_fields(saved: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Fill keys the saved config dropped, recursively, without overriding live values."""
+    for key, value in source.items():
+        if key in _CONFIG_MERGE_SKIP_KEYS:
+            continue
+        if key not in saved:
+            saved[key] = value
+        elif isinstance(saved[key], dict) and isinstance(value, dict):
+            _merge_missing_config_fields(saved[key], value)
+
+
+def _quantization_config_for_model_config(
+    quantize_config: Any,
+    runtime_format: FORMAT,
+) -> Dict[str, Any]:
+    """Return the compact quantization descriptor embedded in config.json."""
+    payload = quantize_config.to_dict()
+    if runtime_format == FORMAT.EXL3:
+        payload.pop("tensor_storage", None)
+    return payload
+
+
+def _save_model_configs_without_weights(
+        model: torch.nn.Module,
+        save_dir: str,
+        source_model_dir: Optional[str] = None,
+) -> None:
+    """Serialize HF model metadata without invoking weight-file cleanup.
+
+    ``PreTrainedModel.save_pretrained(state_dict={})`` is not a config-only
+    operation: Transformers treats the empty dictionary as the complete weight
+    set and removes pre-existing checkpoint shards. Quantized exports write
+    their weights separately below, so use the same metadata preparation as
+    Transformers and call the config serializers directly.
+    """
+
+    os.makedirs(save_dir, exist_ok=True)
+    config = model.config
+
+    dtype = getattr(model, "dtype", None)
+    if dtype is not None:
+        config.dtype = str(dtype).split(".")[-1]
+    config.architectures = [model.__class__.__name__.removeprefix("FSDP")]
+
+    is_remote_code = getattr(model, "is_remote_code", None)
+    if callable(is_remote_code) and is_remote_code():
+        custom_object_save(model, save_dir, config=config)
+
+    # Read the source config before serializing: an in-place export overwrites
+    # ``config.json`` and would otherwise lose the fields we are trying to keep.
+    source_config: Optional[Dict[str, Any]] = None
+    if source_model_dir is not None:
+        source_config_path = os.path.join(source_model_dir, "config.json")
+        if os.path.isfile(source_config_path):
+            with open(source_config_path, "r", encoding="utf-8") as handle:
+                source_config = json.load(handle)
+            if not isinstance(source_config, dict):
+                raise ValueError("Model config.json must contain a JSON object.")
+
+    config.save_pretrained(save_dir)
+
+    # Some remote model configurations contain runtime-significant extension
+    # fields that their registered Transformers config class does not declare.
+    # Loading and reserializing such a config silently drops those fields (for
+    # example DeepSeek V4's ``num_hash_layers``). Preserve source-only fields,
+    # including ones nested in sub-configs such as ``text_config``, while
+    # allowing the live serialized config—including the new
+    # quantization_config—to override every field it knows about.
+    if source_config is not None:
+        saved_config_path = os.path.join(save_dir, "config.json")
+        with open(saved_config_path, "r", encoding="utf-8") as handle:
+            saved_config = json.load(handle)
+        if not isinstance(saved_config, dict):
+            raise ValueError("Model config.json must contain a JSON object.")
+        _merge_missing_config_fields(saved_config, source_config)
+        with open(saved_config_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+
+    can_generate = getattr(model, "can_generate", None)
+    generation_config = getattr(model, "generation_config", None)
+    if callable(can_generate) and can_generate() and generation_config is not None:
+        generation_config.save_pretrained(save_dir)
 
 
 def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtle_model) -> int:
@@ -297,6 +401,7 @@ def _save_module_replacement_safetensors(
     matched_shards_by_prefix: Dict[str, List[str]] = {}
     for prefix in prefixes:
         checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
+        runtime_prefix = {prefix}
         matched_shards = []
         for tensor_name, shard_name in turtle_model._weight_map.items():
             if _tensor_matches_prefixes(tensor_name, checkpoint_prefixes):
@@ -305,15 +410,14 @@ def _save_module_replacement_safetensors(
                     removed_tensor_names.append(tensor_name)
                 if shard_name not in matched_shards:
                     matched_shards.append(shard_name)
-        for leaf in ("weight", "bias"):
-            runtime_name = f"{prefix}.{leaf}"
-            runtime_shard = existing_weight_map.get(runtime_name)
-            if runtime_shard:
-                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_name)
-                if runtime_name not in removed_tensor_names:
-                    removed_tensor_names.append(runtime_name)
-                if runtime_shard not in matched_shards:
-                    matched_shards.append(runtime_shard)
+        for tensor_name, shard_name in existing_weight_map.items():
+            if not _tensor_matches_prefixes(tensor_name, runtime_prefix):
+                continue
+            drop_by_shard.setdefault(shard_name, set()).add(tensor_name)
+            if tensor_name not in removed_tensor_names:
+                removed_tensor_names.append(tensor_name)
+            if shard_name not in matched_shards:
+                matched_shards.append(shard_name)
         matched_shards_by_prefix[prefix] = matched_shards
 
     tied_input_shards = list(matched_shards_by_prefix.get(input_prefix, [])) if input_prefix else []
@@ -341,6 +445,7 @@ def _save_module_replacement_safetensors(
     rewritten_files = []
     tensor_to_filename = {}
     total_size_bytes = 0
+    runtime_prefixes = set(prefixes)
     for shard_name, dropped_names in drop_by_shard.items():
         if not shard_name.endswith(".safetensors"):
             raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
@@ -351,13 +456,17 @@ def _save_module_replacement_safetensors(
         tensors = {}
         with safe_open(read_path, framework="pt", device="cpu") as handler:
             for tensor_name in handler.keys():
-                if tensor_name not in dropped_names:
-                    tensors[tensor_name] = handler.get_tensor(tensor_name)
-                    tensor_to_filename[tensor_name] = shard_name
+                if tensor_name in dropped_names or _tensor_matches_prefixes(tensor_name, runtime_prefixes):
+                    if tensor_name not in removed_tensor_names:
+                        removed_tensor_names.append(tensor_name)
+                    continue
+                tensors[tensor_name] = handler.get_tensor(tensor_name)
+                tensor_to_filename[tensor_name] = shard_name
         for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
             tensors[tensor_name] = tensor
             tensor_to_filename[tensor_name] = shard_name
-        save_file(tensors, target_path, metadata=metadata)
+        with _atomic_shard_path(target_path) as temporary:
+            save_file(tensors, temporary, metadata=metadata)
         rewritten_files.append(shard_name)
         total_size_bytes += os.path.getsize(target_path)
     return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
@@ -491,15 +600,27 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         raise ValueError(f"Missing native W4A checkpoint tensors: {missing}")
 
 
-def _load_tensors_by_prefixes(
+def _load_tensors_by_selectors(
     model_local_path: str,
     prefixes: List[str],
+    suffixes: Optional[List[str]] = None,
+    tensor_names: Optional[List[str]] = None,
     source_files: Optional[List[str]] = None,
 ) -> Dict[str, torch.Tensor]:
-    # Gather tensors whose names match any of the requested prefixes.
-    # Gather tensors whose names match any of the requested prefixes from all available shards.
+    """Gather source tensors selected by prefix, suffix, or exact name."""
+
     tensors: Dict[str, torch.Tensor] = {}
+    suffixes = suffixes or []
+    tensor_name_set = set(tensor_names or [])
     source_file_names = _resolve_out_of_model_source_files(model_local_path, source_files)
+
+    def selected(name: str) -> bool:
+        return (
+            name in tensor_name_set
+            or any(name.startswith(prefix) for prefix in prefixes)
+            or any(name.endswith(suffix) for suffix in suffixes)
+        )
+
     for source_file_name in source_file_names:
         source_tensor_path = os.path.join(model_local_path, source_file_name)
         if not os.path.exists(source_tensor_path):
@@ -507,22 +628,26 @@ def _load_tensors_by_prefixes(
         try:
             with safe_open(source_tensor_path, framework="pt", device="cpu") as f:
                 for tensor_name in f.keys():
-                    if any(tensor_name.startswith(prefix) for prefix in prefixes):
+                    if selected(tensor_name):
                         if tensor_name not in tensors:
                             tensors[tensor_name] = f.get_tensor(tensor_name)
         except Exception as exc:
             log.warn(
-                f"Model: Failed to read tensors from {source_file_name} while scanning for prefixes "
-                f"{prefixes}: {exc}"
+                f"Model: Failed to read tensors from {source_file_name} while scanning "
+                f"for out-of-model selectors: {exc}"
             )
     # Prefixes absent from the index stay optional, but tensors the index declares
     # must not be silently dropped when their shard is missing or unreadable.
     weight_map = None if source_files else _read_safetensors_weight_map(model_local_path)
-    missing = sorted(name for name in weight_map or {} if name.startswith(tuple(prefixes)) and name not in tensors)
+    missing = sorted(
+        name
+        for name in weight_map or {}
+        if selected(name) and name not in tensors
+    )
     if missing:
         shards = sorted({weight_map[name] for name in missing})
         raise ValueError(
-            f"Model: {len(missing)} tensors with prefixes {prefixes} declared in the safetensors index of "
+            f"Model: {len(missing)} tensors declared in the safetensors index of "
             f"`{model_local_path}` are missing from or unreadable in {shards}, e.g. {missing[:3]}."
         )
     return tensors
@@ -539,30 +664,579 @@ def _tensor_source_from_tensor(name: str, tensor: torch.Tensor) -> TensorSource:
     )
 
 
-def _merge_prefix_tensors_into_state_dict(
-    prefixes: List[str], model_local_path: str, state_dict: Dict[str, TensorSource]
+def _merge_selected_tensors_into_state_dict(
+    prefixes: List[str],
+    suffixes: List[str],
+    tensor_names: List[str],
+    model_local_path: str,
+    state_dict: Dict[str, TensorSource],
 ) -> None:
     # Inject matched tensors into the ongoing state_dict before sharding.
     merged = 0
     normalized_prefixes = [prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes]
-    tensors = _load_tensors_by_prefixes(model_local_path, normalized_prefixes)
+    tensors = _load_tensors_by_selectors(
+        model_local_path,
+        normalized_prefixes,
+        suffixes,
+        tensor_names,
+    )
     for name, tensor in tensors.items():
         state_dict[name] = _tensor_source_from_tensor(name, tensor)
         merged += 1
     if merged:
-        log.info(f"Model: Merged {merged} tensors with prefixes {normalized_prefixes} into the state dict")
+        log.info(
+            "Model: Merged %s tensors selected by prefixes=%s suffixes=%s names=%s into the state dict",
+            merged,
+            normalized_prefixes,
+            suffixes,
+            tensor_names,
+        )
     else:
-        log.warn(f"Model: No tensors matched prefixes {normalized_prefixes} while merging into the state dict")
+        log.warn(
+            "Model: No tensors matched out-of-model selectors prefixes=%s suffixes=%s names=%s",
+            normalized_prefixes,
+            suffixes,
+            tensor_names,
+        )
+
+
+def _validated_save_state_overlay(owner):
+    """Return one validated out-of-tree model overlay contract, if attached."""
+
+    provider = getattr(owner, "save_state_overlay", None)
+    if not callable(provider):
+        return None
+    contract = provider()
+    if contract is None:
+        return None
+    if not isinstance(contract, dict):
+        raise TypeError("save-state overlay contract must be a dictionary")
+    overlay_model = contract.get("model")
+    prefixes = contract.get("replace_prefixes")
+    if not isinstance(overlay_model, torch.nn.Module):
+        raise TypeError("save-state overlay has no torch module")
+    if (
+        not isinstance(prefixes, (list, tuple))
+        or not prefixes
+        or any(not isinstance(prefix, str) or not prefix for prefix in prefixes)
+        or len(set(prefixes)) != len(prefixes)
+    ):
+        raise ValueError("save-state overlay prefixes must be unique non-empty strings")
+    normalized = tuple(
+        prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes
+    )
+    return contract, overlay_model, normalized
+
+
+def _validated_save_state_overlay_suffixes(contract):
+    expected_suffixes = contract.get("expected_suffixes")
+    if expected_suffixes is None:
+        return None
+    if (
+        not isinstance(expected_suffixes, (list, tuple))
+        or not expected_suffixes
+        or any(
+            not isinstance(suffix, str) or not suffix
+            for suffix in expected_suffixes
+        )
+        or len(set(expected_suffixes)) != len(expected_suffixes)
+    ):
+        raise ValueError(
+            "save-state overlay expected suffixes must be unique non-empty strings"
+        )
+    return set(expected_suffixes)
+
+
+def _validated_save_state_overlay_removals(contract):
+    """Return source-checkpoint prefixes superseded under different names."""
+
+    prefixes = contract.get("remove_prefixes")
+    if prefixes is None:
+        return (), None
+    if (
+        not isinstance(prefixes, (list, tuple))
+        or not prefixes
+        or any(not isinstance(prefix, str) or not prefix for prefix in prefixes)
+        or len(set(prefixes)) != len(prefixes)
+    ):
+        raise ValueError(
+            "save-state overlay removal prefixes must be unique non-empty strings"
+        )
+    normalized = tuple(
+        prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes
+    )
+    expected_suffixes = contract.get("remove_expected_suffixes")
+    if (
+        not isinstance(expected_suffixes, (list, tuple))
+        or not expected_suffixes
+        or any(
+            not isinstance(suffix, str) or not suffix
+            for suffix in expected_suffixes
+        )
+        or len(set(expected_suffixes)) != len(expected_suffixes)
+    ):
+        raise ValueError(
+            "save-state overlay removal suffixes must be unique non-empty strings"
+        )
+    return normalized, set(expected_suffixes)
+
+
+def _validate_exllamav3_publication_modules(
+    owner,
+    validated_overlay=None,
+) -> int:
+    """Fail before META sync if a completed EXL3 result is still native.
+
+    Recovery controllers may defer packed-module installation while they
+    advance through activation boundaries.  Every module represented in the
+    authoritative EXL3 error ledger must be present as an EXL3 module in the
+    publication tree (or its declared save-state overlay) before the generic
+    saver is allowed to materialize remaining META tensors.  Otherwise a
+    native source weight can be reconstructed accidentally, defeating bounded
+    recovery and potentially exhausting host memory on large MoE models.
+    """
+
+    records = [
+        entry.get("exl3_error_ledger_record")
+        for entry in (getattr(owner, "quant_log", None) or ())
+        if isinstance(entry, dict)
+        and isinstance(entry.get("exl3_error_ledger_record"), dict)
+    ]
+    if not records:
+        return 0
+    modules = [record.get("module") for record in records]
+    if any(not isinstance(module, str) or not module for module in modules):
+        raise RuntimeError(
+            "EXL3 publication ledger contains a missing module identity"
+        )
+    expected = set(modules)
+    actual = {
+        name
+        for name, module in owner.model.named_modules()
+        if getattr(module, "QUANT_TYPE", None) == "exl3"
+    }
+    validated = validated_overlay or _validated_save_state_overlay(owner)
+    if validated is not None:
+        _contract, overlay_model, _normalized = validated
+        actual.update(
+            name
+            for name, module in overlay_model.named_modules()
+            if getattr(module, "QUANT_TYPE", None) == "exl3"
+        )
+    missing = sorted(expected - actual)
+    if missing:
+        raise RuntimeError(
+            "EXL3 publication tree is missing packed modules: "
+            f"actual={len(expected) - len(missing)} expected={len(expected)} "
+            "missing="
+            + ", ".join(missing[:8])
+        )
+    return len(expected)
+
+
+def _exllamav3_checkpoint_passthrough_plan(owner, tensor_storage):
+    """Describe an exact native checkpoint passthrough when names are stable.
+
+    A lazy shell uses runtime module names, which can differ from the original
+    safetensors keys after Transformers applies a conversion map.  Serializing
+    untouched tensors from that shell silently renames native checkpoint state
+    and can also materialize it unnecessarily.  When every EXL3 replacement
+    has the same authoritative ``<module>.weight`` name in the source index,
+    retain all other source entries byte-for-byte under their original names.
+    """
+
+    checkpoint_source = getattr(owner, "turtle_model", None)
+    weight_map = getattr(checkpoint_source, "_weight_map", None)
+    source_root = getattr(checkpoint_source, "model_local_path", None)
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+    if not isinstance(source_root, str) or not source_root:
+        return None
+    if not isinstance(tensor_storage, dict) or not tensor_storage:
+        return None
+
+    quant_names = set()
+    replaced_source_modules = set()
+    source_candidates = getattr(
+        owner,
+        "exllamav3_checkpoint_module_candidates",
+        None,
+    )
+    fused_replacements = getattr(owner, "exllamav3_checkpoint_replaced_tensors", None)
+    replaced_fused_names = None
+    if callable(fused_replacements):
+        replaced_fused_names = fused_replacements(tensor_storage)
+        if (
+            not isinstance(replaced_fused_names, (set, frozenset))
+            or not replaced_fused_names
+            or not all(isinstance(name, str) for name in replaced_fused_names)
+            or not replaced_fused_names.issubset(weight_map)
+        ):
+            raise RuntimeError("EXL3 fused checkpoint replacement set is invalid")
+    for module_name, entry in tensor_storage.items():
+        if not isinstance(module_name, str) or not module_name:
+            return None
+        stored = entry.get("stored_tensors") if isinstance(entry, dict) else None
+        if not isinstance(stored, dict) or not stored:
+            return None
+        names = set(stored)
+        if any(
+            not isinstance(name, str) or not name.startswith(f"{module_name}.")
+            for name in names
+        ):
+            return None
+        quant_names.update(names)
+        if replaced_fused_names is not None:
+            continue
+        if callable(source_candidates):
+            candidates = source_candidates(module_name)
+            if (
+                not isinstance(candidates, (list, tuple))
+                or not candidates
+                or any(
+                    not isinstance(candidate, str) or not candidate
+                    for candidate in candidates
+                )
+                or len(set(candidates)) != len(candidates)
+            ):
+                raise RuntimeError(
+                    "EXL3 checkpoint module candidates must be unique "
+                    f"non-empty strings for {module_name}"
+                )
+        else:
+            candidates = (module_name,)
+        matches = [
+            candidate
+            for candidate in candidates
+            if f"{candidate}.weight" in weight_map
+        ]
+        if len(matches) != 1:
+            if callable(source_candidates):
+                raise RuntimeError(
+                    "EXL3 checkpoint module mapping is not unique for "
+                    f"{module_name}: {matches}"
+                )
+            return None
+        replaced_source_modules.add(matches[0])
+
+    if replaced_fused_names is not None:
+        return {
+            "checkpoint_source": checkpoint_source,
+            "quant_names": frozenset(quant_names),
+            "replaced_source_names": frozenset(replaced_fused_names),
+        }
+
+    # Conversion-based architectures are eligible only when the publication
+    # module identities themselves are also source-checkpoint identities. This
+    # makes passthrough exact and keeps the fallback behavior for architectures
+    # whose quantized prefixes require a more involved conversion contract.
+    # An EXL3 module replaces the complete native module state, not only its
+    # weight tensor.  Native FP8 checkpoints commonly keep auxiliary tensors
+    # such as ``weight_scale_inv`` under the same prefix; preserving those
+    # after replacing the weight leaks stale source state into the published
+    # tensor namespace.  Match the complete authoritative source prefix, just
+    # like the ordinary save-state overlay path does.
+    replaced_source_names = set()
+    for name in weight_map:
+        owner_name = name
+        while "." in owner_name:
+            owner_name = owner_name.rsplit(".", 1)[0]
+            if owner_name in replaced_source_modules:
+                replaced_source_names.add(name)
+                break
+    return {
+        "checkpoint_source": checkpoint_source,
+        "quant_names": frozenset(quant_names),
+        "replaced_source_names": frozenset(replaced_source_names),
+    }
+
+
+def _torch_dtype_from_safetensors_name(name: str) -> torch.dtype:
+    mapping = {
+        "F64": torch.float64,
+        "F32": torch.float32,
+        "F16": torch.float16,
+        "BF16": torch.bfloat16,
+        "I64": torch.int64,
+        "I32": torch.int32,
+        "I16": torch.int16,
+        "I8": torch.int8,
+        "U8": torch.uint8,
+        "BOOL": torch.bool,
+    }
+    optional = {
+        "F8_E4M3": "float8_e4m3fn",
+        "F8_E5M2": "float8_e5m2",
+        "F8_E8M0": "float8_e8m0fnu",
+    }
+    attribute = optional.get(name)
+    if attribute is not None and hasattr(torch, attribute):
+        return getattr(torch, attribute)
+    dtype = mapping.get(name)
+    if dtype is None:
+        raise ValueError(f"Unsupported safetensors dtype in checkpoint passthrough: {name}")
+    return dtype
+
+
+def _build_exllamav3_checkpoint_passthrough_state_dict(
+    owner,
+    plan,
+    *,
+    offload_root=None,
+    validated_overlay=None,
+) -> Dict[str, TensorSource]:
+    """Build packed EXL3 state plus exact, zero-copy native source entries."""
+
+    quant_names = set(plan["quant_names"])
+    state_dict = get_state_dict_for_save(
+        owner.model,
+        offload_root=offload_root,
+        include_names=quant_names,
+    )
+    _apply_save_state_overlay(
+        owner,
+        state_dict,
+        validated_overlay=validated_overlay,
+        require_source_removals=False,
+    )
+    actual_quant_names = set(state_dict)
+    if actual_quant_names != quant_names:
+        missing = sorted(quant_names - actual_quant_names)
+        unexpected = sorted(actual_quant_names - quant_names)
+        raise RuntimeError(
+            "EXL3 checkpoint passthrough packed tensor census differs: "
+            f"actual={len(actual_quant_names)} expected={len(quant_names)} "
+            f"missing={missing[:8]} unexpected={unexpected[:8]}"
+        )
+
+    checkpoint_source = plan["checkpoint_source"]
+    source_root = os.path.realpath(checkpoint_source.model_local_path)
+    weight_map = checkpoint_source._weight_map
+    replaced = set(plan["replaced_source_names"])
+    native_names = set(weight_map) - replaced
+    by_shard: Dict[str, List[str]] = {}
+    for name in native_names:
+        shard_name = weight_map.get(name)
+        if not isinstance(shard_name, str) or not shard_name:
+            raise RuntimeError(f"Invalid checkpoint shard for native tensor {name}")
+        by_shard.setdefault(shard_name, []).append(name)
+
+    native_sources: Dict[str, TensorSource] = {}
+    for shard_name in sorted(by_shard):
+        # Hugging Face snapshots intentionally store basename-only symlinks to
+        # the repository's shared ``blobs`` directory, which is outside the
+        # snapshot root after realpath resolution. Reject path components and
+        # traversal, but permit that canonical snapshot-link layout.
+        if os.path.basename(shard_name) != shard_name or shard_name in {".", ".."}:
+            raise RuntimeError(f"Checkpoint shard name is unsafe: {shard_name}")
+        shard_path = os.path.realpath(os.path.join(source_root, shard_name))
+        if not os.path.isfile(shard_path):
+            raise RuntimeError(f"Checkpoint shard is not a regular file: {shard_name}")
+        with safe_open(shard_path, framework="pt", device="cpu") as handler:
+            available = set(handler.keys())
+            expected = set(by_shard[shard_name])
+            missing = sorted(expected - available)
+            if missing:
+                raise RuntimeError(
+                    f"Checkpoint shard is missing native tensors: {shard_name} {missing[:8]}"
+                )
+            for name in sorted(expected):
+                tensor_slice = handler.get_slice(name)
+                dtype = _torch_dtype_from_safetensors_name(tensor_slice.get_dtype())
+                shape = tuple(tensor_slice.get_shape())
+                native_sources[name] = TensorSource(
+                    name=name,
+                    torch_dtype=dtype,
+                    shape=shape,
+                    source=OffloadTensorRef(
+                        path=shard_path,
+                        torch_dtype=dtype,
+                        shape=shape,
+                        format="safetensors",
+                        weight_name=name,
+                    ),
+                )
+
+    collisions = set(native_sources).intersection(state_dict)
+    if collisions:
+        raise RuntimeError(
+            "EXL3 checkpoint passthrough native/packed collision: "
+            + ", ".join(sorted(collisions)[:8])
+        )
+    combined = {
+        name: native_sources.get(name, state_dict.get(name))
+        for name in sorted(set(native_sources).union(state_dict))
+    }
+    if any(source is None for source in combined.values()):
+        raise RuntimeError("EXL3 checkpoint passthrough produced an empty tensor source")
+    log.info(
+        "Model save: preserving %s native source tensors under exact checkpoint names; "
+        "publishing %s packed EXL3 tensors without native shell materialization.",
+        len(native_sources),
+        len(state_dict),
+    )
+    return combined
+
+
+def _build_exllamav3_tensor_storage_for_save(
+    owner,
+    validated_overlay=None,
+) -> Dict[str, Dict[str, Any]]:
+    """Include EXL3 modules supplied by a disjoint save-state overlay.
+
+    DeepSeek V4 quantizes its MTP body through an attached model rather than
+    placing those modules in the target model tree. The tensor payload overlay
+    already replaces the native MTP prefixes during save; its EXL3 metadata
+    must be assembled from the same exact prefix contract before config files
+    are written.
+    """
+
+    storage = build_exllamav3_tensor_storage(owner.model)
+    validated = validated_overlay or _validated_save_state_overlay(owner)
+    if validated is None:
+        return storage
+    contract, overlay_model, normalized = validated
+    overlay_storage = build_exllamav3_tensor_storage(overlay_model)
+    expected_modules = {prefix[:-1] for prefix in normalized}
+    selected = {
+        name: entry
+        for name, entry in overlay_storage.items()
+        if name in expected_modules
+    }
+    if set(selected) != expected_modules:
+        missing = sorted(expected_modules - set(selected))
+        raise ValueError(
+            "save-state overlay has no EXL3 tensor-storage metadata for "
+            + ", ".join(missing)
+        )
+    expected_suffixes = _validated_save_state_overlay_suffixes(contract)
+    if expected_suffixes is not None:
+        for module, entry in selected.items():
+            stored_tensors = entry.get("stored_tensors") if isinstance(entry, dict) else None
+            prefix = f"{module}."
+            actual_names = set(stored_tensors) if isinstance(stored_tensors, dict) else set()
+            expected_names = {f"{prefix}{suffix}" for suffix in expected_suffixes}
+            actual_suffixes = {name[len(prefix):] for name in actual_names if name.startswith(prefix)}
+            if actual_names != expected_names or actual_suffixes != expected_suffixes:
+                raise ValueError(
+                    f"save-state overlay tensor-storage contract differs for {module}: "
+                    f"actual={sorted(actual_suffixes)} "
+                    f"expected={sorted(expected_suffixes)}"
+                )
+    for module in expected_modules:
+        storage.pop(module, None)
+    collisions = set(selected).intersection(storage)
+    if collisions:
+        raise ValueError(
+            "save-state overlay tensor-storage collides outside replacement prefixes: "
+            + ", ".join(sorted(collisions))
+        )
+    storage.update(selected)
+    return storage
+
+
+def _apply_save_state_overlay(
+    owner,
+    state_dict: Dict[str, TensorSource],
+    validated_overlay=None,
+    *,
+    require_source_removals: bool = True,
+) -> None:
+    """Replace complete tensor prefixes from an attached quantization model."""
+
+    validated = validated_overlay or _validated_save_state_overlay(owner)
+    if validated is None:
+        return
+    contract, overlay_model, normalized = validated
+    overlay = get_state_dict_for_save(
+        overlay_model,
+        offload_root=contract.get("offload_root"),
+        include_prefixes=normalized,
+    )
+    selected = {
+        name: source
+        for name, source in overlay.items()
+        if any(name.startswith(prefix) for prefix in normalized)
+    }
+    missing = [
+        prefix
+        for prefix in normalized
+        if not any(name.startswith(prefix) for name in selected)
+    ]
+    if missing:
+        raise ValueError(
+            "save-state overlay has no replacement tensors for " + ", ".join(missing)
+        )
+    expected_suffixes = _validated_save_state_overlay_suffixes(contract)
+    if expected_suffixes is not None:
+        for prefix in normalized:
+            actual_suffixes = {
+                name[len(prefix) :]
+                for name in selected
+                if name.startswith(prefix)
+            }
+            if actual_suffixes != expected_suffixes:
+                raise ValueError(
+                    f"save-state overlay tensor contract differs for {prefix}: "
+                    f"actual={sorted(actual_suffixes)} "
+                    f"expected={sorted(expected_suffixes)}"
+                )
+    removal_prefixes, removal_suffixes = _validated_save_state_overlay_removals(
+        contract
+    )
+    removed_native = [
+        name
+        for name in state_dict
+        if any(name.startswith(prefix) for prefix in removal_prefixes)
+    ]
+    if require_source_removals:
+        for prefix in removal_prefixes:
+            actual_suffixes = {
+                name[len(prefix) :]
+                for name in removed_native
+                if name.startswith(prefix)
+            }
+            if actual_suffixes != removal_suffixes:
+                raise ValueError(
+                    f"save-state overlay source-removal contract differs for {prefix}: "
+                    f"actual={sorted(actual_suffixes)} "
+                    f"expected={sorted(removal_suffixes)}"
+                )
+    stale = set(removed_native)
+    stale.update(
+        name
+        for name in state_dict
+        if any(name.startswith(prefix) for prefix in normalized)
+    )
+    for name in stale:
+        del state_dict[name]
+    collisions = set(selected).intersection(state_dict)
+    if collisions:
+        raise ValueError(
+            "save-state overlay collides outside replacement prefixes: "
+            + ", ".join(sorted(collisions))
+        )
+    state_dict.update(selected)
+    log.info(
+        "Model: Replaced %s tensor prefixes (%s source tensors, including %s "
+        "checkpoint aliases -> %s overlay tensors)",
+        len(normalized),
+        len(stale),
+        len(removed_native),
+        len(selected),
+    )
 
 
 def _normalize_out_of_model_tensors_entries(
     entries: Optional[List[Union[str, Dict[str, Any]]]]
-) -> tuple[List[str], List[str]]:
+) -> tuple[List[str], List[str], List[str], List[str]]:
     # Normalize configured files/prefixes into explicit lists.
     copy_files: List[str] = []
     prefixes: List[str] = []
+    suffixes: List[str] = []
+    tensor_names: List[str] = []
     if not entries:
-        return copy_files, prefixes
+        return copy_files, prefixes, suffixes, tensor_names
 
     raw_entries = list(entries) if isinstance(entries, (list, tuple)) else [entries]
     for entry in raw_entries:
@@ -588,7 +1262,23 @@ def _normalize_out_of_model_tensors_entries(
                     raise ValueError("`prefixes` entries must be non-empty strings.")
                 prefixes.append(prefix)
 
-    return copy_files, prefixes
+        suffixes_value = entry.get("suffixes")
+        if suffixes_value is not None:
+            suffix_list = [suffixes_value] if isinstance(suffixes_value, str) else list(suffixes_value)
+            for suffix in suffix_list:
+                if not isinstance(suffix, str) or not suffix:
+                    raise ValueError("`suffixes` entries must be non-empty strings.")
+                suffixes.append(suffix)
+
+        tensors_value = entry.get("tensors")
+        if tensors_value is not None:
+            tensors = [tensors_value] if isinstance(tensors_value, str) else list(tensors_value)
+            for tensor_name in tensors:
+                if not isinstance(tensor_name, str) or not tensor_name:
+                    raise ValueError("`tensors` entries must be non-empty strings.")
+                tensor_names.append(tensor_name)
+
+    return copy_files, prefixes, suffixes, tensor_names
 
 
 def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> tuple[str, bool]:
@@ -896,21 +1586,38 @@ def ModelWriter(cls):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
+        (
+            copy_tensor_files,
+            prefix_entries,
+            suffix_entries,
+            tensor_name_entries,
+        ) = _normalize_out_of_model_tensors_entries(
             getattr(self, "out_of_model_tensors", None)
         )
         out_of_model_state_dict: Dict[str, TensorSource] = {}
-        if prefix_entries:
-            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, out_of_model_state_dict)
+        if prefix_entries or suffix_entries or tensor_name_entries:
+            _merge_selected_tensors_into_state_dict(
+                prefix_entries, suffix_entries, tensor_name_entries,
+                self.model_local_path, out_of_model_state_dict,
+            )
 
         os.makedirs(save_dir, exist_ok=True)
 
         if self.quant_log:
+            write_exl3_error_ledger(
+                save_dir,
+                (
+                    entry["exl3_error_ledger_record"]
+                    for entry in self.quant_log
+                    if isinstance(entry.get("exl3_error_ledger_record"), dict)
+                ),
+            )
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
-                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
+                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS,
+                            QUANT_LOG_LOSS_KIND, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
                 w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
-                              entry.get(QUANT_LOG_NSAMPLES), entry.get(QUANT_LOG_DAMP),
+                              entry.get(QUANT_LOG_LOSS_KIND), entry.get(QUANT_LOG_NSAMPLES), entry.get(QUANT_LOG_DAMP),
                               entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
@@ -1001,8 +1708,10 @@ def ModelWriter(cls):
 
         quantize_config = copy.deepcopy(self.quantize_config)
 
+        save_state_overlay = _validated_save_state_overlay(self)
         quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
         runtime_format = resolve_quant_format(quantize_config.format, quant_method)
+        checkpoint_passthrough_plan = None
 
         if runtime_format == FORMAT.GPTQ_V2:
             log.warn(
@@ -1010,9 +1719,20 @@ def ModelWriter(cls):
             )
 
         if runtime_format == FORMAT.EXL3:
-            tensor_storage = build_exllamav3_tensor_storage(self.model)
+            _validate_exllamav3_publication_modules(
+                self,
+                validated_overlay=save_state_overlay,
+            )
+            tensor_storage = _build_exllamav3_tensor_storage_for_save(
+                self,
+                validated_overlay=save_state_overlay,
+            )
             quantize_config.tensor_storage = tensor_storage
             self.quantize_config.tensor_storage = copy.deepcopy(tensor_storage)
+            checkpoint_passthrough_plan = _exllamav3_checkpoint_passthrough_plan(
+                self,
+                tensor_storage,
+            )
 
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
             self.model = self.get_model_with_quantize(
@@ -1021,8 +1741,16 @@ def ModelWriter(cls):
             )
 
         # --- start config save block ---
-        # Save quantized config
-        config.quantization_config = quantize_config.to_dict()
+        # Keep the Transformers config small. EXL3's per-tensor storage map can
+        # be tens of megabytes and already has an authoritative home in
+        # quantize_config.json. Embedding a second copy in config.json exceeds
+        # Hub's config renderer limit and makes ordinary AutoConfig loading
+        # needlessly expensive. vLLM/GPTQModel load the complete EXL3 manifest
+        # from the external quantization config filename.
+        config.quantization_config = _quantization_config_for_model_config(
+            quantize_config,
+            runtime_format,
+        )
         self.model.config = config
 
         def strip_attention_impl_fields(target: Any) -> Dict[str, Any]:
@@ -1047,9 +1775,15 @@ def ModelWriter(cls):
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
             _normalize_legacy_tied_weights_keys(self.model)
 
-            # Save model config, including generation_config
-            # Use empty state_dict hack to bypass saving weights
-            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+            # Save model metadata directly. Calling model.save_pretrained with
+            # an empty state_dict deletes resumable shards in recent
+            # Transformers releases because they are absent from the supplied
+            # (empty) checkpoint.
+            _save_model_configs_without_weights(
+                self.model,
+                save_dir,
+                self.model_local_path,
+            )
         finally:
             for attr, value in removed_config_attention_attrs.items():
                 setattr(self.model.config, attr, value)
@@ -1081,50 +1815,76 @@ def ModelWriter(cls):
             with open(config_path, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps(saved_config, indent=2) + "\n")
 
-        def debug_saved_config(path):
-            # List all files in the directory
-            files = os.listdir(path)
-            print("Files in directory:")
-            for file in files:
-                print(file)
-
-            config_file_paths = ["generation_config.json", "config.json"]
-            for file_name in config_file_paths:
-                full_path = os.path.join(path, file_name)
-                if os.path.isfile(full_path):
-                    print(f"Content of saved `{file_name}`:")
-                    with open(full_path, 'r') as config_file:
-                        config_data = json.load(config_file)
-                        print(json.dumps(config_data, indent=4))
-                else:
-                    print(f"`{file_name}` does not exist in the directory.")
-
-        debug_saved_config(save_dir)
+        log.info("Model: Saved quantized config metadata to `%s`.", save_dir)
 
         # --- end config save block ---
 
-        # Due to shell/turtle state, we need to sync the modules from turtle to shell
-        if not self.load_quantized_model:
-            # Packed buffers named "weight" (e.g. BNB) belong to offload
-            # storage, not to the original dense checkpoint at the same path.
-            alias_all_from_turtle_if_meta(
-                shell_model=self.model, turtle_model=self.turtle_model,
-                skip_module_types=(BaseQuantLinear,),
-            )
-            materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
-            if materialized_layers:
-                log.info("Model save: materialized %s meta layer modules from turtle source.", materialized_layers)
-            restored_meta = _materialize_remaining_meta_params_from_turtle(self.model, self.turtle_model)
-            if restored_meta:
-                log.info("Model save: materialized %s remaining meta params from turtle source.", restored_meta)
-
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
-        state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+
+        # Ordinary shell saves need native runtime tensors materialized. Exact
+        # checkpoint passthrough instead reads untouched tensors directly under
+        # their authoritative source names and therefore deliberately skips
+        # this memory-heavy conversion step.
+        if not self.load_quantized_model and checkpoint_passthrough_plan is None:
+            suspend_staging = getattr(
+                self.turtle_model, "suspend_active_source_staging", None
+            )
+            direct_source_scope = (
+                suspend_staging() if callable(suspend_staging) else nullcontext()
+            )
+            with direct_source_scope:
+                alias_all_from_turtle_if_meta(
+                    shell_model=self.model,
+                    turtle_model=self.turtle_model,
+                )
+                materialized_layers = _materialize_meta_layers_from_turtle(
+                    self.model,
+                    self.turtle_model,
+                )
+                if materialized_layers:
+                    log.info(
+                        "Model save: materialized %s meta layer modules from turtle source.",
+                        materialized_layers,
+                    )
+                restored_meta = _materialize_remaining_meta_params_from_turtle(
+                    self.model,
+                    self.turtle_model,
+                )
+                if restored_meta:
+                    log.info(
+                        "Model save: materialized %s remaining meta params from turtle source.",
+                        restored_meta,
+                    )
+        elif checkpoint_passthrough_plan is not None:
+            log.info(
+                "Model save: exact native checkpoint passthrough enabled; "
+                "skipping native shell materialization."
+            )
+
+        if checkpoint_passthrough_plan is not None:
+            state_dict = _build_exllamav3_checkpoint_passthrough_state_dict(
+                self,
+                checkpoint_passthrough_plan,
+                offload_root=offload_root,
+                validated_overlay=save_state_overlay,
+            )
+        else:
+            state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        if checkpoint_passthrough_plan is None:
+            state_dict.update(out_of_model_state_dict)
+            out_of_model_state_dict.clear()
+            _apply_save_state_overlay(
+                self,
+                state_dict,
+                validated_overlay=save_state_overlay,
+            )
         checkpoint_key_for_save = getattr(self, "checkpoint_key_for_save", None)
-        if callable(checkpoint_key_for_save):
+        if callable(checkpoint_key_for_save) and checkpoint_passthrough_plan is None:
             state_dict = _convert_checkpoint_state_dict_keys(state_dict, checkpoint_key_for_save)
-        state_dict.update(out_of_model_state_dict)
-        out_of_model_state_dict.clear()
+
+        # The layer split path writes into several subdirectories, so guard
+        # references against the export root before any group can be written.
+        _validate_offload_sources_outside_save_dir(state_dict, save_dir)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
@@ -1319,9 +2079,27 @@ def ModelWriter(cls):
                 if qcfg.lm_head and name == self.lm_head:
                     continue
 
-                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config, qcfg) for ignore_module in sublist
-                ):
+                declared = {
+                    item.split(":", 1)[0]
+                    for sublist in self.simple_layer_modules(config, qcfg)
+                    for item in sublist
+                }
+                layer_prefix = next(
+                    (f"{prefix}." for prefix in self.extract_layers_node() if name.startswith(f"{prefix}.")),
+                    None,
+                )
+                relative = name[len(layer_prefix):] if layer_prefix is not None else None
+                if relative is not None:
+                    layer_index, separator, remainder = relative.partition(".")
+                    relative = remainder if separator and layer_index.isdigit() else relative
+                relative_match = relative is not None and any(
+                    relative == leaf or (relative.startswith(f"{leaf}.") and EXPERT_INDEX_PLACEHOLDER in leaf)
+                    for leaf in declared
+                )
+                if any(
+                        name == ignore_module or name.startswith(f"{ignore_module}.")
+                        for ignore_module in ignore_modules
+                ) or not relative_match:
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         log.info(f"The layer {name} is not quantized.")

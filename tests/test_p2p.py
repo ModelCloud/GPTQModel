@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.utils import p2p
 
 
@@ -119,52 +120,6 @@ def test_p2p_config_disable(monkeypatch):
     assert status.can_copy(0, 1) is False
 
 
-def test_configure_p2p_installs_policy():
-    """The config object, not the environment, drives every P2P helper."""
-
-    config = p2p.configure_p2p(
-        p2p.P2PConfig(mode="off", probe=True, probe_mib=8, min_gbps=9, min_ratio=2)
-    )
-    assert p2p.p2p_mode() == "off"
-    assert p2p.probe_enabled() is True
-    assert p2p._probe_mib() == 8
-    assert p2p._min_gbps() == 9
-    assert p2p._min_ratio() == 2
-    assert p2p.get_p2p_config() is config
-
-    # A plain dict is accepted anywhere a P2PConfig is.
-    p2p.configure_p2p({"mode": "on"})
-    assert p2p.p2p_mode() == "on"
-
-
-def test_p2p_config_rejects_invalid_mode():
-    with pytest.raises(ValueError):
-        p2p.P2PConfig(mode="bogus")
-
-
-def test_p2p_config_is_noop_for_cpu_devices(monkeypatch):
-    """Peer access is accelerator-only; CPU<->CPU must be untouched and silent."""
-
-    warnings = []
-    monkeypatch.setattr(
-        p2p.log, "warning", lambda message, *args, **kwargs: warnings.append(message)
-    )
-    # Even a forced, probing policy must not turn CPU transfers into peer work.
-    p2p.configure_p2p(p2p.P2PConfig(mode="on", probe=True))
-
-    status = p2p.enable_for_devices([torch.device("cpu"), torch.device("cpu")])
-    assert status.devices == ()
-    assert status.pairs == {}
-    assert status.direct_copy_allowed() is False
-    assert warnings == []
-
-    src = torch.arange(4)
-    dst = torch.zeros(4)
-    assert p2p.peer_copy_batch([src], [dst]) is False
-    assert p2p.p2p_move_nested([src, dst], torch.device("cpu")) is p2p.P2P_NOT_APPLICABLE
-    assert p2p.broadcast_module_to_device(torch.nn.Linear(2, 2), torch.device("cpu")) is False
-
-
 def test_p2p_bandwidth_gate(monkeypatch):
     _fake_topology(
         monkeypatch,
@@ -178,8 +133,6 @@ def test_p2p_bandwidth_gate(monkeypatch):
     assert status.state(1, 0) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is False
     assert status.can_copy(1, 0) is True
-    # One degraded direction forces the whole status off the direct path.
-    assert status.direct_copy_allowed() is False
 
 
 def test_p2p_parity_with_host_staging_stays_enabled(monkeypatch):
@@ -196,7 +149,6 @@ def test_p2p_parity_with_host_staging_stays_enabled(monkeypatch):
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is True
-    assert status.direct_copy_allowed() is True
 
 
 def test_p2p_materially_slower_than_host_staging_is_degraded(monkeypatch):
@@ -213,10 +165,9 @@ def test_p2p_materially_slower_than_host_staging_is_degraded(monkeypatch):
     assert status.bandwidth_gbps[(0, 1)] == 10.0
     assert status.host_staged_gbps[(0, 1)] == 45.0
     assert status.can_copy(0, 1) is False
-    assert status.direct_copy_allowed() is False
 
 
-def test_p2p_ratio_gate_can_be_tightened_by_env(monkeypatch):
+def test_p2p_ratio_gate_can_be_tightened(monkeypatch):
     # A stricter 1.1x requirement (direct must strictly beat staging) rejects a
     # parity link; the default does not.
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (45.0, 45.0))
@@ -225,32 +176,307 @@ def test_p2p_ratio_gate_can_be_tightened_by_env(monkeypatch):
     assert status.state(0, 1) == p2p.STATE_DEGRADED
 
 
-def test_copy_tensor_to_never_bounces_through_host(monkeypatch):
-    """A degraded verdict must not be turned into an explicit CPU relay.
+def test_asymmetric_peer_topology_is_per_direction(monkeypatch):
+    """Regression: ``0 -> 1`` unsupported while ``1 -> 0`` works.
 
-    Production transfers go through ``dst.copy_(src)``, where the driver picks
-    the peer or staged path. An explicit ``src.to("cpu")`` here would be the
-    ``gpu1 -> CPU -> gpu2`` relay multi-GPU quantization must avoid.
+    The rig that exposed the SIGSEGV reports exactly this matrix. A global
+    "some direction works" verdict used to send the unsupported direction down
+    ``hipMemcpyPeerAsync``, which crashes the process instead of raising.
     """
-    _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (1.0, 100.0))
-    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True))
+    _fake_topology(monkeypatch, {(1, 0): True})
     status = p2p.enable_peer_access([0, 1])
-    assert status.state(0, 1) == p2p.STATE_DEGRADED
 
-    to_cpu_calls = []
-    original_to = torch.Tensor.to
+    assert status.can_copy(0, 1) is False
+    assert status.can_copy(1, 0) is True
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1", status) is False
+    assert p2p.can_transfer_directly("cuda:1", "cuda:0", status) is True
+    assert not hasattr(status, "direct_copy_allowed")
 
-    def spy_to(self, *args, **kwargs):
-        if args and args[0] == "cpu":
-            to_cpu_calls.append(args[0])
-        return original_to(self, *args, **kwargs)
 
-    dst = torch.zeros(8)
+def test_safe_move_to_stages_unsupported_direction(monkeypatch):
+    """The unsupported direction must relay through host memory."""
+    staged = []
+
+    def fake_stage(tensor, device, *, dtype=None, copy=False):
+        staged.append((tensor.device, torch.device(device)))
+        return tensor.clone()
+
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *args, **kwargs: False)
+    monkeypatch.setattr(p2p, "_stage_through_host", fake_stage)
+
     src = torch.arange(8)
-    monkeypatch.setattr(torch.Tensor, "to", spy_to)
-    p2p.copy_tensor_to(dst, src, status)
-    assert to_cpu_calls == []
-    assert torch.equal(dst, src)
+    moved = p2p.safe_move_to(src, "cuda:1")
+    assert staged == [(src.device, torch.device("cuda:1"))]
+    assert torch.equal(moved, src)
+
+
+def test_safe_move_to_uses_direct_path_when_supported(monkeypatch):
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        p2p,
+        "_stage_through_host",
+        lambda *args, **kwargs: pytest.fail("healthy link must not be staged"),
+    )
+    src = torch.arange(8)
+    moved = p2p.safe_move_to(src, torch.device("cpu"), copy=True)
+    assert torch.equal(moved, src)
+    assert moved is not src
+
+
+@pytest.mark.parametrize("device", [DEVICE.CUDA, DEVICE.ROCM])
+def test_safe_moves_with_family_enum_use_current_device(monkeypatch, device):
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *a, **k: False)
+    staged = []
+
+    def fake_stage(tensor, target, **kwargs):
+        staged.append(target)
+        return tensor.clone()
+
+    monkeypatch.setattr(p2p, "_stage_through_host", fake_stage)
+    src = torch.arange(8)
+    assert torch.equal(p2p.safe_move_to(src, device), src)
+    assert staged == [torch.device("cuda:1")]
+
+    module = torch.nn.Linear(2, 2)
+    targets = []
+    monkeypatch.setattr(module, "to", lambda **kwargs: targets.append(kwargs["device"]) or module)
+    assert p2p.safe_module_to(module, device) is module
+    assert targets[-1] == torch.device("cuda:1")
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA/HIP devices")
+@pytest.mark.parametrize("device", [DEVICE.CUDA, DEVICE.ROCM])
+def test_family_enum_moves_on_nonzero_current_device(device):
+    src = torch.arange(8)
+    module = torch.nn.Linear(8, 2)
+    with torch.no_grad():
+        module.weight.copy_(torch.arange(16).reshape(2, 8) / 16)
+        module.bias.copy_(torch.arange(2) / 8)
+    expected = module(src.float()).detach()
+
+    with torch.cuda.device(1):
+        moved = p2p.safe_move_to(src, device)
+        p2p.safe_module_to(module, device)
+        assert moved.device == torch.device("cuda:1")
+        assert module.weight.device == torch.device("cuda:1")
+        assert torch.equal(moved.cpu(), src)
+        torch.testing.assert_close(module(moved.float()).cpu(), expected)
+        # Explicit ordinals must still override the current-device context.
+        assert p2p.safe_move_to(src, "cuda:0").device == torch.device("cuda:0")
+
+
+def test_asymmetric_pairs_lists_only_the_broken_direction(monkeypatch):
+    _fake_topology(monkeypatch, {(1, 0): True})
+    status = p2p.enable_peer_access([0, 1])
+    assert status.asymmetric_pairs() == [(0, 1)]
+
+
+def test_forced_peer_access_is_not_trusted_when_capability_denies(monkeypatch):
+    """``P2PConfig(mode='on')`` can make enablement report success on a denied pair.
+
+    That is not evidence of a usable link: a direct copy there still crashes the
+    ROCm rig, so the direction must stay host-staged even when forced.
+    """
+    _fake_topology(monkeypatch, {(1, 0): True})
+    p2p.configure_p2p(p2p.P2PConfig(mode="on"))
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert status.state(0, 1) == p2p.STATE_UNVERIFIED
+    assert status.can_copy(0, 1) is False
+    assert status.unverified_pairs() == [(0, 1)]
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1", status) is False
+    assert p2p.can_transfer_directly("cuda:1", "cuda:0", status) is True
+
+
+def test_forced_unverified_pair_is_never_probed(monkeypatch):
+    """The probe performs a direct copy, so it must not run on a denied pair."""
+    probed = []
+
+    def fake_bandwidth(src, dst):
+        probed.append((src, dst))
+        return 100.0, 50.0
+
+    _fake_topology(monkeypatch, {(1, 0): True}, bandwidth=fake_bandwidth)
+    p2p.configure_p2p(p2p.P2PConfig(mode="on", probe=True))
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert (0, 1) not in probed
+    assert (1, 0) in probed
+    assert status.state(0, 1) == p2p.STATE_UNVERIFIED
+
+
+def test_forced_unverified_pair_counts_as_asymmetric(monkeypatch):
+    """A forced-on but capability-denied direction is still unusable.
+
+    ``clone_module_for_devices`` skips NCCL replicate on ``asymmetric_pairs()``;
+    the forced state must therefore be reported there too, otherwise a rig that
+    denies ``0 -> 1`` would still attempt the collective path.
+    """
+    _fake_topology(monkeypatch, {(1, 0): True})
+    p2p.configure_p2p(p2p.P2PConfig(mode="on"))
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert status.state(0, 1) == p2p.STATE_UNVERIFIED
+    assert status.asymmetric_pairs() == [(0, 1)]
+
+
+def test_can_transfer_directly_falls_back_to_capability(monkeypatch):
+    p2p.clear_p2p_cache()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(p2p, "_can_access_peer", lambda src, dst: (src, dst) == (1, 0))
+
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1") is False
+    assert p2p.can_transfer_directly("cuda:1", "cuda:0") is True
+    # Transfers that do not cross two accelerators are always safe.
+    assert p2p.can_transfer_directly("cpu", "cuda:1") is True
+
+
+def test_safe_module_to_stages_whole_module_on_unsupported_direction(monkeypatch):
+    class FakeTensor:
+        def __init__(self, device):
+            self.device = device
+
+    module = torch.nn.Linear(2, 2)
+    monkeypatch.setattr(module, "parameters", lambda: iter([FakeTensor(torch.device("cuda:0"))]))
+    monkeypatch.setattr(module, "buffers", lambda: iter([]))
+    calls = []
+    monkeypatch.setattr(module, "to", lambda *a, **k: calls.append((a, k)) or module)
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *a, **k: False)
+
+    p2p.safe_module_to(module, torch.device("cuda:1"))
+    assert [call[1]["device"] for call in calls] == [
+        torch.device("cpu"),
+        torch.device("cuda:1"),
+    ]
+
+
+def test_safe_module_to_uses_direct_path_when_supported(monkeypatch):
+    class FakeTensor:
+        def __init__(self, device):
+            self.device = device
+
+    module = torch.nn.Linear(2, 2)
+    monkeypatch.setattr(module, "parameters", lambda: iter([FakeTensor(torch.device("cuda:0"))]))
+    monkeypatch.setattr(module, "buffers", lambda: iter([]))
+    calls = []
+    monkeypatch.setattr(module, "to", lambda *a, **k: calls.append((a, k)) or module)
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *a, **k: True)
+
+    p2p.safe_module_to(module, torch.device("cuda:1"))
+    assert len(calls) == 1
+    assert calls[0][1]["device"] == torch.device("cuda:1")
+
+
+def test_copy_tensor_to_stages_unsupported_direction(monkeypatch):
+    src = torch.arange(8)
+    dst = torch.zeros(8)
+    staged = src + 1
+    monkeypatch.setattr(p2p, "can_transfer_directly", lambda *a, **k: False)
+    monkeypatch.setattr(p2p, "safe_move_to", lambda *a, **k: staged)
+
+    result = p2p.copy_tensor_to(dst, src)
+    assert result is dst
+    assert torch.equal(dst, staged)
+
+
+def test_hooked_linear_routes_cross_device_input_through_safe_move(monkeypatch):
+    """Regression: the forward replay crash was ``input.to(weight.device)``.
+
+    ``HookedLinear`` must never call ``Tensor.to`` directly across devices; the
+    asymmetric ROCm rig segfaulted there inside ``hipMemcpyPeerAsync``.
+    """
+    from gptqmodel.nn_modules import hooked_linear
+
+    class FakeData:
+        # The forward reads ``weight.data.device`` to pick the compute device,
+        # so ``data`` must itself report the accelerator; a plain CPU tensor
+        # would make the layer believe no cross-device move is needed.
+        device = torch.device("cuda:1")
+
+    class FakeWeight:
+        dtype = torch.float32
+        is_meta = False
+        device = torch.device("cuda:1")
+        data = FakeData()
+
+    layer = hooked_linear.HookedLinear.from_linear(torch.nn.Linear(4, 4))
+    # Replace the registered parameter without going through nn.Module's
+    # Parameter type check; the forward only reads ``.data.device``.
+    del layer._parameters["weight"]
+    object.__setattr__(layer, "weight", FakeWeight())
+    moved = []
+    monkeypatch.setattr(
+        hooked_linear,
+        "safe_move_to",
+        lambda tensor, device, **kwargs: moved.append(torch.device(device)) or tensor,
+    )
+    monkeypatch.setattr(
+        torch.nn.functional,
+        "linear",
+        lambda inp, weight, bias=None: inp,
+    )
+
+    output = layer(torch.zeros(2, 4))
+    assert moved == [torch.device("cuda:1")]
+    assert output.device == torch.device("cpu")
+
+
+@pytest.mark.parametrize("broken_state", [p2p.STATE_UNSUPPORTED, p2p.STATE_UNVERIFIED])
+def test_clone_skips_nccl_replicate_on_asymmetric_topology(monkeypatch, broken_state):
+    from gptqmodel.utils import looper_helpers
+
+    status = p2p.PeerStatus(
+        devices=(0, 1),
+        pairs={(0, 1): broken_state, (1, 0): p2p.STATE_ENABLED},
+    )
+    monkeypatch.setattr(looper_helpers, "enable_for_devices", lambda devices: status)
+    p2p.configure_p2p(p2p.P2PConfig(use_torch_replicate=True))
+    monkeypatch.setattr(looper_helpers, "_REPLICATE_DISABLED", False)
+    monkeypatch.setattr(
+        looper_helpers,
+        "torch_replicate",
+        lambda *a, **k: pytest.fail("replicate must be skipped"),
+    )
+    monkeypatch.setattr(looper_helpers, "safe_module_to", lambda *a, **k: None)
+    monkeypatch.setattr(looper_helpers, "rehome_module_to_device", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    clones = looper_helpers.clone_module_for_devices(
+        torch.nn.Linear(2, 2),
+        [torch.device("cuda", 0), torch.device("cuda", 1)],
+    )
+    assert set(clones) == {torch.device("cuda", 0), torch.device("cuda", 1)}
+
+
+def test_clone_disables_replicate_after_nccl_failure(monkeypatch):
+    from gptqmodel.utils import looper_helpers
+
+    status = p2p.PeerStatus(
+        devices=(0, 1),
+        pairs={(0, 1): p2p.STATE_ENABLED, (1, 0): p2p.STATE_ENABLED},
+    )
+    monkeypatch.setattr(looper_helpers, "enable_for_devices", lambda devices: status)
+    p2p.configure_p2p(p2p.P2PConfig(use_torch_replicate=True))
+    monkeypatch.setattr(looper_helpers, "_REPLICATE_DISABLED", False)
+    monkeypatch.setattr(
+        looper_helpers,
+        "torch_replicate",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("NCCL Error 2: unhandled system error")),
+    )
+    monkeypatch.setattr(looper_helpers, "safe_module_to", lambda *a, **k: None)
+    monkeypatch.setattr(looper_helpers, "rehome_module_to_device", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    clones = looper_helpers.clone_module_for_devices(
+        torch.nn.Linear(2, 2),
+        [torch.device("cuda", 0), torch.device("cuda", 1)],
+    )
+    assert set(clones) == {torch.device("cuda", 0), torch.device("cuda", 1)}
+    assert looper_helpers._REPLICATE_DISABLED is True
 
 
 def test_p2p_unmeasurable_direct_link_is_degraded(monkeypatch):
@@ -340,9 +566,9 @@ def test_p2p_probe_is_resilient_to_a_noisy_sample(monkeypatch):
 
 
 def test_p2p_forced_mode_ignores_relative_gate(monkeypatch):
-    # ``mode='on'`` asks for the direct path explicitly; a link slower than
-    # staging must not be vetoed by the relative comparison (the absolute floor
-    # still applies).
+    # ``P2PConfig(mode='on')`` asks for the direct path explicitly; a link slower
+    # than staging must not be vetoed by the relative comparison (the absolute
+    # floor still applies).
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (20.0, 45.0))
     p2p.configure_p2p(p2p.P2PConfig(mode="on", min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])

@@ -4,9 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class FalconH1QModel(BaseQModel):
+    fusable = FusableConfig("falcon_h1").merge(LlamaFusableConfig())
+
     layers_node = "model.layers"
 
     module_tree= [

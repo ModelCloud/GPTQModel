@@ -12,7 +12,11 @@ weights and prove the operand is collectable afterwards. Numeric checks use a
 Torch oracle that decodes the packed INT4 words itself.
 
 The GPU kernels (Triton FP8 MMA) are not exercised here; see
-``test_w4afp8_gb10.py``.
+``test_w4afp8_gb10.py``. The few cases that do launch a kernel are gated on
+``w4a_kernels_available()`` rather than ``torch.cuda.is_available()``: HIP
+reuses the CUDA device namespace, so the torch check is true on ROCm even
+though the kernels (``ttg.nvidia_mma`` operands and PTX rounding) cannot be
+compiled there.
 """
 
 from __future__ import annotations
@@ -25,13 +29,20 @@ import weakref
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear, unpack_int4_codes
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+from tests.w4a_hardware_marks import w4a_kernels_available
 
 
 K, N = 256, 128
+
+_W4A_GPU_REASON = (
+    "the W4A Triton kernels require an NVIDIA CUDA device "
+    "(they lower to `ttg.nvidia_mma` and emit PTX, which HIP cannot compile)"
+)
 
 # Comment on storage: a packed 4-bit weight uses half a byte per weight, so any
 # floating tensor of at least ``K * N`` bytes is an expansion, not a layout.
@@ -113,6 +124,20 @@ def _fp8_carrier(x: torch.Tensor) -> W4AActivation:
         mode="w4afp8", codes=codes, scales=scales,
         shape=tuple(x.shape), model_dtype=x.dtype,
     )
+
+
+def _decode_e2m1_planes(plane: torch.Tensor) -> torch.Tensor:
+    """Decode one packed E2M1 plane through the format's numeric codebook.
+
+    Independent of the module helpers: the nibbles are read directly and each
+    four-bit code is looked up in the E2M1 value table, so a packing bug cannot
+    cancel itself out. Codes are ``magnitude | (sign << 3)``.
+    """
+    values = torch.tensor((0., .5, 1., 1.5, 2., 3., 4., 6.))
+    data = plane.view(torch.uint8)
+    rows, cols = data.shape
+    codes = torch.stack((data & 15, data >> 4), dim=1).reshape(rows * 2, cols)
+    return values[(codes & 7).long()] * torch.where((codes & 8) == 0, 1., -1.)
 
 
 # --------------------------------------------------------------------------
@@ -554,8 +579,8 @@ def test_transient_staging_peak_is_measured_not_assumed():
     module = _module(W4AFP8Linear)
     operand_bytes = K * N
     floor = K * N
-    if not torch.cuda.is_available():
-        pytest.skip("allocator sampling requires CUDA")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     module.to("cuda")
     torch.cuda.synchronize()
@@ -587,8 +612,8 @@ def test_device_round_trip_forward_restages_from_native_weights(dtype):
     inverse: the move stages nothing, and the first forward on the new device
     still produces the operand from the native INT4 weights.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
     module = _module(W4AFP8Linear)
 
     def unexpected_post_init(*args, **kwargs):
@@ -708,6 +733,57 @@ def test_observable_layout_is_reported_for_normal_construction():
 
 
 # --------------------------------------------------------------------------
+# ROCm gating: HIP reuses the CUDA namespace but cannot lower these kernels.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cls", [W4AFP8Linear, W4ANVFP4Linear])
+def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
+    """A ROCm target must be refused at validation, not at Triton compile time.
+
+    ``torch.cuda.is_available()`` is true on ROCm and gfx1201 reports a
+    synthetic ``(12, 0)`` capability that clears the FP8 floor, so the torch
+    checks cannot gate this backend. Without the family gate the first forward
+    aborts inside Triton with "Unsupported DotOp found when converting
+    TritonGPU to LLVM".
+    """
+    w4a_floatx = sys.modules[W4AFP8Linear.__module__]
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
+    error = cls._rocm_unsupported_error()
+    assert isinstance(error, NotImplementedError)
+    assert "ROCm" in str(error) and "ttg.nvidia_mma" in str(error)
+
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.CUDA)
+    assert cls._rocm_unsupported_error() is None
+
+
+def test_rocm_kernels_refuse_before_lowering(monkeypatch):
+    """Direct kernel calls must report the platform, not a PassManager crash."""
+    from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as nvfp4_triton
+    from gptqmodel.nn_modules.qlinear import w4a_triton
+
+    monkeypatch.setattr(w4a_triton, "IS_ROCM", True)
+    monkeypatch.setattr(nvfp4_triton, "IS_ROCM", True)
+
+    error = w4a_triton.native_fp8_gemm_error()
+    assert isinstance(error, RuntimeError)
+    assert "ttg.nvidia_mma" in str(error)
+
+    # Device/argument checks must not run first: a HIP host has no usable path
+    # for any of these, whatever the operand happens to be.
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        w4a_triton.unpack_int4_to_e4m3(
+            torch.zeros((32, 64), dtype=torch.int32),
+            torch.empty((256, 64), dtype=torch.float8_e4m3fn),
+        )
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        w4a_triton.fp8_pack(torch.zeros((4, K), dtype=torch.float16))
+    with pytest.raises(NotImplementedError, match="CUDA-only"):
+        nvfp4_triton.nvfp4_pack_and_swizzle(
+            torch.zeros((4, K), dtype=torch.float16), torch.ones(())
+        )
+
+
+# --------------------------------------------------------------------------
 # Fused INT4 -> E4M3 unpacking must stay byte-identical to the Torch decode.
 # --------------------------------------------------------------------------
 
@@ -730,8 +806,8 @@ def test_fused_unpack_matches_torch_decode(rows, out):
     difference shows up as a byte mismatch. Random words exercise every nibble
     position instead of a ramp that could agree by accident.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     generator = torch.Generator().manual_seed(rows * 17 + out)
     packed = torch.randint(
@@ -749,10 +825,51 @@ def test_fused_unpack_matches_torch_decode(rows, out):
     assert torch.equal(fused.view(torch.uint8), expected.view(torch.uint8))
 
 
+@pytest.mark.parametrize("layout", ["packed_rows", "packed_columns", "output_rows", "output_columns"])
+def test_fused_unpack_respects_strided_input_and_caller_output(layout):
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
+
+    rows, columns = 256, 64
+    generator = torch.Generator().manual_seed(1753)
+    packed = torch.randint(0, 2**31 - 1, (rows // 8, columns), generator=generator, dtype=torch.int64)
+    packed = packed.to(device="cuda", dtype=torch.int32)
+    expected = (unpack_int4_codes(packed.cpu()).to(torch.int16) - 8).to(torch.float8_e4m3fn).cuda()
+    argument = packed
+    output = torch.empty((rows, columns), device="cuda", dtype=torch.float8_e4m3fn)
+    untouched = None
+    if layout.startswith("packed"):
+        if layout.endswith("rows"):
+            storage = torch.empty((rows // 8, columns + 8), device="cuda", dtype=torch.int32)
+            argument = storage[:, :columns]
+        else:
+            storage = torch.empty((rows // 8, columns * 2), device="cuda", dtype=torch.int32)
+            argument = storage[:, ::2]
+        argument.copy_(packed)
+        assert not argument.is_contiguous()
+    else:
+        if layout.endswith("rows"):
+            storage = torch.empty((rows, columns + 8), device="cuda", dtype=torch.float8_e4m3fn)
+            output = storage[:, :columns]
+            untouched = storage[:, columns:]
+        else:
+            storage = torch.empty((rows, columns * 2), device="cuda", dtype=torch.float8_e4m3fn)
+            output = storage[:, ::2]
+            untouched = storage[:, 1::2]
+        storage.view(torch.uint8).fill_(0xA5)
+        assert not output.is_contiguous()
+
+    assert _fused_unpack()(argument, output) is output
+    torch.cuda.synchronize()
+    assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+    if untouched is not None:
+        assert bool((untouched.view(torch.uint8) == 0xA5).all())
+
+
 def test_fused_unpack_rejects_bad_arguments():
     """Wrong dtype/shape/device must be refused instead of silently decoded."""
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     packed = torch.zeros((32, 64), dtype=torch.int32, device="cuda")
     good = torch.empty((256, 64), dtype=torch.float8_e4m3fn, device="cuda")
@@ -767,8 +884,8 @@ def test_fused_unpack_rejects_bad_arguments():
 
 def test_fused_unpack_all_zero_and_all_fifteen_words():
     """The extreme word values pin the ends of the centered INT4 range."""
-    if not torch.cuda.is_available():
-        pytest.skip("the fused unpack runs on CUDA only")
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
 
     out = torch.empty((64, 32), device="cuda", dtype=torch.float8_e4m3fn)
     zero_words = torch.zeros((8, 32), dtype=torch.int32, device="cuda")
@@ -783,10 +900,10 @@ def test_fused_unpack_all_zero_and_all_fifteen_words():
 
 
 # --------------------------------------------------------------------------
-# W4ANVFP4Linear stages its own operand caches and so skips
+# W4ANVFP4Linear stages its own *packed* operand caches and so skips
 # W4AFP8Linear.post_init; its post_init must still revalidate the packed
 # checkpoint layout before decoding, or a bad checkpoint silently corrupts
-# every weight it exports.
+# every weight it exports. The FP8 lane it inherits is per-forward only.
 # --------------------------------------------------------------------------
 
 @pytest.mark.skipif(
@@ -906,6 +1023,179 @@ def test_nvfp4_failed_repost_init_clears_operand_caches():
         assert getattr(module, name).numel() == 0
     with pytest.raises(RuntimeError, match="weight cache is absent"):
         module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_post_init_retains_only_packed_planes():
+    """The NVFP4 caches are packed layouts, not expanded weight planes.
+
+    ``_weight_both`` is two E2M1 planes at 4 bits per weight, so 1 B/weight in
+    total; that is an allowed alternate packed layout. A full-layer E4M3 plane
+    is one code per weight (an expansion) and must not be retained even though
+    the mixed FP8 attention lane needs it on demand.
+    """
+    module = _module(W4ANVFP4Linear)
+
+    assert not hasattr(module, "_weight_e4m3")
+    assert "_weight_e4m3" not in module._buffers
+    assert "_weight_e4m3" not in module.__dict__
+    assert "_weight_e4m3" not in module._WEIGHT_CACHE_NAMES
+    assert module._w4a_weights_ready is True
+
+    # The retained packed planes are 1 B/weight; native INT4 is 0.5 B/weight.
+    assert _bytes(module.qweight) == K * N // 2
+    assert _bytes(module._weight_both) == K * N
+    assert _bytes(module._unit_weight_scales) < K * N
+    assert _expanded_weight_tensors(module) == []
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "activation_global_scale_bits",
+    }
+
+    # Independent E2M1 decode: the packed planes must reconstruct every
+    # centered INT4 code, so removing the E4M3 plane changed no weights.
+    centered = (
+        _decode_e2m1_planes(module._weight_both[:, :N])
+        + 4 * _decode_e2m1_planes(module._weight_both[:, N:])
+    )
+    assert torch.equal(centered, _decode_centered_codes(module).float())
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_operand_is_staged_per_forward(cpu_kernels):
+    """The mixed FP8 lane materializes and drops one E4M3 operand per call."""
+    module = _module(W4ANVFP4Linear)
+    native_state = {name: value.clone() for name, value in module.state_dict().items()}
+    baseline_buffers = {name: _bytes(value) for name, value in module._buffers.items()}
+
+    x = torch.randn((3, K), dtype=torch.bfloat16)
+    x[0].zero_()
+    seen: list[torch.Tensor] = []
+    references: list[weakref.ref] = []
+    original = module.fp8_weight_operand
+
+    def tracking():
+        weight = original()
+        assert weight.dtype == torch.float8_e4m3fn
+        assert weight.numel() == K * N
+        seen.append(weight)
+        references.append(weakref.ref(weight))
+        return weight
+
+    module.fp8_weight_operand = tracking
+    try:
+        for _ in range(2):
+            out = module._forward_fp8_operand(_fp8_carrier(x))
+            assert out.dtype == torch.bfloat16 and out.shape == (3, N)
+            assert torch.isfinite(out).all()
+    finally:
+        del module.fp8_weight_operand
+
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+    seen.clear()
+    gc.collect()
+    assert all(ref() is None for ref in references), "the per-forward E4M3 operand outlived its forward"
+
+    assert not hasattr(module, "_weight_e4m3")
+    assert _expanded_weight_tensors(module) == []
+    assert {name: _bytes(value) for name, value in module._buffers.items()} == baseline_buffers
+    for name, value in native_state.items():
+        assert torch.equal(module.state_dict()[name], value)
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_operand_matches_independent_int4_decode():
+    module = _module(W4ANVFP4Linear)
+    expected = _decode_centered_codes(module)
+    operand = module.fp8_weight_operand()
+
+    assert operand.dtype == torch.float8_e4m3fn and operand.shape == (K, N)
+    assert torch.equal(
+        operand.view(torch.uint8),
+        expected.to(torch.float8_e4m3fn).view(torch.uint8),
+    )
+    # Staging the operand must not install it as module state.
+    assert not hasattr(module, "_weight_e4m3")
+    assert _expanded_weight_tensors(module) == []
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_forward_rejects_a_stale_packed_cache():
+    """An in-place qweight write must invalidate the packed planes."""
+    module = _module(W4ANVFP4Linear)
+    module.qweight[0, 0] ^= 1
+
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+    # Explicit invalidation has the same effect and drops the packed planes.
+    module.post_init()
+    module.invalidate_weight_layout()
+    assert module._weight_both.numel() == 0
+    with pytest.raises(RuntimeError, match="weight cache is absent"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 packed caches need native PyTorch FP4 support",
+)
+def test_nvfp4_fp8_staging_cannot_launder_a_stale_packed_cache():
+    """Staging the FP8 operand must not make the packed planes look current.
+
+    The inherited ``fp8_weight_operand()`` revalidates a changed layout and then
+    rewrites ``_w4a_layout_token`` to the *new* weights. Nothing rebuilds
+    ``_weight_both`` there, so a refresh would let the next ``forward()`` pass
+    its freshness check while the FP4 planes still encode the old codes. NVFP4
+    therefore rejects changed weights instead of revalidating them.
+    """
+    module = _module(W4ANVFP4Linear)
+    before = _decode_centered_codes(module)
+    assert module._weights_are_current() is True
+
+    module.qweight[0, 0] ^= 1
+    mutated = _decode_centered_codes(module)
+    assert not torch.equal(before, mutated)
+    assert module._weights_are_current() is False
+
+    # The public FP8 staging helper must refuse, not silently refresh the token.
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.fp8_weight_operand()
+    assert module._weights_are_current() is False, (
+        "FP8 staging refreshed the layout token without rebuilding the packed cache"
+    )
+
+    # The FP8 lane and the NVFP4 lane both refuse the mutated module.
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module._forward_fp8_operand(_fp8_carrier(torch.zeros(2, K, dtype=torch.bfloat16)))
+    with pytest.raises(RuntimeError, match="changed since post_init"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+    # Rebuilding restores agreement between both weight representations.
+    module.post_init()
+    assert module._weights_are_current() is True
+    assert torch.equal(_decode_centered_codes(module), mutated)
+    planes = (
+        _decode_e2m1_planes(module._weight_both[:, :N])
+        + 4 * _decode_e2m1_planes(module._weight_both[:, N:])
+    )
+    assert torch.equal(planes, mutated.float())
+    assert torch.equal(
+        module.fp8_weight_operand().view(torch.uint8),
+        mutated.to(torch.float8_e4m3fn).view(torch.uint8),
+    )
 
 
 def test_failed_repost_init_clears_w4a_readiness():

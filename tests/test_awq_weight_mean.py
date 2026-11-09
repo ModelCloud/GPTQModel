@@ -342,7 +342,7 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         (MixtralQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3MoeQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3NextGPTQ, "mlp", "mlp.shared_expert.down_proj"),
-        (MiniMaxM2GPTQ, "block_sparse_moe", "block_sparse_moe.experts.0.w1"),
+        (MiniMaxM2GPTQ, "mlp", "mlp.experts.0.gate_proj"),
     ]
 
     for model_cls, root_name, child_name in cases:
@@ -1199,6 +1199,7 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
@@ -1267,6 +1268,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
@@ -1300,7 +1302,7 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     w = torch.ones(64, 16, dtype=torch.float16)
     input_feat = torch.ones(4, 16, dtype=torch.float16)
 
-    def nan_quantize(src, dst, abs_max=None):
+    def nan_quantize(src, dst, abs_max=None, bits=None):
         dst.fill_(float("nan"))
 
     processor._pseudo_quantize_tensor_into = nan_quantize
@@ -1625,6 +1627,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
     ):
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (

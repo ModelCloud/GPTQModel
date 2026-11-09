@@ -19,13 +19,14 @@ import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
+from .._alloc_conf import large_hessian_alloc_hint
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
-from ..utils.p2p import p2p_all_enabled
+from ..utils.p2p import p2p_all_enabled, safe_move_to
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -54,13 +55,49 @@ def _log_hessian_verbose() -> bool:
 
 _WORKSPACE_LOCKS_GUARD = threading.Lock()
 
+
+class _HessianAccumulatorState:
+    """Reference-counted capture state shared by identical projection inputs."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.hessian: Optional[torch.Tensor] = None
+        self.nsamples = 0
+        self.device_partials: Dict[torch.device, torch.Tensor] = {}
+        self.device_partial_ready: Dict[torch.device, Optional[torch.cuda.Event]] = {}
+        self.ready_event: Optional[torch.cuda.Event] = None
+        self.deferred_sources: list[Tuple[torch.Tensor, Optional[torch.cuda.Event]]] = []
+        self.device_sample_counts: Dict[torch.device, int] = {}
+        self.dirty = False
+        self.final_device_hint: Optional[torch.device] = None
+        self.users = 1
+
+    def release(self) -> None:
+        with self.lock:
+            self.users -= 1
+            if self.users < 0:
+                raise RuntimeError("Hessian accumulator state was released twice")
+            if self.users == 0:
+                # Cross-device copies may still consume source tensors after
+                # their producing projection has released its capture handle.
+                for _, event in self.deferred_sources:
+                    if event is not None:
+                        event.synchronize()
+                self.deferred_sources.clear()
+                self.device_partial_ready.clear()
+                self.ready_event = None
+                self.hessian = None
+                self.device_partials.clear()
+                self.device_sample_counts.clear()
+                self.dirty = False
+
 # Shared workspaces are cached globally per device and dtype so concurrent
 # GPTQ instances reuse temporary buffers instead of repeatedly allocating
-# large tensors during Hessian accumulation.  Each pool is bounded below.
+# large tensors during Hessian accumulation. Each pool is bounded below.
 # ``_WORKSPACE_CACHE`` remains a compatibility view of the most recently
-# released tensor.  The actual reusable slots live in ``_WORKSPACE_SLOTS``;
-# unlike the old one-tensor cache, a slot is reusable from another CUDA stream
-# only after that stream waits on the release event.
+# released tensor. The actual reusable slots live in ``_WORKSPACE_SLOTS``;
+# a slot is reusable from another CUDA stream only after that stream waits
+# on the release event.
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
@@ -289,6 +326,88 @@ def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
 
 
 class GPTQ:
+    @property
+    def H(self) -> Optional[torch.Tensor]:
+        return self._hessian_state.hessian
+
+    @H.setter
+    def H(self, value: Optional[torch.Tensor]) -> None:
+        self._hessian_state.hessian = value
+
+    @H.deleter
+    def H(self) -> None:
+        self._hessian_state.hessian = None
+
+    @property
+    def nsamples(self) -> int:
+        return self._hessian_state.nsamples
+
+    @nsamples.setter
+    def nsamples(self, value: int) -> None:
+        self._hessian_state.nsamples = int(value)
+
+    @property
+    def _device_hessian_partials(self) -> Dict[torch.device, torch.Tensor]:
+        return self._hessian_state.device_partials
+
+    @_device_hessian_partials.setter
+    def _device_hessian_partials(
+        self, value: Dict[torch.device, torch.Tensor]
+    ) -> None:
+        self._hessian_state.device_partials = value
+
+    @property
+    def _device_hessian_partial_ready(self) -> Dict[torch.device, Optional[torch.cuda.Event]]:
+        return self._hessian_state.device_partial_ready
+
+    @_device_hessian_partial_ready.setter
+    def _device_hessian_partial_ready(self, value: Dict[torch.device, Optional[torch.cuda.Event]]) -> None:
+        self._hessian_state.device_partial_ready = value
+
+    @property
+    def _hessian_ready_event(self) -> Optional[torch.cuda.Event]:
+        return self._hessian_state.ready_event
+
+    @_hessian_ready_event.setter
+    def _hessian_ready_event(self, value: Optional[torch.cuda.Event]) -> None:
+        self._hessian_state.ready_event = value
+
+    @property
+    def _deferred_hessian_sources(self) -> list[Tuple[torch.Tensor, Optional[torch.cuda.Event]]]:
+        return self._hessian_state.deferred_sources
+
+    @_deferred_hessian_sources.setter
+    def _deferred_hessian_sources(self, value: list[Tuple[torch.Tensor, Optional[torch.cuda.Event]]]) -> None:
+        self._hessian_state.deferred_sources = value
+
+    @property
+    def _device_sample_counts(self) -> Dict[torch.device, int]:
+        return self._hessian_state.device_sample_counts
+
+    @_device_sample_counts.setter
+    def _device_sample_counts(self, value: Dict[torch.device, int]) -> None:
+        self._hessian_state.device_sample_counts = value
+
+    @property
+    def _hessian_dirty(self) -> bool:
+        return self._hessian_state.dirty
+
+    @_hessian_dirty.setter
+    def _hessian_dirty(self, value: bool) -> None:
+        self._hessian_state.dirty = bool(value)
+
+    @property
+    def _final_hessian_device_hint(self) -> Optional[torch.device]:
+        return self._hessian_state.final_device_hint
+
+    @_final_hessian_device_hint.setter
+    def _final_hessian_device_hint(
+        self, value: Optional[torch.device]
+    ) -> None:
+        self._hessian_state.final_device_hint = (
+            None if value is None else torch.device(value)
+        )
+
     @staticmethod
     def resolve_module_source(module: nn.Module) -> nn.Module:
         """Resolve the dense module view GPTQ should quantize for one wrapper."""
@@ -301,10 +420,11 @@ class GPTQ:
         return module
 
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
-        # Hessian capture/materialization can run on multiple device workers when
-        # GIL=0. Re-entrancy is required because target-device selection is also
-        # used from materialization while the task lock is held.
-        self.lock = threading.RLock()
+        self._hessian_state = _HessianAccumulatorState()
+        self.lock = self._hessian_state.lock
+        self._hessian_capture_enabled = True
+        self._hessian_state_released = False
+        self._hessian_accumulator_device: Optional[torch.device] = None
         self.region_timer = region_timer
 
         # self.num_tied_handles = 0
@@ -412,6 +532,46 @@ class GPTQ:
         self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
         self._borrow_workspace_last_chunk_rows: Optional[int] = None
 
+    def share_hessian_state_from(self, source: "GPTQ") -> None:
+        """Use one accumulator for projections fed by exactly the same rows."""
+
+        if not isinstance(source, GPTQ) or source is self:
+            raise TypeError("shared Hessian source must be another GPTQ capture")
+        if self.columns != source.columns:
+            raise ValueError("shared Hessian projections have different input widths")
+        if (
+            self.nsamples
+            or self.H is not None
+            or self._device_hessian_partials
+            or self._device_sample_counts
+        ):
+            raise RuntimeError("cannot share a Hessian after capture has started")
+        self._hessian_state.release()
+        self._hessian_state = source._hessian_state
+        self._hessian_state.users += 1
+        self.lock = self._hessian_state.lock
+        self._hessian_capture_enabled = False
+        self._hessian_accumulator_device = source._hessian_accumulator_device
+
+    def set_hessian_accumulator_device(
+        self, device: torch.device | str | None
+    ) -> None:
+        target = None if device is None else torch.device(device)
+        current = self._hessian_accumulator_device
+        if current is not None and target is not None and current != target:
+            raise RuntimeError("shared Hessian accumulator ownership changed")
+        self._hessian_accumulator_device = target
+        if target is not None:
+            self._final_hessian_device_hint = target
+
+    @property
+    def hessian_accumulator_device(self) -> Optional[torch.device]:
+        return self._hessian_accumulator_device
+
+    @property
+    def hessian_is_shared(self) -> bool:
+        return self._hessian_state.users > 1
+
     def _validate_act_group_aware_shape(self) -> None:
         if not getattr(self.qcfg, "act_group_aware", False):
             return
@@ -457,6 +617,13 @@ class GPTQ:
             stage,
             source_device,
         )
+        # A wide projection (e.g. a 40960-wide `down_proj`) needs three
+        # `columns ** 2 * 4` buffers at once: the Hessian, the Cholesky factor
+        # and the cuSOLVER workspace. The native caching allocator fails that
+        # request on a busy multi-device run even with plenty of free memory.
+        hint = large_hessian_alloc_hint()
+        if hint is not None:
+            log.warn("Quantization: Module `%s` -> %s", self.name, hint)
 
     def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
         """Bypass zero scales and report the unstable module once per pass."""
@@ -476,7 +643,9 @@ class GPTQ:
         if not device:
             device = self.module.weight.data.device
 
-        clone = self.module.weight.data.to(copy=copy, device=device)
+        # A cross-device clone is a peer copy; on an asymmetric ROCm link the
+        # direct path segfaults, so go through the direction-aware helper.
+        clone = safe_move_to(self.module.weight.data, device, copy=copy)
 
         if isinstance(self.module, nn.Embedding):
             clone = clone.t()
@@ -509,6 +678,8 @@ class GPTQ:
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+        if not self._hessian_capture_enabled:
+            return
         if isinstance(self.module, nn.Embedding):
             del out, batch_index
             token_count, counts, device = self.process_batch(inp)
@@ -826,6 +997,14 @@ class GPTQ:
             del pad
         canonical_device = torch.device(inp_device)
 
+        accumulator_device = self._hessian_accumulator_device
+        if accumulator_device is not None and canonical_device != accumulator_device:
+            reshaped_inp = reshaped_inp.to(
+                device=accumulator_device,
+                non_blocking=False,
+            )
+            canonical_device = accumulator_device
+
         batch_token_size = reshaped_inp.shape[0]
 
         if batch_token_size == 0:
@@ -891,7 +1070,7 @@ class GPTQ:
                     self._wait_hessian_ready(device)
                     if self._H_diag.device != device:
                         source_diag = self._H_diag
-                        self._H_diag = self._H_diag.to(device=device)
+                        self._H_diag = safe_move_to(self._H_diag, device)
                         self._record_hessian_ready(device)
                         self._defer_hessian_sources([source_diag], self._hessian_ready_event)
                     self.H = None
@@ -911,7 +1090,7 @@ class GPTQ:
                 else:
                     existing_diag = self._H_diag
                     self._wait_hessian_ready(device)
-                    diag = existing_diag.to(device=device, dtype=torch.float32)
+                    diag = safe_move_to(existing_diag, device, dtype=torch.float32)
                     if diag is not existing_diag:
                         source_diag = existing_diag
 
@@ -930,7 +1109,10 @@ class GPTQ:
                                 torch.cuda.current_stream(device).wait_event(partial_event)
                             else:
                                 partial_event.synchronize()
-                        diag.add_(counts.to(device=device, dtype=torch.float32), alpha=2.0 / float(total_samples))
+                        diag.add_(
+                            safe_move_to(counts, device, dtype=torch.float32),
+                            alpha=2.0 / float(total_samples),
+                        )
 
                 self._H_diag = diag
                 self.H = None
@@ -951,7 +1133,7 @@ class GPTQ:
                 self._wait_hessian_ready(device)
                 if self.H.device != device:
                     source_hessian = self.H
-                    self.H = self.H.to(device=device)
+                    self.H = safe_move_to(self.H, device)
                     self._record_hessian_ready(device)
                     self._defer_hessian_sources([source_hessian], self._hessian_ready_event)
                 return
@@ -1027,7 +1209,9 @@ class GPTQ:
                         reduction_staging.copy_(partial, non_blocking=True)
                         result_accum.add_(reduction_staging)
                     else:
-                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                        result_accum.add_(
+                            safe_move_to(partial, result_accum.device, dtype=torch.float32)
+                        )
                 else:
                     result_accum.add_(partial)
             del reduction_staging
@@ -1073,8 +1257,9 @@ class GPTQ:
             # the leader readiness dependency there before an asynchronous
             # cross-device copy, rather than waiting on the leader stream.
             leader._wait_hessian_ready(target_device)
-            copy = source.detach().to(
-                device=target_device,
+            copy = safe_move_to(
+                source.detach(),
+                target_device,
                 dtype=torch.float32,
                 copy=True,
                 non_blocking=(target_device.type == "cuda" and source.device.type == "cuda"),
@@ -1156,6 +1341,60 @@ class GPTQ:
         if self.H is None:
             self.H = self.create_H(target_device)
         return self.H
+
+    def snapshot_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
+        """Return a normalized Hessian without changing the live capture.
+
+        Durable capture-frontier writers use this to stream one Hessian at a
+        time to host storage.  Unlike :meth:`finalize_hessian`, this method
+        deliberately leaves ``H`` and the per-device partials in place so the
+        subsequent quantization pass can consume the original device-local
+        capture without retaining every Hessian in host memory.
+        """
+
+        with self.lock:
+            device = self._select_hessian_target_device(target_device)
+            if not self._hessian_dirty and self.H is not None:
+                self._wait_hessian_ready(device)
+                source = self.H
+                result = source.detach().to(device=device, dtype=torch.float32)
+                if result.device != source.device:
+                    event = self._cuda_event_for(device)
+                    if event is not None:
+                        event.record(torch.cuda.current_stream(device))
+                    self._defer_hessian_sources([source], event)
+                return result
+
+            total_samples = sum(self._device_sample_counts.values())
+            if total_samples != self.nsamples:
+                raise RuntimeError(
+                    f"Hessian snapshot sample-count drift: partials={total_samples}, "
+                    f"capture={self.nsamples}"
+                )
+            result = torch.zeros(
+                (self.columns, self.columns),
+                dtype=torch.float32,
+                device=device,
+            )
+            if total_samples == 0:
+                return result
+
+            sources = list(self._device_hessian_partials.values())
+            for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
+                partial = self._device_hessian_partials[partial_device]
+                event = self._device_hessian_partial_ready.get(torch.device(partial_device))
+                if event is not None:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).wait_event(event)
+                    else:
+                        event.synchronize()
+                result.add_(partial.to(device=device, dtype=torch.float32))
+            result.mul_(2.0 / float(total_samples))
+            event = self._cuda_event_for(device)
+            if event is not None:
+                event.record(torch.cuda.current_stream(device))
+            self._defer_hessian_sources(sources, event)
+            return result
 
     def create_H(self, target_device):
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
@@ -1305,7 +1544,7 @@ class GPTQ:
         else:
             Q = Q.to(self.module.weight.dtype)
 
-        Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+        Q = safe_move_to(Q, self.module.weight.data.device)
         mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
         duration = time.time() - start_time
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
@@ -1673,7 +1912,7 @@ class GPTQ:
             g_idx = g_idx[:self._original_columns]
 
         quantized = quantized.t().reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        quantized = quantized.to(device=self.module.weight.device, non_blocking=False)
+        quantized = safe_move_to(quantized, self.module.weight.device)
 
         self.H = None
         self._device_hessian_partials.clear()
@@ -1822,7 +2061,7 @@ class GPTQ:
             # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
-            W = self.module_copy.to(device=self.H.device)
+            W = safe_move_to(self.module_copy, self.H.device)
             del self.module_copy
 
         self.quantizer.find_params(W, weight=True)
@@ -2287,7 +2526,12 @@ class GPTQ:
                 result_device,
             )
 
-        Q = Q.to(device=result_device, non_blocking=False)
+        # ``result_device`` is the module's device, which can differ from the
+        # Hessian/compute device when a follower adopted a leader's Hessian.
+        # That makes this a cross-device move, so route it through the
+        # direction-aware helper; it returns ``Q`` unchanged when the devices
+        # already match.
+        Q = safe_move_to(Q, result_device)
 
         duration = time.time() - start
 
@@ -2386,25 +2630,14 @@ class GPTQ:
         self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
-        # The task object outlives free() in processor.tasks until layer
-        # end, so no path may leave a Hessian partial behind here.
+        # A shared capture stays live until the final projection releases it.
+        # Factor-cache ownership remains projection-local.
         with self.lock:
-            # ``free`` is an explicit lifecycle boundary.  Unlike the hot
-            # path, it may synchronously observe completion before releasing
-            # cross-device source references.
-            for _, event in self._deferred_hessian_sources:
-                if event is not None:
-                    event.synchronize()
-            self._deferred_hessian_sources.clear()
             self._shared_hessian_cache = None
             self._shared_hessian_cache_disabled = False
-            self._device_hessian_partials.clear()
-            self._device_hessian_partial_ready.clear()
-            self._device_sample_counts.clear()
-            self._hessian_dirty = False
-
-        if hasattr(self, "H"):
-            del self.H
+        if not self._hessian_state_released:
+            self._hessian_state.release()
+            self._hessian_state_released = True
         if hasattr(self, "_H_diag"):
             del self._H_diag
         self._device_embedding_counts.clear()

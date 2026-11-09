@@ -22,6 +22,28 @@ def _get_quantize_exl3():
     return quantize_exl3
 
 
+def _require_exl3_quantize_shmem(bits: int) -> None:
+    """Skip when the device cannot satisfy the kernel's dynamic shared-memory request.
+
+    The compact 2-bit kernel fits its cost buffers into exactly 64 KiB by
+    reusing dead storage for reduction scratch. Other layouts need 704 B extra.
+    """
+    if not torch.cuda.is_available():
+        return
+    required = 2 * (65536 >> bits) * 2 + 512 + 64 + 128
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    limit = getattr(props, "shared_memory_per_block_optin", None)
+    if limit is None:
+        limit = props.shared_memory_per_block
+    if bits == 2 and 65536 <= limit < required:
+        required = 65536
+    if required > limit:
+        pytest.skip(
+            f"{props.name} allows {limit} B of dynamic shared memory per block; "
+            f"EXL3 {bits}-bit codebooks need {required} B."
+        )
+
+
 def _get_block_trace():
     if not torch.cuda.is_available():
         pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
@@ -125,8 +147,81 @@ def _clone_tensors(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     }
 
 
-def _build_kernels(bits: int, codebook: str) -> tuple[torch.Tensor, ExllamaV3TorchLinear, ExllamaV3Linear]:
+def test_exllamav3_fallback_reports_unweighted_mse_without_fake_hessian_error():
     quantize_exl3 = _get_quantize_exl3()
+    torch.manual_seed(23)
+    weight = torch.randn(256, 128, device="cuda", dtype=torch.float32)
+    quant_args = {
+        "K": 2,
+        "devices": [weight.device],
+        "apply_out_scales": True,
+        "sigma_reg": 0.025,
+        "seed": 787,
+        "mcg": True,
+    }
+
+    _, proxy_error, _ = quantize_exl3(
+        weight=weight,
+        H_data={
+            "H": torch.zeros(256, 256, device="cuda", dtype=torch.float32),
+            "count": 1,
+            "finalized": False,
+        },
+        quant_args=quant_args,
+        return_weight_q=True,
+    )
+
+    metrics = quant_args["error_metrics"]
+    assert quant_args["q_fallback"] is True
+    assert metrics["quantizer_path"] == "fallback"
+    assert metrics["reported_metric_kind"] == "unweighted_reconstruction_mse"
+    assert metrics["reported_metric_value"] == pytest.approx(proxy_error)
+    assert proxy_error == pytest.approx(metrics["reconstruction"]["mse"])
+    assert metrics["hessian_weighted_error_numerator"] is None
+    assert metrics["hessian_weighted_reference_denominator"] is None
+    assert metrics["hessian_weighted_relative_error"] is None
+    assert metrics["hessian_metric_status"] == "not_applicable_fallback"
+
+
+def test_exllamav3_projection_seed_does_not_mutate_global_cuda_rng():
+    quantize_exl3 = _get_quantize_exl3()
+    device = torch.device("cuda:0")
+    global_generator = torch.Generator(device=device).manual_seed(9917)
+    torch.cuda.set_rng_state(global_generator.get_state(), device=device)
+    state_before = torch.cuda.get_rng_state(device=device)
+    input_generator = torch.Generator(device=device).manual_seed(23)
+    weight = torch.randn(
+        256,
+        128,
+        device=device,
+        dtype=torch.float32,
+        generator=input_generator,
+    )
+    hessian = torch.eye(256, device=device, dtype=torch.float32)
+    quant_args = {
+        "K": 2,
+        "devices": [device],
+        "apply_out_scales": True,
+        "sigma_reg": 0.025,
+        "seed": 787,
+        "mcg": True,
+    }
+
+    quantize_exl3(
+        weight=weight,
+        H_data={"H": hessian, "count": 256, "finalized": False},
+        quant_args=quant_args,
+        return_weight_q=False,
+    )
+
+    assert torch.equal(torch.cuda.get_rng_state(device=device), state_before)
+
+
+def _build_kernels(
+    bits: int, codebook: str
+) -> tuple[torch.Tensor, ExllamaV3TorchLinear, ExllamaV3Linear]:
+    quantize_exl3 = _get_quantize_exl3()
+    _require_exl3_quantize_shmem(bits)
 
     torch.manual_seed(17)
     in_features = {
@@ -157,6 +252,16 @@ def _build_kernels(bits: int, codebook: str) -> tuple[torch.Tensor, ExllamaV3Tor
         H_data={"H": hessian, "count": in_features, "finalized": False},
         quant_args=quant_args,
         return_weight_q=True,
+    )
+    metrics = quant_args["error_metrics"]
+    assert metrics["schema"] == "gptqmodel.exl3-trellis-error"
+    assert metrics["reported_metric_kind"] == "hessian_weighted_relative_error"
+    assert metrics["hessian_metric_status"] == "ok"
+    assert metrics["hessian_weighted_error_numerator"] >= 0.0
+    assert metrics["hessian_weighted_reference_denominator"] > 0.0
+    assert metrics["reconstruction"]["domain"] == "regularized_exl3_search_space"
+    assert metrics["reconstruction"]["tile_count"] == (in_features // 16) * (
+        out_features // 16
     )
 
     base_tensors = dict(out_tensors)

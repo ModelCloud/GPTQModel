@@ -50,6 +50,62 @@ module work, configure `dense_vram_strategy` and
 across GPUs is a separate operation and can use `device_map="auto"`; that
 controls inference placement, not quantization parallelism.
 
+## Explicit device sequences
+
+Pass a tuple or list of concrete accelerator ordinals to constrain the default
+layer-wise loader map and quantization to those devices.
+Integer ordinals use the active Torch accelerator namespace, so on a CUDA or
+ROCm runtime `device=(0, 1)` resolves to logical `cuda:0` and `cuda:1`.
+Duplicate ordinals select one device. Use `device=("cuda:1",)` to constrain a
+single GPU in both paths. `from_quantized(device="cuda:1")` also uses an explicit
+single-device map, while `from_pretrained` needs a sequence to constrain its
+quantization device pool. A bare family such as `device="cuda"` spans all
+visible GPUs.
+
+```mermaid
+flowchart TD
+    A["ModelLoader.from_quantized device argument"] --> B{"Explicit device_map?"}
+    B -- Yes --> M["normalize_device_device_map from map"]
+    B -- No --> C["_resolve_default_layerwise_device"]
+    C --> D["_explicit_requested_devices"]
+    D --> E["_selector_devices normalizes ordinals"]
+    E --> F{"Concrete accelerator ordinals?"}
+    F -- None --> G["normalize_device_device_map and auto_select_device"]
+    G --> H["expand_selector_device_family"]
+    F -- Mixed --> X["ValueError: ambiguous device sequence"]
+    F -- All --> I["selector_device_family checks family and capabilities"]
+    I --> J{"Compatible selected devices?"}
+    J -- No --> Y["ValueError: unsupported device mix"]
+    J -- Yes --> K["Keep ordered concrete tuple"]
+    H --> L["_layerwise_device_count and _layerwise_device_strings"]
+    K --> L
+    M --> N["Explicit device_map placement"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X,Y failure;
+```
+
+The prior helper at `gptqmodel/models/loader.py:388-403` converted list items
+with `torch.device(str(item))` and returned `None` for a single entry or any
+bare selector. The `None` fallback at `gptqmodel/models/loader.py:412-424`
+counted every visible GPU. Normalization in `ModelLoader.from_quantized` also
+collapsed one-device and duplicate lists to a scalar before this helper saw
+them (`gptqmodel/models/loader.py:1515-1526` in the prior version). The current
+helper normalizes and validates the original sequence at
+`gptqmodel/models/loader.py:393-406`. The default loader path preserves that
+sequence before normalization can collapse it at
+`gptqmodel/models/loader.py:453-460` and
+`gptqmodel/models/loader.py:1529-1536`. `ModelLoader.from_pretrained` uses the
+same helper to build its quantization `compute_device_filter`.
+See [PR #3577](https://github.com/ModelCloud/GPTQModel/pull/3577) for the
+regression report and rationale.
+
+| Request on a four-GPU host | Before | After |
+| --- | --- | --- |
+| `device=(0, 1)` | Quantization used all four; default loader map used two | Both use `cuda:0`, `cuda:1` |
+| `device=("cuda:1",)` | Both used all four | Both use only `cuda:1` |
+| `device=("cuda:1", "cuda")` | Both used all four | `ValueError` for the ambiguous mix |
+| `device=("cuda:1", "cuda:1")` | Quantization used `cuda:1`; loader map used all four | Both use only `cuda:1` |
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path
@@ -62,8 +118,31 @@ looper, and for multi-device `device_map` loads. Enablement goes through
 `hipDeviceEnablePeerAccess` on ROCm and `cuCtxEnablePeerAccess` on CUDA; PyTorch
 has no enable wrapper of its own.
 
-Enablement never inserts a host relay: the transfer path is always a single
-`dst.copy_(src)`, and PyTorch/the driver chooses peer or internal staging.
+Peer links are **directed**. GPT-QModel checks `src -> dst` for every
+cross-device move it issues itself; when that direction is unsupported (or
+measured `degraded`), the move is staged through pinned host memory instead of
+calling the peer copy.
+On some ROCm topologies the matrix is asymmetric (for example `0 -> 1`
+unsupported while `1 -> 0` works), and a direct `tensor.to("cuda:1")` segfaults
+inside `hipMemcpyPeerAsync` rather than raising. That case is logged, and
+NCCL/torch replicate is skipped in favor of deepcopy plus host staging. A
+healthy symmetric link still uses the direct device-to-device path.
+
+An enablement call that reports success for a direction the runtime capability
+query denies is reported as `unverified` and is never used for a direct copy or
+measured by the probe (the probe itself performs a direct copy). Enablement is
+still kept for PyTorch's own paths; GPT-QModel moves in that direction are
+staged through host memory.
+
+Inference is **not** covered by this routing. Loading the quantized model with
+`device_map="auto"` installs accelerate's `AlignDevicesHook`, whose
+`send_to_device` moves activations with a plain `Tensor.to`; on an asymmetric
+ROCm topology that still segfaults (exit 139) inside `hipMemcpyPeerAsync`.
+Measured on 2x R9700 (`gfx1201`, ROCm 7.16.26385): quantization completes, then
+`generate()` on the same two devices crashes from
+`accelerate.hooks.AlignDevicesHook.pre_forward -> send_to_device`. Until that
+move is routed through `safe_move_to`, run inference on a single device on such
+a topology.
 
 Configuration lives on `BaseQuantizeConfig.p2p` (`P2PConfig`); there are no
 environment variables:
@@ -81,7 +160,7 @@ config = QuantizeConfig(
         probe_mib=64,      # preferred probe payload (steps down under pressure)
         min_gbps=5.0,      # diagnostic floor
         min_ratio=1.0,     # direct must reach this fraction of host staging
-        use_torch_replicate=True,
+        use_torch_replicate=False,
     ),
 )
 
@@ -95,12 +174,12 @@ a `P2PConfig` is accepted. `None` uses the defaults.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `mode` | `auto` | `off` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `on` also attempts pairs the capability bit denies |
-| `probe` | `False` | runs the bandwidth diagnostic and records `enabled`/`degraded` |
-| `min_gbps` | `5.0` | diagnostic floor; below it a link is reported `degraded` |
-| `min_ratio` | `1.0` | diagnostic: direct copy must reach this fraction of ordered pinned-host staging |
+| `mode` | `auto` | `off` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `on` also attempts pairs the capability bit denies, but a denied direction stays host-staged (`unverified`) even if enablement reports success |
+| `probe` | `False` | measures every directed pair; `degraded` directions are host-staged |
+| `min_gbps` | `5.0` | absolute floor; below it a direction is `degraded` (host-staged) |
+| `min_ratio` | `1.0` | direct copy must reach this fraction of ordered pinned-host staging, else `degraded` |
 | `probe_mib` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
-| `use_torch_replicate` | `True` | allow `torch.nn.parallel.replicate` on GIL builds (always skipped when the GIL is disabled) |
+| `use_torch_replicate` | `False` | allow `torch.nn.parallel.replicate` on GIL builds (always skipped when the GIL is disabled) |
 
 `P2PConfig` is a no-op for CPU-only runs and for any CPU<->CPU transfer: peer
 access is an accelerator concept, so `enable_peer_access` reports
@@ -111,8 +190,8 @@ use their regular copy path.
 
 Probing moves real payload across every directed pair and synchronizes each
 sample, so it is **opt-in** and never runs during normal quantization. Its
-verdict is diagnostic: peer access cannot be revoked once enabled, and no
-production caller routes on it.
+verdict selects the transfer path: a `degraded` direction is staged through
+pinned host memory, exactly like an unsupported one.
 
 The reference is an explicit, correctly ordered `src -> pinned CPU -> dst`
 pipeline. It pays for two transfers (D2H then H2D), so it is strictly slower
@@ -191,9 +270,9 @@ on both ROCm and CUDA (small payloads can pass; multi-MiB payloads tear), and
 `reduce_add` has hung inside NCCL and segfaulted. `torch.nn.parallel.replicate`
 internally uses `broadcast_coalesced`; `clone_module_for_devices` skips it when
 the GIL is disabled and uses the deepcopy + `move_module_to_device` path
-instead. It is still serialized by `_THREAD_SAFE_PARALLEL` on GIL builds; set
-`p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path there
-too.
+instead. It is still serialized by `_THREAD_SAFE_PARALLEL` on GIL builds.
+`use_torch_replicate` is off by default; enable it only after qualifying the
+replicate path for the target Python/PyTorch build.
 `pytorch_gil_0_compat.md` records the measured status of every PyTorch API we
 use, plus the workaround for each unsafe one.
 
@@ -208,3 +287,48 @@ P2P and NCCL are different mechanisms. The `gloo`/`nccl` distributed path used b
 GSQ (`gptqmodel/quantization/gsq_distributed.py`) is independent; verify it with
 `tests/test_gsq_distributed.py` (gated on `is_nccl_available()`) in addition to
 the P2P tests in `tests/test_p2p.py`.
+
+## Allocator backend for very wide layers
+
+GPTQ builds a dense `columns x columns` fp32 Hessian per projection, and inverts
+it with a Cholesky factor plus a cuSOLVER workspace. A 40960-wide projection
+(`mlp.down_proj` on a 65B model) therefore needs roughly **three 6.25 GiB
+buffers at once**. Data-parallel accumulation makes it worse: each participating
+device holds a full partial Hessian, and `materialize_global_hessian` allocates a
+separate accumulator on the target device.
+
+The native CUDA caching allocator can fail that single multi-GiB request even
+when the driver reports >13 GiB free, because it cannot assemble one contiguous
+block next to the resident partials. The failure surfaces either as a plain OOM
+or, with `expandable_segments`, as `CUDA driver error: out of memory ...
+from cuMemSetAccess`. GPTQModel logs a hint when it falls back to CPU for this
+reason.
+
+Use the async allocator for these runs:
+
+```bash
+PYTORCH_ALLOC_CONF=backend:cudaMallocAsync python quantize.py
+```
+
+Measured on 4x RTX 4090 with a 65B model, `offload_to_disk=True` and
+`auto_forward_data_parallel=True`:
+
+| allocator | result |
+| --- | --- |
+| `native` (default) | OOM on the first wide `mlp.down_proj` |
+| `native` + `expandable_segments` | still fails, now in `cuMemSetAccess` |
+| `backend:cudaMallocAsync` | 80/80 layers, no OOM, `reserved` flat across layers |
+
+`cudaMallocAsync` does not change numerics: quantizing the same checkpoint on
+four devices produced **237/237 bit-identical tensors** compared with the native
+backend.
+
+Caveats:
+
+* The backend is chosen when the process first touches CUDA. Set the variable in
+  the environment, before Python starts; it cannot be switched at runtime.
+* `torch.cuda.memory_snapshot()` and `torch.cuda.memory._record_memory_history()`
+  are unsupported on this backend and raise. `memory_allocated`,
+  `memory_reserved`, `memory_stats`, `memory_summary`, `mem_get_info` and
+  `empty_cache()` all keep working.
+* `expandable_segments` is a native-allocator feature and is ignored here.

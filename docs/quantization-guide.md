@@ -103,6 +103,47 @@ not the number of examples. Too-short samples may be filtered out. Keep a
 separate evaluation set, and record the dataset revision, sample selection,
 model revision, dtype, and configuration for reproducibility.
 
+## Reshard a checkpoint
+
+`gptqmodel.reshard()` rewrites an existing safetensors checkpoint into a new
+shard layout without loading or dequantizing any weights. The default
+`ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL` writes one directory per transformer
+layer and exactly one root `global.safetensors` for embeddings, lm-head, norms,
+and every other non-layer module. Every layer stack found in the checkpoint is
+sharded separately, including vision transformer blocks; numerically indexed
+non-layer modules such as `mlp1.0` stay in the global shard.
+
+```python
+from gptqmodel import ShardConfig, ShardLayout, reshard
+
+reshard(
+    "Qwen3-0.6B-GPTQ-W4A16",
+    "Qwen3-0.6B-GPTQ-W4A16-per-layer",
+    ShardConfig(layout=ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL),
+)
+```
+
+The output uses `model.layers.0/layer.safetensors`, `model.layers.1/layer.safetensors`,
+and so on, plus a root `global.safetensors` and `model.safetensors.index.json`.
+The global shard is not named `model.safetensors` because
+`transformers.from_pretrained` prefers that single-file name over the index and
+would load only the global shard. `max_shard_size` splits oversized layer
+directories but never the single global shard. Set
+`ShardConfig(layer_prefixes=["model.layers"])` when the checkpoint has no
+`config.json` or uses a custom architecture. Pass `overwrite=True` to replace an
+existing non-empty destination.
+
+Pass a specific `.safetensors.index.json` path to choose its shards, or a
+standalone `.safetensors` path to choose only that file. A path to an indexed
+shard selects the complete checkpoint. See
+[reshard source selection](reshard-source-selection.md) for the rules.
+
+Resharding reads only safetensors headers, copies payloads byte-for-byte through
+an 8 MiB buffer, and keeps at most one source shard open at a time. It does not
+mmap source weights, so peak host RAM stays bounded even for multi-hundred-GB
+checkpoints. Config, tokenizer, processor, and nested auxiliary files are copied
+to the destination; the destination must be outside the source checkpoint.
+
 ## Recipe substitutions
 
 Each block below replaces the configuration and backend in the complete example.
@@ -296,6 +337,7 @@ and keep an engine's pinned dependencies in a separate environment.
 | Tune normalization after quantization | [Norm tuning](../README.md#norm-tuning) |
 | Quantize on Apple silicon | [Native MLX workflow](../README.md#native-mlx-quantization-on-apple-silicon) |
 | Select, pack, or repack individual layer kernels | [HF packing API](hf_packing_api.md) |
+| Change the on-disk shard layout | [Reshard a checkpoint](#reshard-a-checkpoint) |
 
 If quantization runs out of memory, start with `batch_size=1`, shorter calibration
 sequences, and the memory controls in the multi-GPU guide. If no kernel accepts a

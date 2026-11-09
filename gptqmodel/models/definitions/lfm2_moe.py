@@ -4,10 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class LFM2MoeQModel(BaseQModel):
+    fusable = FusableConfig("lfm2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_experts"

@@ -42,9 +42,8 @@ cover, and never upgrade a row to SAFE based on a single-threaded run.
   serialized by `_THREAD_SAFE_PARALLEL` in `looper_helpers.py`, but that only
   prevents concurrent entry; it does not make the entry point safe.
   `clone_module_for_devices` skips it when the GIL is disabled and uses the
-  deepcopy + `move_module_to_device` path. Set
-  `p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path on a
-  GIL build.
+  deepcopy + `move_module_to_device` path. `use_torch_replicate` is off by
+  default; enable it only after qualifying replicate for the target build.
 - `torch.cuda.set_device` is thread-local. Set it at the top of every worker;
   never inherit the device of the thread that spawned it.
 - Join work with per-thread streams and events. Avoid

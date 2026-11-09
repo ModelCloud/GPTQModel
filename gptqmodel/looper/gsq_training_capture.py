@@ -179,10 +179,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
     forwards are suitable for attention/block training. Conversion leaves the
     live block and cache untouched. Padding policy is still caller-owned.
     """
-    from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-
-    if not isinstance(layer, LlamaDecoderLayer):
-        raise TypeError('Staged capture currently requires a LlamaDecoderLayer')
+    if layer.__class__.__name__ not in ("LlamaDecoderLayer", "Qwen3DecoderLayer"):
+        raise TypeError('Staged capture requires a Llama or Qwen3 decoder layer')
     disk_backed = isinstance(cache, DiskBackedLlamaCapture)
     device_backed = isinstance(cache, DeviceBackedLlamaCapture)
     if disk_backed:
@@ -276,7 +274,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
 
 def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack=True, device=None,
                                 initialization_cache=None, validation_cache=None, distributed=None,
-                                target_cache='none', activation_checkpointing=False):
+                                target_cache='none', activation_checkpointing=False,
+                                projections=None, attention_projections=None, mlp_projections=None):
     """Train/export a shared captured block even when its caller uses inference mode.
 
     The shared looper still owns installing the result and replaying it before
@@ -296,7 +295,10 @@ def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack
                                         gsq=gsq, pack=pack,
                                         initialization_batches=initialization_batches,
                                         validation_batches=validation_batches, distributed=distributed,
-                                        target_cache=target_cache, activation_checkpointing=activation_checkpointing)
+                                        target_cache=target_cache, activation_checkpointing=activation_checkpointing,
+                                        projections=projections,
+                                        attention_projections=attention_projections,
+                                        mlp_projections=mlp_projections)
 
 
 def capture_llama_gsq_inputs(
@@ -310,15 +312,13 @@ def capture_llama_gsq_inputs(
     import logging
     import time
 
-    from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
     from .input_cache import InputCache
 
-    if not isinstance(model, LlamaForCausalLM):
-        raise TypeError('Staged capture currently requires LlamaForCausalLM')
+    if getattr(getattr(model, "config", None), "model_type", None) not in ("llama", "qwen3"):
+        raise TypeError('Staged capture requires a Llama or Qwen3 causal LM')
     if (isinstance(layer_index, bool) or not isinstance(layer_index, int)
             or not 0 <= layer_index < len(model.model.layers)):
-        raise ValueError('Invalid Llama layer index')
+        raise ValueError('Invalid decoder layer index')
     if not documents:
         raise ValueError('Staged capture requires nonempty calibration documents')
     if not isinstance(offload_to_cpu, bool):
@@ -413,7 +413,7 @@ def capture_llama_gsq_inputs(
                     # The pre-hook stops this forward pass once the input is captured.
                     pass
                 if len(captured) != count+1:
-                    raise RuntimeError('Selected Llama decoder was not captured exactly once')
+                    raise RuntimeError('Selected decoder was not captured exactly once')
                 if time.monotonic() >= progress_at:
                     logging.getLogger(__name__).info(
                         'GSQ capture layer=%d documents=%d/%d offload=%s disk=%s',

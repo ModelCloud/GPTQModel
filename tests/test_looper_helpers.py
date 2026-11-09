@@ -1,6 +1,32 @@
+from types import MethodType
+
 import torch
 
 import gptqmodel.utils.looper_helpers as looper_helpers
+
+
+def test_rebinds_shallow_copied_instance_method_to_replica_node():
+    class Router(torch.nn.Module):
+        pass
+
+    class Layer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.router = Router()
+
+    def patched_forward(self, value):
+        return self, value
+
+    source = Layer()
+    source.router.forward = MethodType(patched_forward, source.router)
+    replica = Layer()
+    replica.router.forward = source.router.forward
+
+    looper_helpers._rebind_copied_instance_methods(source, replica)
+
+    owner, value = replica.router.forward("ok")
+    assert owner is replica.router
+    assert value == "ok"
 
 
 class _DummyProcessor:

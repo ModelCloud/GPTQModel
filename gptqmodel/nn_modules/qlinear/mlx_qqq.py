@@ -40,9 +40,8 @@ def _dynamic_quant_kernel(threads):
                 maxima[0] = group_maximum;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            // The source QQQ runtime divides a half-precision maximum by 127
-            // before promoting the resulting scale to float32.
-            float scale = float(half(maxima[0] / 127.0f));
+            // Keep tiny nonzero scales in FP32 through quantization.
+            float scale = maxima[0] == 0.0f ? 1.0f : maxima[0] / 127.0f;
             if (lane == 0) {
                 scales[row] = scale;
             }

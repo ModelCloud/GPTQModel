@@ -13,6 +13,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -117,7 +118,7 @@ class AwqTorchLinear(AWQuantLinear):
 
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         self.register_buffer("scales", scales.clone().to(scale_dtype))
@@ -132,9 +133,9 @@ class AwqTorchLinear(AWQuantLinear):
         weight = linear.weight.data
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (weight.t() + scale_zeros.index_select(0, group_index))
-            / self.scales.index_select(0, group_index)
-        ).to(torch.int32).contiguous()
+            (weight.t().float() + scale_zeros.index_select(0, group_index))
+            / self.scales.index_select(0, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32).contiguous()
 
         qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)
 
@@ -142,7 +143,7 @@ class AwqTorchLinear(AWQuantLinear):
         self.register_buffer("qzeros", qzeros)
 
     def _ensure_runtime_dtype(self, *, device: torch.device, dtype: torch.dtype) -> None:
-        if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
+        if self.scales.device != device or self.scales.dtype != dtype:
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
         if self.bias is not None and (
             self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
@@ -282,9 +283,7 @@ class AwqTorchLinear(AWQuantLinear):
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
         # Subclasses such as ParoQuant use the shared dequantize helper.
         weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = torch.matmul(x_flat, weight)
-        if self.bias is not None:
-            output = output + self.bias
+        output = matmul_fp32_reduce(x_flat, weight, bias=self.bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

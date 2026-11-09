@@ -21,6 +21,7 @@ torch = pytest.importorskip("torch")
 
 from gptqmodel.nn_modules.qlinear.mlx_gptq import (  # noqa: E402
     MlxGPTQGroup16Linear,
+    _uses_packed_columns,
     _uses_packed_prefill,
 )
 from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear  # noqa: E402
@@ -28,6 +29,35 @@ from gptqmodel.utils.mlx_packing import _pack_rows  # noqa: E402
 
 
 SOURCE_BITS = (2, 3, 4, 5, 6, 7, 8)
+
+
+def test_gptq_group16_wide_decode_gate():
+    assert _uses_packed_columns(5120)
+    assert not _uses_packed_columns(5119)
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize(
+    "out_features", (5120, 5200), ids=("aligned", "unaligned"),
+)
+def test_gptq_group16_wide_decode_matches_fp64_torch_oracle(out_features, dtype):
+    """Cover the multi-column warp decode used for wide projections."""
+    assert _uses_packed_columns(out_features)
+    layer, reference, output_pattern, layer_bias = _group16_fixture(
+        out_features, 512, 4,
+    )
+    source = np.linspace(-0.1, 0.1, 512, dtype=np.float32)[None]
+    x = mx.array(source).astype(dtype)
+    actual = layer(x)
+    internal = _unrounded_output(layer, x)
+    mx.eval(actual, internal)
+    rounded, raw = _rounded_oracle(x, reference, output_pattern, layer_bias, dtype)
+    assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(
+        np.asarray(actual.astype(mx.float32)), rounded, rtol=2e-3, atol=2e-3,
+    )
 
 
 def _group16_fixture(out_features, in_features, source_bits, *, bias=True, patterns=2):

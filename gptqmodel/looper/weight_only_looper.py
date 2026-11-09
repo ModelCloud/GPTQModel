@@ -25,16 +25,19 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
+from ..models.module_plan import _model_module_plan
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
+    NF12ADConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
@@ -67,7 +70,7 @@ from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 log = setup_logger()
 
 
-class WeightOnlyLooper(DeviceAssignmentState):
+class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -80,6 +83,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
         """Initializes the looper with the model being quantized and its processor."""
 
         self.gptq_model = model
+        self.layer_module_coverage = LayerModuleCoverageTracker()
         self.processor = processor
         self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
@@ -214,26 +218,23 @@ class WeightOnlyLooper(DeviceAssignmentState):
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
-    @staticmethod
-    def _extract_moe_group_key(module_name: Optional[str]) -> Optional[str]:
+    def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
         """Return the expert family key used to co-locate gate/up/down modules."""
 
-        if not module_name or ".experts." not in module_name:
-            return None
-        prefix, remainder = module_name.split(".experts.", 1)
-        expert_id = remainder.split(".", 1)[0]
-        if not expert_id:
-            return None
-        return f"{prefix}.experts.{expert_id}"
+        plan = _model_module_plan(self.gptq_model)
+        return plan.expert_root(module_name) if plan is not None and module_name else None
 
-    @staticmethod
-    def _collect_assignable_moe_group_keys(moe_groups: Dict[str, List[str]]) -> List[str]:
+    def _collect_assignable_moe_group_keys(self, moe_groups: Dict[str, List[str]]) -> List[str]:
         """Return expert families that should stay co-located on one device."""
 
         assignable_group_keys: List[str] = []
         for group_key, module_names in moe_groups.items():
-            suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-            if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+            plan = _model_module_plan(self.gptq_model)
+            if plan is None:
+                assignable_group_keys.append(group_key)
+                continue
+            roles = {role for name in module_names for role in plan.roles(name)}
+            if {"gate", "up"}.issubset(roles):
                 assignable_group_keys.append(group_key)
         return assignable_group_keys
 
@@ -472,7 +473,10 @@ class WeightOnlyLooper(DeviceAssignmentState):
         self,
         named: NamedModule,
         target_device: torch.device,
-    ) -> Tuple[NamedModule, Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]]:
+    ) -> Tuple[
+        NamedModule,
+        Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig],
+    ]:
         """Run one module's weight-only quantization on its assigned device."""
 
         self._prepare_named_module_for_quantization(named, target_device)
@@ -485,7 +489,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
     def _finalize_quantized_module(
         self,
         named: NamedModule,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig,
+        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
     ) -> str:
         """Move a quantized module back to CPU, pack it, and optionally offload it."""
 
@@ -535,7 +539,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
 
     def _finalize_target_device(
         self,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig,
+        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
     ) -> torch.device:
         """Resolve the worker device for one finalize task."""
 
@@ -546,7 +550,12 @@ class WeightOnlyLooper(DeviceAssignmentState):
 
     def _finalize_subset_modules(
         self,
-        quantized_modules: List[Tuple[NamedModule, RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]],
+        quantized_modules: List[
+            Tuple[
+                NamedModule,
+                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+            ]
+        ],
     ) -> None:
         """Finalize one subset, using the device pool when multiple finalize targets exist."""
 
@@ -634,10 +643,21 @@ class WeightOnlyLooper(DeviceAssignmentState):
     def _quantize_subset_modules(
         self,
         named_modules: List[NamedModule],
-    ) -> List[Tuple[NamedModule, RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]]:
+    ) -> List[
+        Tuple[
+            NamedModule,
+            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        ]
+    ]:
         """Quantize one subset, using multiple devices when available."""
 
-        results_by_name: Dict[str, Tuple[NamedModule, RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]] = {}
+        results_by_name: Dict[
+            str,
+            Tuple[
+                NamedModule,
+                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+            ],
+        ] = {}
         task_specs = [
             (named, self._assign_quant_device_for_module(named, CPU))
             for named in named_modules
@@ -686,10 +706,12 @@ class WeightOnlyLooper(DeviceAssignmentState):
         if resolved is None:
             resolved, _ = get_module_by_name_prefix(layer_module, module_name)
             if resolved is None:
+                self.layer_module_coverage.record_miss(module_name, layer_index)
                 if self.gptq_model.layer_modules_strict:
                     raise ValueError(f"layer module item `{module_name}` not found in model, please check your model config.")
                 return None
 
+        self.layer_module_coverage.record_hit(module_name, layer_index)
         if isinstance(resolved, NamedModule):
             return resolved
 
@@ -814,10 +836,13 @@ class WeightOnlyLooper(DeviceAssignmentState):
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
         quant_config = self.gptq_model.quantize_config
-        if not isinstance(quant_config, (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig)):
+        if not isinstance(
+            quant_config,
+            (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, NF12ADConfig),
+        ):
             raise NotImplementedError(
                 "Weight-only looper only supports `RTNConfig`, `GGUFConfig`, "
-                "`FP8Config`, and `BitsAndBytesConfig` today."
+                "`FP8Config`, `BitsAndBytesConfig`, and `NF12ADConfig` today."
             )
 
         embedding_targets = self._embedding_quant_targets()

@@ -6,7 +6,12 @@ import torch
 import gptqmodel.nn_modules.qlinear.exllamav2_awq as exllamav2_awq_module
 
 
-def _build_module() -> exllamav2_awq_module.AwqExllamaV2Linear:
+def _build_module(monkeypatch) -> exllamav2_awq_module.AwqExllamaV2Linear:
+    # Native calls are mocked below, so do not require a CUDA build to construct
+    # the module used by these dispatch-only tests.
+    monkeypatch.setattr(
+        exllamav2_awq_module.AwqExllamaV2Linear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
     return exllamav2_awq_module.AwqExllamaV2Linear(
         bits=4,
         group_size=128,
@@ -20,16 +25,15 @@ def _build_module() -> exllamav2_awq_module.AwqExllamaV2Linear:
 
 
 def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     calls = {}
 
-    def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx, temp_dq):
+    def fake_make_q_matrix(qweight, q_perm, q_invperm, q_scale, q_scale_max, q_groups, qzeros, scales, g_idx):
         calls["make_q_matrix_awq"] = {
             "qweight_shape": tuple(qweight.shape),
             "qzeros_shape": tuple(qzeros.shape),
             "scales_dtype": scales.dtype,
             "g_idx_is_none": g_idx is None,
-            "temp_dq_shape": tuple(temp_dq.shape),
         }
         return 123
 
@@ -39,7 +43,6 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
         module.qweight,
         module.qzeros,
         module.scales.to(dtype=torch.float32),
-        torch.zeros(module.temp_dq_size() // 2, dtype=torch.float16),
     )
 
     assert handle == 123
@@ -48,12 +51,11 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
         "qzeros_shape": tuple(module.qzeros.shape),
         "scales_dtype": torch.float16,
         "g_idx_is_none": True,
-        "temp_dq_shape": (module.temp_dq_size() // 2,),
     }
 
 
 def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
-    module = _build_module()
+    module = _build_module(monkeypatch)
     module.q_handle = 77
     calls = {}
 
@@ -75,7 +77,7 @@ def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
 
     assert calls["gemm_half_q_half_awq"] == {
         "x_shape": (2, module.in_features),
-        "x_dtype": torch.float16,
+        "x_dtype": torch.float32,
         "q_handle": 77,
         "output_shape": (2, module.out_features),
         "force_cuda": False,
@@ -86,6 +88,9 @@ def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
 
 
 def test_exllamav2_awq_validate_once_surfaces_jit_error(monkeypatch):
+    # Pin the host family so this exercises the non-ROCm JIT-error path even
+    # when the suite runs on a HIP device.
+    monkeypatch.setattr(exllamav2_awq_module, "IS_ROCM", False)
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_available", lambda: False)
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_error", lambda: "missing exllamav2 awq jit ops")
 

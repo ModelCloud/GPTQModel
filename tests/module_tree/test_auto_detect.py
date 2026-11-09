@@ -33,7 +33,7 @@ class DummyModel:
 
 
 class TestAutoDetectModuleTree(unittest.TestCase):
-    def test_layers_with_parents(self):
+    def test_diagnostic_tree_detection_remains_available(self):
         model = DummyModel()
         base = BaseQModel.__new__(BaseQModel)
         tree = base._auto_detect_module_tree(model, quant_method="gptq")

@@ -39,6 +39,21 @@ def _resolve_extension_factory(module_name: str, attr_name: str) -> TorchOpsJitE
     return _resolve_attr(module_name, attr_name)()
 
 
+def _host_is_rocm() -> bool:
+    """Return whether the process runs on an AMD ROCm host."""
+
+    try:
+        return bool(_resolve_attr("gptqmodel.utils.rocm", "IS_ROCM"))
+    except Exception:
+        return False
+
+
+def _native_cuda_extension_supported() -> bool:
+    """CUDA-only JIT extensions cannot be built by hipcc."""
+
+    return not _host_is_rocm()
+
+
 _EXTENSION_SPECS = (
     _ExtensionSpec(
         name="pack_block_cpu",
@@ -63,26 +78,43 @@ _EXTENSION_SPECS = (
         name="awq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: (
+            "The native AWQ JIT extension is CUDA-only and cannot be built by hipcc. "
+            "On ROCm use BACKEND.AWQ_GEMM_TRITON (FORMAT.GEMM) or "
+            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV/GEMV_FAST/LLM_AWQ), which run "
+            "the same packed layouts in Triton."
+        ),
     ),
     _ExtensionSpec(
         name="qqq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qqq", "_QQQ_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.nn_modules.qlinear.qqq", "QQQ_ROCM_UNSUPPORTED"
+        ),
     ),
     _ExtensionSpec(
         name="vptq",
         aliases=("vptq_cuda",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.vptq_cuda", "_VPTQ_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.vptq_cuda", "_validate_vptq_build_support")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.vptq_cuda", "vptq_cuda_build_error")(),
     ),
     _ExtensionSpec(
         name="exllamav2",
         aliases=("exllama2", "exllama_v2", "exllamav2_gptq"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.exllamav2", "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.exllamav2", "exllamav2_gptq_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.exllamav2", "exllamav2_gptq_runtime_error")(),
     ),
     _ExtensionSpec(
         name="exllamav2_awq",
         aliases=("exllama2_awq", "exllama_v2_awq"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.exllamav2", "_EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.exllamav2", "exllamav2_awq_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.exllamav2", "exllamav2_awq_runtime_error")(),
     ),
     _ExtensionSpec(
         name="exllamav3",
@@ -100,11 +132,19 @@ _EXTENSION_SPECS = (
         name="marlin_fp16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_FP16_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.marlin", "_marlin_build_environment_error"
+        )(),
     ),
     _ExtensionSpec(
         name="marlin_bf16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.marlin", "_marlin_build_environment_error"
+        )(),
     ),
     _ExtensionSpec(
         name="swordfish",
@@ -299,8 +339,7 @@ def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
             results[extension_name] = True
         except RuntimeError as exc:
             results[extension_name] = False
-            extension = _EXTENSION_SPECS_BY_NAME[extension_name].resolve()
-            errors[extension_name] = extension.last_error_message() or str(exc)
+            errors[extension_name] = str(exc)
 
     if errors:
         summary = "\n".join(f"- {name}: {message}" for name, message in errors.items())

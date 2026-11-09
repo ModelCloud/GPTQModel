@@ -7,4 +7,6 @@ from . import LlamaQModel
 
 
 class InstellaQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_trust_remote_code = True

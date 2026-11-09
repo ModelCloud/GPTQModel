@@ -33,7 +33,7 @@ def test_fp8_scaled_mm_failure_is_logged_once_and_falls_back(monkeypatch):
 
     fallbacks = []
 
-    def _fallback(_x_flat):
+    def _fallback(_x_flat, bias=None):
         fallbacks.append(True)
         return torch.zeros((2, module.out_features), dtype=torch.float16)
 

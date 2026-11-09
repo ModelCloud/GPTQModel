@@ -268,3 +268,74 @@ def test_cuda_embedding_hessian_materialization_waits_for_prior_stream():
 
     expected = 2.0 * torch.tensor([1, 3, 0, 1, 1, 0, 0, 0], device=device) / 6.0
     torch.testing.assert_close(task.finalize_hessian(target_device=device), expected)
+
+
+class _CountingHessianEvent:
+    def __init__(self):
+        self.synchronizations = 0
+
+    def synchronize(self):
+        self.synchronizations += 1
+
+
+def test_shared_capture_preserves_readiness_until_last_owner_releases():
+    leader = _task()
+    follower = _task()
+    follower.share_hessian_state_from(leader)
+    state = leader._hessian_state
+    partial_event = _CountingHessianEvent()
+    final_event = _CountingHessianEvent()
+    source_event = _CountingHessianEvent()
+    leader.H = torch.eye(leader.columns)
+    leader._device_hessian_partial_ready[torch.device("cpu")] = partial_event
+    leader._hessian_ready_event = final_event
+    leader._deferred_hessian_sources = [(torch.ones(2, 2), source_event)]
+
+    assert follower._device_hessian_partial_ready is leader._device_hessian_partial_ready
+    assert follower._hessian_ready_event is final_event
+    assert follower._deferred_hessian_sources is leader._deferred_hessian_sources
+    leader.free()
+    assert follower.H is not None
+    assert follower._device_hessian_partial_ready[torch.device("cpu")] is partial_event
+    assert source_event.synchronizations == 0
+
+    follower.free()
+    assert source_event.synchronizations == 1
+    assert state.hessian is None
+    assert not state.device_partial_ready
+    assert state.ready_event is None
+    assert not state.deferred_sources
+
+
+def test_capture_snapshot_waits_for_partial_event_and_preserves_capture():
+    task = _task(chunk_size=3)
+    rows = torch.arange(88, dtype=torch.float32).reshape(11, 8) / 17
+    task.add_batch(rows, torch.empty(0))
+    event = _CountingHessianEvent()
+    task._device_hessian_partial_ready[torch.device("cpu")] = event
+    partial = task._device_hessian_partials[torch.device("cpu")]
+    before = partial.clone()
+
+    actual = task.snapshot_hessian(torch.device("cpu"))
+    rows64 = rows.to(torch.float64)
+    oracle = 2.0 * (rows64.T @ rows64) / rows64.shape[0]
+    normalized_error = torch.linalg.vector_norm(actual.to(torch.float64) - oracle) / torch.linalg.vector_norm(oracle)
+    assert float(normalized_error) <= 1e-6
+    assert event.synchronizations == 1
+    assert task.H is None
+    assert task.nsamples == rows.shape[0]
+    assert torch.equal(partial, before)
+    assert task._hessian_dirty
+
+
+def test_capture_snapshot_waits_for_materialized_hessian_event():
+    task = _task()
+    task.H = torch.eye(task.columns)
+    event = _CountingHessianEvent()
+    task._hessian_ready_event = event
+
+    snapshot = task.snapshot_hessian(torch.device("cpu"))
+
+    assert event.synchronizations == 1
+    assert torch.equal(snapshot, torch.eye(task.columns))
+    assert task._hessian_ready_event is event

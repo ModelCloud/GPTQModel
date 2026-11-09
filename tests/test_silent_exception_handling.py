@@ -518,7 +518,11 @@ def test_unreadable_generation_config_is_reported(tmp_path, monkeypatch):
 
 
 def test_failed_device_move_is_reported(monkeypatch):
-    """A buffer that cannot reach the target device is a correctness problem."""
+    """A buffer that cannot reach the target device is a correctness problem.
+
+    The target must differ from the buffer's device: a same-device move is a
+    no-op and never invokes the failing ``Tensor.to`` override.
+    """
     calls = []
 
     class FakeLogger:
@@ -538,7 +542,7 @@ def test_failed_device_move_is_reported(monkeypatch):
     monkeypatch.setattr(looper_helpers, "log", FakeLogger())
 
     looper_helpers.rehome_module_to_device(
-        module, torch.device("cpu"), only_mismatched=False
+        module, torch.device("cuda", 0), only_mismatched=False
     )
 
     assert calls, "a failed buffer move was silently swallowed"
@@ -577,7 +581,7 @@ def test_failed_device_moves_do_not_flood_the_log(monkeypatch):
     monkeypatch.setattr(looper_helpers, "log", FakeLogger())
     monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
 
-    looper_helpers.rehome_module_to_device(model, torch.device("cpu"), only_mismatched=False)
+    looper_helpers.rehome_module_to_device(model, torch.device("cuda", 0), only_mismatched=False)
 
     assert len(calls) == 2, f"expected 1 traceback + 1 summary, got {len(calls)}: {calls}"
     assert calls[0][1] is True, "the first failure must carry the traceback"
@@ -606,7 +610,7 @@ def test_repeated_rehome_calls_do_not_repeat_the_traceback(monkeypatch):
     monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
 
     for _ in range(8):
-        looper_helpers.rehome_module_to_device(module, torch.device("cpu"), only_mismatched=False)
+        looper_helpers.rehome_module_to_device(module, torch.device("cuda", 0), only_mismatched=False)
 
     tracebacks = [c for c in calls if c[1] is True]
     assert len(tracebacks) == 1, (
@@ -630,7 +634,7 @@ def test_single_failed_device_move_still_reports_a_count(monkeypatch):
     monkeypatch.setattr(looper_helpers, "log", FakeLogger())
     monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
 
-    looper_helpers.rehome_module_to_device(module, torch.device("cpu"), only_mismatched=False)
+    looper_helpers.rehome_module_to_device(module, torch.device("cuda", 0), only_mismatched=False)
 
     assert len(calls) == 2, f"expected traceback + count, got {calls}"
     assert calls[0][1] is True

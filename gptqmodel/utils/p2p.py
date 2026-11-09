@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Best-effort GPU peer-access (P2P) detection, enablement and direct copy.
+"""Best-effort GPU peer-access (P2P) detection, enablement and safe copies.
 
 PyTorch exposes ``torch.cuda.can_device_access_peer`` but no enablement API, so
 enablement goes through ``ctypes``: ``hipDeviceEnablePeerAccess`` on ROCm and
@@ -16,15 +16,20 @@ PyTorch already enables peer access lazily inside its own copy path
 (``c10/cuda/PeerToPeerAccess.cpp`` -> ``CUDACachingAllocator::enablePeerAccess``),
 so this module is **not** required for ``copy_``/``to`` to stay on the
 interconnect.  Its job is to (a) enable the links before the first cross-device
-copy so the very first transfer is direct, and (b) optionally *diagnose* the
-links.  Enabling is cheap and idempotent; bandwidth probing moves real payload
-and is opt-in through :class:`P2PConfig` (``probe=True``).
+copy so the very first transfer is direct, (b) route every cross-device move
+through a direction-aware helper, and (c) optionally *diagnose* the links.
+Enabling is cheap and idempotent; bandwidth probing moves real payload and is
+opt-in through :class:`P2PConfig` (``probe=True``).
 
 A capability bit is not proof of usable bandwidth, so an opt-in probe classifies
-each direction as ``enabled``/``degraded``.  That classification is diagnostic
-only: peer access cannot be revoked once enabled and no code path here routes a
-``degraded`` link through an explicit host relay.  Never assert P2P is effective
-from the capability bit alone.
+each direction as ``enabled``/``degraded``.  ``can_copy(src, dst)`` answers for
+one direction only.  On some ROCm topologies the link is *asymmetric*: the
+capability query reports ``0 -> 1`` unsupported while ``1 -> 0`` is enabled, and
+PyTorch's direct ``tensor.to("cuda:1")`` then calls ``hipMemcpyPeerAsync`` and
+segfaults the process instead of raising.  :func:`safe_move_to` therefore stages
+that direction through pinned host memory, which is the only path the driver
+does not crash on.  Never assert P2P is effective from a single direction or
+from a global "some link works" verdict.
 
 Behavior is controlled by :class:`P2PConfig`, normally supplied as
 ``BaseQuantizeConfig.p2p`` (or ``GPTQModel.load(..., p2p=...)`` for inference)
@@ -48,6 +53,7 @@ from typing import Any, Iterable, Sequence
 import torch
 
 from .logger import setup_logger
+from .torch import as_torch_device
 
 
 log = setup_logger()
@@ -107,8 +113,9 @@ class P2PConfig:
         ordered host-staging rate a direct copy must reach.
     ``use_torch_replicate``
         Allow ``torch.nn.parallel.replicate`` when the GIL is enabled. It is
-        skipped on free-threaded builds regardless because it funnels into
-        ``torch.cuda.comm.broadcast_coalesced``, which is not thread-safe.
+        off by default and skipped on free-threaded builds regardless because
+        it funnels into ``torch.cuda.comm.broadcast_coalesced``, which is not
+        thread-safe.
 
     Peer access is an accelerator concept: this config only affects CUDA/HIP
     device-to-device copies. It is a no-op for CPU-only runs and for
@@ -121,7 +128,7 @@ class P2PConfig:
     probe_mib: int = 64
     min_gbps: float = DEFAULT_MIN_GBPS
     min_ratio: float = DEFAULT_MIN_RATIO
-    use_torch_replicate: bool = True
+    use_torch_replicate: bool = False
 
     def __post_init__(self) -> None:
         mode = str(self.mode).strip().lower()
@@ -207,11 +214,25 @@ def get_p2p_config() -> P2PConfig:
 STATE_ENABLED = "enabled"
 STATE_UNSUPPORTED = "unsupported"
 STATE_DEGRADED = "degraded"
+# ``P2PConfig(mode='on')`` can make ``hipDeviceEnablePeerAccess`` report success for
+# a direction the runtime capability query denies. That is not evidence the
+# direction is usable -- on the asymmetric ROCm rig the enable call fails with
+# 101, but a driver that accepted it would still crash a direct copy -- so such
+# a pair is never routed directly.
+STATE_UNVERIFIED = "unverified"
 
 _PEER_ALREADY_ENABLED = 704
 
 _STATUS_CACHE: dict[tuple[str, bool, tuple[int, ...]], "PeerStatus"] = {}
 _BANDWIDTH_CACHE: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+# Raw ``can_device_access_peer`` answers, cached per directed pair.  This is the
+# fallback used by :func:`safe_move_to` when no probe status covers the pair.
+_CAPABILITY_CACHE: dict[tuple[int, int], bool] = {}
+# One warning per unsupported direction, not one per tensor move.
+_STAGED_DIRECTIONS: set[tuple[int, int]] = set()
+# Most recent probe result. ``safe_move_to`` uses it when the caller does not
+# pass a status, so a measured ``degraded`` verdict also selects host staging.
+_LAST_STATUS: "PeerStatus | None" = None
 
 # One actionable warning per process: a multi-GPU run that cannot enable every
 # ordered pair must not repeat the same diagnosis for every layer/module.
@@ -243,35 +264,76 @@ class PeerStatus:
         """Return the per-direction state (defaults to ``unsupported``)."""
         return self.pairs.get((src, dst), STATE_UNSUPPORTED)
 
-    def direct_copy_allowed(self) -> bool:
-        """True when at least one directed pair is enabled and none degraded."""
-        return any(state == STATE_ENABLED for state in self.pairs.values()) and not any(
-            state == STATE_DEGRADED for state in self.pairs.values()
-        )
-
     def can_copy(self, src: int, dst: int) -> bool:
-        """True only when ``src -> dst`` measured as a healthy peer link."""
+        """True only when ``src -> dst`` is a healthy peer link.
+
+        This is deliberately per-direction: an asymmetric topology can have
+        ``can_copy(0, 1) is False`` while ``can_copy(1, 0) is True``, and the
+        false direction must never be used for a direct transfer.
+        """
         return self.state(src, dst) == STATE_ENABLED
 
+    def asymmetric_pairs(self) -> list[tuple[int, int]]:
+        """Directed pairs that are not usable while the reverse is enabled.
+
+        Both ``unsupported`` and ``unverified`` mean GPT-QModel must not issue a
+        direct copy in that direction, while the reverse can still be usable.
+        Such a topology is the one that crashes PyTorch's direct peer copy on
+        ROCm; callers use this to avoid collective/replicate paths that assume
+        a symmetric link as well as to log one actionable warning.
+        """
+        unusable = (STATE_UNSUPPORTED, STATE_UNVERIFIED)
+        return [
+            (src, dst)
+            for (src, dst), state in sorted(self.pairs.items())
+            if state in unusable and self.pairs.get((dst, src)) == STATE_ENABLED
+        ]
+
+    def unverified_pairs(self) -> list[tuple[int, int]]:
+        """Directions forced on with ``P2PConfig(mode='on')`` that the runtime denies.
+
+        Enablement reported success but the capability query says the direction
+        is not accessible, so the link is never used for a direct copy.
+        """
+        return [
+            (src, dst)
+            for (src, dst), state in sorted(self.pairs.items())
+            if state == STATE_UNVERIFIED
+        ]
+
     def summary(self) -> str:
-        counts = {STATE_ENABLED: 0, STATE_UNSUPPORTED: 0, STATE_DEGRADED: 0}
+        counts = {
+            STATE_ENABLED: 0,
+            STATE_UNSUPPORTED: 0,
+            STATE_DEGRADED: 0,
+            STATE_UNVERIFIED: 0,
+        }
         for state in self.pairs.values():
             counts[state] = counts.get(state, 0) + 1
         paired = ", ".join(
             f"{src}->{dst}:{state}" for (src, dst), state in sorted(self.pairs.items())
         ) or "none"
         reason = f"; reason={self.reason}" if self.reason else ""
+        unverified = (
+            f" unverified={counts[STATE_UNVERIFIED]}"
+            if counts[STATE_UNVERIFIED]
+            else ""
+        )
         return (
             f"P2P mode={self.mode} devices={list(self.devices)} "
             f"enabled={counts[STATE_ENABLED]} unsupported={counts[STATE_UNSUPPORTED]} "
-            f"degraded={counts[STATE_DEGRADED]} [{paired}]{reason}"
+            f"degraded={counts[STATE_DEGRADED]}{unverified} [{paired}]{reason}"
         )
 
 
 def clear_p2p_cache() -> None:
     """Drop cached probe/bandwidth results (tests, device hot-plug)."""
+    global _LAST_STATUS
     _STATUS_CACHE.clear()
     _BANDWIDTH_CACHE.clear()
+    _CAPABILITY_CACHE.clear()
+    _STAGED_DIRECTIONS.clear()
+    _LAST_STATUS = None
 
 
 def _cache_namespace() -> bool:
@@ -280,7 +342,7 @@ def _cache_namespace() -> bool:
 
 
 def p2p_mode() -> str:
-    """Return the requested mode: ``auto``, ``1`` (force), or ``0`` (off)."""
+    """Return the requested mode: ``auto``, ``on`` (force), or ``off``."""
     return _ACTIVE_CONFIG.mode
 
 
@@ -764,12 +826,15 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     still raises for a later ``strict=True`` request.
     """
 
+    global _LAST_STATUS
+
     mode = p2p_mode()
     indices = _normalize_indices(devices)
     status = PeerStatus(mode=mode, devices=indices)
 
     if mode == _MODE_OFF:
         status.reason = "P2PConfig.mode='off'"
+        _LAST_STATUS = status
         log.debug("%s", status.summary())
         return status
 
@@ -778,6 +843,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     cached = _STATUS_CACHE.get(cache_key)
     if cached is not None:
         _warn_degraded_once(cached)
+        _LAST_STATUS = cached
         if strict and cached.errors:
             (src, dst), detail = next(iter(cached.errors.items()))
             raise RuntimeError(f"P2P {src}->{dst} enablement failed: {detail}")
@@ -786,6 +852,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     if len(indices) < 2 or not torch.cuda.is_available():
         status.reason = "fewer than two CUDA/HIP devices"
         _STATUS_CACHE[cache_key] = status
+        _LAST_STATUS = status
         log.debug("%s", status.summary())
         return status
 
@@ -805,6 +872,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                     continue
                 # ``mode='on'`` is an explicit request to try the enablement
                 # call even when the capability probe says no.
+                forced = not capability[row][col]
                 available = capability[row][col] or mode == _MODE_ON
                 if not available:
                     status.pairs[(src, dst)] = STATE_UNSUPPORTED
@@ -816,6 +884,24 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                     log.debug("P2P %s->%s not enabled: %s", src, dst, detail)
                     if strict:
                         raise RuntimeError(f"P2P {src}->{dst} enablement failed: {detail}")
+                    continue
+
+                if forced:
+                    # The runtime denies this direction, so a success return
+                    # code is not evidence of a usable link: a direct copy here
+                    # can still segfault inside hipMemcpyPeerAsync. Never probe
+                    # it either -- the probe performs a direct copy. Peer
+                    # access stays enabled for PyTorch's own paths, but
+                    # GPT-QModel moves route through host memory.
+                    status.pairs[(src, dst)] = STATE_UNVERIFIED
+                    log.debug(
+                        "P2P %s->%s enablement reported success (%s) but the "
+                        "capability query denies the direction; routing through "
+                        "host memory",
+                        src,
+                        dst,
+                        detail,
+                    )
                     continue
 
                 if not diagnose:
@@ -855,37 +941,211 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                 log.debug("failed to restore device %s: %s", original_device, exc)
 
     _STATUS_CACHE[cache_key] = status
+    _LAST_STATUS = status
+    asymmetric = status.asymmetric_pairs()
+    if asymmetric:
+        pairs = ", ".join(f"{src}->{dst}" for src, dst in asymmetric)
+        log.warning(
+            "P2P topology is asymmetric (%s unsupported while the reverse is enabled); "
+            "cross-device moves in those directions will be staged through host memory "
+            "because a direct peer copy can crash the process.",
+            pairs,
+        )
+    unverified = status.unverified_pairs()
+    if unverified:
+        pairs = ", ".join(f"{src}->{dst}" for src, dst in unverified)
+        log.warning(
+            "P2PConfig(mode='on') forced peer access on %s, but the capability query denies those "
+            "directions; they are treated as unusable and staged through host "
+            "memory because a direct peer copy can crash the process.",
+            pairs,
+        )
     log.info("%s", status.summary())
     _warn_degraded_once(status)
     return status
 
 
-def copy_tensor_to(dst: torch.Tensor, src: torch.Tensor, status: PeerStatus | None = None) -> torch.Tensor:
-    """Copy ``src`` into ``dst``, using the direct device-to-device path.
+def _device_ordinal(device: torch.device) -> int | None:
+    """Resolve an accelerator device to its ordinal (``None`` for CPU/other)."""
+    if device.type != "cuda":
+        return None
+    if device.index is not None:
+        return device.index
+    try:
+        return torch.cuda.current_device()
+    except Exception:  # pragma: no cover - runtime dependent
+        return 0
 
-    The transfer is always issued as a single ``dst.copy_(src)``. When peer
-    access is enabled (see :func:`enable_peer_access`) the copy engine performs
-    a direct ``src -> dst`` transfer; otherwise the driver stages it internally.
-    ``dst`` is returned.
 
-    An earlier version hand-rolled ``src.to("cpu")`` ``-> dst.copy_()`` for
-    ``degraded`` links. That staged through *pageable* host memory, so it was
-    both slower than the driver's own pinned staging and exactly the explicit
-    ``gpu1 -> CPU -> gpu2`` relay that multi-GPU quantization must avoid. The
-    measured direct/staged ratios on this host are 0.92-1.00 (see
-    ``DEFAULT_MIN_RATIO``), so a wrong "degraded" verdict must never downgrade a
-    healthy PCIe peer link into a CPU bounce.
+def _can_access_peer(src: int, dst: int) -> bool:
+    """Cached ``can_device_access_peer`` answer for one directed pair."""
+    key = (src, dst)
+    cached = _CAPABILITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        value = bool(torch.cuda.can_device_access_peer(src, dst))
+    except Exception as exc:  # pragma: no cover - runtime dependent
+        # An unanswerable capability query must not be treated as a healthy
+        # link: a direct copy on an unsupported ROCm direction segfaults.
+        log.debug("can_device_access_peer(%s, %s) failed: %s", src, dst, exc)
+        value = False
+    _CAPABILITY_CACHE[key] = value
+    return value
+
+
+def can_transfer_directly(
+    src: torch.device | str,
+    dst: torch.device | str,
+    status: PeerStatus | None = None,
+) -> bool:
+    """True only when a direct ``src -> dst`` transfer is known to be safe.
+
+    Unlike a global "P2P is available" check this is evaluated per direction.
+    When ``status`` covers the pair its verdict wins (so ``degraded`` links stage
+    through host memory, matching the probe that measured the fallback as
+    faster); otherwise the raw capability query is used. Transfers that do not
+    cross two accelerator devices are always safe.
     """
+    src = torch.device(src)
+    dst = torch.device(dst)
+    src_index = _device_ordinal(src)
+    dst_index = _device_ordinal(dst)
+    if src_index is None or dst_index is None or src_index == dst_index:
+        return True
+    if status is None:
+        status = _LAST_STATUS
+    if status is not None and (src_index, dst_index) in status.pairs:
+        return status.can_copy(src_index, dst_index)
+    return _can_access_peer(src_index, dst_index)
 
-    # ``copy_`` performs a direct peer transfer when the link is enabled and a
-    # driver-staged transfer otherwise. Both are GPU-side paths; never insert an
-    # explicit host relay here. ``status`` is accepted for call-site symmetry and
-    # future diagnostics, but must not demote a healthy link to a CPU bounce.
-    if status is not None and src.device.index is not None and dst.device.index is not None:
-        state = status.state(src.device.index, dst.device.index)
-        if state == STATE_DEGRADED:
-            log.debug("P2P %s->%s is degraded; driver staging may be used", src.device, dst.device)
-    dst.copy_(src, non_blocking=True)
+
+def _warn_staged_once(src: int, dst: int, reason: str) -> None:
+    key = (src, dst)
+    if key in _STAGED_DIRECTIONS:
+        return
+    _STAGED_DIRECTIONS.add(key)
+    log.warning(
+        "P2P %s->%s is not usable (%s); cross-device moves in this direction "
+        "are staged through pinned host memory to avoid a peer-copy crash.",
+        src,
+        dst,
+        reason,
+    )
+
+
+def _stage_through_host(
+    tensor: torch.Tensor,
+    device: torch.device,
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Move ``tensor`` to ``device`` via a pinned host buffer.
+
+    The H2D leg is issued synchronously: a non-blocking copy from a temporary
+    pinned buffer can outlive that buffer once this function returns, which
+    corrupts the destination. Correctness beats the overlap here; this path is
+    only used for directions the peer link cannot serve.
+    """
+    src_device = tensor.device
+    src_index = _device_ordinal(src_device)
+    dst_index = _device_ordinal(device)
+    if src_index is not None and dst_index is not None:
+        _warn_staged_once(src_index, dst_index, "direct peer copy not usable in this direction")
+
+    try:
+        host = torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True)
+        with torch.no_grad():
+            host.copy_(tensor.detach())
+    except Exception:
+        # ``pin_memory`` can be unavailable (no CUDA driver context, restricted
+        # container); pageable staging still avoids the crashing peer copy.
+        host = tensor.detach().to(device="cpu", copy=True)
+
+    return host.to(device=device, dtype=dtype, non_blocking=False)
+
+
+def safe_move_to(
+    tensor: torch.Tensor,
+    device: torch.device | str,
+    *,
+    dtype: torch.dtype | None = None,
+    non_blocking: bool = False,
+    status: PeerStatus | None = None,
+    copy: bool = False,
+) -> torch.Tensor:
+    """Move ``tensor`` to ``device`` without an unsafe direct peer copy.
+
+    ``tensor.to(device)`` on an asymmetric ROCm topology can segfault inside
+    ``hipMemcpyPeerAsync`` instead of raising, so every cross-device move must
+    go through this helper. When ``can_transfer_directly`` is false the tensor
+    is staged ``src -> pinned CPU -> dst``, which was verified to work on the
+    affected rig. ``status`` is optional; without it the cached capability query
+    decides the direction.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"safe_move_to expects a Tensor, got {type(tensor).__name__}")
+
+    device = as_torch_device(device)
+    target_dtype = tensor.dtype if dtype is None else dtype
+    ordinal = _device_ordinal(device)
+    if ordinal is not None and device.index is None:
+        device = torch.device(device.type, ordinal)
+
+    if tensor.device == device and target_dtype == tensor.dtype:
+        return tensor.clone() if copy else tensor
+
+    if can_transfer_directly(tensor.device, device, status):
+        return tensor.to(device=device, dtype=dtype, non_blocking=non_blocking, copy=copy)
+
+    # The staged result is always a fresh tensor, so ``copy=True`` is satisfied.
+    return _stage_through_host(tensor, device, dtype=dtype)
+
+
+def safe_module_to(
+    module: torch.nn.Module,
+    device: torch.device | str,
+    *,
+    dtype: torch.dtype | None = None,
+    status: PeerStatus | None = None,
+) -> torch.nn.Module:
+    """Move a module to ``device`` without a crashing direct peer copy.
+
+    ``nn.Module.to`` cannot be redirected per tensor, so when any parameter or
+    buffer would need an unsupported direction the module is first moved to the
+    CPU and then to the destination. Both legs are safe and ``_apply`` still
+    runs, which preserves dtype/format handling and cache invalidation in
+    quantized subclasses.
+    """
+    device = as_torch_device(device)
+    ordinal = _device_ordinal(device)
+    if ordinal is not None and device.index is None:
+        device = torch.device(device.type, ordinal)
+
+    sources = {tensor.device for tensor in module.parameters()}
+    sources.update(tensor.device for tensor in module.buffers())
+    needs_staging = any(
+        not can_transfer_directly(src, device, status)
+        for src in sources
+        if src.type == "cuda" and src != device
+    )
+    if needs_staging:
+        module.to(device=torch.device("cpu"), dtype=dtype)
+    return module.to(device=device, dtype=dtype)
+
+
+def copy_tensor_to(dst: torch.Tensor, src: torch.Tensor, status: PeerStatus | None = None) -> torch.Tensor:
+    """Copy ``src`` into ``dst``, staging through host memory when required.
+
+    A plain ``dst.copy_(src)`` uses the peer path whenever the driver thinks it
+    is available; on an asymmetric ROCm link that is exactly the call that
+    segfaults. The direction is therefore checked first and an unsupported
+    direction is relayed through pinned host memory. ``dst`` is returned.
+    """
+    if can_transfer_directly(src.device, dst.device, status):
+        dst.copy_(src, non_blocking=True)
+        return dst
+    dst.copy_(safe_move_to(src, dst.device, status=status))
     return dst
 
 

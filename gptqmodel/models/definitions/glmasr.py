@@ -16,7 +16,7 @@ class GlmASRGPTQ(BaseQModel):
     # GLM-ASR keeps the speech encoder and projector at the top level while the
     # text decoder stays under `language_model.model`.
     lm_head = "language_model.lm_head"
-    pre_lm_head_norm_module = "language_model.model.norm"
+    pre_lm_head_norm_module = ["language_model.norm", "language_model.model.norm"]
     rotary_embedding = "language_model.model.rotary_emb"
 
     module_tree = [

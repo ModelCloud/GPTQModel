@@ -7,5 +7,7 @@ from . import LlamaQModel
 
 
 class DeciLMQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_trust_remote_code = True
     layer_modules_strict = False  # Some model variants skip modules.

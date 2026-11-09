@@ -14,10 +14,13 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class InklingMMQModel(BaseQModel):
+    fusable = FusableConfig("inkling_mm_model").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     loader = AutoModelForMultimodalLM
 
     require_load_processor = True

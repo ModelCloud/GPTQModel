@@ -6,11 +6,14 @@
 from inspect import signature
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class GraniteMoeHybridQModel(BaseQModel):
     # Quantized Granite Mamba layers must use the eager path because the fast kernels
     # expect dense projections instead of GPTQ quantized linear modules.
+    fusable = FusableConfig("granitemoehybrid").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "model.norm"
     require_monkeypatch = True
 
@@ -28,12 +31,9 @@ class GraniteMoeHybridQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe:moe:?": {
                 # Defuser expands each packed parallel projection into
-                # `<projection>.<expert>.linear` pointwise modules.
-                "input_linear": {
-                    "#": ("linear:0",),
-                },
-                "output_linear": {
-                    "#": ("linear:1",),
+                # `<projection>.<expert>.gate_proj/up_proj/down_proj` modules.
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
             "shared_mlp": ("input_linear:0", "output_linear:1"),

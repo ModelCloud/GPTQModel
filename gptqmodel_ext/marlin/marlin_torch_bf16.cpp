@@ -1,4 +1,5 @@
 #include <torch/library.h>
+#include <vector>
 #include <tuple>
 
 #include "awq_marlin_repack.cuh"
@@ -21,6 +22,8 @@ torch::Tensor gptq_marlin_gemm_bf16(
 std::tuple<int64_t, int64_t> gptq_marlin_scratch_sizes_bf16(
     torch::Tensor& a, int64_t size_m, int64_t size_k, bool use_fp32_reduce,
     bool has_act_order);
+
+std::vector<int64_t> gptq_marlin_device_profile(int64_t device);
 
 namespace {
 
@@ -51,6 +54,10 @@ std::tuple<int64_t, int64_t> gptq_marlin_scratch_sizes_bf16_dispatch(
                                          has_act_order);
 }
 
+std::vector<int64_t> marlin_device_profile_dispatch(int64_t device) {
+  return gptq_marlin_device_profile(device);
+}
+
 torch::Tensor gptq_marlin_repack_dispatch(torch::Tensor b_q_weight,
                                           torch::Tensor perm, int64_t size_k,
                                           int64_t size_n, int64_t num_bits) {
@@ -77,6 +84,7 @@ TORCH_LIBRARY(gptqmodel_marlin_bf16, m) {
   m.def("marlin_scratch_sizes(Tensor a, int size_m, int size_k, bool use_fp32_reduce, bool has_act_order) -> (int, int)");
   m.def("gptq_marlin_repack(Tensor b_q_weight, Tensor perm, int size_k, int size_n, int num_bits) -> Tensor");
   m.def("awq_marlin_repack(Tensor b_q_weight, int size_k, int size_n, int num_bits) -> Tensor");
+  m.def("marlin_device_profile(int device) -> int[]");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_marlin_bf16, CUDA, m) {
@@ -84,4 +92,10 @@ TORCH_LIBRARY_IMPL(gptqmodel_marlin_bf16, CUDA, m) {
   m.impl("marlin_scratch_sizes", &gptq_marlin_scratch_sizes_bf16_dispatch);
   m.impl("gptq_marlin_repack", &gptq_marlin_repack_dispatch);
   m.impl("awq_marlin_repack", &awq_marlin_repack_dispatch);
+}
+
+// `marlin_device_profile` takes no tensor, so the dispatcher has no device
+// key to consult; CatchAll lets it be called directly.
+TORCH_LIBRARY_IMPL(gptqmodel_marlin_bf16, CatchAll, m) {
+  m.impl("marlin_device_profile", &marlin_device_profile_dispatch);
 }

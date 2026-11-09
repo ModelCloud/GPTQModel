@@ -4,9 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class GptJQModel(BaseQModel):
+    fusable = FusableConfig("gptj").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "transformer.ln_f"
 
     module_tree = [

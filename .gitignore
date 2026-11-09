@@ -198,7 +198,53 @@ AGENTs.md
 temp
 tmp
 
+# ---------------------------------------------------------------------------
+# WARNING: READ THIS BEFORE ADDING ANY ``*_hip.*`` / ``*.hip`` FILE
+# ---------------------------------------------------------------------------
+# The patterns below exclude hipify-GENERATED ROCm sources. Those are build
+# artifacts produced locally from the CUDA sources and must not be committed.
+#
+# BUT: some ROCm kernels here are HAND-WRITTEN, and hand-written kernels reuse
+# the same ``_hip`` / ``.hip`` naming. A new hand-written file therefore matches
+# the ignore patterns and is SILENTLY DROPPED from the commit. ``git status``
+# shows nothing, other changes commit successfully, and CI/other machines fail to
+# build because the source never left your disk.
+#
+# Verified failure mode (do not assume this is theoretical):
+#     $ git check-ignore -v gptqmodel_ext/allspark_hip/newfile_hip.cuh
+#     .gitignore:gptqmodel_ext/**/*_hip.*   <-- ignored, no warning, no error
+#
+# So: if you add a hand-written ROCm kernel, you MUST either
+#   (a) add a ``!<exact-path>`` negation to the allow-list below, or
+#   (b) name it so it does not match these patterns.
+# Always inspect ``git check-ignore -v --no-index <path>`` for the matching
+# rule and confirm tracking with ``git ls-files <path>`` after staging.
+# Exit 1 from check-ignore means not ignored, not necessarily tracked.
+# Prefer one negation per file over a
+# wildcard, so each hand-written exception is explicit and reviewable.
+# ---------------------------------------------------------------------------
+
 # hipify-generated ROCm sources (produced locally from the CUDA sources)
 gptqmodel_ext/**/*_hip.*
 gptqmodel_ext/**/*.hip
 gptqmodel_ext/exllamav2/hip/
+
+# Hand-written ROCm sources that must be tracked despite the patterns above.
+# Keep this list explicit and alphabetical; add one line per file.
+# NOTE: git has no glob for "is generated", so this allow-list is the only
+# thing keeping these files in the repo. A missing entry = an unbuildable
+# checkout, not a compile error.
+!gptqmodel_ext/allspark_hip/allspark_hip.cu
+!gptqmodel_ext/allspark_hip/allspark_torch_hip.cpp
+!gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh
+# NF12-AD HIP port (RDNA4). torch's hipify emits `nf12_ad_decode_hip.hip`,
+# `nf12_ad_encode_hip.hip` and `nf12_ad_torch_hip.cpp` from these; only the
+# hand-written originals are tracked. Nothing is shipped precompiled.
+!gptqmodel_ext/nf12_hip/nf12_ad_decode.hip
+!gptqmodel_ext/nf12_hip/nf12_ad_encode.hip
+!gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip
+!gptqmodel_ext/nf12_hip/nf12_ad_moe.hip
+!gptqmodel_ext/nf12_hip/nf12_ad_pack_bf16t.hip
+!gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh
+!gptqmodel_ext/nf12_hip/nf12_ad_validation.cuh
+!gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp

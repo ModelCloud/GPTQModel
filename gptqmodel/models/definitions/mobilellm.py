@@ -7,4 +7,6 @@ from . import LlamaQModel
 
 
 class MobileLLMQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_trust_remote_code = True

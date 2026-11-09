@@ -10,6 +10,7 @@ from gptqmodel.quantization.config import (
     ExpertsRoutingOverride,
     GcMode,
     MoEConfig,
+    normalize_bypass_batch_size,
 )
 
 
@@ -51,6 +52,8 @@ class TestMoEExpertBatching(unittest.TestCase):
         )
         # Mock processor tasks
         self.processor.tasks = {}
+        self.processor.begin_shared_input_capture.return_value = {}
+        self.processor.end_shared_input_capture.return_value = None
 
         # Create fake subset
         self.subset = {f"expert.{i}": MagicMock() for i in range(10)}
@@ -101,14 +104,20 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
-    @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
-    def test_no_batching_when_batch_size_is_zero(self, mock_empty_cache):
-        """When batch_size is 0, batching should be disabled."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 0
+    def test_batch_size_zero_is_rejected_not_treated_as_disabled(self):
+        """batch_size=0 used to read as "batching disabled"; it is invalid now.
 
-        self._run_subset_stage(self.subset)
+        The consumer re-validates the attribute too, because it can be assigned
+        after construction and would otherwise fall through the `batch_size > 0`
+        guard in the staged executor.
+        """
+        with self.assertRaises(ValueError):
+            ExpertsRoutingBypass(batch_size=0)
 
-        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
+        routing = ExpertsRoutingBypass(batch_size=4)
+        routing.batch_size = 0
+        with self.assertRaises(ValueError):
+            normalize_bypass_batch_size(routing.batch_size)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_expert_groups(self, mock_empty_cache):

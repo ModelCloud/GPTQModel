@@ -195,6 +195,37 @@ def test_cuda_cached_llama_rms_norm_matches_eager_bf16():
     torch.testing.assert_close(actual, expected, rtol=.01, atol=.02)
 
 
+@pytest.mark.parametrize('shape', [(0, 1, 128), (1, 0, 128), (1, 1, 0)])
+def test_cuda_cached_llama_rms_norm_accepts_empty_activation(shape):
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA device required')
+    hidden = torch.empty(shape, device='cuda', dtype=torch.bfloat16)
+    weight = torch.ones(shape[-1], device='cuda', dtype=torch.bfloat16)
+
+    actual = cuda_rms_norm(hidden, weight, 1e-6)
+
+    assert actual is not None
+    assert actual.shape == hidden.shape
+    assert actual.dtype == hidden.dtype
+    assert actual.device == hidden.device
+
+
+@pytest.mark.parametrize('rows,columns', [(0, 128), (1, 0)])
+def test_cuda_relaxation_defers_empty_geometry_to_eager_path(rows, columns):
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA device required')
+    group_size = 32
+    logits = torch.empty((5, rows, columns), device='cuda', requires_grad=True)
+    scales = torch.ones((rows, (columns + group_size - 1) // group_size), device='cuda')
+    initial = torch.empty((rows, columns), device='cuda')
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    uniform = torch.full_like(logits, 0.5)
+
+    assert cuda_relaxed_scalar_weights(
+        logits, scales, initial, valid, uniform, group_size, 1.0, 1.0,
+    ) is None
+
+
 def test_cuda_staged_llama_uses_fused_training_and_disk_targets(tmp_path, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")

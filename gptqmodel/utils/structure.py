@@ -35,6 +35,7 @@ import re
 import shutil
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
@@ -45,6 +46,8 @@ from safetensors import safe_open
 from torch import nn
 
 from ..utils.logger import setup_logger
+from .p2p import safe_move_to
+from .torch import as_torch_device
 
 
 # =========================
@@ -554,7 +557,9 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     if param.device == device:
         return param
     # CPU or wrong GPU -> rebind data storage on target device
-    param.data = param.data.to(device, copy=True)  # alloc new storage on device; keeps Parameter identity
+    # Allocate new storage on the target device; a direct peer copy on an
+    # asymmetric ROCm link can segfault, so use the direction-aware helper.
+    param.data = safe_move_to(param.data, device, copy=True)  # keeps Parameter identity
     return param
 
 
@@ -798,6 +803,46 @@ class _LazyCheckpointAssembly:
     concat_dim: Optional[int]
 
 
+# A shard holding several model layers is re-opened and re-read once per layer
+# it contains. The layout is fixed per checkpoint, so a process only needs to
+# hear it once.
+_NON_LAYERWISE_SHARD_WARNING_LOCK = threading.Lock()
+_NON_LAYERWISE_SHARD_WARNING_EMITTED = False
+
+# Path segments that conventionally introduce a decoder/encoder layer index in
+# Hugging Face checkpoints. Used only when the model's `module_tree` does not
+# describe the checkpoint naming scheme.
+_LAYER_CONTAINER_SEGMENTS = frozenset(
+    {
+        "block",
+        "blocks",
+        "decoder_block",
+        "decoder_blocks",
+        "decoder_layer",
+        "decoder_layers",
+        "encoder_block",
+        "encoder_blocks",
+        "encoder_layer",
+        "encoder_layers",
+        "h",
+        "layer",
+        "layers",
+        "transformer_block",
+        "transformer_blocks",
+        "transformer_layer",
+        "transformer_layers",
+    }
+)
+
+
+def reset_non_layerwise_shard_warning() -> None:
+    """Allow the one-shot checkpoint shard-layout warning to fire again."""
+
+    global _NON_LAYERWISE_SHARD_WARNING_EMITTED
+    with _NON_LAYERWISE_SHARD_WARNING_LOCK:
+        _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -861,6 +906,152 @@ class LazyTurtle:
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
         self._lock = threading.RLock()
+        self._active_source_root: Optional[str] = None
+        self._active_source_provenance: Optional[Dict[str, Any]] = None
+
+    def configure_active_source_staging(
+        self,
+        root: str,
+        *,
+        provenance: Dict[str, Any],
+    ) -> None:
+        """Stage active decoder/MTP shards on fast local storage on demand."""
+
+        if not isinstance(root, str) or not root or not os.path.isabs(root):
+            raise ValueError("LazyTurtle active source staging requires an absolute root")
+        if not isinstance(provenance, dict) or not provenance:
+            raise ValueError("LazyTurtle active source staging requires provenance")
+        os.makedirs(root, exist_ok=True)
+        if os.path.islink(root) or not os.path.isdir(root):
+            raise ValueError("LazyTurtle active source staging root is unsafe")
+        with self._lock:
+            if self._active_source_root not in {None, root}:
+                raise ValueError("LazyTurtle active source staging root changed")
+            if (
+                self._active_source_provenance is not None
+                and self._active_source_provenance != provenance
+            ):
+                raise ValueError("LazyTurtle active source provenance changed")
+            self._active_source_root = root
+            self._active_source_provenance = copy.deepcopy(provenance)
+
+    @contextmanager
+    def suspend_active_source_staging(self):
+        """Read the authoritative checkpoint directly for one bounded scope.
+
+        Active-source staging is useful while quantization repeatedly accesses
+        one decoder layer, but final serialization walks every retained native
+        tensor exactly once.  Copying each multi-gigabyte source shard into a
+        layer-scoped staging directory during that walk can consume nearly an
+        entire second model's worth of fast storage.  Suspending the cache is
+        safe because the configured checkpoint remains authoritative and the
+        staging tree contains no unique state.
+        """
+
+        with self._lock:
+            root = self._active_source_root
+            self._active_source_root = None
+        try:
+            yield
+        finally:
+            with self._lock:
+                if self._active_source_root is not None:
+                    raise RuntimeError(
+                        "LazyTurtle active source staging changed while suspended"
+                    )
+                self._active_source_root = root
+
+    @staticmethod
+    def _active_source_scope(module_path: Optional[str]) -> Optional[str]:
+        if not isinstance(module_path, str):
+            return None
+        match = re.match(r"^(?:model\.)?layers\.(\d+)(?:\.|$)", module_path)
+        if match is not None:
+            return f"base-{int(match.group(1)):06d}"
+        match = re.match(r"^mtp\.(\d+)(?:\.|$)", module_path)
+        if match is not None:
+            return f"mtp-{int(match.group(1)):06d}"
+        return None
+
+    def _checkpoint_shard_path(
+        self,
+        shard: str,
+        *,
+        module_path: Optional[str],
+    ) -> str:
+        source_path = os.path.join(self.model_local_path, shard)
+        scope = self._active_source_scope(module_path)
+        root = self._active_source_root
+        if root is None or scope is None:
+            return source_path
+        if os.path.basename(shard) != shard:
+            raise ValueError("LazyTurtle checkpoint shard name is unsafe")
+        scope_root = os.path.join(root, scope)
+        staged_path = os.path.join(scope_root, shard)
+        source_stat = os.stat(source_path, follow_symlinks=True)
+        with self._lock:
+            os.makedirs(scope_root, exist_ok=True)
+            if os.path.islink(scope_root) or not os.path.isdir(scope_root):
+                raise RuntimeError("LazyTurtle active source scope is unsafe")
+            try:
+                staged_stat = os.stat(staged_path, follow_symlinks=False)
+            except FileNotFoundError:
+                staged_stat = None
+            if staged_stat is not None:
+                if not os.path.isfile(staged_path) or os.path.islink(staged_path):
+                    raise RuntimeError("LazyTurtle staged source shard is unsafe")
+                if staged_stat.st_size != source_stat.st_size:
+                    raise RuntimeError("LazyTurtle staged source shard size differs")
+                return staged_path
+
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{shard}.", suffix=".tmp", dir=scope_root
+            )
+            try:
+                with open(source_path, "rb", buffering=0) as source, os.fdopen(
+                    descriptor, "wb", buffering=0
+                ) as target:
+                    shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if os.stat(temporary).st_size != source_stat.st_size:
+                    raise RuntimeError("LazyTurtle staged source shard was truncated")
+                os.chmod(temporary, 0o644)
+                os.replace(temporary, staged_path)
+                directory = os.open(scope_root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                raise
+        return staged_path
+
+    def prune_active_source_scope_through(
+        self, namespace: str, layer_index: int
+    ) -> None:
+        """Delete staged shards only after the matching output is durable."""
+
+        root = self._active_source_root
+        if root is None:
+            return
+        if namespace not in {"base", "mtp"}:
+            raise ValueError("LazyTurtle active source namespace is invalid")
+        with self._lock:
+            for entry in os.scandir(root):
+                match = re.fullmatch(rf"{namespace}-(\d{{6}})", entry.name)
+                if match is None or int(match.group(1)) > layer_index:
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    raise RuntimeError("LazyTurtle active source scope is unsafe")
+                shutil.rmtree(entry.path)
+
+    def prune_active_source_through(self, layer_index: int) -> None:
+        self.prune_active_source_scope_through("base", layer_index)
 
     @classmethod
     def maybe_create(
@@ -1043,10 +1234,113 @@ class LazyTurtle:
 
         path = _get_qualified_name(target_model, target_submodule)
         with self._lock:
-            return self._load_checkpoint_tensors_for_module_path(
+            tensors = self._load_checkpoint_tensors_for_module_path(
                 module_path=path,
                 recurse=recurse,
             )
+
+            # Floatx checkpoints commonly keep a packed ``weight`` and its
+            # scale as direct leaves of the source projection. When the HF
+            # shell renames that projection (for example DeepSeek-V4
+            # ``gate_proj`` -> ``w1``), resolving only the runtime module
+            # prefix yields no tensors even though per-parameter resolution
+            # succeeds. Resolve the raw source weight explicitly so the auto
+            # decoder sees the packed representation.
+            if "weight" not in tensors:
+                source_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                    path,
+                    "weight",
+                )
+                if (
+                    source_name is not None
+                    and expert_index is None
+                    and split_index is None
+                    and split_dim is None
+                ):
+                    raw_names = [source_name]
+                    if source_name.endswith(".weight"):
+                        source_prefix = source_name[:-len(".weight")]
+                        for suffix in (
+                            "scale",
+                            "scale_inv",
+                            "scale_2",
+                            "weight_scale",
+                            "weight_scale_inv",
+                            "weight_scale_2",
+                        ):
+                            candidate = f"{source_prefix}.{suffix}"
+                            if candidate in self._weight_map:
+                                raw_names.append(candidate)
+
+                    grouped_names: Dict[str, list[str]] = {}
+                    for raw_name in raw_names:
+                        shard = self._weight_map.get(raw_name)
+                        if shard is not None:
+                            grouped_names.setdefault(shard, []).append(raw_name)
+
+                    for shard, names in grouped_names.items():
+                        shard_path = self._checkpoint_shard_path(
+                            shard, module_path=path
+                        )
+                        with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                            for raw_name in names:
+                                if raw_name == source_name:
+                                    tensors["weight"] = handler.get_tensor(raw_name)
+                                    continue
+                                leaf_name = raw_name.rsplit(".", 1)[-1]
+                                tensors[leaf_name] = handler.get_tensor(raw_name)
+                elif source_name is not None:
+                    # Defused experts have no direct checkpoint prefix. Reuse
+                    # the ordinary materializer's fused slicing/transpose rules
+                    # when reloading a dense source for an inline tier upgrade.
+                    shard_path = self._checkpoint_shard_path(
+                        self._weight_map[source_name], module_path=path
+                    )
+                    with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                        raw_weight = handler.get_tensor(source_name)
+                        if not raw_weight.is_floating_point() or raw_weight.element_size() < 2:
+                            raise RuntimeError(
+                                f"Fused quantization source requires dense weights: {source_name}"
+                            )
+                        weight = self._transform_checkpoint_tensor(
+                            raw_weight,
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                            expected_shape=tuple(target_submodule.weight.shape),
+                            prefer_transposed=self._resolve_prefer_transposed_hint(
+                                target_model=target_model,
+                                module_path=path,
+                                rel_name="weight",
+                                modules_by_name={
+                                    prefix: target_model.get_submodule(prefix)
+                                    for prefix in (
+                                        ".".join(path.split(".")[:count])
+                                        for count in range(1, len(path.split(".")) + 1)
+                                    )
+                                },
+                            ),
+                        )
+                        if weight is None:
+                            raise RuntimeError(
+                                f"Fused quantization source shape mismatch: {source_name} -> {path}"
+                            )
+                        tensors["weight"] = weight.clone()
+
+            # Normalize the direct ``.scale`` spelling used by native
+            # DeepSeek-V4 checkpoints to the names consumed by GPTQModel's
+            # generic floatx decoder. Preserve the source spelling too for
+            # provenance/debug reports.
+            companion_aliases = {
+                "scale": "weight_scale",
+                "scale_inv": "weight_scale_inv",
+                "scale_2": "weight_scale_2",
+            }
+            for source_leaf, decoder_leaf in companion_aliases.items():
+                if source_leaf in tensors and decoder_leaf not in tensors:
+                    tensors[decoder_leaf] = tensors[source_leaf]
+
+            return tensors
 
     def sync_all_meta(
         self,
@@ -1067,6 +1361,12 @@ class LazyTurtle:
         progress.title(f"Syncing lazy checkpoint writes ({len(modules)} modules)")
         progress.subtitle("Preparing module writes")
         progress.draw(force=True)
+        # Large MoE shells can contain tens of thousands of leaf modules. A
+        # pair of logbar redraws for every leaf makes Docker JSON logging the
+        # dominant cost even though most packed shells have no native META
+        # tensor to restore. Keep roughly 200 visible checkpoints while still
+        # visiting and validating every module.
+        progress_interval = max(1, len(modules) // 200)
 
         try:
             with self._lock, torch.inference_mode():
@@ -1074,9 +1374,16 @@ class LazyTurtle:
                     if isinstance(shell_sub, skip_module_types):
                         continue
                     module_label = qname or "<root>"
-                    progress.current_iter_step = idx
-                    progress.subtitle(f"Writing {module_label} ({idx + 1}/{len(modules)})")
-                    progress.draw()
+                    draw_progress = (
+                        idx % progress_interval == 0
+                        or idx + 1 == len(modules)
+                    )
+                    if draw_progress:
+                        progress.current_iter_step = idx
+                        progress.subtitle(
+                            f"Writing {module_label} ({idx + 1}/{len(modules)})"
+                        )
+                        progress.draw()
                     synced = self._materialize_direct_meta_tensors(
                         shell_sub=shell_sub,
                         module_path=qname,
@@ -1084,9 +1391,12 @@ class LazyTurtle:
                         buffer_cache=buffer_cache,
                     )
                     materialized += synced
-                    progress.current_iter_step = idx + 1
-                    progress.subtitle(f"Wrote {module_label} (+{synced}, total {materialized})")
-                    progress.draw()
+                    if draw_progress:
+                        progress.current_iter_step = idx + 1
+                        progress.subtitle(
+                            f"Wrote {module_label} (+{synced}, total {materialized})"
+                        )
+                        progress.draw()
         finally:
             progress.close()
 
@@ -1110,7 +1420,7 @@ class LazyTurtle:
         """Materialize only direct meta params/buffers for one shell submodule."""
 
         if device is not None:
-            device = torch.device(device)
+            device = as_torch_device(device)
             if device.type == "meta":
                 raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
 
@@ -1121,7 +1431,54 @@ class LazyTurtle:
                 module_path=path,
                 param_cache={},
                 buffer_cache={},
+                device=device,
             )
+            direct_buffers = dict(target_submodule.named_buffers(recurse=False))
+            nonpersistent = getattr(
+                target_submodule,
+                "_non_persistent_buffers_set",
+                set(),
+            )
+            # Non-persistent buffers are absent from the checkpoint, so the
+            # recursive path rebuilds them from a constructor template whenever
+            # they are meta or not on the requested device. Match that here
+            # instead of only rebuilding meta tensors.
+            restore_device = device
+            if restore_device is None:
+                # A materialized direct parameter anchors this module's
+                # execution device before any init-only buffer does.
+                resolved = next(
+                    (
+                        param.device
+                        for param in target_submodule.parameters(recurse=False)
+                        if not _is_meta_tensor(param)
+                    ),
+                    None,
+                )
+                if resolved is None:
+                    resolved = next(
+                        (
+                            buffer.device
+                            for buffer in direct_buffers.values()
+                            if not _is_meta_tensor(buffer)
+                        ),
+                        None,
+                    )
+                restore_device = resolved if resolved is not None else torch.device("cpu")
+            missing_nonpersistent_buffers = [
+                (name, name)
+                for name, buffer in direct_buffers.items()
+                if name in nonpersistent
+                and (_is_meta_tensor(buffer) or buffer.device != restore_device)
+            ]
+            if missing_nonpersistent_buffers:
+                self._restore_missing_nonpersistent_buffers(
+                    target_model=target_model,
+                    target_submodule=target_submodule,
+                    t_bufs=direct_buffers,
+                    missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+                    device=restore_device,
+                )
             return target_submodule
 
     def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
@@ -1495,6 +1852,105 @@ class LazyTurtle:
                     continue
                 return parts[start : end + 1], parts[end + 1 :]
         return (), parts
+
+    @staticmethod
+    def _fallback_layer_key(name: str) -> Optional[str]:
+        """Infer a layer key from a checkpoint path without `module_tree` prefixes."""
+
+        parts = tuple(part for part in name.split(".") if part)
+        for index in range(1, len(parts)):
+            if parts[index].isdigit() and parts[index - 1] in _LAYER_CONTAINER_SEGMENTS:
+                return ".".join(parts[: index + 1])
+        return None
+
+    def checkpoint_layer_key(self, name: str) -> Optional[str]:
+        """Return the layer that owns checkpoint tensor `name`, if any.
+
+        Tensors that are not owned by a layer (embeddings, the language
+        model head, model-level norms, ...) return `None` and are ignored by the
+        shard-layout check.
+        """
+
+        layer_head, _ = self._split_layer_relative_path(name)
+        if layer_head:
+            return ".".join(layer_head)
+        return self._fallback_layer_key(name)
+
+    def checkpoint_shard_layer_groups(self) -> Dict[str, frozenset[str]]:
+        """Map every checkpoint shard to the layers whose tensors it stores."""
+
+        groups: Dict[str, set[str]] = {}
+        for tensor_name, shard_name in self._weight_map.items():
+            bucket = groups.setdefault(shard_name, set())
+            layer_key = self.checkpoint_layer_key(tensor_name)
+            if layer_key is not None:
+                bucket.add(layer_key)
+        return {shard_name: frozenset(layer_keys) for shard_name, layer_keys in groups.items()}
+
+    def warn_if_checkpoint_shards_are_not_layerwise(self) -> None:
+        """Warn once per process when a shard stores tensors from several layers.
+
+        LazyTurtle is only used by the quantization offload path, so this check
+        intentionally stays out of the inference load path. The warning is
+        advisory: a failure while inspecting the index must never disable lazy
+        loading.
+        """
+
+        global _NON_LAYERWISE_SHARD_WARNING_EMITTED
+
+        try:
+            shard_groups = self.checkpoint_shard_layer_groups()
+        except Exception as exc:  # never let an advisory break lazy loading
+            log.debug("LazyTurtle: checkpoint shard-layout check skipped: %s", exc)
+            return
+
+        multi_layer_shards = {
+            shard_name: layer_keys
+            for shard_name, layer_keys in shard_groups.items()
+            if len(layer_keys) > 1
+        }
+        if not multi_layer_shards:
+            return
+
+        with _NON_LAYERWISE_SHARD_WARNING_LOCK:
+            if _NON_LAYERWISE_SHARD_WARNING_EMITTED:
+                return
+            _NON_LAYERWISE_SHARD_WARNING_EMITTED = True
+
+        example_shard, example_layers = max(
+            multi_layer_shards.items(),
+            key=lambda item: len(item[1]),
+        )
+
+        log.warning(
+            "LazyTurtle: loading this checkpoint for quantization, but its shards are not layer-wise: "
+            "%s. The same shard is opened and re-read once per layer it holds, adding "
+            "avoidable I/O during quantization; re-shard so each layer has its own file.",
+            self._format_shard_layout_detail(
+                shard_groups=shard_groups,
+                multi_layer_shards=multi_layer_shards,
+                example_shard=example_shard,
+                example_layer_count=len(example_layers),
+            ),
+        )
+
+    @staticmethod
+    def _format_shard_layout_detail(
+        *,
+        shard_groups: Dict[str, frozenset[str]],
+        multi_layer_shards: Dict[str, frozenset[str]],
+        example_shard: str,
+        example_layer_count: int,
+    ) -> str:
+        """Describe the offending shards, keeping the count grammar-correct."""
+
+        if len(shard_groups) == 1:
+            return f"`{example_shard}` holds {example_layer_count} model layers"
+        verb = "holds" if len(multi_layer_shards) == 1 else "hold"
+        return (
+            f"{len(multi_layer_shards)} of {len(shard_groups)} safetensors files {verb} multiple "
+            f"model layers (e.g. `{example_shard}` holds {example_layer_count})"
+        )
 
     def _module_tree_name_aliases(self, name: str) -> list[str]:
         """Generate checkpoint-name candidates from MoE aliases declared in `module_tree`."""
@@ -2312,7 +2768,7 @@ class LazyTurtle:
 
         if self.is_no_placement_tensor(module_path, rel_name):
             return torch.device("cpu")
-        return torch.device(default_device)
+        return as_torch_device(default_device)
 
     def is_no_placement_tensor(self, module_path: str, rel_name: str) -> bool:
         """Check Transformers' accelerator placement exclusions."""
@@ -2611,7 +3067,9 @@ class LazyTurtle:
 
         tensors: Dict[str, torch.Tensor] = {}
         for shard, names in grouped_names.items():
-            shard_path = os.path.join(self.model_local_path, shard)
+            shard_path = self._checkpoint_shard_path(
+                shard, module_path=module_path
+            )
             with safe_open(shard_path, framework="pt", device="cpu") as handler:
                 for rel_name, full_name in names:
                     tensors[rel_name] = handler.get_tensor(full_name)
@@ -2765,7 +3223,9 @@ class LazyTurtle:
                                     target_shape=expected_shape,
                                 )
                             )
-                        shard_path = os.path.join(self.model_local_path, shard)
+                        shard_path = self._checkpoint_shard_path(
+                            shard, module_path=module_path
+                        )
                         with safe_open(shard_path, framework="pt", device="cpu") as handler:
                             parts.append(self._decode_mimo_checkpoint_tensor(
                                 full_name,
@@ -2844,7 +3304,7 @@ class LazyTurtle:
                         persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
                         source = tensor.detach()
                         if target_buffer is None:
-                            new_buffer = source.to(device=device)
+                            new_buffer = safe_move_to(source, device)
                             t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
                             t_bufs[rel_name] = new_buffer
                         elif getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
@@ -2866,7 +3326,9 @@ class LazyTurtle:
                         progress.draw()
 
                 for shard, entries in grouped_names.items():
-                    shard_path = os.path.join(self.model_local_path, shard)
+                    shard_path = self._checkpoint_shard_path(
+                        shard, module_path=module_path
+                    )
                     with safe_open(shard_path, framework="pt", device="cpu") as handler:
                         for kind, rel_name, full_name, expert_index, split_index, split_dim in entries:
                             if progress is not None:
@@ -2957,7 +3419,7 @@ class LazyTurtle:
 
                                 source = tensor.detach()
                                 if target_buffer is None:
-                                    new_buffer = source.to(device=device)
+                                    new_buffer = safe_move_to(source, device)
                                     t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
                                     t_bufs[rel_name] = new_buffer
                                 else:
@@ -3123,7 +3585,7 @@ class LazyTurtle:
                 source_buffer = source_buffer.detach()
 
             target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
-            materialized = source_buffer.to(device=device, dtype=target_dtype)
+            materialized = safe_move_to(source_buffer, device, dtype=target_dtype)
             owner_module.register_buffer(leaf, materialized, persistent=False)
             t_bufs[rel_name] = materialized
 
@@ -3140,6 +3602,7 @@ class LazyTurtle:
             tuple[str, Optional[int], Optional[int], Optional[int | _LazyCheckpointAssembly], torch.dtype],
             torch.Tensor,
         ],
+        device: Optional[torch.device] = None,
     ) -> int:
         synced = 0
 
@@ -3164,7 +3627,9 @@ class LazyTurtle:
                                 full_name=full_name,
                                 target_shape=tuple(shell_param.shape),
                             ))
-                        source_path = os.path.join(self.model_local_path, shard)
+                        source_path = self._checkpoint_shard_path(
+                            shard, module_path=module_path
+                        )
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
                             parts.append(self._decode_mimo_checkpoint_tensor(
                                 full_name,
@@ -3209,8 +3674,7 @@ class LazyTurtle:
                     cache_key = (",".join(full_names), None, None, concat_dim, shell_param.dtype, shell_param.requires_grad)
                     new_param = param_cache.get(cache_key)
                     if new_param is None:
-                        if source_param.dtype != shell_param.dtype:
-                            source_param = source_param.to(dtype=shell_param.dtype)
+                        source_param = source_param.to(device=device, dtype=shell_param.dtype)
                         new_param = nn.Parameter(
                             source_param.clone(),
                             requires_grad=shell_param.requires_grad,
@@ -3239,7 +3703,9 @@ class LazyTurtle:
                         split_dim=split_dim,
                     ))
 
-                source_path = os.path.join(self.model_local_path, shard)
+                source_path = self._checkpoint_shard_path(
+                    shard, module_path=module_path
+                )
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
                     checkpoint_param = self._decode_mimo_checkpoint_tensor(
                         full_name,
@@ -3287,8 +3753,7 @@ class LazyTurtle:
                 cache_key = (full_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
                 new_param = param_cache.get(cache_key)
                 if new_param is None:
-                    if source_param.dtype != shell_param.dtype:
-                        source_param = source_param.to(dtype=shell_param.dtype)
+                    source_param = source_param.to(device=device, dtype=shell_param.dtype)
                     new_param = nn.Parameter(
                         source_param.clone(),
                         requires_grad=shell_param.requires_grad,
@@ -3318,7 +3783,9 @@ class LazyTurtle:
                                 full_name=full_name,
                                 target_shape=tuple(shell_buffer.shape),
                             ))
-                        source_path = os.path.join(self.model_local_path, shard)
+                        source_path = self._checkpoint_shard_path(
+                            shard, module_path=module_path
+                        )
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
                             parts.append(self._decode_mimo_checkpoint_tensor(
                                 full_name,
@@ -3355,8 +3822,7 @@ class LazyTurtle:
                     cache_key = (",".join(full_names), None, None, concat_dim, shell_buffer.dtype)
                     new_buffer = buffer_cache.get(cache_key)
                     if new_buffer is None:
-                        if source_buffer.dtype != shell_buffer.dtype:
-                            source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
+                        source_buffer = source_buffer.to(device=device, dtype=shell_buffer.dtype)
                         new_buffer = source_buffer.clone()
                         buffer_cache[cache_key] = new_buffer
 
@@ -3382,7 +3848,9 @@ class LazyTurtle:
                         split_dim=split_dim,
                     ))
 
-                source_path = os.path.join(self.model_local_path, shard)
+                source_path = self._checkpoint_shard_path(
+                    shard, module_path=module_path
+                )
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
                     checkpoint_buffer = self._decode_mimo_checkpoint_tensor(
                         full_name,
@@ -3431,8 +3899,7 @@ class LazyTurtle:
                 cache_key = (full_name, expert_index, split_index, split_dim, shell_buffer.dtype)
                 new_buffer = buffer_cache.get(cache_key)
                 if new_buffer is None:
-                    if source_buffer.dtype != shell_buffer.dtype:
-                        source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
+                    source_buffer = source_buffer.to(device=device, dtype=shell_buffer.dtype)
                     new_buffer = source_buffer.clone()
                     buffer_cache[cache_key] = new_buffer
 

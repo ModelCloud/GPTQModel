@@ -14,7 +14,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -87,6 +87,7 @@ from ..utils.model import (
     warn_fused_unit_dynamic_conflicts,
 )
 from ..utils.model_dequant import infer_block_shape
+from ..utils.p2p import safe_module_to
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -95,21 +96,25 @@ from ..utils.structure import (
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
 )
-from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
+from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
 from ._const import (
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
     DEVICE,
     EXPERT_INDEX_PLACEHOLDER,
     META,
+    normalize_device,
 )
+from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
+from .module_plan import ModulePlan
 from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
 
 if TYPE_CHECKING:
     from ..looper.checkpoint_store import CheckpointConfig
+    from .fusion import FusionPlanner
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -336,6 +341,9 @@ class BaseQModel(nn.Module):
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
 
+    # No profile means this definition cannot opt into projection fusion.
+    fusable: Optional[FusableConfig] = None
+
     # `model_type`s whose `:in=<tag>` shared-input metadata was verified against a real (tiny, CPU)
     # forward in tests/module_tree/test_shared_input_cpu_forward.py. Not inherited: every concrete
     # definition (and every extra model_type mapped onto it) must list itself or its `:in=` tags
@@ -346,7 +354,7 @@ class BaseQModel(nn.Module):
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
     layer_modules_strict = True
 
-    pre_lm_head_norm_module: str = None
+    pre_lm_head_norm_module: Union[str, List[str], None] = None
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
@@ -413,8 +421,9 @@ class BaseQModel(nn.Module):
 
     # Some models have optional layers that are not loaded or supported by HF so even when they exist in the original
     # model, they are not properly saved on save(). GLM 4.5/4.6 (air) with MTP layers is such example.
-    # Provide either a safetensors filename (the file is copied through if present) or a prefix (all `prefix.` tensors
-    # are merged into the main state dict so they end up in model.safetensors).
+    # Provide either a safetensors filename (the file is copied through if present),
+    # a prefix (all `prefix.` tensors), a suffix, or an exact tensor name. Selected
+    # tensors are merged into the main state dict so they end up in model.safetensors.
     out_of_model_tensors: Optional[Dict[str, Union[str | List[str]]]] = None
 
     supports_desc_act = [True, False]
@@ -433,8 +442,6 @@ class BaseQModel(nn.Module):
     # Optional runtime->checkpoint overrides for LazyTurtle. Prefer reversed
     # `WeightRenaming` entries; legacy runtime->checkpoint dicts are still accepted.
     HF_CONVERSION_MAP_REVERSED: Optional[Any] = None
-
-    moe_expert_module_name_prefixes = [".expert"]
 
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
@@ -467,8 +474,15 @@ class BaseQModel(nn.Module):
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
+        fusion_enabled: bool = False,
     ):
         super().__init__()
+        if type(fusion_enabled) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        if fusion_enabled:
+            require_fusable_config(type(self), getattr(model.config, "model_type", None))
+        self._auto_fusion = fusion_enabled
+        self._fusion_plan = None
 
         # Resolve per-instance module structure without ever changing the
         # declaration owned by the model definition class.  ``module_tree`` is
@@ -482,12 +496,16 @@ class BaseQModel(nn.Module):
 
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if effective_tree is None:
-            raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
+            raise ValueError(
+                f"Unsupported model_type {model.config.model_type}: no explicit module_tree is registered. "
+                "Add a model definition instead of relying on name-based auto-detection."
+            )
 
         # Keep the selected tree stable for the lifetime of this instance;
         # class definitions remain reusable by later instances.
         self.effective_module_tree = _freeze_module_tree(effective_tree)
         self.module_tree = self.effective_module_tree
+        self._module_plan = ModulePlan.from_tree(self.effective_module_tree)
 
 
         # record configuration early so model lifecycle hooks can rely on them
@@ -519,6 +537,11 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        hooks = getattr(self, "moe_lifecycle_hooks", None)
+        if hooks is not None:
+            hooks = copy.copy(hooks)
+            self.moe_lifecycle_hooks = hooks
+            hooks.module_plan = self.module_plan()
         if (getattr(quantize_config, "dynamic", None)
                 and hasattr(self.model, "named_modules")
                 and (not dynamic_cache_prepared or self.model is not model
@@ -589,22 +612,21 @@ class BaseQModel(nn.Module):
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
         self._auto_configure_lookahead()
+        if self.quantized and self._auto_fusion:
+            self.fuse()
 
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         """Resolve a model tree before a loader needs to plan against it."""
         quant_method = getattr(quantize_config, "method", None) if quantize_config else None
-        effective_tree = copy.deepcopy(cls.module_tree)
+        effective_tree = copy.deepcopy(getattr(model, "gptqmodel_effective_module_tree", None))
+        if effective_tree is None:
+            effective_tree = copy.deepcopy(cls.module_tree)
         if quant_method is not None:
             override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
             if override is not None and effective_tree is not None:
                 log.info(f"Module Tree: overridden by METHOD.{quant_method.upper()}")
                 effective_tree = apply_module_tree_override(effective_tree, override)
-
-            if effective_tree is None:
-                if detector is None:
-                    detector = cls.__new__(cls)
-                effective_tree = detector._auto_detect_module_tree(model, quant_method)
 
         return copy.deepcopy(effective_tree)
 
@@ -644,6 +666,57 @@ class BaseQModel(nn.Module):
 
         invoke_with_effective_tree.__gptqmodel_tree_bound__ = True
         return invoke_with_effective_tree
+
+    def module_plan(self) -> ModulePlan:
+        """Return the immutable module plan compiled for this model instance."""
+
+        try:
+            plan = object.__getattribute__(self, "_module_plan")
+        except AttributeError:
+            plan = None
+        if not isinstance(plan, ModulePlan):
+            raise RuntimeError(
+                f"{type(self).__name__}: module plan is not compiled yet; "
+                "construct the quantized model before inspecting it"
+            )
+        return plan
+
+    def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None) -> Optional[FusionPlanner]:
+        """Apply optional QKV/gate-up fusion and return its FusionPlanner.
+
+        Fusion is disabled by default. Enabling it rebinds checkpoint operands
+        to shared packed storage views. ``enabled=False`` restores independent
+        contiguous operands and ordinary execution, returning None. Inspect the
+        returned plan with its print(), render(), and to_dict() methods.
+        Definition and per-call overrides can disable a family (``qkv``/``gate_up``)
+        or exact parent path.
+        The definition must declare a matching ``FusableConfig``; otherwise
+        enabling fusion raises. Disabling never requires a profile.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        if enabled and not self.quantized:
+            raise RuntimeError("Fusion requires a post-quantized model")
+        if enabled:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
+        from .fusion import FusionPlanner
+
+        previous = self._fusion_plan
+        # Build before changing installed execution so invalid requests leave
+        # the previous plan in place. Temporarily unwrap for hook inspection.
+        if previous is not None:
+            previous.remove()
+        try:
+            plan = FusionPlanner(self, overrides=overrides) if enabled else None
+            if plan is not None:
+                plan.apply()
+        except Exception:
+            if previous is not None:
+                previous.apply()
+            raise
+        self._fusion_plan = plan
+        self._auto_fusion = enabled
+        return plan
 
     @classmethod
     def extract_layers_node(cls):
@@ -826,21 +899,30 @@ class BaseQModel(nn.Module):
         Returns:
             True if any parent in the path is marked with :moe flag
         """
-        moe_modules = cls.get_moe_modules()
+        if not isinstance(module_path, str) or not module_path:
+            return False
 
-        # Check if any MoE module is a prefix of this path
-        for moe_module in moe_modules:
-            # Handle layer index in path (e.g., "model.layers.0.mlp" should match "mlp")
-            if f".{moe_module}" in module_path or module_path.endswith(moe_module):
-                return True
-            # Also check for patterns like "mlp.experts.5" matching "mlp.experts"
-            path_parts = module_path.split(".")
-            for i in range(len(path_parts)):
-                partial_path = ".".join(path_parts[i:])
-                if partial_path.startswith(moe_module + ".") or partial_path == moe_module:
-                    return True
+        layers = cls.extract_layers_node()
+        relative = None
+        for layer_path in layers:
+            prefix = f"{layer_path}."
+            if module_path.startswith(prefix):
+                relative = module_path[len(prefix):]
+                break
+            container_name = layer_path.rsplit(".", 1)[-1]
+            shorthand = f"{container_name}."
+            if module_path.startswith(shorthand):
+                layer_index, separator, remainder = module_path[len(shorthand):].partition(".")
+                if separator and layer_index.isdigit():
+                    relative = remainder
+                    break
+        if relative is None:
+            return False
 
-        return False
+        first, separator, remainder = relative.partition(".")
+        if separator and first.isdigit():
+            relative = remainder
+        return ModulePlan.from_tree(_module_tree_for_class(cls)).is_moe(relative)
 
     @classmethod
     def get_moe_module_name(cls) -> Optional[List[str]]:
@@ -850,7 +932,7 @@ class BaseQModel(nn.Module):
         Each layer can have only ONE MoE module marked with :moe flag.
         For example:
         - GLM-4: "mlp:moe" -> returns "mlp"
-        - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
+        - MiniMax-M2 / MiniMax-Text-01: "mlp:moe" -> returns "mlp"
 
         Returns:
             The names of MoE modules (without flags), or ``None`` when no
@@ -942,6 +1024,77 @@ class BaseQModel(nn.Module):
         _, flags = cls._parse_module_flags(module_spec)
         return NORM_FLAG.lstrip(":") in flags
 
+    def _pre_lm_head_norm_candidates(self) -> List[str]:
+        """Return the declared pre-lm-head norm paths as a flat candidate list.
+
+        A definition may declare one path or an ordered list of alternatives for
+        model layouts that differ across transformers releases. Callers must
+        never wrap the field again: a list is already the candidate list.
+        """
+        declared = self.pre_lm_head_norm_module
+        if declared is None:
+            return []
+        if isinstance(declared, str):
+            candidates = [declared]
+        elif isinstance(declared, (list, tuple)):
+            candidates = list(declared)
+        else:
+            raise TypeError(
+                f"{type(self).__name__}.pre_lm_head_norm_module must be a string or a "
+                f"list/tuple of strings, got {type(declared).__name__}."
+            )
+
+        normalized = []
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate:
+                raise TypeError(
+                    f"{type(self).__name__}.pre_lm_head_norm_module contains "
+                    f"{candidate!r}; expected non-empty module path strings."
+                )
+            if candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    def _resolved_pre_lm_head_norm_candidates(self) -> List[Tuple[nn.Module, str]]:
+        """Resolve the declared pre-lm-head norm candidates against ``self.model``.
+
+        Exact submodule paths win over prefix matches, and candidates keep their
+        declaration order. A non-empty declaration that resolves to nothing is
+        an error: silently skipping the pre-lm-head norm corrupts calibration.
+        """
+        candidates = self._pre_lm_head_norm_candidates()
+        if not candidates:
+            return []
+
+        resolved = []
+        seen = set()
+        for name in candidates:
+            try:
+                module = self.model.get_submodule(name)
+            except AttributeError:
+                continue
+            if id(module) not in seen:
+                seen.add(id(module))
+                resolved.append((module, name))
+        if resolved:
+            return resolved
+
+        # Some definitions intentionally name a module prefix (for example
+        # ``lm_head``); preserve that compatibility only when no exact path
+        # matched, so a stale candidate cannot win over a valid one.
+        for name in candidates:
+            module, matched_name = get_module_by_name_prefix(self.model, name)
+            if module is not None and id(module) not in seen:
+                seen.add(id(module))
+                resolved.append((module, matched_name))
+        if resolved:
+            return resolved
+
+        raise ValueError(
+            f"{type(self).__name__}: cannot resolve `pre_lm_head_norm_module` "
+            f"candidate(s) {candidates!r} in {type(self.model).__name__}."
+        )
+
     def norm_module_names(self, types=None, skip=()) -> List[str]:
         """Full paths of every tagged norm module matching `types`, plus the pre-lm_head norm.
 
@@ -973,22 +1126,18 @@ class BaseQModel(nn.Module):
                         )
                     if family in requested:
                         names.append(full_name)
-        if self.pre_lm_head_norm_module and not any(
-            self.pre_lm_head_norm_module.endswith(suffix) for suffix in skip
-        ):
-            try:
-                module = self.model.get_submodule(self.pre_lm_head_norm_module)
-            except AttributeError:
-                module = None
-            if module is not None:
-                family = norm_type_of(module)
-                if family in requested:
-                    names.append(self.pre_lm_head_norm_module)
-                elif family is None:
-                    log.warn.once(
-                        f"{type(self).__name__}: `{self.pre_lm_head_norm_module}` is not a supported "
-                        "normalization module and is skipped."
-                    )
+        for module, name in self._resolved_pre_lm_head_norm_candidates():
+            if any(name.endswith(suffix) for suffix in skip):
+                continue
+            family = norm_type_of(module)
+            if family in requested:
+                names.append(name)
+            elif family is None:
+                log.warn.once(
+                    f"{type(self).__name__}: `{name}` is not a supported "
+                    "normalization module and is skipped."
+                )
+            break
         return names
 
     @classmethod
@@ -1062,13 +1211,20 @@ class BaseQModel(nn.Module):
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
-                    add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
-                    if add_capture_only_module and capture_only_modules:
+                    if capture_only_modules and any(EXPERT_INDEX_PLACEHOLDER in n for n in names):
                         # Extend all elements in capture_only_modules
                         moe_simple[-1].extend(capture_only_modules)
                 else:
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
+                    # A block only enters this branch when at least one name
+                    # carries the placeholder, but it may also hold shared-expert
+                    # or dense-MLP entries that must be emitted once. Expanding
+                    # those with the expert count duplicated them once per
+                    # expert (3x spec inflation at 192 experts for `afmoe`).
                     for n in names:
+                        if EXPERT_INDEX_PLACEHOLDER not in n:
+                            moe_simple[-1].append(n)
+                            continue
                         for index in range(expert_count(n)):
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
 
@@ -1340,7 +1496,17 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
+        fuse: Optional[bool] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        if fuse is not None and type(fuse) is not bool:
+            raise TypeError("Fusion enabled must be bool")
+        fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
+        if fusion_requested:
+            require_fusable_config(type(self), getattr(self.model.config, "model_type", None))
+        if fuse is not None:
+            self._auto_fusion = fuse
+            if not fuse:
+                self.fuse(False)
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
             embed_quant_mode=embed_quant_mode,
@@ -1394,6 +1560,8 @@ class BaseQModel(nn.Module):
                     },
                 )
                 self.after_quantize()
+                if self._auto_fusion:
+                    self.fuse()
                 if timer is not None:
                     timer.flush()
                 return result
@@ -1473,6 +1641,8 @@ class BaseQModel(nn.Module):
                 )
             elif self.quantize_config.method == METHOD.VPTQ:
                 preferred_backend = BACKEND.VPTQ_TORCH
+            elif self.quantize_config.method == METHOD.NF12_AD:
+                preferred_backend = BACKEND.NF12_AD
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -1514,7 +1684,7 @@ class BaseQModel(nn.Module):
                 backend=preferred_backend,
                 format=format_code,
                 quant_method=export_quant_method,
-                device=DEVICE(self.quantize_config.device),
+                device=normalize_device(self.quantize_config.device),
                 pack=True,
                 pack_dtype=self.quantize_config.pack_dtype,
             )
@@ -1553,7 +1723,7 @@ class BaseQModel(nn.Module):
                     sym=self.quantize_config.sym,
                     pack=True,
                     dynamic=self.quantize_config.dynamic,
-                    device=DEVICE(self.quantize_config.device),
+                    device=normalize_device(self.quantize_config.device),
                     pack_dtype=self.quantize_config.pack_dtype,
                     multi_select=False,
                     backend=preferred_backend,
@@ -1581,12 +1751,21 @@ class BaseQModel(nn.Module):
             }
             self.model = fuse_layer_norms(model=self.model,
                                             pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
+                                            plan=self.module_plan(),
                                             **module_name_args)
 
             # MPS does not support float64.
-            rotation_device = self.quantize_config.device if self.quantize_config.device != DEVICE.MPS else DEVICE.CPU
+            rotation_device = (
+                as_torch_device(self.quantize_config.device)
+                if self.quantize_config.device is not None
+                else None
+            )
+            if rotation_device is not None and rotation_device.type == "mps":
+                rotation_device = CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                            device=rotation_device, **module_name_args)
+                                            device=rotation_device, plan=self.module_plan(),
+                                            embedding_name=self.get_input_embeddings_name(),
+                                            **module_name_args)
 
         if self.quantize_config.rotation:
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
@@ -1670,9 +1849,16 @@ class BaseQModel(nn.Module):
         if timer is not None:
             timer.flush()
 
-        _setup_rotation_online_had(self.model, self.quantize_config.rotation)
+        _setup_rotation_online_had(
+            self.model,
+            self.quantize_config.rotation,
+            module_plan=self.module_plan(),
+            layer_prefixes=self.extract_layers_node(),
+        )
         if self.quantize_config.dynamic:
             log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
+        if self._auto_fusion:
+            self.fuse()
         return result
 
     @staticmethod
@@ -1863,7 +2049,7 @@ class BaseQModel(nn.Module):
             endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
             if endpoint_device.type == "meta":
                 endpoint_device = CPU
-            quantize_config.device = DEVICE(endpoint_device.type)
+            quantize_config.device = normalize_device(endpoint_device)
 
         result = self.quantize(
             calibration=calibration,
@@ -2083,6 +2269,7 @@ class BaseQModel(nn.Module):
             try:
                 return module_looper.loop(backend=backend, fallback=self.quantize_config.fallback)
             finally:
+                module_looper.layer_module_coverage.report(type(self).__name__)
                 # Keep the run lease until every worker has stopped accessing
                 # the attempt directory, including exceptional/stop exits.
                 if extension is not None:
@@ -2149,6 +2336,7 @@ class BaseQModel(nn.Module):
             try:
                 return module_looper.loop(backend=backend)
             finally:
+                module_looper.layer_module_coverage.report(type(self).__name__)
                 if checkpoint:
                     DEVICE_THREAD_POOL.wait()
 
@@ -2226,7 +2414,13 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(model=self, processors=processors)
 
-        module_looper.loop()
+        try:
+            module_looper.loop()
+        finally:
+            # The other two looper entry points report coverage in a `finally`
+            # too; EoRA generation could otherwise skip every routed expert
+            # without a warning.
+            module_looper.layer_module_coverage.report(type(self).__name__)
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
@@ -2530,6 +2724,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                result_shape=tuple(getattr(module.weight, "shape", weight.shape)),
                 module_name=module_name,
             )
             if decoder_kind is None:
@@ -2580,6 +2775,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                result_shape=tuple(getattr(module.weight, "shape", weight.shape)),
                 module_name=module_name,
             )
             if decoder_kind is None:
@@ -2647,6 +2843,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                result_shape=tuple(getattr(module.weight, "shape", weight.shape)),
                 module_name=module_name,
             )
             if decoder_kind is None:
@@ -2766,6 +2963,26 @@ class BaseQModel(nn.Module):
             # offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
             pass
 
+    def prepare_input_capture_layer(
+        self,
+        layer: nn.Module,
+        *,
+        module_path: Optional[str],
+        device: torch.device,
+    ) -> nn.Module:
+        """Materialize the first traversed layer before its early-stop hook.
+
+        Auxiliary model definitions may override this when constructing the
+        first layer input does not execute the layer body.  The ordinary model
+        path retains the historical eager materialization behavior.
+        """
+
+        return self.shell_module_materialize(
+            target_submodule=layer,
+            device=device,
+            module_path=module_path,
+        )
+
     def capture_first_layer_positional_inputs(
         self,
         args: tuple[Any, ...],
@@ -2780,6 +2997,18 @@ class BaseQModel(nn.Module):
             return [move_to(args[0], device=batch_device)]
         return []
 
+    def begin_input_capture_example(
+        self,
+        example: Dict[str, Any],
+        batch_device: torch.device,
+    ) -> None:
+        """Expose original model inputs while the first-layer hook executes."""
+
+        del example, batch_device
+
+    def end_input_capture_example(self) -> None:
+        """Release any model-specific original-input capture state."""
+
     def capture_first_layer_input_kwargs(
         self,
         args: tuple[Any, ...],
@@ -2791,6 +3020,45 @@ class BaseQModel(nn.Module):
 
         return layer_input_kwargs
 
+    def quantization_layer_output_required(
+        self,
+        *,
+        layer_index: int,
+        layer_name: str,
+        layer_count: int,
+    ) -> bool:
+        """Return whether a model-specific consumer needs this replay output.
+
+        The default layer loop does not replay the final transformer layer
+        because no ordinary successor consumes it. Auxiliary graphs can opt
+        into a bounded callback without pretending to be additional decoder
+        layers.
+        """
+
+        del layer_index, layer_name, layer_count
+        return False
+
+    def receive_quantization_layer_outputs(
+        self,
+        *,
+        layer_index: int,
+        layer_name: str,
+        layer_outputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, Any]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor | None],
+    ) -> None:
+        """Receive an opted-in post-quantization replay boundary."""
+
+        del (
+            layer_index,
+            layer_name,
+            layer_outputs,
+            layer_input_kwargs,
+            position_ids,
+            attention_masks,
+        )
+
     def prepare_layer_replay_kwargs(
         self,
         layer: nn.Module,
@@ -2801,6 +3069,19 @@ class BaseQModel(nn.Module):
         """Allow model definitions to refresh layer-specific kwargs before cached layer replay."""
 
         return additional_inputs
+
+    def prepare_layer_replay_keep_mask(
+        self,
+        layer: nn.Module,
+        layer_input: List[torch.Tensor],
+        additional_inputs: Dict[str, Any],
+        keep_mask: torch.Tensor | None,
+        target_device: torch.device,
+    ) -> torch.Tensor | None:
+        """Allow transformed replay layers to align processor hook masks."""
+
+        del layer, layer_input, additional_inputs, target_device
+        return keep_mask
 
     def update_layer_replay_kwargs_from_output(
         self,
@@ -2814,8 +3095,9 @@ class BaseQModel(nn.Module):
         return layer_input_kwargs
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
-        if self.pre_lm_head_norm_module:
-            norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])
+        resolved = self._resolved_pre_lm_head_norm_candidates()
+        if resolved:
+            norm, _ = resolved[0]
             norm = self.pre_quantize(norm)
 
             for element in inputs:
@@ -2852,6 +3134,8 @@ class BaseQModel(nn.Module):
         decoder_cfg = self._active_auto_module_decoder_config()
         if decoder_cfg is None or not isinstance(self.turtle_model, LazyTurtle):
             return False
+
+        device = as_torch_device(device)
 
         decoded_any = False
         # Traverse leaves first, because replacement invalidates the old
@@ -2980,6 +3264,15 @@ class BaseQModel(nn.Module):
     ) -> nn.Module:
         """Build a dense CPU source module from checkpoint tensors for quantization."""
 
+        missing = [
+            name for name, parameter in target_submodule.named_parameters()
+            if parameter.is_meta
+            and not isinstance((checkpoint_tensors or {}).get(name), torch.Tensor)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Cannot reload quantization source: missing checkpoint tensors {missing}"
+            )
         quant_source = copy.deepcopy(target_submodule)
         if _module_has_meta_tensors(quant_source):
             quant_source = quant_source.to_empty(device=CPU)
@@ -2987,6 +3280,7 @@ class BaseQModel(nn.Module):
             quant_source = quant_source.to(device=CPU)
         weight = None if checkpoint_tensors is None else checkpoint_tensors.get("weight")
         if isinstance(weight, torch.Tensor) and hasattr(quant_source, "weight"):
+            result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
             direct_scale = checkpoint_tensors.get("weight_scale")
             if not isinstance(direct_scale, torch.Tensor):
                 direct_scale = checkpoint_tensors.get("scale")
@@ -2997,6 +3291,7 @@ class BaseQModel(nn.Module):
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
                 module_name=module_name,
+                result_shape=result_shape,
             )
             if decoder_kind == "mimo_mixed":
                 from ..utils.mimo import decode_mimo_weight
@@ -3284,6 +3579,7 @@ class BaseQModel(nn.Module):
         *,
         weight: torch.Tensor,
         checkpoint_tensors: Dict[str, torch.Tensor],
+        result_shape: Optional[tuple[int, ...]] = None,
         module_name: Optional[str] = None,
     ) -> Optional[str]:
         """Infer which floatx decoder matches one checkpoint weight tensor."""
@@ -3304,6 +3600,13 @@ class BaseQModel(nn.Module):
             direct_scale = checkpoint_tensors.get("scale")
         if weight.dtype not in {torch.uint8, torch.int8} or not isinstance(direct_scale, torch.Tensor):
             return None
+        if (
+            result_shape is not None
+            and len(result_shape) == weight.ndim
+            and tuple(result_shape[:-1]) == tuple(weight.shape[:-1])
+            and result_shape[-1] == weight.shape[-1] * 2
+        ):
+            return "fp4"
         if isinstance(checkpoint_tensors.get("weight_scale_2"), torch.Tensor):
             return "fp4"
 
@@ -3546,6 +3849,18 @@ class BaseQModel(nn.Module):
         """Build the first-pass floatx view and defer dense BF16 until quantization."""
 
         decoder_plan = named_module.state.get("auto_module_decoder")
+        if not isinstance(decoder_plan, dict):
+            # Passthrough modules participate in the layer forward but are not
+            # visited by ModulePreProcessor. They still need the run's active
+            # checkpoint decoder when a lazy packed source backs their shell.
+            decoder_config = self._active_auto_module_decoder_config()
+            if decoder_config is not None:
+                decoder_plan = {
+                    "code": decoder_config.code,
+                    "source_dtype": decoder_config.source_dtype,
+                    "target_dtype": decoder_config.target_dtype,
+                }
+                named_module.state["auto_module_decoder"] = decoder_plan
         turtle_model = self.turtle_model
         if not isinstance(decoder_plan, dict) or turtle_model is None:
             return target_submodule
@@ -3567,6 +3882,7 @@ class BaseQModel(nn.Module):
         decoder_kind = self._decoder_weight_format(
             weight=weight,
             checkpoint_tensors=checkpoint_tensors,
+            result_shape=tuple(getattr(target_submodule.weight, "shape", weight.shape)),
             module_name=named_module.full_name,
         )
         if decoder_kind is None:
@@ -3574,6 +3890,7 @@ class BaseQModel(nn.Module):
 
         target_dtype = decoder_plan.get("target_dtype", target_submodule.weight.dtype)
         forward_policy = str(decoder_plan.get("passthrough_forward_policy", "native")).strip().lower()
+        preserve_subclass_forward = type(target_submodule) is not nn.Linear
         defer_quant_source_decode = (
             decoder_plan.get("quant_source_decode_policy") == "defer_until_quantization"
         )
@@ -3585,7 +3902,7 @@ class BaseQModel(nn.Module):
         forward_mode = "decode"
         reason = "native_execution_disabled"
         replacement = target_submodule
-        if forward_policy != "decode" and decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=True):
+        if forward_policy != "decode" and not preserve_subclass_forward and decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=True):
             fp8_module = self._build_fp8_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -3598,7 +3915,7 @@ class BaseQModel(nn.Module):
                 reason = "validated_native_fp8"
             else:
                 reason = "native_fp8_wrapper_unavailable"
-        elif forward_policy != "decode" and decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=True):
+        elif forward_policy != "decode" and not preserve_subclass_forward and decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=True):
             fp4_module = self._build_fp4_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -3675,7 +3992,8 @@ class BaseQModel(nn.Module):
         if not isinstance(module_name, str):
             return None
 
-        for moe_root in cls.get_moe_module_name() or []:
+        plan = ModulePlan.from_tree(_module_tree_for_class(cls))
+        for moe_root in (spec.template for spec in plan.moe_roots()) or cls.get_moe_module_name() or []:
             if module_name == moe_root:
                 return {
                     "mode": "token_rows",
@@ -3766,9 +4084,22 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            is_moe_block = any(any(k in name for k in self.moe_expert_module_name_prefixes) for name in block)
-            is_moe_down_block = is_moe_block and any("down" in name for name in block)
-            is_moe_gate_up_block = is_moe_block and any("gate" in name for name in block) and any("up" in name for name in block)
+            try:
+                plan = self.module_plan()
+            except RuntimeError:
+                plan = ModulePlan.from_tree(_module_tree_for_class(type(self)))
+            block_roles = {
+                name: plan.roles(strip_non_quantize_flags(name))
+                for name in block
+            }
+            is_moe_block = any(
+                plan.is_expert(strip_non_quantize_flags(name))
+                for name in block
+            )
+            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
+            is_moe_gate_up_block = is_moe_block and any(
+                "gate" in roles or "up" in roles for roles in block_roles.values()
+            )
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
@@ -3866,7 +4197,8 @@ class BaseQModel(nn.Module):
                 # as the effective boundary for the expert segment in this block.
                 gate_up_proj_indices = [
                     i for i, name in enumerate(block)
-                    if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
+                    if plan.is_expert(strip_non_quantize_flags(name))
+                    and ({"gate", "up"} & set(block_roles[name]))
                 ]
 
                 # Use the last one if any exist
@@ -3874,7 +4206,7 @@ class BaseQModel(nn.Module):
                 last_up_proj_index = gate_up_proj_indices[-1]
 
                 candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
-                assert "gate" in candidate_name or "up" in candidate_name
+                assert {"gate", "up"} & set(block_roles[block[last_up_proj_index]])
             else:
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
@@ -3912,6 +4244,7 @@ class BaseQModel(nn.Module):
             named_module: Optional["NamedModule"] = None,
             module_path: Optional[str] = None,
     ) -> torch.nn.Module:
+        device = as_torch_device(device)
         with self._turtle_lock:
             if role == "quant_source" and named_module is not None:
                 quant_source = named_module.state.get("quant_source_module")
@@ -3949,7 +4282,7 @@ class BaseQModel(nn.Module):
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
                 if get_device(module) != device:
-                    module.to(device)
+                    safe_module_to(module, device)
                 return module
 
             turtle_model = self.turtle_model
@@ -3964,6 +4297,7 @@ class BaseQModel(nn.Module):
                     decoder_kind = self._decoder_weight_format(
                         weight=weight,
                         checkpoint_tensors=checkpoint_tensors,
+                        result_shape=tuple(getattr(target_submodule.weight, "shape", weight.shape)),
                         module_name=named_module.full_name,
                     )
                     if decoder_kind is not None:
@@ -3977,7 +4311,7 @@ class BaseQModel(nn.Module):
 
             if turtle_model is None:
                 if get_device(target_submodule) != device:
-                    target_submodule.to(device)
+                    safe_module_to(target_submodule, device)
                 module = target_submodule
             else:
                 module = alias_from_turtle_for_submodule(
@@ -4002,6 +4336,8 @@ class BaseQModel(nn.Module):
             target_submodule: torch.nn.Module,
             device: Optional[torch.device] = None,
     ):
+        if device is not None:
+            device = as_torch_device(device)
         with self._turtle_lock:
             if self.turtle_model is None:
                 return None
@@ -4422,10 +4758,11 @@ class BaseQModel(nn.Module):
             METHOD.EXL3,
             METHOD.PARO,
             METHOD.VPTQ,
+            METHOD.NF12_AD,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12"
             )
             return None
 
