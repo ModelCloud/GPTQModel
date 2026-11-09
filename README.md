@@ -219,6 +219,9 @@ derived cache invalidation follow the
 [kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
 contract.
 
+FP8 source weights must be finite before quantization; see the
+[FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
+
 GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `METHOD.QQQ`, `METHOD.FP8`, `METHOD.PARO`, and `METHOD.RTN` paths. Staged block training currently supports dense Llama GPTQ and AWQ export. Each path retains its method's existing checkpoint format; method-specific GSQ constraints are described below.
 
 AWQ FP16 boundary staging and packed decode follow the [AWQ affine range contract](docs/awq-affine-range.md).
