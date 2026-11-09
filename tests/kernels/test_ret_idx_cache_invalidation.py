@@ -167,6 +167,54 @@ def test_fused_op_gathers_for_a_non_identity_ret_idx():
     assert captured["x"].is_contiguous()
 
 
+def test_identity_fast_path_forwards_a_storage_offset_fp16_activation():
+    """A contiguous FP16 view with a non-zero storage offset is forwarded as-is.
+
+    The old unconditional ``x[:, arange].contiguous()`` always materialized a
+    zero-offset copy, so a fused kernel that quietly required offset-zero
+    storage would have been masked. The fast path hands the original view to
+    ``torch_fused_op``; pin both the identity of the forwarded tensor and its
+    numerical equivalence with the forced-gather path.
+    """
+    storage = torch.randn(10, IN_FEATURES, dtype=torch.float16)
+    activation = storage[2:6]
+    assert activation.storage_offset() != 0
+    assert activation.is_contiguous()
+
+    # 1) The fast path forwards the same tensor object: no gather, no copy.
+    module = _fused_module(TorchFusedLinear, _fused_checkpoint(seed=5, order=(0, 1, 2, 3)))
+    assert module._ret_idx_is_identity()
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+    module._fused_op_forward(activation)
+
+    assert captured["x"] is activation
+
+    # 2) Same weights through the pre-change gather path: bit-exact outputs.
+    checkpoint = _fused_checkpoint(seed=5, order=(0, 1, 2, 3))
+
+    fast = _fused_module(TorchFusedLinear, checkpoint)
+    with torch.no_grad():
+        fast_out = fast(activation).clone()
+
+    gathered = _fused_module(TorchFusedLinear, checkpoint)
+    gathered._ret_idx_is_identity = lambda: False  # force the old gather
+    with torch.no_grad():
+        gathered_out = gathered(activation).clone()
+
+    torch.testing.assert_close(fast_out, gathered_out, rtol=0, atol=0)
+    assert fast_out.dtype is torch.float16
+
+    # 3) And the fast path still matches an independent float64 oracle.
+    oracle = _dense_oracle(checkpoint, activation)
+    torch.testing.assert_close(fast_out.float(), oracle, rtol=2e-3, atol=2e-3)
+
+
 def test_clear_weight_cache_drops_the_cached_identity_flag():
     module = _module(TorchFusedLinear)
     module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
