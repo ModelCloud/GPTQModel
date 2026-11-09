@@ -437,6 +437,9 @@ MODEL_MAP = {
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
+    # The published baidu/Unlimited-OCR config uses `unlimited_ocr`; keep the
+    # hyphenated key so older local configs keep resolving.
+    "unlimited_ocr": UnlimitedOCRQModel,
     "unlimited-ocr": UnlimitedOCRQModel,
     "voxtral": VoxtralGPTQ,
 }
