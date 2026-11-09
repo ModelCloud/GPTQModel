@@ -44,6 +44,7 @@
 // translation unit there and the caller keeps the decode-then-GEMM route.
 // ---------------------------------------------------------------------------
 #include "nf12_ad_format_hip.cuh"
+#include "nf12_ad_validation.cuh"
 
 // The launcher templates below run before the C entry points are defined, so
 // the two queries they need are declared here instead of pulling in the whole
@@ -149,7 +150,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // This CTA owns tokens [m0, m0 + kMt*16). kMt is chosen from M so one block
   // covers the caller's whole M and the packed weight is read exactly once.
   //
-  // Routed: blockIdx.y indexes the flattened (expert, 16-row tile) space. The
+  // Routed: grid.y/z index the flattened (expert, 16-row tile) space. The
   // tile count is device-side (per-expert counts are device-only), so a CTA
   // scans the offsets and exits when it is past the last expert. CTAs beyond the
   // scanned count are free: they return before touching memory.
@@ -157,7 +158,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
   WmmaRoute route = route_in;
   if constexpr (kRouted) {
-    int64_t rem = int64_t(blockIdx.y);
+    int64_t rem = int64_t(blockIdx.z) * gridDim.y + blockIdx.y;
     int64_t start = 0, rows = 0;
     int64_t lo = moe_next_offset(route.expert_offsets[0], 0, route.max_assignments);
     int32_t e = 0;
@@ -225,7 +226,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Slices are whole super-atoms (64 k each) and contiguous, so each split
   // still walks a valid prefix of the plane layout.
   const int64_t per = (k_blocks + kSplits - 1) / kSplits;
-  const int64_t kb_lo = int64_t(blockIdx.z) * per;
+  const int64_t kb_lo = kRouted ? 0 : int64_t(blockIdx.z) * per;
   const int64_t kb_hi = min(k_blocks, kb_lo + per);
   // Two buffers per warp when kDbl. Decoding into the idle buffer while the
   // busy one is consumed removes the barrier between the store and the first
@@ -396,10 +397,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     for (int i = 0; i < 8; ++i) {
       const int64_t row = origin + 8 * (lane >> 4) + i;
       if (row < lo || row >= hi) continue;
-      // With split-K each split writes its own FP32 partial plane and the
-      // reduce kernel sums them, so bias must be added exactly once across
-      // the splits (adding it in every split multiplied it by kSplits).
-      float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
+      // Keep partials unbiased until cancellation in the complete reduction.
+      float v = acc[t][i];
+      if constexpr (kSplits == 1) v += bias_v;
       if constexpr (kRouted) {
         // Scatter to the assignment's output row and apply the router weight in
         // FP32 before the single BF16 rounding (SPEC.md 9.2).
@@ -421,11 +421,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // is identical to a single-pass FP32 accumulation followed by one rounding
 // (splitting K only changes the association order of the FP32 adds).
 __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bfloat16* __restrict__ out,
-                                   int64_t total, int splits) {
+                                   int64_t total, int splits, int64_t n, const __hip_bfloat16* __restrict__ bias) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
     float s = partial[i];
     for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
+    if (bias != nullptr) s += __bfloat162float(bias[i % n]);
     out[i] = __float2bfloat16(s);
   }
 }
@@ -742,14 +743,15 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
     if (rb > 128) rb = 128;
     const int reduce_blocks = rb;
     wmma_reduce_kernel<<<reduce_blocks, 256, 0, stream>>>(
-        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits);
+        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits, n,
+        reinterpret_cast<const __hip_bfloat16*>(bias));
     status = hipGetLastError();
   }
   return status;
 }
 
 // Routed (mixture-of-experts) linear. One CTA per (expert, 16-row weight block,
-// 16-assignment tile), so blockIdx.y enumerates the flattened (expert, tile)
+// 16-assignment tile), so grid.y/z enumerate the flattened (expert, tile)
 // space. The tile count is device-side because per-expert counts are, so the
 // grid is the worst-case bound and surplus CTAs return before touching memory.
 // `out` rows are ldy apart; `x` rows are ldx apart.
@@ -761,15 +763,24 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                                   const int32_t* scatter, const int64_t* expert_offsets,
                                   int64_t max_assignments, const float* row_scale, void* out,
                                   int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
-  if (!wmma_available()) return hipErrorNotSupported;
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 ||
-      num_experts < 1 || max_assignments <= 0) {
+  using namespace nf12_ad::validation;
+  if (!valid_moe_shape(num_experts, n, k) || packed == nullptr || !aligned16(packed) ||
+      !valid_moe_linear_buffers(x, ldx, gather, gather_div, scatter, expert_offsets,
+                                max_assignments, row_scale, out, ldy, n, k)) {
     return hipErrorInvalidValue;
   }
+  if constexpr (Src == WeightSource::kNf12) {
+    if (!aligned16(escapes) || escape_offsets == nullptr || !aligned(escape_offsets, 8) ||
+        exp_base == nullptr) return hipErrorInvalidValue;
+  }
+  if (max_assignments == 0) return hipSuccess;
+  if (!wmma_available()) return hipErrorNotSupported;
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
   if (n_blocks == 0) return hipSuccess;
-  if (n_blocks > kMaxWmmaGridX || m_tiles > kMaxWmmaGridY) return hipErrorNotSupported;
+  const int64_t grid_y = std::min(m_tiles, kMaxWmmaGridY);
+  const int64_t grid_z = (m_tiles + grid_y - 1) / grid_y;
+  if (n_blocks > kMaxWmmaGridX || grid_z > kMaxWmmaGridY) return hipErrorNotSupported;
 
   WmmaRoute route{};
   route.gather = gather;
@@ -786,7 +797,8 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                              SourceTraits<Src>::kVecs;
   route.num_experts = num_experts;
 
-  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_tiles), 1);
+  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(grid_y),
+                  static_cast<unsigned>(grid_z));
   // One tile per CTA: the assignment axis is the scarce one in MoE, and a
   // single tile keeps the VGPR budget low enough for several CTAs per CU.
   wmma_kernel<Src, true, 1, 1, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(

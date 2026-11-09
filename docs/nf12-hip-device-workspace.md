@@ -192,7 +192,7 @@ weight cache or scratch allocation was added.
 | 524256 | 32767 | Success | 0 / 0 |
 | 524272 | 32768 | Success | 0 / 0 |
 | 1048544 | 65535 | Success | 0 / 0 |
-| 1048560 | 65536 | hipErrorNotSupported (801) | 0 writes |
+| 1048560 | 65536 total tiles across Y/Z | Success | 0 / 0 |
 
 Validated with `PYTHON_GIL=0`, two visible R9700 GPUs, ROCm 10.1.0 / HIP
 7.16.26385: **659 passed in 18.46 seconds** across the NF12 codec, native
@@ -321,3 +321,50 @@ and compares the baseline with these kernels on HIP2:
 
 These two samples support the scheduling change on this device; they do not
 establish performance across models or architectures.
+
+## Bias reduction and routed launch contracts
+
+Split-K writes unbiased FP32 partials. `wmma_reduce_kernel` sums all splits,
+adds bias, then rounds once to BF16. Adding bias to split zero could lose it
+before cancellation or overflow even when the final answer is finite.
+
+Native routed linear now uses `valid_moe_linear_buffers` for the same scalar,
+alignment and stride checks as upstream's shared CUDA/HIP ABI. Empty work
+validates weights/scalars but needs no X/Y/offset buffers. Assignment tiles
+span grid.y/z, while routed K always starts at zero. Dense split-K still uses
+Z for K slices. Neither path allocates or retains device buffers internally.
+
+```mermaid
+flowchart TD
+    A["moe_linear_impl"] --> B{"Weight and valid_moe_linear_buffers checks pass?"}
+    B -- No --> X["hipErrorInvalidValue; no writes"]
+    B -- Yes --> C{"max_assignments == 0?"}
+    C -- Yes --> R["hipSuccess; no launch"]
+    C -- No --> D{"wmma_available and grid limits valid?"}
+    D -- No --> U["hipErrorNotSupported; no launch"]
+    D -- Yes --> E["wmma_kernel: Y/Z assignment tiles; full K per tile"]
+    F["Dense split-K wmma_kernel"] --> G["Unbiased FP32 partial planes"]
+    G --> H["wmma_reduce_kernel: sum, bias, BF16 rounding"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X,U failure;
+```
+
+| Before at `21e9961a4` | Current |
+| --- | --- |
+| Bias added to partial zero (`nf12_ad_wmma.hip:402`) | Add after reduction (`nf12_ad_wmma.hip:423`) |
+| Routed grids with more than 65535 Y tiles rejected (`nf12_ad_wmma.hip:772`) | Use bounded Y/Z dimensions (`nf12_ad_wmma.hip:781`) |
+| Native routed validation omitted buffer checks and rejected empty work (`nf12_ad_wmma.hip:766`) | Share `valid_moe_linear_buffers`, allow validated empty work (`nf12_ad_wmma.hip:768`) |
+| Decode E > 65535 returned unsupported (`nf12_ad_moe.hip:516`) | Return invalid-value, matching the CUDA codec contract |
+
+Validation on two visible R9700s, ROCm 10.1 / HIP 7.16.26385, GIL=0:
+**717 tests passed in 19.58 s**, with no skips. Tests cover exact cancelling
+products with biases 1, 2^-25 and 2^127; all return the exact finite bias.
+The routed tests check all output elements and guards through 2097120 assignments.
+Malformed native inputs are rejected without writes, and empty work succeeds.
+There are **zero bytes** of additional persistent weight storage; partial planes
+remain transient caller-owned scratch. Existing module/state tests also pass.
+
+The same fixes are in dphnAI/nf12 PR #3. Its independent before/after timing
+probe measures up to 3.16% higher GPU time for one biased split-K case; it is
+not a performance measurement of this vendored extension. No universal
+performance claim is made for these correctness fixes.
