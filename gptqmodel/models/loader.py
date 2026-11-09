@@ -44,6 +44,7 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import (
@@ -2350,8 +2351,11 @@ def ModelLoader(cls):
         ]:
             keep_in_fp32_modules = []
             fp32_bf16_buffer_names = []
+            packed_fp8_buffer_dtypes = {}
             for name, module in model.named_modules():
                 prefix = f"{name}." if name else ""
+                if isinstance(module, TorchFP8Linear):
+                    packed_fp8_buffer_dtypes[f"{prefix}weight"] = module.fp8_dtype
                 if getattr(module, "weight_scale_inv", None) is not None:
                     scale_name = f"{prefix}weight_scale_inv"
                     keep_in_fp32_modules.append(scale_name)
@@ -2361,13 +2365,14 @@ def ModelLoader(cls):
                     or hasattr(module, "gguf_tensor_qtype")
                 ):
                     keep_in_fp32_modules.append(f"{prefix}bias")
-                    if isinstance(module, GGUFTorchLinear):
+                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear)):
                         fp32_bf16_buffer_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
+                packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
