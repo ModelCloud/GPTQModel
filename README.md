@@ -1526,3 +1526,4 @@ The following reference pages document features proposed from the working fork.
 - [persist authenticated capture frontiers](docs/exl3-capture-frontiers.md)
 - [resume capture at calibration-batch boundaries](docs/exl3-capture-batch-spool.md)
 - [expose ranked router candidates for route recovery](docs/exl3-router-recovery.md)
+- [persist deterministic adjacent mixed-tier plans](docs/exl3-inline-mixed-tiers.md)
