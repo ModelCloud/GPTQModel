@@ -442,7 +442,10 @@ if _TRITON_AVAILABLE:
                 sign_bits = (packed[:, None, :] >> bit_shifts[None, :, None]) & 0x01
                 signs = tl.reshape(sign_bits, (32, BLOCK_SIZE_N))
                 weight = (tl.cast(signs, tl.float16) * 2.0 - 1.0) * scale[None, :]
-                accumulator += tl.dot(a, weight)
+                if x_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a, weight.to(tl.float32), input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -505,7 +508,10 @@ if _TRITON_AVAILABLE:
                 packed = tl.cast(packed, tl.uint32)
                 sign_bits = (packed[None, :] >> bit_shifts[:, None]) & 0x01
                 weight = (tl.cast(sign_bits, tl.float16) * 2.0 - 1.0) * scale[None, :]
-                accumulator += tl.dot(a, weight)
+                if x_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a, weight.to(tl.float32), input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -570,7 +576,10 @@ if _TRITON_AVAILABLE:
                 sign_bits = (packed[:, None, :] >> bit_shifts[None, :, None]) & 0x01
                 signs = tl.reshape(sign_bits, (32, BLOCK_SIZE_N))
                 weight = (tl.cast(signs, tl.float16) * 2.0 - 1.0) * scale[None, :]
-                accumulator += tl.dot(a, weight)
+                if x_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a, weight.to(tl.float32), input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -632,7 +641,10 @@ if _TRITON_AVAILABLE:
                 packed = tl.cast(packed, tl.uint32)
                 sign_bits = (packed[None, :] >> bit_shifts[:, None]) & 0x01
                 weight = (tl.cast(sign_bits, tl.float16) * 2.0 - 1.0) * scale[None, :]
-                accumulator += tl.dot(a, weight)
+                if x_ptr.dtype.element_ty == tl.float32:
+                    accumulator += tl.dot(a, weight.to(tl.float32), input_precision="ieee")
+                else:
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -1767,7 +1779,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 f"(Q1_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
-        self._gguf_triton_cache: dict[tuple[int, str], dict[str, Any]] = {}
+        self._gguf_triton_cache: dict[tuple[int, str, bool], dict[str, Any]] = {}
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -1796,10 +1808,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
         self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
-    def _triton_cache_key(self, device: torch.device) -> tuple[int, str]:
-        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype)
+    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str, bool]:
+        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype, wide_dot)
 
-    def _build_triton_cache(self, device: torch.device) -> dict[str, Any]:
+    def _build_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
         blocks, _, _ = self._reshape_blocks(device=device)
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
@@ -1840,7 +1852,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q4_K":
-            scale_dtype = torch.float32 if self._k_scale_overflows(blocks, torch.float16) else torch.float16
+            scale_dtype = torch.float32 if wide_dot or self._k_scale_overflows(blocks, torch.float16) else torch.float16
             d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
@@ -1854,7 +1866,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q5_K":
-            scale_dtype = torch.float32 if self._k_scale_overflows(blocks, torch.float16) else torch.float16
+            scale_dtype = torch.float32 if wide_dot or self._k_scale_overflows(blocks, torch.float16) else torch.float16
             d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(scale_dtype)
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
@@ -1879,7 +1891,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             # weights outside FP16 even when activations are FP16.
             scale_dtype = (
                 torch.float32
-                if bool((scale.abs() * 32 > torch.finfo(torch.float16).max).any())
+                if wide_dot or bool((scale.abs() * 32 > torch.finfo(torch.float16).max).any())
                 else torch.float16
             )
             scale = scale.to(scale_dtype).permute(1, 2, 0).contiguous()
@@ -1891,20 +1903,21 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
-    def _get_triton_cache(self, device: torch.device) -> dict[str, Any]:
-        key = self._triton_cache_key(device)
+    def _get_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        key = self._triton_cache_key(device, wide_dot)
         qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
         if cached is not None and cached.get("qweight_key") == qweight_key:
             return cached
 
-        cached = self._build_triton_cache(device)
+        cached = self._build_triton_cache(device, wide_dot)
         cached["qweight_key"] = qweight_key
         self._gguf_triton_cache[key] = cached
         return cached
 
     def _forward_triton(
         self, x_flat: torch.Tensor, output_dtype: torch.dtype | None = None,
+        wide_dot: bool = False,
     ) -> torch.Tensor:
         # HIP reuses the "cuda" device namespace, so this admits CUDA and ROCm
         # while still refusing CPU/MPS/XPU placements.
@@ -1919,7 +1932,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
         else:
             x_work = x_flat.contiguous()
 
-        cache = self._get_triton_cache(x_work.device)
+        cache = (
+            self._get_triton_cache(x_work.device, wide_dot=True)
+            if wide_dot else self._get_triton_cache(x_work.device)
+        )
         output_kwargs = {} if output_dtype is None else {"output_dtype": output_dtype}
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
@@ -2048,11 +2064,17 @@ class GGUFTritonKernel(GGUFTorchLinear):
         x_flat = x.reshape(-1, x.shape[-1])
 
         input_dtype = x_flat.dtype
+        wide_dot = input_dtype != torch.float16 and self.bias is not None
         row_scales = None
-        if input_dtype != torch.float16:
+        if wide_dot:
+            # Bias can nearly cancel a large dot. In that case even a small
+            # FP16 weight reconstruction error dominates the visible result.
+            # Keep both activation and compact scale metadata in FP32.
+            x_work = x_flat.float().contiguous()
+        elif input_dtype != torch.float16:
             # A plain .half() can turn a finite BF16/FP32 input into inf or
-            # zero. The fused matmuls still receive FP16 activations, with a
-            # per-row scale restored before bias and output rounding.
+            # zero. The unbiased fused matmul still receives FP16 activations,
+            # with a per-row scale restored before output rounding.
             x_dense = x_flat.contiguous()
             x_work = torch.empty(x_dense.shape, device=x_dense.device, dtype=torch.float16)
             row_scales = torch.empty((x_dense.shape[0],), device=x_dense.device, dtype=torch.float32)
@@ -2066,6 +2088,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
         output = self._forward_triton(
             x_work, output_dtype=torch.float32 if row_scales is not None or self.bias is not None else None,
+            wide_dot=wide_dot,
         )
 
         if row_scales is not None:
