@@ -1165,6 +1165,8 @@ Set the `act_group_aware` parameter to `True` and disable the default activation
 quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
+The [GPTQ static-group ordering guide](docs/gptq-static-group-ordering.md)
+shows how reordered columns, group parameters, and packed weights stay aligned.
 
 ### Experimental Features 🧪
 

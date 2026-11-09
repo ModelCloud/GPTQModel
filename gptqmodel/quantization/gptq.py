@@ -2497,16 +2497,20 @@ class GPTQ:
         elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm).to(device=Q.device)
             Q = Q[:, inv_final]
-            inv_global_perm = invert_perm(global_perm)
-            inv_global_perm_list = inv_global_perm.tolist()
-            reordered_group_count = len(inv_global_perm_list)
-            temp_scale = [scale[i] for i in inv_global_perm_list]
-            temp_scale.extend(scale[reordered_group_count:])
-            scale = temp_scale
-            temp_zero = [zero[i] for i in inv_global_perm_list]
-            temp_zero.extend(zero[reordered_group_count:])
-            zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
+            if not self.qcfg.static_groups:
+                # Dynamic parameters were measured in reordered group order.
+                # Static parameters were measured before reordering and already
+                # match the original-column g_idx returned below.
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                reordered_group_count = len(inv_global_perm_list)
+                temp_scale = [scale[i] for i in inv_global_perm_list]
+                temp_scale.extend(scale[reordered_group_count:])
+                scale = temp_scale
+                temp_zero = [zero[i] for i in inv_global_perm_list]
+                temp_zero.extend(zero[reordered_group_count:])
+                zero = temp_zero
+            del final_perm, inv_final, global_perm, local_perms
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
