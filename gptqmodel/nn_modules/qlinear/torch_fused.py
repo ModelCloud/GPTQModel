@@ -186,6 +186,11 @@ class TorchFusedLinear(PackableQuantLinear):
 
         ret_idx = build_group_ret_idx(self.g_idx)
         self.ret_idx = ret_idx
+        # The permutation changed, so any cached identity verdict for the
+        # previous ``g_idx`` is stale. Callers may rebuild ``ret_idx``
+        # explicitly before the next forward; the base class recomputes the
+        # verdict from the new key.
+        self._ret_idx_identity = None
         self._ret_idx_key = key
         return ret_idx
 

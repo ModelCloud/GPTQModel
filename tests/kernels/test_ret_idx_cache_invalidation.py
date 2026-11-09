@@ -179,6 +179,43 @@ def test_clear_weight_cache_drops_the_cached_identity_flag():
     assert module._ret_idx_identity is None
 
 
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize("mutation", ["in_place", "replace"])
+def test_rebuilding_ret_idx_after_an_identity_forward_drops_the_identity_flag(cls, mutation):
+    """An explicit rebuild must not leave ``_ret_idx_identity`` stale.
+
+    ``forward`` caches ``True`` for a canonical ``g_idx``. Replacing ``g_idx``
+    and calling ``_build_ret_idx()`` refreshes ``_ret_idx_key``; if the cached
+    identity flag survives, the next forward skips a required gather and
+    silently returns wrong values.
+
+    The control omits the explicit rebuild: there the key mismatch forces
+    ``_ret_idx_is_identity()`` to recompute, which is the known-correct path.
+    """
+    activation = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+
+    def _run(explicit_rebuild):
+        module = _fused_module(cls, _fused_checkpoint(seed=7, order=(0, 1, 2, 3)))
+        with torch.no_grad():
+            module(activation)  # identity g_idx: caches the identity flag
+            assert module._ret_idx_is_identity()
+
+            new_g_idx = _group_labels((3, 0, 2, 1))
+            if mutation == "in_place":
+                module.g_idx.copy_(new_g_idx)
+            else:
+                module.g_idx = new_g_idx
+            if explicit_rebuild:
+                module._build_ret_idx()
+                assert not module._ret_idx_is_identity()
+            return module(activation).clone()
+
+    expected = _run(explicit_rebuild=False)
+    actual = _run(explicit_rebuild=True)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 # ---------------------------------------------------------------------------
 # Derived fused metadata must follow the packed buffers a load replaces.
 # ---------------------------------------------------------------------------
