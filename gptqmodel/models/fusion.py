@@ -440,11 +440,20 @@ class _FusionGroup:
             sizes = [getattr(module, name).shape[dim] for module in self.modules]
             for module, view in zip(self.modules, tensor.split(sizes, dim=dim)):
                 _set_operand(module, name, view)
-        for clear in self.original_clears:
-            if clear is not None:
-                clear()
-        for module in self.modules:
-            self.kernel.rebind(module)
+        suppress_restore = self.kernel.layout in ("cpu_aten", "cpu_legacy")
+        try:
+            if suppress_restore:
+                for module in self.modules:
+                    module._suspend_fused_train_restore = True
+            for clear in self.original_clears:
+                if clear is not None:
+                    clear()
+            for module in self.modules:
+                self.kernel.rebind(module)
+        finally:
+            if suppress_restore:
+                for module in self.modules:
+                    module.__dict__.pop("_suspend_fused_train_restore", None)
         self.invalidate()
         self.packed = fused
         self.packed_key = self._key()
@@ -597,11 +606,12 @@ class _FusionGroup:
         self.parent.forward = self.installed_forward
         self.active = True
         self.installed_clears = []
-        for module, clear in zip(self.modules, self.original_clears):
-            def clear_weight_cache(_clear=clear):
+        for module in self.modules:
+            def clear_weight_cache():
                 self.invalidate()
-                if _clear is not None:
-                    _clear()
+                for sibling_clear in self.original_clears:
+                    if sibling_clear is not None:
+                        sibling_clear()
             module.clear_weight_cache = clear_weight_cache
             self.installed_clears.append(clear_weight_cache)
         # Build before serving tokens. Training/offloaded/partial models keep

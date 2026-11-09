@@ -211,6 +211,11 @@ columns at a time and never retains a dense dequantized weight;
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
+Native backend availability, shape validation, wide activation inputs, and
+derived cache invalidation follow the
+[kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
+contract.
+
 GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `METHOD.QQQ`, `METHOD.FP8`, `METHOD.PARO`, and `METHOD.RTN` paths. Staged block training currently supports dense Llama GPTQ and AWQ export. Each path retains its method's existing checkpoint format; method-specific GSQ constraints are described below.
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.

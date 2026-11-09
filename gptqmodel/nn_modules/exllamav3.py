@@ -235,7 +235,17 @@ class ExllamaV3Linear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         inner = self._ensure_inner()
         input_dtype = x.dtype
-        return inner.forward(x.half(), {})[..., :self.out_features].to(input_dtype)
+        # The native GEMM accepts FP16 or FP32 only. Use FP32 for BF16 and
+        # other wide inputs so converting to the kernel does not narrow range.
+        runtime_dtype = (
+            torch.float16 if input_dtype == torch.float16 else torch.float32
+        )
+        result = inner.forward(
+            x.to(dtype=runtime_dtype),
+            {},
+            out_dtype=runtime_dtype,
+        )
+        return result[..., :self.out_features].to(input_dtype)
 
     def _multiplier_value(self, name: str) -> Optional[int]:
         tensor = getattr(self, name, None)

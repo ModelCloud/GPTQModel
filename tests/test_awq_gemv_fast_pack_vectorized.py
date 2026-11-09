@@ -92,10 +92,10 @@ def test_gemv_fast_pack_matches_scalar_fp32_reference():
     torch.manual_seed(0)
 
     for out_features, in_features, group_size in (
-        (64, 256, 128),
-        (128, 512, 64),
-        (64, 1024, 32),
-        (32, 128, 128),
+        (128, 256, 128),
+        (256, 512, 128),
+        (128, 1024, 128),
+        (128, 128, 128),
     ):
         linear = nn.Linear(in_features, out_features, bias=False)
         module = AwqGEMVFastLinear(

@@ -324,6 +324,10 @@ class BaseQuantLinear(nn.Module):
         inference tensor has no version counter, so clear unconditionally.
         """
 
+        if getattr(self, "_fused_train_state", None) is not None:
+            from ._fused_train_state import discard_fused_train_state
+
+            discard_fused_train_state(self)
         super()._load_from_state_dict(*args, **kwargs)
         self._clear_runtime_weight_cache()
 

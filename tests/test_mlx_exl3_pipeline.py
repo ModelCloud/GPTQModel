@@ -107,7 +107,11 @@ def _pipeline_oracle(
             bits=bits,
             codebook=codebook,
         )
-        proxy_error = 0.0
+        error = torch.from_numpy(regularized - quantized)
+        source = torch.from_numpy(regularized)
+        proxy_error = float(
+            (torch.sum(error * error) / torch.sum(source * source).clamp_min(1e-8)).item()
+        )
     else:
         quantized, encoded = _torch_ldlq_oracle(
             regularized,
@@ -199,7 +203,8 @@ def test_exl3_pipeline_fallback_matches_torch_oracle():
     )
     np.testing.assert_array_equal(np.asarray(actual[2]), expected[2])
     _assert_composed_weight_matches(np.asarray(actual[0]), expected[0])
-    assert float(actual[1].item()) == 0.0
+    assert abs(float(actual[1].item()) - expected[1]) <= 1e-6
+    assert float(actual[1].item()) > 0.0
     assert actual[5] is True
 
 

@@ -16,6 +16,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
@@ -168,6 +169,12 @@ class TorchAtenLinear(PackableQuantLinear):
         The packed ``qweight`` is already in the ATen layout, so the derived
         metadata is rebuilt from it rather than from dense weights.
         """
+        if restore_fused_train_state(self):
+            self.linear_mode = None
+            self.scales_and_zeros = None
+            self._cpu_transformed = False
+            self._cpu_transform_dtype = None
+
         self.ret_idx = None
         self._ret_idx_identity = None
         self._ret_idx_key = None
@@ -230,6 +237,13 @@ class TorchAtenLinear(PackableQuantLinear):
             return self
 
         from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+        if mode and self.linear_mode == "inference":
+            restore_fused_train_state(self)
+            self.linear_mode = None
+            self.scales_and_zeros = None
+            self._cpu_transformed = False
+            self._cpu_transform_dtype = None
 
         if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
             if mode:
@@ -303,6 +317,7 @@ class TorchAtenLinear(PackableQuantLinear):
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
         ):
+            capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
