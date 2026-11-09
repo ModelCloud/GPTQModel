@@ -173,7 +173,9 @@ def fp8_linear(x: torch.Tensor, weight_e4m3: torch.Tensor, scales: torch.Tensor,
 
 @triton.jit
 def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
-                         BW: tl.constexpr, BN: tl.constexpr):
+                         BW: tl.constexpr, BN: tl.constexpr,
+                         PACKED_ROW_STRIDE: tl.constexpr, PACKED_COL_STRIDE: tl.constexpr,
+                         OUT_ROW_STRIDE: tl.constexpr, OUT_COL_STRIDE: tl.constexpr):
     """Expand packed GPTQ nibble words straight into E4M3.
 
     ``Packed`` is ``[K/8, N]`` int32 with eight codes per word, low nibble
@@ -187,7 +189,7 @@ def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
     word_row = tl.program_id(0) * BW + tl.arange(0, BW)
     cols = tl.program_id(1) * BN + tl.arange(0, BN)
     words = tl.load(
-        Packed + word_row[:, None] * N + cols[None, :],
+        Packed + word_row[:, None] * PACKED_ROW_STRIDE + cols[None, :] * PACKED_COL_STRIDE,
         mask=(word_row[:, None] < K // 8) & (cols[None, :] < N),
         other=0,
     )
@@ -196,7 +198,7 @@ def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
         centered = ((words >> (4 * nibble)) & 15).to(tl.float32) - 8.0
         row = word_row * 8 + nibble
         tl.store(
-            Out + row[:, None] * N + cols[None, :],
+            Out + row[:, None] * OUT_ROW_STRIDE + cols[None, :] * OUT_COL_STRIDE,
             _to_e4m3_rn(centered),
             mask=(row[:, None] < K) & codes_in_range,
         )
@@ -224,7 +226,8 @@ def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor
     block_cols = 256 if n % 256 == 0 else (64 if n % 64 == 0 else 32)
     with _launch_device(packed.device):
         _unpack_int4_to_e4m3[(triton.cdiv(words, block_words), triton.cdiv(n, block_cols))](
-            packed, out, k, n, block_words, block_cols, num_warps=4,
+            packed, out, k, n, block_words, block_cols,
+            packed.stride(0), packed.stride(1), out.stride(0), out.stride(1), num_warps=4,
         )
     return out
 
@@ -264,6 +267,13 @@ def fp8_linear_prepacked(q: torch.Tensor, row_scale: torch.Tensor,
     output = torch.empty((rows, n), device=q.device, dtype=output_dtype)
     if not rows:
         return output
+    # The GEMM addresses every operand with dense row or element offsets.
+    q = q.contiguous()
+    row_scale = row_scale.contiguous()
+    weight_e4m3 = weight_e4m3.contiguous()
+    scales = scales.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
     tile_n = 32 if n % 64 else 64
     with _launch_device(q.device):
         _grouped_fp8_gemm[(triton.cdiv(rows, 16), triton.cdiv(n, tile_n))](

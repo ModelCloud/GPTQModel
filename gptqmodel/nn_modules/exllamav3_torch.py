@@ -374,8 +374,13 @@ class ExllamaV3TorchLinear(nn.Module):
     def _stored_features(self) -> tuple[int, int]:
         """Validate full Hadamard storage against the logical linear shape."""
         trellis = getattr(self, "trellis", None)
+        # Packing width is `bits` 16-bit words, so it is always a multiple of 16.
+        # The upper bound follows from the bit width, not a fixed 128: EXL3
+        # supports 2..16 bits (16 bits -> 256 words), and capping at 128/8 bits
+        # rejected every valid 10/12/16-bit checkpoint. ``_bits_per_weight()``
+        # derives the same value from this dimension.
         if (trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16
-                or trellis.shape[-1] not in range(16, 129, 16)):
+                or trellis.shape[-1] <= 0 or trellis.shape[-1] % 16 != 0):
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry or dtype")
         inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
         padded_outputs = ((self.out_features + 127) // 128) * 128

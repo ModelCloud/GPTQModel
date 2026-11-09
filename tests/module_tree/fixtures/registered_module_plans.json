@@ -190,6 +190,7 @@
     "stablelm_epoch": "LlamaQModel",
     "starcoder2": "Starcoder2QModel",
     "telechat": "TeleChat2QModel",
+    "unlimited_ocr": "UnlimitedOCRQModel",
     "unlimited-ocr": "UnlimitedOCRQModel",
     "voxtral": "VoxtralGPTQ",
     "xing4_0": "Xing4_0QModel",
