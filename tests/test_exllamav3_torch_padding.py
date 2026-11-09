@@ -139,6 +139,84 @@ def _check_forward(*, device, dtype, outputs, bias, batch):
 
 
 @pytest.mark.cpu
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_native_wide_fallback_preserves_checkpoint_and_packed_buffer_lifecycle(dtype):
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    outputs = 576  # Exercise padded trellis storage with a logical-width bias.
+    packed = _packed(outputs, bits=2, codebook="3inst", bias=True)
+    module = ExllamaV3Linear.from_tensors(
+        in_features=128, out_features=outputs, name="kv_a", tensors=packed
+    )
+    checkpoint = {key: tensor.clone() for key, tensor in module.state_dict().items()}
+    keys = set(checkpoint)
+    checkpoint_bytes = sum(t.numel() * t.element_size() for t in checkpoint.values())
+    x = (torch.randn((2, 128), generator=torch.Generator().manual_seed(3738)) * .01).to(dtype)
+    reference = x.float() @ _oracle_weight(packed)[:, :outputs] + packed["bias"].float()
+
+    def check_packed_state(expected_bytes=checkpoint_bytes):
+        state = module.state_dict()
+        assert set(state) == keys
+        assert sum(t.numel() * t.element_size() for t in state.values()) == expected_bytes
+        assert "_torch_inner" not in module._modules
+        helper = module._torch_inner
+        assert helper is not None
+        for name, tensor in helper.named_buffers():
+            assert tensor is getattr(module, name)  # No copied packed buffers.
+
+    first_output = module(x)
+    torch.testing.assert_close(first_output.float(), reference, rtol=2e-3, atol=2e-3)
+    first_helper = module._torch_inner
+    check_packed_state()
+    for key, saved in checkpoint.items():
+        assert torch.equal(module.state_dict()[key], saved)
+    torch.testing.assert_close(module(x), first_output, rtol=0, atol=0)
+    assert module._torch_inner is first_helper
+
+    with torch.no_grad():
+        module.bias.add_(.125)
+    changed_output = module(x)
+    assert module._torch_inner is not first_helper
+    torch.testing.assert_close(changed_output.float(), reference + .125, rtol=2e-3, atol=2e-3)
+    check_packed_state()
+
+    changed_helper = module._torch_inner
+    module.load_state_dict(checkpoint, strict=True)
+    restored_output = module(x)
+    assert module._torch_inner is not changed_helper
+    torch.testing.assert_close(restored_output, first_output, rtol=0, atol=0)
+    check_packed_state()
+
+    replacement = {key: tensor.clone() for key, tensor in checkpoint.items()}
+    replacement["bias"].add_(.0625)
+    pre_replace_helper = module._torch_inner
+    module.load_state_dict(replacement, strict=True, assign=True)
+    replaced_output = module(x)
+    assert module._torch_inner is not pre_replace_helper
+    torch.testing.assert_close(replaced_output.float(), reference + .0625, rtol=2e-3, atol=2e-3)
+    check_packed_state()
+    module.load_state_dict(checkpoint, strict=True, assign=True)
+    torch.testing.assert_close(module(x), first_output, rtol=0, atol=0)
+    check_packed_state()
+
+    pre_move_helper = module._torch_inner
+    module.to(dtype=torch.float32)
+    assert module._torch_inner is None
+    moved_output = module(x)
+    assert module._torch_inner is not pre_move_helper
+    torch.testing.assert_close(moved_output.float(), reference, rtol=2e-3, atol=2e-3)
+    moved_bytes = checkpoint_bytes + module.bias.numel() * 2  # FP16 bias becomes FP32.
+    check_packed_state(moved_bytes)
+
+    pre_clear_helper = module._torch_inner
+    module.clear_weight_cache()
+    assert module._torch_inner is None
+    torch.testing.assert_close(module(x), moved_output, rtol=0, atol=0)
+    assert module._torch_inner is not pre_clear_helper
+    check_packed_state(moved_bytes)
+
+
+@pytest.mark.cpu
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("outputs", [128, 576, 1056])
 @pytest.mark.parametrize("bias", [False, True])
