@@ -134,7 +134,16 @@ class ExllamaV3Linear(nn.Module):
             if tensor is None:
                 signature.append(None)
                 continue
-            signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
+            try:
+                version = None if tensor.is_inference() else tensor._version
+            except RuntimeError:
+                version = None
+            signature.append((
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                str(tensor.dtype),
+                version,
+            ))
         # Only the padded path copies the bias, so only that path needs liveness.
         signature.append(bias_version)
         return tuple(signature)
