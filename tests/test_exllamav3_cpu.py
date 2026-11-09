@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.exllamav3_torch as exllamav3_torch
+from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 
 
 @pytest.fixture(autouse=True)
@@ -244,6 +245,74 @@ def test_exllamav3_torch_chunked_forward_matches_independent_oracle(bits, dtype)
     assert actual.dtype == dtype
     assert raw_error <= 2e-3
     assert visible_error <= 2e-3
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("rows", [32, 33])
+def test_exllamav3_bridge_wide_noncontiguous_input_matches_independent_oracle(device, dtype, rows):
+    if device == "cuda" and (not torch.cuda.is_available() or torch.version.hip is not None):
+        pytest.skip("requires NVIDIA CUDA")
+
+    bits = 4
+    in_features = out_features = 128
+    generator = torch.Generator().manual_seed(3)
+    symbols = torch.randint(
+        0,
+        1 << bits,
+        (in_features // 16, out_features // 16, 256),
+        dtype=torch.int64,
+        generator=generator,
+    )
+    packed = _make_module(size=128, bits=bits, trellis=_pack_symbols(symbols, bits))
+    tensors = {
+        name: getattr(packed, name, None)
+        for name in ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+    }
+    module = ExllamaV3Linear.from_tensors(
+        in_features=in_features,
+        out_features=out_features,
+        name="wide_bridge",
+        tensors=tensors,
+    ).to(device).eval()
+
+    leading_shape = (2, 16) if rows == 32 else (3, 11)
+    x = torch.randn((*leading_shape, in_features), generator=generator).transpose(0, 1)
+    x[..., 0] = 131072.0  # Beyond the finite FP16 range.
+    x = x.to(dtype=dtype, device=device)
+    assert not x.is_contiguous()
+
+    weight = _independent_weight_oracle(symbols, bits, packed.suh, packed.svh)
+    expected = x.cpu().double() @ weight + packed.bias.double()
+    before = {
+        name: getattr(module, name).cpu().clone()
+        for name in ("trellis", "suh", "svh", "bias")
+    }
+    packed_pointer = module.trellis.data_ptr()
+
+    with torch.inference_mode():
+        actual = module(x)
+        repeated = module(x)
+
+    assert actual.dtype == dtype
+    assert actual.shape == (*x.shape[:-1], out_features)
+    assert torch.isfinite(actual).all()
+    assert _relative_l2(actual.cpu(), expected) <= 2e-3
+    assert _relative_l2(actual.cpu(), expected.to(dtype)) <= 2e-3
+    torch.testing.assert_close(actual, repeated, rtol=0, atol=0)
+
+    assert module._inner is None  # Both row-count branches stay away from FP16-only native code.
+    assert module._torch_inner is not None
+    assert module.trellis.data_ptr() == packed_pointer
+    assert module._torch_inner.trellis.data_ptr() == packed_pointer
+    for name, value in before.items():
+        torch.testing.assert_close(getattr(module, name).cpu(), value, rtol=0, atol=0)
+    for owner in (module, module._torch_inner):
+        assert not any(
+            tensor.shape == (in_features, out_features)
+            for tensor in (*owner.__dict__.values(), *owner.buffers())
+            if isinstance(tensor, torch.Tensor)
+        )
 
 
 def test_exllamav3_torch_forward_decodes_per_call_without_dense_cache(monkeypatch):

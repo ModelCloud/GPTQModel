@@ -545,7 +545,7 @@ class ExllamaV3TorchLinear(nn.Module):
     def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         compute_dtype = torch.float32
-        x_2d = x.view(-1, self.in_features).to(compute_dtype)
+        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
         if x.device.type == "cpu" and _cpu_bf16x3_should_use(
             x_2d.shape[0],
             self.in_features,

@@ -74,10 +74,11 @@ they do not retain reconstructed dense weights.
 
 ## Wide activation inputs
 
-The native EXL3 and GGUF CUDA paths use FP16 kernels but support BF16 callers.
-Converting BF16 directly to FP16 narrows range. BF16 and FP32 inputs therefore
-enter the native kernels as FP32, and the visible output is cast back to the
-caller's dtype once.
+Native EXL3 requires FP16 activations. `ExllamaV3Linear.forward` routes BF16 and
+FP32 activations to the bounded `ExllamaV3TorchLinear` FP32 reconstruction path
+before either native GEMM branch; see [EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md).
+GGUF CUDA has its own FP32 input normalization for BF16 callers. The visible
+output is cast back to the caller's dtype once.
 
 ## Failure contract
 
@@ -87,6 +88,6 @@ caller's dtype once.
 | Width or group violates native tile | reject during validation |
 | Packed tensor changes | release and rebuild the derived handle or plan |
 | Wrong GGUF input width | raise before padding or launch |
-| BF16 value exceeds FP16 range | preserve it through FP32 native input |
+| EXL3 BF16 value exceeds FP16 range | route to bounded Torch FP32 reconstruction |
 | Eval-to-train transition | restore packed checkpoint state before training |
 | 3-bit GPTQ with narrow pack words | reject; require `torch.int32` |
