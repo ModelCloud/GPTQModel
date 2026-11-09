@@ -5,6 +5,9 @@
 The codec is a lossless BF16 encoding, so decode must reproduce every input
 bit. The CUDA kernels share the same format; these tests validate the Torch
 oracle used for quantization and CPU inference.
+
+Native HIP cases were validated on ROCm 10.1.0 / HIP 7.16.26385 with R9700
+(gfx1201); see gptqmodel_ext/nf12_hip/README.md for the full toolchain.
 """
 
 from __future__ import annotations
