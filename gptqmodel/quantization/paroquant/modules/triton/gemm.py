@@ -355,6 +355,11 @@ def paroquant_dequantize_triton(
     assert group_size <= K
     assert group_size in PAROQUANT_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
+    # The dequant kernel uses dense offsets for all packed operands.
+    qweight = qweight.contiguous()
+    scales = scales.contiguous()
+    qzeros = qzeros.contiguous()
+
     result = torch.empty(
         qweight.shape[0],
         qweight.shape[1] * 8,
@@ -402,6 +407,11 @@ def _paroquant_gemm_triton(
     fp32_accum: bool = FP32_ACCUM,
 ) -> torch.Tensor:
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
+    # The fused GEMM uses dense row and column offsets for every operand.
+    input = input.contiguous()
+    qweight = qweight.contiguous()
+    scales = scales.contiguous()
+    qzeros = qzeros.contiguous()
     if bias is not None:
         if bias.shape != (N,) or bias.device != input.device or not bias.is_floating_point():
             raise ValueError("ParoQuant Triton bias must be a floating [N] tensor on the input device.")
