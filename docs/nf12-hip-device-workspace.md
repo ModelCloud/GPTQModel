@@ -119,6 +119,48 @@ flowchart TD
 
 ## Routing bounds and empty alignment
 
+### WMMA launch dimensions
+
+The dense and routed WMMA launchers admit the supported gfx1200/gfx1201 grid
+dimensions: X up to 2147483647, Y up to 65535. Indices widen to `int64_t`
+before multiplying by tile sizes. A larger grid returns
+`hipErrorNotSupported` before launching or writing output; no extra device
+query or allocation is added to the launch path.
+
+```mermaid
+flowchart TD
+    A["linear_wmma_impl or moe_linear_impl"] --> B["Calculate n_blocks and m_blocks or m_tiles"]
+    B --> C{"X exceeds kMaxWmmaGridX or Y exceeds kMaxWmmaGridY?"}
+    C -- Yes --> X["hipErrorNotSupported; output untouched"]
+    C -- No --> D["Existing workspace validation and WMMA launch"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Mechanism | Before at `1e676331e` | Current |
+| --- | --- | --- |
+| Dense WMMA grid check | X/Y above 32767 rejected as invalid (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:631`) | X up to 2147483647 and Y up to 65535; larger grids are unsupported |
+| Routed WMMA grid check | Same restriction (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:767`) | Same corrected limits |
+
+R9700 boundary tests use one 16-by-64 expert, BF16 ones, and guarded output.
+The expected output is exactly 64, independently of the encoder. No expanded
+weight cache or scratch allocation was added.
+
+| Assignments | Reserved Y blocks | Result | Wrong output elements / changed guard elements |
+| ---: | ---: | --- | --- |
+| 524256 | 32767 | Success | 0 / 0 |
+| 524272 | 32768 | Success | 0 / 0 |
+| 1048544 | 65535 | Success | 0 / 0 |
+| 1048560 | 65536 | hipErrorNotSupported (801) | 0 writes |
+
+Validated with `PYTHON_GIL=0`, two visible R9700 GPUs, ROCm 10.1.0 / HIP
+7.16.26385: **659 passed in 18.46 seconds** across the NF12 codec, native
+review contracts, runtime loading, validator, backend naming, quantization-bit,
+ROCm LLC, and kernel contract suites. This launch-boundary change does not
+retune kernels; no new performance claim is made.
+
+### Offset normalization
+
 Routing and encoder contract updates introduced in #3685.
 
 The vendored HIP MoE consumers follow CUDA's clamped running-maximum offset

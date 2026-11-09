@@ -143,6 +143,34 @@ def test_native_decode_grid_x_above_32767(native):
     assert bool((decoded == 1).all())
 
 
+@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048560])
+def test_native_wmma_grid_y_boundary(native, count):
+    _, lib = native
+    n, k = 16, 64
+    # Independently construct all-one weights: zero metadata selects escape 0.
+    packed = torch.zeros((1536,), device="cuda", dtype=torch.uint8)
+    escapes = torch.ones((8,), device="cuda", dtype=torch.bfloat16)
+    escape_offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int64)
+    bases = torch.zeros((1,), device="cuda", dtype=torch.uint8)
+    offsets = torch.tensor([0, count], device="cuda", dtype=torch.int64)
+    x = torch.ones((count, k), device="cuda", dtype=torch.bfloat16)
+    guarded = torch.full((count + 2, n), -7., device="cuda", dtype=torch.bfloat16)
+    out = guarded[1:-1]
+    rc = lib.nf12_ad_moe_linear(
+        packed.data_ptr(), escapes.data_ptr(), escape_offsets.data_ptr(), bases.data_ptr(),
+        1, x.data_ptr(), k, None, 1, None, offsets.data_ptr(), count, None,
+        out.data_ptr(), n, n, k, torch.cuda.current_stream().cuda_stream,
+    )
+    torch.cuda.synchronize()
+    if (count + 15) // 16 + 1 > 65535:
+        assert rc == 801  # hipErrorNotSupported: no launch or output writes.
+        assert bool((guarded == -7).all())
+    else:
+        assert rc == 0
+        assert bool((out == k).all())  # Exact BF16 oracle: sum of 64 ones.
+        assert bool((guarded[[0, -1]] == -7).all())
+
+
 def test_native_empty_align_with_no_workspace(native):
     _, lib = native
     assert lib.nf12_ad_moe_align_workspace_bytes(0, 4) == 0
