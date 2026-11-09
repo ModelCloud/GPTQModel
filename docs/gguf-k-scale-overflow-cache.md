@@ -293,3 +293,6 @@ ordinary peak allocator deltas remain 35,655,680 bytes for dense and
 35,659,776 bytes for chunked. MXFP4 uses temporary FP32 operands even for
 ordinary weights, adding about 2.1 MB to peak allocation; no expanded
 weight remains after inference.
+
+This width selection was extended in
+[PR #3673](https://github.com/ModelCloud/GPTQModel/pull/3673).
