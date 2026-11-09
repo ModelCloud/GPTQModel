@@ -68,8 +68,8 @@ class AwqGemvLaunch(NamedTuple):
     num_stages: int
 
 
-# ``block_k`` is capped at ``max_block_k`` and additionally clamped to the group
-# size: the kernel loads one scale/zero group per K tile and broadcasts it across
+# ``block_k`` is capped at ``max_block_k`` and must divide the group size:
+# the kernel loads one scale/zero group per K tile and broadcasts it across
 # the tile, so a tile may never span more than one group.
 _AWQ_GEMV_LAUNCH_CONFIGS: dict[str, AwqGemvLaunch] = {
     # Measured on gfx1201 across K,N in {(2048,2048), (4096,4096), (5120,8192),
@@ -206,6 +206,8 @@ def awq_gemv_triton(
         raise ValueError("AWQ GEMV Triton requires positive M, N and K")
     if qweight.shape[1] * 8 != K:
         raise ValueError("AWQ GEMV Triton qweight must be [N, K/8]")
+    if group_size < 8 or group_size % 8:
+        raise ValueError("AWQ GEMV Triton group_size must be a positive multiple of 8")
     if K % group_size:
         raise ValueError("AWQ GEMV Triton group_size must divide K")
     groups = K // group_size
@@ -226,7 +228,9 @@ def awq_gemv_triton(
 
     config = launch_config(input.device)
     block_n = config.block_n
-    block_k = min(config.max_block_k, group_size)
+    # A non-power-of-two group still has a power-of-two factor that aligns
+    # every tile with a scale/zero boundary (e.g. group 96 -> tile 32).
+    block_k = min(config.max_block_k, group_size & -group_size)
     out_dtype = input.dtype if output_dtype is None else output_dtype
     output = torch.empty((M, N), device=input.device, dtype=out_dtype)
     with torch.cuda.device(input.device):
