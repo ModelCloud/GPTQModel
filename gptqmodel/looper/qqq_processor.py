@@ -142,19 +142,19 @@ class QQQProcessor(LoopProcessor):
         tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
-        if self.qcfg.mse.norm > 0.0:
+        if qcfg_clone.mse.norm > 0.0:
             mse = True
-            norm = self.qcfg.mse.norm
+            norm = qcfg_clone.mse.norm
         else:
             mse = False
             norm = 100
         tmp.quantizer.configure(
-            self.qcfg.bits,
+            qcfg_clone.bits,
             perchannel=True,
-            sym=self.qcfg.sym,
+            sym=qcfg_clone.sym,
             mse=mse,
             norm=norm,
-            groupsize=self.qcfg.group_size,
+            groupsize=qcfg_clone.group_size,
         )
 
         self.tasks[module.name] = tmp
