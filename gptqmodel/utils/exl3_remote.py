@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from filelock import FileLock, Timeout
 from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
 
@@ -609,6 +610,7 @@ class ExecutionSlotLease:
     new_assignment: bool
     _client: "EXL3RemoteClient" = field(repr=False)
     _slot_id: str = field(repr=False)
+    _cross_process_lock: FileLock | None = field(default=None, repr=False)
     _released: bool = field(default=False, init=False, repr=False)
     _release_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -622,7 +624,7 @@ class ExecutionSlotLease:
         with self._release_lock:
             if self._released:
                 return
-            self._client._release_slot(self._slot_id)
+            self._client._release_slot(self._slot_id, self._cross_process_lock)
             self._released = True
 
 
@@ -705,11 +707,15 @@ class EXL3RemoteClient:
         }
         self._topology_sha256 = _sha256(canonical_json_bytes(self._slot_contracts))
         self.assignment_store_path = None
+        self._slot_lock_root: Path | None = None
         if assignment_store_path is not None:
             raw_assignment_path = Path(assignment_store_path).expanduser()
             if raw_assignment_path.is_symlink():
                 raise ValueError("EXL3 assignment store cannot be a symbolic link")
             self.assignment_store_path = raw_assignment_path.resolve()
+            self._slot_lock_root = self.assignment_store_path.with_name(
+                f".{self.assignment_store_path.name}.locks"
+            )
         self._slot_condition = threading.Condition()
         self._busy_slots: dict[str, int] = {}
         self._assignments = self._load_assignments()
@@ -738,6 +744,49 @@ class EXL3RemoteClient:
             "record_sha256": _sha256(canonical_json_bytes(body)),
         }
 
+    def _validate_assignment_record(
+        self,
+        path: Path,
+        record: Any,
+    ) -> tuple[str, str]:
+        root = self.assignment_store_path
+        if root is None or not isinstance(record, dict):
+            raise ValueError("EXL3 assignment record is malformed")
+        body = {
+            key: value
+            for key, value in record.items()
+            if key != "record_sha256"
+        }
+        assignment_key = record.get("assignment_key")
+        slot_id = record.get("slot_id")
+        key_sha256 = (
+            _sha256(assignment_key.encode())
+            if isinstance(assignment_key, str)
+            else None
+        )
+        expected_relative = (
+            Path(key_sha256[:2]) / key_sha256[2:4] / f"{key_sha256}.json"
+            if key_sha256 is not None
+            else None
+        )
+        if (
+            record.get("schema") != REMOTE_ASSIGNMENT_SCHEMA
+            or record.get("schema_version") != REMOTE_ASSIGNMENT_SCHEMA_VERSION
+            or record.get("scheduler") != REMOTE_SCHEDULER
+            or record.get("topology_sha256") != self._topology_sha256
+            or not isinstance(assignment_key, str)
+            or not assignment_key
+            or len(assignment_key) > 4096
+            or record.get("assignment_key_sha256") != key_sha256
+            or path.relative_to(root) != expected_relative
+            or not isinstance(slot_id, str)
+            or slot_id not in self._slot_by_id
+            or record.get("execution") != self._slot_contracts[slot_id]
+            or record.get("record_sha256") != _sha256(canonical_json_bytes(body))
+        ):
+            raise ValueError("EXL3 assignment store failed identity validation")
+        return assignment_key, slot_id
+
     def _load_assignments(self) -> dict[str, str]:
         root = self.assignment_store_path
         if root is None or not root.exists():
@@ -759,44 +808,33 @@ class EXL3RemoteClient:
                 record = json.loads(path.read_bytes())
             except (OSError, UnicodeError, json.JSONDecodeError) as error:
                 raise ValueError("EXL3 assignment record is not valid JSON") from error
-            if not isinstance(record, dict):
-                raise ValueError("EXL3 assignment record is malformed")
-            body = {
-                key: value
-                for key, value in record.items()
-                if key != "record_sha256"
-            }
-            assignment_key = record.get("assignment_key")
-            slot_id = record.get("slot_id")
-            key_sha256 = (
-                _sha256(assignment_key.encode())
-                if isinstance(assignment_key, str)
-                else None
-            )
-            expected_relative = (
-                Path(key_sha256[:2]) / key_sha256[2:4] / f"{key_sha256}.json"
-                if key_sha256 is not None
-                else None
-            )
-            if (
-                record.get("schema") != REMOTE_ASSIGNMENT_SCHEMA
-                or record.get("schema_version") != REMOTE_ASSIGNMENT_SCHEMA_VERSION
-                or record.get("scheduler") != REMOTE_SCHEDULER
-                or record.get("topology_sha256") != self._topology_sha256
-                or not isinstance(assignment_key, str)
-                or not assignment_key
-                or len(assignment_key) > 4096
-                or record.get("assignment_key_sha256") != key_sha256
-                or path.relative_to(root) != expected_relative
-                or not isinstance(slot_id, str)
-                or slot_id not in self._slot_by_id
-                or record.get("execution") != self._slot_contracts[slot_id]
-                or record.get("record_sha256") != _sha256(canonical_json_bytes(body))
-                or assignment_key in assignments
-            ):
+            assignment_key, slot_id = self._validate_assignment_record(path, record)
+            if assignment_key in assignments:
                 raise ValueError("EXL3 assignment store failed identity validation")
             assignments[assignment_key] = slot_id
         return assignments
+
+    def _assignment_path(self, assignment_key: str) -> Path:
+        root = self.assignment_store_path
+        if root is None:
+            raise ValueError("EXL3 dynamic scheduling requires an assignment store")
+        key_sha256 = _sha256(assignment_key.encode())
+        return root / key_sha256[:2] / key_sha256[2:4] / f"{key_sha256}.json"
+
+    def _read_assignment(self, assignment_key: str) -> str | None:
+        path = self._assignment_path(assignment_key)
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+            raise ValueError("EXL3 assignment store contains an invalid entry")
+        try:
+            record = json.loads(path.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("EXL3 assignment record is not valid JSON") from error
+        stored_key, slot_id = self._validate_assignment_record(path, record)
+        if stored_key != assignment_key:
+            raise ValueError("EXL3 assignment store failed identity validation")
+        return slot_id
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
@@ -815,20 +853,17 @@ class EXL3RemoteClient:
         if current.is_symlink() or not current.is_dir():
             raise ValueError("EXL3 assignment-store parent is invalid")
         for directory in reversed(missing):
-            directory.mkdir()
-            self._fsync_directory(directory.parent)
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                if directory.is_symlink() or not directory.is_dir():
+                    raise ValueError("EXL3 assignment-store parent is invalid")
+            else:
+                self._fsync_directory(directory.parent)
 
     def _persist_assignment(self, assignment_key: str, slot_id: str) -> None:
-        root = self.assignment_store_path
-        if root is None:
-            raise ValueError("EXL3 dynamic scheduling requires an assignment store")
-        key_sha256 = _sha256(assignment_key.encode())
-        path = root / key_sha256[:2] / key_sha256[2:4] / f"{key_sha256}.json"
+        path = self._assignment_path(assignment_key)
         self._ensure_assignment_directory(path.parent)
-        if path.is_symlink():
-            raise ValueError("EXL3 assignment record cannot be a symbolic link")
-        if path.exists():
-            raise ValueError("EXL3 assignment record appeared concurrently")
         payload = canonical_json_bytes(
             self._assignment_record(assignment_key, slot_id)
         ) + b"\n"
@@ -841,7 +876,10 @@ class EXL3RemoteClient:
                 target.write(payload)
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary_name, path)
+            # The hard link publishes the fully-fsynced inode only if the
+            # destination does not exist. Unlike replace(), it cannot overwrite
+            # an assignment published by another coordinator.
+            os.link(temporary_name, path)
             self._fsync_directory(path.parent)
         except BaseException:
             try:
@@ -849,6 +887,37 @@ class EXL3RemoteClient:
             except FileNotFoundError:
                 pass
             raise
+
+    def _ensure_slot_lock_directory(self) -> Path:
+        root = self._slot_lock_root
+        if root is None:
+            raise ValueError("EXL3 cross-process slot locking requires an assignment store")
+        if root.exists():
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("EXL3 slot-lock directory is unsafe")
+            return root
+        try:
+            root.mkdir()
+        except FileExistsError:
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("EXL3 slot-lock directory is unsafe")
+        else:
+            self._fsync_directory(root.parent)
+        return root
+
+    def _acquire_cross_process_slot(self, slot_id: str) -> FileLock | None:
+        if self._slot_lock_root is None:
+            return None
+        lock_root = self._ensure_slot_lock_directory()
+        slot_sha256 = _sha256(slot_id.encode())
+        for position in range(self._slot_capacities[slot_id]):
+            lock = FileLock(lock_root / f"{slot_sha256}.{position}.lock")
+            try:
+                lock.acquire(timeout=0)
+            except Timeout:
+                continue
+            return lock
+        return None
 
     def acquire_slot(self, assignment_key: str) -> ExecutionSlotLease:
         """Wait for a physical slot or bounded Spark staging position."""
@@ -884,16 +953,30 @@ class EXL3RemoteClient:
                         else None
                     )
                     if slot_id is not None:
-                        # This commit is the ownership barrier. A killed run will
-                        # either see the old complete file or the new complete file.
-                        self._persist_assignment(assignment_key, slot_id)
-                        self._assignments[assignment_key] = slot_id
-                        new_assignment = True
+                        try:
+                            self._persist_assignment(assignment_key, slot_id)
+                        except FileExistsError:
+                            # Another coordinator won publication. Resume the
+                            # authoritative assignment rather than selecting or
+                            # overwriting a slot from local state.
+                            slot_id = self._read_assignment(assignment_key)
+                            if slot_id is None:
+                                raise RuntimeError(
+                                    "EXL3 assignment publication failed without an authoritative record"
+                                )
+                            self._assignments[assignment_key] = slot_id
+                        else:
+                            self._assignments[assignment_key] = slot_id
+                            new_assignment = True
                 if (
                     slot_id is not None
                     and self._busy_slots.get(slot_id, 0)
                     < self._slot_capacities[slot_id]
                 ):
+                    cross_process_lock = self._acquire_cross_process_slot(slot_id)
+                    if cross_process_lock is None:
+                        self._slot_condition.wait(timeout=0.05)
+                        continue
                     self._busy_slots[slot_id] = self._busy_slots.get(slot_id, 0) + 1
                     return ExecutionSlotLease(
                         slot=self._slot_by_id[slot_id],
@@ -902,10 +985,15 @@ class EXL3RemoteClient:
                         new_assignment=new_assignment,
                         _client=self,
                         _slot_id=slot_id,
+                        _cross_process_lock=cross_process_lock,
                     )
                 self._slot_condition.wait()
 
-    def _release_slot(self, slot_id: str) -> None:
+    def _release_slot(
+        self,
+        slot_id: str,
+        cross_process_lock: FileLock | None,
+    ) -> None:
         with self._slot_condition:
             active = self._busy_slots.get(slot_id, 0)
             if active <= 0:
@@ -915,6 +1003,8 @@ class EXL3RemoteClient:
             else:
                 self._busy_slots[slot_id] = active - 1
             self._slot_condition.notify_all()
+        if cross_process_lock is not None:
+            cross_process_lock.release()
 
     @staticmethod
     def execution_contract(slot: ExecutionSlot) -> dict[str, Any]:
