@@ -245,6 +245,10 @@ All of these were verified on `gfx1201` hardware, not assumed:
 5. **`__builtin_amdgcn_fdot2` is FP16, not BF16.** It compiles and runs, and
    produces silently wrong results on BF16 data. The BF16 packed dot is
    `__builtin_amdgcn_fdot2_f32_bf16`, which lowers to `v_dot2_f32_bf16`.
+   That builtin needs the `dot12-insts` target feature, which only
+   `gfx1200`/`gfx1201` provide. `gfx1250` has no such instruction, so the
+   kernel uses an exact BF16-to-FP32 FMA fallback there; both targets compile
+   from the same source, and a family-wide `PYTORCH_ROCM_ARCH` build succeeds.
 6. **Bias joins the FP32 reduction, not the BF16 result.** Adding bias to the
    already-rounded output double-rounds and measured 1.00 ULP / 1.7e-3 RMS
    relative error; folding it into the accumulator before the single BF16
@@ -276,6 +280,7 @@ Environment knobs:
 | --- | --- |
 | `GPTQMODEL_NF12_AD_HIP_BUILD_ROOT` | Override the build/cache directory. |
 | `GPTQMODEL_NF12_AD_HIP_FORCE_REBUILD` | Rebuild even when the cache matches. |
+| `GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK` | Force the gfx1250 portable-dot path on gfx1200/gfx1201 for oracle validation. |
 | `GPTQMODEL_EXT_VERBOSE` | Show the full hipcc command line. |
 | `GPTQMODEL_NO_ROCM_LLC` | Skip the `gptqmodel.rocm_llc` back-port. |
 
