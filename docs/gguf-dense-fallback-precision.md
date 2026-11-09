@@ -51,6 +51,8 @@ The tests repeat each forward, check FP16/BF16 output dtype and values, and
 inspect packed buffers and module state for retained expanded tensors. The
 separate llama.cpp backend uses its own reduction and bias epilogue; this
 change does not alter it.
+This correction was introduced in
+[PR #3743](https://github.com/ModelCloud/GPTQModel/pull/3743).
 
 For the 1 × 32 Q8_0 case, the main temporary payloads are a 128-byte FP32
 weight, a 128-byte promoted activation, and a four-byte FP32 dot. No new
