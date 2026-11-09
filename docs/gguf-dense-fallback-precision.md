@@ -11,6 +11,58 @@ their ordinary path; formats with established packed bounds select FP32 only
 when needed, and the other formats use FP32 conservatively to preserve finite
 dot products.
 
+## CPU autocast and cancelling bias
+
+The CPU dense GGUF Torch path uses FP32 operands for low-precision activations
+with bias. An outer BF16 autocast context can still narrow its `torch.mm`
+result to BF16 before the FP32 bias is added. An FP16 Q8_0 input with a 100000
+dot and a -100000 FP32 bias then returns -160 instead of zero.
+`_forward_dequant_matmul` temporarily disables CPU autocast around the FP32
+matmul only when autocast is active, then adds the FP32 bias and rounds the
+result once. `_forward_fused_k` already keeps this case wide when selected and
+is unchanged.
+
+```mermaid
+flowchart TD
+    A["GGUFTorchLinear.forward"] --> B{"Dense CPU low precision with bias?"}
+    B -- "Yes" --> C["_forward_dequant_matmul reconstructs temporary FP32 weight"]
+    C --> D{"CPU autocast active?"}
+    D -- "Yes" --> E["Disable CPU autocast around torch.mm"]
+    D -- "No" --> F["Run torch.mm directly"]
+    E --> G["Add FP32 bias and round once to activation dtype"]
+    F --> G
+    B -- "No" --> H["Existing fused or other reduction path"]
+    A -. "Old outer BF16 autocast" .-> X["FP32 dot rounded to BF16 before bias; finite cancellation lost"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Dense CPU reduction | `gguf.py:1715-1716` called `torch.mm` under the caller's autocast context | Disable CPU autocast around FP32 `torch.mm` only when autocast is active |
+| Fused CPU reduction | `_forward_fused_k` already kept this test case wide when explicitly selected | Unchanged; tested as a control |
+| Inference storage | Only packed GGUF bytes survived each forward | The same packed bytes survive; temporary FP32 weight and chunks are released |
+
+An independent FP64 and FP32 Q8_0 oracle gives exactly zero for the FP16
+100000 + (-100000) case. On Torch 2.16.0.dev20261102+cu130, public dense CPU
+forward returned -160 under BF16 autocast before this correction and zero
+after it; normal and forced fused execution returned zero in both versions.
+The tests repeat each forward, check FP16/BF16 output dtype and values, and
+inspect packed buffers and module state for retained expanded tensors. The
+separate llama.cpp backend uses its own reduction and bias epilogue; this
+change does not alter it.
+
+For the 1 × 32 Q8_0 case, the main temporary payloads are a 128-byte FP32
+weight, a 128-byte promoted activation, and a four-byte FP32 dot. No new
+persistent tensor is installed. A paired CPU benchmark used one Torch thread,
+100 warmups per path, and the median of five alternating batches of 500 public
+forwards. Timings include dequantization and the Python call:
+
+| Outer BF16 autocast | Before | After | Output before → after |
+| --- | ---: | ---: | ---: |
+| Disabled | 29.84 µs | 30.59 µs | 0 → 0 |
+| Enabled | 32.25 µs | 35.47 µs | -160 → 0 |
+
 ```mermaid
 flowchart TD
     A["GGUFTorchLinear.forward chooses dense fallback"] --> Z{"CPU low precision with bias?"}

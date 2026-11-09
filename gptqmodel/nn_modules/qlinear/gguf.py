@@ -1712,7 +1712,13 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                 device=x_flat.device,
                 dtype=torch.float32,
             )
-            output = torch.mm(x_flat.float(), weight)
+            # CPU autocast would round the FP32 dot to BF16 before the bias
+            # can cancel it. Disable it only for the affected reduction.
+            if torch.is_autocast_enabled("cpu"):
+                with torch.autocast("cpu", enabled=False):
+                    output = torch.mm(x_flat.float(), weight)
+            else:
+                output = torch.mm(x_flat.float(), weight)
             return (output + bias.float()).to(x_flat.dtype)
         if self._use_fp32_gguf_weight(x_flat.dtype, device=x_flat.device):
             # Keep the temporary dense fallback wide until the output

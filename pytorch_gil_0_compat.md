@@ -169,6 +169,7 @@ results below for that build.
 | `Tensor.copy_` (non_blocking, cross-device) | SAFE (concurrent) (needs 2 GPUs) | P2P verify, Hessian adopt | Must synchronize the destination stream before reading the result. |
 | `torch.inference_mode` | SAFE (concurrent), thread-local | inference paths | Thread-local grad mode; no shared state. |
 | `torch.no_grad` | SAFE (concurrent), thread-local | calibration | Same as above. |
+| `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. GPU autocast was not tested by this CPU probe. |
 
 ## Manual findings
 

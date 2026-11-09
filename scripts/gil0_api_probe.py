@@ -142,6 +142,33 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         generator.manual_seed(1234)
         return bool(torch.randn(64, generator=generator, device="cuda").abs().sum().item() > 0)
 
+    def cpu_autocast_override() -> bool:
+        x = torch.full((1, 32), 1000.0)
+        weight = torch.full((32, 1), 3.125)
+        before = torch.is_autocast_enabled("cpu")
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            outer = torch.is_autocast_enabled("cpu")
+            narrowed = torch.mm(x, weight)
+            with torch.autocast("cpu", enabled=False):
+                inner = torch.is_autocast_enabled("cpu")
+                wide = torch.mm(x, weight)
+            resumed_enabled = torch.is_autocast_enabled("cpu")
+            resumed = torch.mm(x, weight)
+        correct = (
+            not before
+            and outer
+            and not inner
+            and resumed_enabled
+            and not torch.is_autocast_enabled("cpu")
+            and narrowed.dtype == resumed.dtype == torch.bfloat16
+            and wide.dtype == torch.float32
+            and narrowed.item() == resumed.item() == 99840.0
+            and wide.item() == 100000.0
+        )
+        if not correct:
+            raise AssertionError("CPU autocast state or FP32 reduction changed across a nested context")
+        return True
+
     def set_device_isolation(index: int = 0) -> bool:
         device = index % max(_gpu_count(), 1)
         torch.cuda.set_device(device)
@@ -228,6 +255,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.Generator(device='cuda')": generator_roundtrip,
         "torch.inference_mode": lambda: _no_grad_result(torch, torch.inference_mode),
         "torch.no_grad": lambda: _no_grad_result(torch, torch.no_grad),
+        "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
     }
     return probes
 
