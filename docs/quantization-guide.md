@@ -217,6 +217,53 @@ backend = BACKEND.FP8_TORCH
 Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
 calibration; it does not enable the experimental GPTQ FP8 activation stream.
 
+#### FP8 source weight validation
+
+FP8 quantization requires finite dense source weights that remain finite when
+converted to FP32. `quantize_fp8_weight` rejects Inf, NaN, and values outside
+FP32's range by checking the already-computed absolute maxima before inverse
+scales. `TorchFP8Linear.pack_original` checks the source before an optional
+smoother and before MLX dispatch; the ordinary Torch path uses the direct
+quantizer's check. This contract was introduced in PR #3742.
+
+| Previous path | Current path |
+| --- | --- |
+| `quantize_fp8_weight` computed `amax` and inverse scales from the FP32 copy without validating the source (`gptqmodel/nn_modules/qlinear/fp8.py:131` at the previous revision). | `_require_finite_fp8_source` checks each method's computed absolute maxima before inverse scales. |
+| `TorchFP8Linear.pack_original` smoothed and selected the packer directly (`gptqmodel/nn_modules/qlinear/fp8.py:348` at the previous revision). | It validates before smoothing or MLX dispatch; the Torch path checks its maxima. |
+
+```mermaid
+flowchart TD
+    A["TorchFP8Linear.pack_original"] --> B["Convert source to CPU FP32"]
+    B --> C{"Smoother configured?"}
+    C -- Yes --> D["_require_finite_fp8_source before smoothing"]
+    D --> D2{"Finite?"}
+    D2 -- Yes --> E["Optional smoothing"]
+    D2 -- No --> X["ValueError before packed buffers change"]
+    C -- No --> E
+    E --> F{"MLX large-weight path selected?"}
+    F -- Yes --> V["_require_finite_fp8_source before MLX"]
+    V --> V2{"Finite?"}
+    V2 -- Yes --> G["quantize_fp8_weight_mlx validates and packs"]
+    V2 -- No --> X
+    F -- No --> H["quantize_fp8_weight"]
+    Q["Direct quantize_fp8_weight"] --> H
+    H --> I["Convert source to CPU FP32 and compute abs maxima"]
+    I --> K["_require_finite_fp8_source on maxima"]
+    K --> K2{"Finite?"}
+    K2 -- No --> X
+    K2 -- Yes --> L["Compute inverse scales and FP8 codes"]
+    G --> R["Return FP8 codes and inverse scales"]
+    L --> R
+    R --> N{"Called by pack_original?"}
+    N -- Yes --> J["Install packed weight and scale buffers"]
+    N -- No --> U["Return to direct caller"]
+    classDef failure fill:#fdd,stroke:#c00,color:#000
+    class X failure
+```
+
+The validation creates no persistent weight cache. Packed FP8 weights and
+inverse scales remain the only weight storage installed by the packer.
+
 ### GGUF block quantization
 
 ```python

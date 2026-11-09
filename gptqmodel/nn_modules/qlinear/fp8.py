@@ -104,6 +104,11 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     )
 
 
+def _require_finite_fp8_source(weight: torch.Tensor) -> None:
+    if not bool(torch.isfinite(weight).all()):
+        raise ValueError("FP8 quantization requires finite source weights representable as float32.")
+
+
 def quantize_fp8_weight(
     weight: torch.Tensor,
     *,
@@ -131,12 +136,16 @@ def quantize_fp8_weight(
     weight = weight.to(device="cpu", dtype=torch.float32).contiguous()
 
     if weight_scale_method == "tensor":
-        scale_inv = _compute_scale_inv(weight.abs().amax(), fp8_max)
+        abs_max = weight.abs().amax()
+        _require_finite_fp8_source(abs_max)
+        scale_inv = _compute_scale_inv(abs_max, fp8_max)
         quantized = torch.clamp(weight * scale_inv, min=-fp8_max, max=fp8_max).to(fp8_dtype)
         return quantized.contiguous(), scale_inv.to(torch.float32)
 
     if weight_scale_method == "row":
-        scale_inv = _compute_scale_inv(weight.abs().amax(dim=1), fp8_max)
+        abs_max = weight.abs().amax(dim=1)
+        _require_finite_fp8_source(abs_max)
+        scale_inv = _compute_scale_inv(abs_max, fp8_max)
         quantized = torch.clamp(
             weight * scale_inv.unsqueeze(1),
             min=-fp8_max,
@@ -158,7 +167,9 @@ def quantize_fp8_weight(
     row_blocks = rows // block_rows
     col_blocks = cols // block_cols
     blocks = weight.reshape(row_blocks, block_rows, col_blocks, block_cols)
-    scale_inv = _compute_scale_inv(blocks.abs().amax(dim=(1, 3)), fp8_max)
+    abs_max = blocks.abs().amax(dim=(1, 3))
+    _require_finite_fp8_source(abs_max)
+    scale_inv = _compute_scale_inv(abs_max, fp8_max)
     scaled = blocks * scale_inv.unsqueeze(1).unsqueeze(3)
     quantized = torch.clamp(scaled, min=-fp8_max, max=fp8_max).to(fp8_dtype).reshape(rows, cols)
     return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
@@ -351,6 +362,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         del scales, zeros, g_idx
 
         weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
+        if smooth is not None:
+            _require_finite_fp8_source(weight)
         weight = _apply_optional_smoother(
             weight,
             smooth=smooth,
@@ -361,6 +374,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and _mlx_quantization_available()
             and weight.numel() >= _MLX_FP8_MIN_ELEMENTS
         ):
+            _require_finite_fp8_source(weight)
             qweight, weight_scale_inv = _quantize_fp8_weight_mlx_to_torch(
                 weight,
                 format=self.fp8_format,
