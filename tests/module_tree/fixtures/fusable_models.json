@@ -5890,6 +5890,14 @@
     "dots3_note": {
       "definition": "Dots3NoteQModel",
       "reason": "Explicit native calibration/expert adapter; fusion executor is unqualified and no profile is enabled by this extraction."
+    },
+    "kimi_k3": {
+      "definition": "KimiK3QModel",
+      "reason": "Explicit native calibration/expert adapter; fusion executor is unqualified and no profile is enabled by this extraction."
+    },
+    "kimi_linear": {
+      "definition": "KimiLinearQModel",
+      "reason": "Explicit native calibration/expert adapter; fusion executor is unqualified and no profile is enabled by this extraction."
     }
   }
 }

@@ -329,3 +329,7 @@ See [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567) for the
 implementation and Llama end-to-end validation.
 
 `dots3_note`: explicit fork calibration/expert adapter; fusion remains unqualified, with no profile enabled by this extraction.
+
+`kimi_k3`: explicit fork calibration/expert adapter; fusion remains unqualified, with no profile enabled by this extraction.
+
+`kimi_linear`: explicit fork calibration/expert adapter; fusion remains unqualified, with no profile enabled by this extraction.
