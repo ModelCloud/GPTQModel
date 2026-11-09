@@ -8,18 +8,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from copy import deepcopy
-from dataclasses import dataclass
-from pathlib import Path
 import re
 import shutil
 import tempfile
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import torch
+import xxhash
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
-import xxhash
 
 from .exl3_error_ledger import routed_expert_identity, routed_expert_processor_layer
 
@@ -112,6 +112,9 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(descriptor, "wb") as target:
             target.write(canonical_json_bytes(value) + b"\n")
             target.flush()
+            # Frontier captures are model artifacts, not secrets. Keep them
+            # readable by an unprivileged host validator.
+            os.fchmod(target.fileno(), 0o644)
             os.fsync(target.fileno())
         os.replace(temporary_name, path)
     except BaseException:
@@ -146,8 +149,18 @@ class EXL3CaptureFrontierStore:
         self.root = Path(root).expanduser().resolve()
         if not isinstance(family_join, dict):
             raise EXL3CaptureFrontierError("capture frontier requires family identity")
-        self.family_join = deepcopy(family_join)
-        self.family_join_sha256 = _sha256_bytes(canonical_json_bytes(family_join))
+        # Normalize through the on-disk JSON representation so a resumed store
+        # compares equal to the manifest after a round trip (tuples become
+        # lists) and non-finite values are rejected up front.
+        try:
+            self.family_join = json.loads(canonical_json_bytes(family_join))
+        except (TypeError, ValueError) as error:
+            raise EXL3CaptureFrontierError(
+                "capture frontier family identity is not JSON-safe"
+            ) from error
+        self.family_join_sha256 = _sha256_bytes(
+            canonical_json_bytes(self.family_join)
+        )
 
     @staticmethod
     def _module_names(subset: dict[str, Any]) -> list[str]:
@@ -497,6 +510,7 @@ class EXL3CaptureFrontierStore:
         try:
             hessian_root = temporary / "hessians"
             hessian_root.mkdir()
+            os.chmod(hessian_root, 0o755)
             grouped: dict[
                 tuple[str, int, int, str], list[EXL3CaptureDescriptor]
             ] = {}
@@ -558,6 +572,7 @@ class EXL3CaptureFrontierStore:
                 relative = Path("hessians") / f"hessian-{payload_index:06d}.safetensors"
                 path = temporary / relative
                 save_safetensors_file({"H": reference_hessian.contiguous()}, path)
+                os.chmod(path, 0o644)
                 descriptor = os.open(path, os.O_RDONLY)
                 try:
                     os.fsync(descriptor)
@@ -607,6 +622,9 @@ class EXL3CaptureFrontierStore:
             }
             _atomic_json(temporary / MANIFEST_FILENAME, manifest)
             _fsync_directory(temporary)
+            # mkdtemp creates 0700; publish the artifact tree readable by an
+            # unprivileged host validator, like the projection checkpoints.
+            os.chmod(temporary, 0o755)
             os.replace(temporary, destination)
             _fsync_directory(self.root)
             return manifest
