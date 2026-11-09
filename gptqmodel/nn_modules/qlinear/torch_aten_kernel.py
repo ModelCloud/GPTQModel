@@ -224,18 +224,6 @@ class TorchAtenLinear(PackableQuantLinear):
         self._ret_idx_key = key
         return ret_idx
 
-    def _ret_idx_is_identity(self) -> bool:
-        cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
-            return cached
-        ret_idx = self._build_ret_idx()
-        identity = torch.equal(
-            ret_idx,
-            torch.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
-        )
-        self._ret_idx_identity = identity
-        return identity
-
     def train(self, mode: bool = True):
         old_train = self.training
         if mode == old_train:

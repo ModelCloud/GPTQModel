@@ -143,6 +143,7 @@ class TorchFusedLinear(PackableQuantLinear):
         """
         self.ret_idx = None
         self._ret_idx_key = None
+        self._ret_idx_identity = None
         self._fused_state_key = None
         self._refresh_fused_op()
 
@@ -311,7 +312,10 @@ class TorchFusedLinear(PackableQuantLinear):
     @torch.no_grad
     def _fused_op_forward(self, x):
         self._refresh_fused_op()
-        x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+        if not self._ret_idx_is_identity():
+            x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+        elif not x.is_contiguous():
+            x = x.contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":

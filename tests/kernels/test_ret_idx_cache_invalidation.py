@@ -17,6 +17,7 @@ import pytest
 import torch
 from test_torch_weight_storage import state_tensors
 
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 
@@ -109,6 +110,73 @@ def test_in_place_g_idx_mutation_is_observed(cls):
 
     rebuilt = module._build_ret_idx()
     assert torch.equal(rebuilt, _oracle_ret_idx(module.g_idx, GROUP_SIZE))
+
+
+def test_ret_idx_is_identity_lives_on_the_packable_base():
+    assert TorchFusedLinear._ret_idx_is_identity is PackableQuantLinear._ret_idx_is_identity
+    assert TorchAtenLinear._ret_idx_is_identity is PackableQuantLinear._ret_idx_is_identity
+
+
+def test_fused_op_skips_the_gather_for_an_identity_ret_idx():
+    """``desc_act=False`` must not pay for ``x[:, arange].contiguous()``.
+
+    The fused op is stubbed so the captured tensor shows whether
+    ``_fused_op_forward`` reordered/copied the activation.
+    """
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+
+    # A contiguous activation is forwarded unchanged: no gather, no copy.
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    module._fused_op_forward(x)
+    assert captured["x"] is x
+
+    # A strided activation is still made contiguous for the fused kernel.
+    strided = torch.randn(IN_FEATURES, 4, dtype=torch.bfloat16).t()
+    assert not strided.is_contiguous()
+    module._fused_op_forward(strided)
+    assert captured["x"] is not strided
+    assert captured["x"].is_contiguous()
+
+
+def test_fused_op_gathers_for_a_non_identity_ret_idx():
+    module = _module(TorchFusedLinear)
+    module.g_idx = _group_labels((3, 0, 2, 1))
+    assert not module._ret_idx_is_identity()
+
+    captured = {}
+
+    def _capture(x):
+        captured["x"] = x
+        return torch.zeros((x.shape[0], OUT_FEATURES), dtype=x.dtype)
+
+    module.torch_fused_op = _capture
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    module._fused_op_forward(x)
+
+    assert captured["x"] is not x
+    assert captured["x"].is_contiguous()
+
+
+def test_clear_weight_cache_drops_the_cached_identity_flag():
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+    assert module._ret_idx_identity is True
+
+    module.clear_weight_cache()
+
+    assert module.ret_idx is None
+    assert module._ret_idx_identity is None
 
 
 # ---------------------------------------------------------------------------
