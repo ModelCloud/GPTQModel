@@ -87,12 +87,18 @@ class Int8PackedModule(torch.nn.Module):
         self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
         self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scales, persistent=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         # The op requires matching activation/scale dtypes. FP32 preserves tiny
-        # channel scales and delays output rounding until after accumulation.
-        return torch.ops.aten._weight_int8pack_mm(
+        # channel scales and delays output rounding until after accumulation and
+        # the optional bias epilogue.
+        output = torch.ops.aten._weight_int8pack_mm(
             x.float(), self.int8_weight_nk, self.int8_channel_scale.float()
-        ).to(x.dtype)
+        )
+        if bias is not None:
+            output = output + bias.float()
+        return output.to(x.dtype)
 
 
 class TorchInt8Linear(GPTQQuantLinear):
@@ -298,9 +304,7 @@ class TorchInt8Linear(GPTQQuantLinear):
 
         # Common decode path is 2D [M, K]. Skip reshape/out-shape overhead on this hot path.
         if x.dim() == 2:
-            out = self._fused_op_forward(x)
-            if self.bias is not None:
-                out.add_(self.bias)
+            out = self._fused_op_forward(x, bias=self.bias)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -308,22 +312,21 @@ class TorchInt8Linear(GPTQQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
 
-        out = self._fused_op_forward(x).reshape(out_shape)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+        out = self._fused_op_forward(x, bias=self.bias).reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         return out
 
     @torch.no_grad
-    def _fused_op_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _fused_op_forward(
+        self, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise NotImplementedError("TorchInt8Linear fused path is CPU-only.")
         if self.int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
-        return self.int8_module(x.contiguous())
+        return self.int8_module(x.contiguous(), bias=bias)
 
     def _empty_gptq_only_weights(self):
         for name in self.GPTQ_BUFFER_NAMES:
