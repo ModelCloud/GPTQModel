@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVTritonLinear
+from gptqmodel.quantization.awq.modules.triton.gemv import awq_gemv_triton
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 
 
@@ -23,6 +24,41 @@ def _independent_dense_weight(qweight, qzeros, scales, group_size):
     zeros = ((qzeros.long()[:, :, None] >> shifts) & 15).reshape(qzeros.shape[0], -1)
     groups = torch.arange(k, device=qweight.device) // group_size
     return (codes.double() - zeros[:, groups].double()) * scales[:, groups].double()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rows", [1, 9])
+@pytest.mark.parametrize("group_size", [8, 24, 96])
+def test_awq_gemv_direct_non_power_of_two_groups(dtype, rows, group_size):
+    torch.manual_seed(3901 + group_size + rows)
+    k, n = 192, 11
+    groups = k // group_size
+    codes = torch.randint(0, 16, (n, k), device="cuda", dtype=torch.int32)
+    zero_codes = torch.randint(0, 16, (n, ((groups + 7) // 8) * 8), device="cuda", dtype=torch.int32)
+    qweight = pack_awq_columns(codes, 4)
+    qzeros = pack_awq_columns(zero_codes, 4)
+    scales = torch.rand((n, groups), device="cuda", dtype=torch.float16).mul_(0.02).add_(0.01)
+    x = torch.randn((rows, k), device="cuda", dtype=dtype)
+
+    wide = awq_gemv_triton(x, qweight, scales, qzeros, group_size, output_dtype=torch.float32)
+    expected = x.double() @ _independent_dense_weight(qweight, qzeros, scales, group_size).T
+    torch.testing.assert_close(wide, expected.float(), rtol=2e-3, atol=2e-3)
+
+    visible = awq_gemv_triton(x, qweight, scales, qzeros, group_size)
+    assert visible.dtype == dtype
+    torch.testing.assert_close(visible, wide.to(dtype), rtol=0, atol=torch.finfo(dtype).eps * wide.abs().max().item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("group_size", [0, 4, 12])
+def test_awq_gemv_direct_rejects_unaligned_group(group_size):
+    x = torch.ones((1, 192), device="cuda", dtype=torch.float16)
+    qweight = torch.zeros((8, 24), device="cuda", dtype=torch.int32)
+    qzeros = torch.zeros((8, 6), device="cuda", dtype=torch.int32)
+    scales = torch.ones((8, 48), device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="positive multiple of 8"):
+        awq_gemv_triton(x, qweight, scales, qzeros, group_size)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
