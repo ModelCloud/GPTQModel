@@ -2237,8 +2237,15 @@ class GPTQ:
 
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization:
-            for i1 in range(0, self.columns, blocksize):
-                i2 = min(i1 + blocksize, self.columns)
+            # Keep each dynamic group within a block. A group that straddles
+            # Q1 would write beyond its bounds and append duplicate metadata.
+            mock_blocksize = (
+                self.qcfg.group_size
+                if not self.qcfg.static_groups and self.qcfg.group_size > 0
+                else blocksize
+            )
+            for i1 in range(0, self.columns, mock_blocksize):
+                i2 = min(i1 + mock_blocksize, self.columns)
                 count = i2 - i1
 
                 W1 = W[:, i1:i2]
@@ -2247,58 +2254,37 @@ class GPTQ:
                 # Handle group quantization parameters efficiently (similar to original)
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
-                        # Find parameters for entire groups at once (optimized)
-                        group_start_cols = list(range(i1, i2, self.qcfg.group_size))
-                        for group_start in group_start_cols:
-                            group_end = min(group_start + self.qcfg.group_size, self.columns)
-                            if group_start < group_end:
-                                self.quantizer.find_params(W[:, group_start:group_end], weight=True)
-                                scale.append(self.quantizer.scale)
-                                zero.append(self.quantizer.zero)
-                                now_idx += 1
+                        for group_start in range(i1, i2, self.qcfg.group_size):
+                            group_end = min(
+                                group_start + self.qcfg.group_size,
+                                i2,
+                            )
+                            self.quantizer.find_params(
+                                W[:, group_start:group_end],
+                                weight=True,
+                            )
+                            scale.append(self.quantizer.scale)
+                            zero.append(self.quantizer.zero)
+                            now_idx += 1
+                            for column in range(group_start, group_end):
+                                q = self.quantizer.quantize(
+                                    W[:, column : column + 1]
+                                ).flatten()
+                                Q1[:, column - i1] = q
                     else:
-                        # Static groups - use pre-computed groups
+                        # A static block can cross several reordered groups.
                         for i in range(count):
+                            column = i1 + i
                             idx = i1 + i
                             if self.qcfg.desc_act:
                                 idx = perm[idx]
+                            elif self.qcfg.act_group_aware and use_hessian:
+                                idx = final_perm[idx]
                             self.quantizer = groups[idx // self.qcfg.group_size]
-
-                    # Vectorized quantization for the entire block (major optimization)
-                    if len(scale) > 0 and len(zero) > 0:
-                        # Use latest scale and zero for the entire block
-                        latest_scale, latest_zero = _replace_zero_scale(scale[-1], zero[-1])
-
-                        # Vectorized quantization using broadcasting
-                        # Reshape scales and zeros to match block dimensions
-                        if latest_scale.dim() == 1:
-                            latest_scale = latest_scale.view(-1, 1)
-                        if latest_zero.dim() == 1:
-                            latest_zero = latest_zero.view(-1, 1)
-
-                        # Apply quantization formula using the cloned weights W1
-                        maxq_val = 2 ** self.qcfg.bits - 1
-                        if self.qcfg.sym:
-                            # Symmetric quantization: Q = scale * clamp(round(x/scale), -maxq/2, maxq/2)
-                            Q1 = latest_scale * torch.clamp(
-                                torch.round(W1 / latest_scale),
-                                -(maxq_val // 2),
-                                maxq_val // 2
-                            )
-                        else:
-                            # Asymmetric quantization: Q = scale * (clamp(round(x/scale) + zero, 0, maxq) - zero)
-                            quantized = torch.clamp(
-                                torch.round(W1 / latest_scale) + latest_zero,
-                                0,
-                                maxq_val
-                            )
-                            Q1 = latest_scale * (quantized - latest_zero)
-                    else:
-                        # Fallback to individual quantization if no scale/zero available
-                        for i in range(count):
-                            w = W1[:, i]
-                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                            Q1[:, i] = q
+                            q = self.quantizer.quantize(
+                                W[:, column : column + 1]
+                            ).flatten()
+                            Q1[:, column - i1] = q
                 else:
                     # No grouping - vectorized quantization for entire block
                     maxq_val = 2 ** self.qcfg.bits - 1
