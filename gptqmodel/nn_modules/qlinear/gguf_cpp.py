@@ -824,6 +824,30 @@ def _get_ggml_bridge() -> _GGMLBridge:
         return _GGML_BRIDGE
 
 
+def _finish_ggml_output(
+    module: GGUFTorchLinear, x_flat: torch.Tensor, output: torch.Tensor
+) -> torch.Tensor:
+    """Add the stored bias before rounding a ggml result to the input dtype."""
+
+    bias = module.bias
+    if bias is not None and output.dtype in (torch.float16, torch.bfloat16):
+        # A low-precision ggml output has already rounded the dot product.
+        # Recompute only this biased case with a temporary FP32 decoded weight
+        # so cancellation and out-of-range FP32 bias remain representable.
+        with torch.autocast(device_type=x_flat.device.type, enabled=False):
+            weight = module.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+            output = x_flat.float() @ weight
+            output = output + bias.to(device=x_flat.device, dtype=torch.float32)
+            del weight
+        return output.to(x_flat.dtype)
+
+    if output.device != x_flat.device:
+        output = output.to(device=x_flat.device)
+    if bias is not None:
+        output = output + bias.to(device=output.device, dtype=output.dtype)
+    return output.to(x_flat.dtype)
+
+
 class GGUFCppKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CPU]
     SUPPORTS_METHODS = [METHOD.GGUF]
@@ -896,10 +920,12 @@ class GGUFCppKernel(GGUFTorchLinear):
             out_features=self.out_features,
         )
 
-    def _forward_torch_cpu(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_torch_cpu(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if self._should_use_fused_k_forward(x_flat):
-            return self._forward_fused_k(x_flat)
-        return self._forward_dequant_matmul(x_flat)
+            return self._forward_fused_k(x_flat, bias=bias)
+        return self._forward_dequant_matmul(x_flat, bias=bias)
 
     def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
@@ -913,10 +939,14 @@ class GGUFCppKernel(GGUFTorchLinear):
         if cached is None:
             try:
                 ggml_time = self._benchmark_forward_runner(
-                    lambda: self._forward_ggml_cpu(x_flat), device=x_flat.device
+                    lambda: _finish_ggml_output(
+                        self, x_flat, self._forward_ggml_cpu(x_flat)
+                    ),
+                    device=x_flat.device,
                 )
                 torch_time = self._benchmark_forward_runner(
-                    lambda: self._forward_torch_cpu(x_flat), device=x_flat.device
+                    lambda: self._forward_torch_cpu(x_flat, bias=self.bias),
+                    device=x_flat.device,
                 )
                 cached = ggml_time <= torch_time
             except Exception:
@@ -942,17 +972,9 @@ class GGUFCppKernel(GGUFTorchLinear):
             )
 
         if self._use_ggml_cpu_matmul(x_flat):
-            output = self._forward_ggml_cpu(x_flat)
+            output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
         else:
-            output = self._forward_torch_cpu(x_flat)
-        if output.dtype != x_flat.dtype:
-            output = output.to(dtype=x_flat.dtype)
-
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+            output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
@@ -1095,14 +1117,7 @@ class GGUFCudaKernel(GGUFTorchLinear):
             plan,
             cached=cached_plan is not None,
         )
-        if output.device != x_flat.device or output.dtype != x_flat.dtype:
-            output = output.to(device=x_flat.device, dtype=x_flat.dtype)
-
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+        output = _finish_ggml_output(self, x_flat, output)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
