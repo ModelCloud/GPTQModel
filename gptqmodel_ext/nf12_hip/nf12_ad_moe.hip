@@ -334,13 +334,18 @@ __global__ void moe_grouped_operands_kernel(const __hip_bfloat16* __restrict__ x
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     for (int32_t e = 0; e < num_experts; ++e) group_ends[e] = s_ends[e];
   }
+  // Without a gather there is nothing to copy: the CUDA build publishes the
+  // ends and returns (csrc/moe/grouped.cu). x and x_out are optional in that
+  // mode, so falling through would read and write caller buffers that the
+  // contract does not require to exist.
+  if (gather == nullptr) return;
   const int32_t total = s_ends[num_experts - 1];
   const int64_t vecs = k / 8;
   for (int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; idx < int64_t(total) * vecs;
        idx += int64_t(gridDim.x) * blockDim.x) {
     const int64_t p = idx / vecs;
     const int64_t c = idx - p * vecs;
-    const int64_t in = (gather != nullptr) ? int64_t(gather[p]) / gather_div : p;
+    const int64_t in = int64_t(gather[p]) / gather_div;
     reinterpret_cast<uint4*>(x_out + p * ldo)[c] = reinterpret_cast<const uint4*>(x + in * ldx)[c];
   }
 }
@@ -433,11 +438,13 @@ hipError_t nf12_ad_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_
                            global_hist != nullptr ? 0u : static_cast<unsigned>(smem), stream>>>(
       topk_ids, num_assignments, static_cast<int32_t>(num_experts), chunk, blocks, counts,
       global_hist);
-  if (hipGetLastError() != hipSuccess) return hipGetLastError();
+  // Read the launch status once: hipGetLastError clears the error, so calling
+  // it again in the return statement would report success for a failed launch.
+  if (hipError_t err = hipGetLastError(); err != hipSuccess) return err;
   moe_align_scan_kernel<<<1, kAlignThreads, 0, stream>>>(counts, totals, blocks,
                                                         static_cast<int32_t>(num_experts),
                                                         expert_offsets_out);
-  if (hipGetLastError() != hipSuccess) return hipGetLastError();
+  if (hipError_t err = hipGetLastError(); err != hipSuccess) return err;
   const int bits = num_experts > 1 ? 64 - __builtin_clzll(static_cast<uint64_t>(num_experts - 1)) : 0;
   moe_align_scatter_kernel<<<static_cast<unsigned>(blocks), kAlignThreads, 0, stream>>>(
       topk_ids, num_assignments, static_cast<int32_t>(num_experts), chunk, blocks, counts,
