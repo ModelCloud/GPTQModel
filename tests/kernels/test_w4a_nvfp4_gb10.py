@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear, _swizzle_scales, nvfp4_input
-from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_pack_and_swizzle
+from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_decode, nvfp4_pack_and_swizzle
 from gptqmodel.quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     nvfp4_block_qdq,
@@ -410,6 +410,35 @@ def test_fused_nvfp4_pack_matches_torch_for_strided_input(recipe, layout, dtype)
     torch.cuda.synchronize()
     assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
     assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("layout", ["codes_rows", "codes_columns", "scales_rows", "scales_columns"])
+def test_nvfp4_decode_accepts_strided_packed_operands(layout):
+    generator = torch.Generator(device="cuda").manual_seed(1281)
+    x = torch.randn((7, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
+    x[0, :16] = 0
+    global_scale = torch.tensor(0.03125, device="cuda")
+    codes, scales = nvfp4_pack_and_swizzle(x, global_scale)
+    source = codes if layout.startswith("codes") else scales
+    if layout.endswith("rows"):
+        storage = torch.empty((source.shape[0], source.shape[1] + 8), device="cuda", dtype=source.dtype)
+        view = storage[:, :source.shape[1]]
+    else:
+        storage = torch.empty((source.shape[0], source.shape[1] * 2), device="cuda", dtype=source.dtype)
+        view = storage[:, ::2]
+    view.view(torch.uint8).copy_(source.view(torch.uint8))
+    assert not view.is_contiguous()
+
+    actual = nvfp4_decode(
+        view if layout.startswith("codes") else codes,
+        view if layout.startswith("scales") else scales,
+        global_scale, x.shape[1], torch.float32,
+    )
+    expected = _independent_nvfp4_qdq(x, global_scale)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 @GLUON_FP8
