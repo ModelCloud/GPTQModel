@@ -1701,6 +1701,17 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if (
+            x_flat.device.type == "cpu"
+            and x_flat.dtype in (torch.float16, torch.bfloat16)
+            and bias is not None
+        ):
+            weight = self.dequantize_weight(
+                device=x_flat.device,
+                dtype=torch.float32,
+            )
+            output = torch.mm(x_flat.float(), weight)
+            return (output + bias.float()).to(x_flat.dtype)
         if self._use_fp32_gguf_weight(x_flat.dtype, device=x_flat.device):
             # Keep the temporary dense fallback wide until the output
             # (including bias) is rounded once.
