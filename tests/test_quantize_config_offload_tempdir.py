@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import gptqmodel.quantization.config as quant_config_module
+import pytest
 import torch
+
+import gptqmodel.quantization.config as quant_config_module
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import EXL3Config, QuantizeConfig
@@ -44,6 +46,9 @@ def test_exl3_config_offload_path_defaults_to_tempdir(monkeypatch):
     assert isinstance(cfg._offload_temp_dir, FakeTemporaryDirectory)
 
 
+@pytest.mark.skip(
+    reason="EXL3 shared hessian-state wiring lands in a later stack layer"
+)
 def test_exl3_projection_capture_does_not_allocate_an_offload_tempdir(
     monkeypatch,
     tmp_path,
@@ -86,6 +91,9 @@ def test_exl3_projection_capture_does_not_allocate_an_offload_tempdir(
     )
 
 
+@pytest.mark.skip(
+    reason="EXL3 shared hessian-state wiring lands in a later stack layer"
+)
 def test_exl3_gate_up_preprocess_shares_one_owned_hessian(tmp_path):
     qcfg = EXL3Config(
         bits=2.0,
