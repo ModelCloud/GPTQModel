@@ -1913,9 +1913,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             output = self._forward_fused_k(x_flat, bias=self.bias)
         else:
             bias = self.bias
-            if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-                bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+            if bias is not None and bias.device != x_flat.device:
+                bias = bias.to(device=x_flat.device)
             output = self._forward_dequant_matmul(x_flat, bias=bias)
+            if output.dtype != x_flat.dtype:
+                output = output.to(dtype=x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
