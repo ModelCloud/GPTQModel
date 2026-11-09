@@ -43,8 +43,8 @@ from ..utils.looper_helpers import (
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
-from .input_cache import TensorLifetimeDiagnostic
 from .extension import LoopStep
+from .input_cache import TensorLifetimeDiagnostic
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 

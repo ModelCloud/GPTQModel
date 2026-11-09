@@ -18,8 +18,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, field, replace
 from contextlib import nullcontext
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre

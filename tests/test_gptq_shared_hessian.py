@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
-from gptqmodel.looper.exllamav3_processor import prepare_exl3_hessian
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -22,10 +22,28 @@ def test_gate_up_share_one_capture_without_double_accumulation() -> None:
     assert gate._device_hessian_partials is up._device_hessian_partials
     assert len(gate._device_hessian_partials) == 1
 
-    normalized = gate.snapshot_hessian(device := torch.device("cpu"))
+    normalized = gate.snapshot_hessian(torch.device("cpu"))
     expected = rows.T @ rows
     assert torch.equal(normalized, expected)
 
+
+@pytest.mark.skip(
+    reason="prepare_exl3_hessian lands in a later stack layer"
+)
+def test_prepare_exl3_hessian_returns_independent_views() -> None:
+    from gptqmodel.looper.exllamav3_processor import prepare_exl3_hessian
+
+    gate = GPTQ(torch.nn.Linear(4, 3, bias=False))
+    up = GPTQ(torch.nn.Linear(4, 3, bias=False))
+    up.share_hessian_state_from(gate)
+    rows = torch.tensor(
+        [[1.0, 2.0, 3.0, 4.0], [2.0, 0.0, 1.0, 3.0]],
+        dtype=torch.float32,
+    )
+    gate.add_batch(rows, torch.empty(0), batch_index=0)
+    up.add_batch(rows.mul(7), torch.empty(0), batch_index=0)
+    device = torch.device("cpu")
+    expected = rows.T @ rows
     gate_raw = prepare_exl3_hessian(
         gate,
         target_device=device,

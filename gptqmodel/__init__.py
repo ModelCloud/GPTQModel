@@ -244,6 +244,18 @@ def _default_cpu_workers() -> int:
     return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
 
 
+def _default_cuda_workers() -> int:
+    """Return the per-CUDA worker count, respecting an explicit env override."""
+
+    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
+    if env_workers is not None:
+        try:
+            return max(1, int(env_workers))
+        except ValueError:
+            pass
+    return 4
+
+
 def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
@@ -254,7 +266,7 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": 4,
+            "cuda:per": _default_cuda_workers(),
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,

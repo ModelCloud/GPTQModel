@@ -623,7 +623,6 @@ class ForwardExecutor:
             forward_devices = self._filter_forward_devices(devices)
 
             device_segments: Dict[torch.device, List[int]] = {}
-            segment_start = 0
             num_devices = len(forward_devices)
 
             # Check if balanced mode is active - if so, assign batches where data already resides
