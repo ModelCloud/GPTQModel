@@ -1,5 +1,4 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
-// SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -25,5 +24,18 @@ inline bool valid_moe_shape(int64_t experts, int64_t n, int64_t k) {
 // Row-major BF16 accessed with 16-byte vectors; callers also bound row counts.
 inline bool valid_bf16_matrix(const void* p, int64_t cols, int64_t ld) {
   return p != nullptr && aligned16(p) && ld >= cols && ld % 8 == 0;
+}
+
+inline bool valid_moe_linear_buffers(const void* x, int64_t ldx, const int32_t* gather,
+                                     int64_t gather_div, const int32_t* scatter,
+                                     const int64_t* offsets, int64_t assignments,
+                                     const float* scale, void* out, int64_t ldy,
+                                     int64_t n, int64_t k) {
+  if (assignments < 0 || assignments > std::numeric_limits<int32_t>::max() || gather_div < 1 ||
+      !aligned(gather, 4) || !aligned(scatter, 4) || !aligned(scale, 4) || !aligned(offsets, 8)) {
+    return false;
+  }
+  return assignments == 0 || (offsets != nullptr && valid_bf16_matrix(x, k, ldx) &&
+                              valid_bf16_matrix(out, n, ldy));
 }
 }  // namespace nf12_ad::validation

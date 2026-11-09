@@ -39,6 +39,36 @@ def native():
     return hip, lib
 
 
+@pytest.mark.parametrize("magnitude,bias_value", [(2.**25, 1.), (1., 2.**-25), (2.**127, 2.**127)])
+def test_split_k_bias_follows_complete_reduction(native, magnitude, bias_value):
+    hip, _ = native
+    m, n, k = 16, 16, 512
+    w = torch.zeros((n, k), device="cuda", dtype=torch.bfloat16)
+    w[:, 0], w[:, 64] = magnitude, -magnitude
+    x = torch.ones((m, k), device="cuda", dtype=torch.bfloat16)
+    bias = torch.full((n,), bias_value, device="cuda", dtype=torch.bfloat16)
+    packed, escapes, base = hip.encode(w)
+    # The two exactly representable products cancel, leaving bias unchanged.
+    for _ in range(2):
+        out = hip.linear(x, packed, escapes, int(base), bias)
+        assert bool(out.isfinite().all())
+        assert torch.equal(out.view(torch.int16), bias.expand(m, n).contiguous().view(torch.int16))
+
+
+def test_native_decode_grid_overflow_is_invalid_value(native):
+    _, lib = native
+    experts, n, k = 65536, 16, 64
+    packed = torch.empty((experts, n, k * 3 // 2), device="cuda", dtype=torch.uint8)
+    offsets = torch.zeros(experts + 1, device="cuda", dtype=torch.int64)
+    bases = torch.zeros(experts, device="cuda", dtype=torch.uint8)
+    out = torch.full((experts, n, k), -7., device="cuda", dtype=torch.bfloat16)
+    assert lib.nf12_ad_moe_decode(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(),
+                                  experts, n, k, None, 0, 0, n, out.data_ptr(), k,
+                                  torch.cuda.current_stream().cuda_stream) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
+
+
 @pytest.mark.parametrize("row0,rows,ldo", [
     (16, 16, 64), (0, 32, 64), (32, 0, 64),
     (0, 16, 0), (0, 16, 56), (0, 16, 65),
@@ -213,7 +243,7 @@ def test_native_decode_grid_x_above_32767(native):
     assert bool((decoded == 1).all())
 
 
-@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048560])
+@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048545, 1048560, 2097120])
 def test_native_wmma_grid_y_boundary(native, count):
     _, lib = native
     n, k = 16, 64
@@ -232,13 +262,9 @@ def test_native_wmma_grid_y_boundary(native, count):
         out.data_ptr(), n, n, k, torch.cuda.current_stream().cuda_stream,
     )
     torch.cuda.synchronize()
-    if (count + 15) // 16 + 1 > 65535:
-        assert rc == 801  # hipErrorNotSupported: no launch or output writes.
-        assert bool((guarded == -7).all())
-    else:
-        assert rc == 0
-        assert bool((out == k).all())  # Exact BF16 oracle: sum of 64 ones.
-        assert bool((guarded[[0, -1]] == -7).all())
+    assert rc == 0
+    assert bool((out == k).all())  # Exact BF16 oracle: sum of 64 ones.
+    assert bool((guarded[[0, -1]] == -7).all())
 
 
 def test_native_empty_align_with_no_workspace(native):
@@ -281,3 +307,54 @@ def test_encode_scheduling_preserves_all_bytes(native, super_atoms):
     assert torch.equal(packed.cpu(), expected_packed)
     assert torch.equal(escapes.cpu(), expected_escapes)
     assert torch.equal(hip.decode(packed, escapes, base).cpu().view(torch.int16), bits)
+
+
+@pytest.mark.parametrize("twin", [False, True])
+@pytest.mark.parametrize("bad", ["k_zero", "k_tail", "n_zero", "ldx", "ldy", "gather_div",
+                                "negative_count", "large_count", "packed", "x", "out", "offsets",
+                                "alignment", "empty"])
+def test_native_moe_linear_matches_shared_validation(native, twin, bad):
+    hip, abi = native
+    p, i = C.c_void_p, C.c_int64
+    fn = abi.nf12_ad_moe_linear_bf16t if twin else abi.nf12_ad_moe_linear
+    fn.restype = C.c_int
+    fn.argtypes = ([p] if twin else [p] * 4) + [C.c_int32, p, i, p, i, p, p, i, p, p, i, i, i, p]
+    w = torch.ones((1, 16, 64), device="cuda", dtype=torch.bfloat16)
+    from types import SimpleNamespace
+
+    if twin:
+        weight = w.view(torch.uint8)  # Uniform BF16 values are layout invariant.
+    else:
+        packed_data, escapes, base = hip.encode(w[0])
+        weight = SimpleNamespace(
+            packed=packed_data, escapes=escapes,
+            escape_offsets=torch.tensor([0, escapes.shape[0]], device="cuda", dtype=torch.int64),
+            exp_base=torch.tensor([base], device="cuda", dtype=torch.uint8),
+        )
+    packed = weight.data_ptr() if twin else weight.packed.data_ptr()
+    x = torch.ones((1, 72), device="cuda", dtype=torch.bfloat16)
+    out = torch.full((1, 16), -7., device="cuda", dtype=torch.bfloat16)
+    offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int64)
+    n, k, ldx, ldy, div, count = 16, 64, 72, 16, 1, 1
+    xp, yp, off = x.data_ptr(), out.data_ptr(), offsets.data_ptr()
+    if bad == "k_zero": k = 0
+    elif bad == "k_tail": k = 65
+    elif bad == "n_zero": n = 0
+    elif bad == "ldx": ldx = 0
+    elif bad == "ldy": ldy = 0
+    elif bad == "gather_div": div = 0
+    elif bad == "negative_count": count = -1
+    elif bad == "large_count": count = 2**31
+    elif bad == "packed": packed = None
+    elif bad == "x": xp = None
+    elif bad == "out": yp = None
+    elif bad == "offsets": off = None
+    elif bad == "alignment": xp += 2
+    else:
+        count, xp, yp, off = 0, None, None, None
+    prefix = [packed] if twin else [packed, weight.escapes.data_ptr(),
+                                    weight.escape_offsets.data_ptr(), weight.exp_base.data_ptr()]
+    expected = 0 if bad == "empty" else 1
+    assert fn(*prefix, 1, xp, ldx, None, div, None, off, count, None, yp, ldy, n, k, torch.cuda.current_stream().cuda_stream) == expected
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())

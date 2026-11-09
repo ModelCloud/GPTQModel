@@ -513,7 +513,7 @@ hipError_t nf12_ad_moe_decode(const uint8_t* packed, const uint4* escapes,
   }
   const int64_t blocks = rows / kSuperAtomRows;
   if (blocks > std::numeric_limits<int32_t>::max()) return hipErrorInvalidValue;
-  if (num_experts > 0xffff) return hipErrorNotSupported;
+  if (num_experts > 0xffff) return hipErrorInvalidValue;
   const dim3 grid(static_cast<unsigned>(blocks), static_cast<unsigned>(num_experts), 1);
   moe_decode_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(
       reinterpret_cast<const uint4*>(packed), escapes, escape_offsets, exp_base, num_experts, n, k,
