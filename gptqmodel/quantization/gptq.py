@@ -2237,8 +2237,15 @@ class GPTQ:
 
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization:
-            for i1 in range(0, self.columns, blocksize):
-                i2 = min(i1 + blocksize, self.columns)
+            # Keep each dynamic group within a block. A group that straddles
+            # Q1 would write beyond its bounds and append duplicate metadata.
+            mock_blocksize = (
+                self.qcfg.group_size
+                if not self.qcfg.static_groups and self.qcfg.group_size > 0
+                else blocksize
+            )
+            for i1 in range(0, self.columns, mock_blocksize):
+                i2 = min(i1 + mock_blocksize, self.columns)
                 count = i2 - i1
 
                 W1 = W[:, i1:i2]
@@ -2250,7 +2257,7 @@ class GPTQ:
                         for group_start in range(i1, i2, self.qcfg.group_size):
                             group_end = min(
                                 group_start + self.qcfg.group_size,
-                                self.columns,
+                                i2,
                             )
                             self.quantizer.find_params(
                                 W[:, group_start:group_end],
@@ -2271,6 +2278,8 @@ class GPTQ:
                             idx = i1 + i
                             if self.qcfg.desc_act:
                                 idx = perm[idx]
+                            elif self.qcfg.act_group_aware and use_hessian:
+                                idx = final_perm[idx]
                             self.quantizer = groups[idx // self.qcfg.group_size]
                             q = self.quantizer.quantize(
                                 W[:, column : column + 1]
