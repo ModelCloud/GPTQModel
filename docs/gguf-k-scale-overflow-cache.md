@@ -1,4 +1,4 @@
-# GGUF K-scale overflow cache
+# GGUF packed scale overflow cache
 
 Q4_K and Q5_K reconstruction can multiply a packed scale by a code large
 enough to exceed FP16 range, even when the final weight is finite after
@@ -158,3 +158,63 @@ the forward.
 
 This guard was extended in
 [PR #3670](https://github.com/ModelCloud/GPTQModel/pull/3670).
+
+## Q4_0 and Q8_0 finite-output range
+
+Q4_0 and Q8_0 decode a signed integer code multiplied by an FP16 block scale.
+Their largest code magnitudes are `8` and `128` respectively. The decoded
+weight can exceed FP16 even when a small FP16 activation yields a finite dot.
+The existing packed-source keyed overflow answer now covers these formats.
+The historical `_k_scale_overflows` name is retained for callers, but its
+bound uses each format's code range. The dense path checks a valid cached
+answer before reshaping packed blocks; it only scans block scales on a miss.
+
+```mermaid
+flowchart TD
+    A["GGUFTorchLinear.forward selects CUDA dense or chunked path"] --> B{"Path?"}
+    B -- "Dense" --> C["_k_scale_overflows called without blocks"]
+    B -- "Chunked" --> D["_reshape_blocks"]
+    D --> E["_k_scale_overflows called with blocks"]
+    C --> F["tensor_cache_key of qweight"]
+    E --> F
+    F --> G{"Valid cached answer?"}
+    G -- "Yes" --> H{"Decoded code times block scale can exceed FP16?"}
+    G -- "No" --> I["Read packed d and bound by code magnitude 8 or 128"]
+    I --> M["Cache boolean by source key and dtype"]
+    M --> H
+    H -- "Yes" --> J["Reconstruct and dot in FP32; round output once"]
+    H -- "No" --> K["Keep ordinary FP16 operand path"]
+    L["Packed weight mutation"] --> F
+    A -. "Old FP16 decoded weight" .-> X["Infinity despite finite FP64 dot product"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Dense fallback | `gguf.py:1687-1703` selected FP32 for BF16 and FP16 K-quants only | `_forward_dequant_matmul` checks Q4_0/Q8_0 packed scales too, then uses a temporary FP32 weight only when the bound requires it |
+| Chunked CUDA | `gguf.py:1773-1780` selected FP32 for Q4_K/Q5_K/Q6_K only | `_forward_fused_k` includes Q4_0/Q8_0 and reconstructs bounded FP32 chunks for wide weights |
+| Cached decision | `gguf.py:1731-1759` computed only K-quant bounds | `_compute_k_scale_overflow` also bounds `|d| × 8` or `|d| × 128`; `_k_scale_overflows` skips `_reshape_blocks` on a dense cache hit |
+
+On the NVIDIA GB10, the old Q4_0 and Q8_0 dense and chunked CUDA paths
+returned infinity for independent NumPy-decoded FP64 dot products of `35000`
+and `31750` respectively. The corrected visible FP16 outputs are `35008` and
+`31744`. GPU tests also cover the negative code extrema, one/eight rows,
+bias, repeated forwards, packed-weight replacement, and the absence of a
+persistent expanded weight. Ordinary weights retain FP16 operands.
+
+For K=N=1024 and one resident FP16 row on the same GB10, five warmups and
+the median of seven groups of 20 synchronized wall-clock forwards measured:
+
+| Format | Path | Ordinary before → after | Wide before → after | New wide peak allocator delta |
+| --- | --- | ---: | ---: | ---: |
+| Q4_0 | Dense | 0.1592 → 0.1666 ms | 0.1573 → 0.1782 ms | 37,756,928 bytes |
+| Q4_0 | Chunked | 0.1512 → 0.1568 ms | 0.1503 → 0.1716 ms | 37,756,928 bytes |
+| Q8_0 | Dense | 0.1188 → 0.1270 ms | 0.1184 → 0.1361 ms | 37,756,928 bytes |
+| Q8_0 | Chunked | 0.1123 → 0.1172 ms | 0.1125 → 0.1344 ms | 37,756,928 bytes |
+
+The old wide outputs were infinity; the new wide outputs were finite FP16
+`35008` for Q4_0 and `31744` for Q8_0. Ordinary outputs stayed `1024`.
+Ordinary peak allocator deltas were 35,655,680 bytes for dense and 35,659,776
+bytes for chunked. The extra wide FP32 weight or chunk is temporary and is
+not retained after inference.

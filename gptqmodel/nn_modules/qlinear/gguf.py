@@ -1685,14 +1685,13 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if x_flat.dtype == torch.bfloat16 or (
-            x_flat.dtype == torch.float16 and self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K")
+            x_flat.dtype == torch.float16 and self.gguf_tensor_qtype in ("Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K")
         ):
             # BF16 weight rounding can amplify cancellation for any GGUF
-            # format. FP16 K-quants need a wide path for out-of-range terms.
+            # format. FP16 needs a wide path for out-of-range decoded terms.
             use_fp32 = x_flat.dtype == torch.bfloat16
             if not use_fp32:
-                blocks, _, _ = self._reshape_blocks(device=x_flat.device)
-                use_fp32 = self._k_scale_overflows(blocks, x_flat.dtype)
+                use_fp32 = self._k_scale_overflows(None, x_flat.dtype, device=x_flat.device)
             if use_fp32:
                 # Keep the temporary dense fallback wide until the output
                 # (including bias) is rounded once.
@@ -1713,7 +1712,13 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         budget_blocks = self.gguf_fused_chunk_bytes // max(1, bytes_per_block)
         return min(num_blocks, max(1, budget_blocks))
 
-    def _k_scale_overflows(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
+    def _k_scale_overflows(
+        self,
+        blocks: torch.Tensor | None,
+        target_dtype: torch.dtype,
+        *,
+        device: torch.device | None = None,
+    ) -> bool:
         # Cache by the packed source, not by this temporary blocks view. The
         # shared key tracks normal in-place writes and supports inference
         # tensors, which have no version counter and require an explicit clear.
@@ -1721,15 +1726,22 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         if source_key != self._k_scale_overflow_cache_source_key:
             self._k_scale_overflow_cache.clear()
             self._k_scale_overflow_cache_source_key = source_key
-        key = (blocks.shape, target_dtype)
+        shape = (
+            tuple(blocks.shape)
+            if blocks is not None
+            else (self.qweight.shape[0], self.qweight.shape[1] // self.gguf_type_size, self.gguf_type_size)
+        )
+        key = (shape, target_dtype)
         cached = self._k_scale_overflow_cache.get(key)
         if cached is None:
+            if blocks is None:
+                blocks, _, _ = self._reshape_blocks(device=device)
             cached = self._compute_k_scale_overflow(blocks, target_dtype)
             self._k_scale_overflow_cache[key] = cached
         return cached
 
     def _compute_k_scale_overflow(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        """True when a K-quant decoded term can leave `target_dtype` range.
+        """True when a guarded GGUF decoded term can leave the target range.
 
         Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`. Both terms
         peak at `d_max * 63 * code_max`, with `code_max` 15 for Q4_K and 31
@@ -1742,9 +1754,19 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         Q6_K uses signed codes in [-32, 31]. Its per-block bound multiplies
         |d| by the largest absolute signed subscale and 32, allowing the
         chunked and dense CUDA paths to keep finite dots for wide weights.
+
+        Q4_0 and Q8_0 only multiply their FP16 scale by a signed code. Their
+        code magnitudes are bounded by 8 and 128 respectively, so inspecting
+        the packed block scales detects out-of-range decoded weights without
+        dequantizing a full layer.
         """
         if not target_dtype.is_floating_point:
             return True
+        if self.gguf_tensor_qtype in ("Q4_0", "Q8_0"):
+            d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
+            # Signed codes reach -8 in Q4_0 and -128 in Q8_0.
+            code_max = 8 if self.gguf_tensor_qtype == "Q4_0" else 128
+            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
         if self.gguf_tensor_qtype == "Q6_K":
             d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).float().abs()
             subscale = blocks[..., 192:208].contiguous().view(torch.int8).float().abs().amax(dim=-1)
@@ -1770,14 +1792,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         # violate the existing 2e-3 fusion contract. Keep that path wide;
         # FP16 retains exact source values and can use the tensor-core path.
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
-        # K-quants need wide reconstruction when a decoded term can leave the
+        # These formats need wide reconstruction when a decoded term can leave the
         # target range; otherwise FP16 reconstruction keeps the fast path.
-        k_wide = (
-            self.gguf_tensor_qtype in ("Q4_K", "Q5_K", "Q6_K")
+        wide_weight = (
+            self.gguf_tensor_qtype in ("Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K")
             and not (is_cpu or target_dtype == torch.bfloat16)
             and self._k_scale_overflows(blocks, target_dtype)
         )
-        use_fp32_operands = is_cpu or target_dtype == torch.bfloat16 or k_wide
+        use_fp32_operands = is_cpu or target_dtype == torch.bfloat16 or wide_weight
         weight_dtype = accum_dtype if use_fp32_operands else target_dtype
         chunk_blocks = self._fused_chunk_blocks(num_blocks, accum_dtype)
 
