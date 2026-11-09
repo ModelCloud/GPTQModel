@@ -2365,7 +2365,7 @@ def ModelLoader(cls):
                     or hasattr(module, "gguf_tensor_qtype")
                 ):
                     keep_in_fp32_modules.append(f"{prefix}bias")
-                    if isinstance(module, GGUFTorchLinear):
+                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear)):
                         fp32_bf16_buffer_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,

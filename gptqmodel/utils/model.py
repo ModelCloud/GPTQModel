@@ -2678,9 +2678,10 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
 
 
 def _restore_checkpoint_buffers(
-    model, checkpoint, dtypes: dict[str, torch.dtype], *, exact_source_names: set[str] = frozenset(),
+    model, checkpoint, dtypes: dict[str, torch.dtype],
+    *, exact_source_names: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Restore checkpoint-owned buffers that Accelerate cast during loading."""
+    """Restore checkpoint buffers one tensor at a time after Accelerate casts."""
     names = set(dtypes)
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -2709,10 +2710,27 @@ def _restore_checkpoint_buffers(
         files = {checkpoint: names}
 
     restored: set[str] = set()
+
+    def restore_one(name: str, value: torch.Tensor) -> None:
+        module_name, _, buffer_name = name.rpartition(".")
+        module = model.get_submodule(module_name) if module_name else model
+        current = module._buffers.get(buffer_name)
+        if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
+            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r}: missing or mismatched model slot")
+        if current.device.type == "meta":
+            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r} on a meta device")
+        if name in exact_source_names and value.dtype != dtypes[name]:
+            raise RuntimeError(
+                f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
+            )
+        module._buffers[buffer_name] = value.to(device=current.device, dtype=dtypes[name])
+        restored.add(name)
+
     for path, selected in files.items():
         if path.endswith(".safetensors"):
             with safe_open(path, framework="pt", device="cpu") as handle:
-                values = {name: handle.get_tensor(name) for name in selected & set(handle.keys())}
+                for name in sorted(selected & set(handle.keys())):
+                    restore_one(name, handle.get_tensor(name))
         else:
             try:
                 state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
@@ -2720,22 +2738,8 @@ def _restore_checkpoint_buffers(
                 if "mmap" not in str(error):
                     raise
                 state = torch.load(path, map_location="cpu", weights_only=True)
-            values = {name: state[name] for name in selected & set(state)}
-
-        for name, value in values.items():
-            module_name, _, buffer_name = name.rpartition(".")
-            module = model.get_submodule(module_name) if module_name else model
-            current = module._buffers.get(buffer_name)
-            if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
-                raise RuntimeError(f"Cannot restore checkpoint buffer {name!r}: missing or mismatched model slot")
-            if current.device.type == "meta":
-                raise RuntimeError(f"Cannot restore checkpoint buffer {name!r} on a meta device")
-            if name in exact_source_names and value.dtype != dtypes[name]:
-                raise RuntimeError(
-                    f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
-                )
-            module._buffers[buffer_name] = value.to(device=current.device, dtype=dtypes[name])
-            restored.add(name)
+            for name in sorted(selected & set(state)):
+                restore_one(name, state[name])
 
     missing = names - restored
     if missing:

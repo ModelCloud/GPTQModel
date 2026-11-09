@@ -14,9 +14,10 @@ flowchart TD
     S --> B["load_checkpoint_in_model_then_tie_weights"]
     B --> C["accelerate.load_checkpoint_in_model"]
     C --> D{"dtype is BF16?"}
-    D -- No --> T["_tie_weights_after_checkpoint_load"]
-    D -- Yes --> F["_restore_fp32_checkpoint_buffers"]
-    F --> G{"Scale exists, target shape matches<br/>and target is materialized?"}
+    D -- No --> P["_restore_checkpoint_buffers: packed weights only"]
+    P --> T["_tie_weights_after_checkpoint_load"]
+    D -- Yes --> R["_restore_checkpoint_buffers: packed weights and FP32 metadata"]
+    R --> G{"Scale exists, target shape matches<br/>and target is materialized?"}
     G -- Yes --> H["Assign exact FP32 scale on target device"]
     H --> T
     G -- No --> X["RuntimeError: missing, mismatched, or meta buffer"]
@@ -27,10 +28,10 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | FP16 scale load | `keep_in_fp32_modules` preserved FP32 (`gptqmodel/models/loader.py:2351`) | Same Accelerate path |
-| BF16 scale load | The loader passed `keep_in_fp32_modules` to Accelerate, which still cast the scale to BF16 (`gptqmodel/models/loader.py:2355`) | The loader adds the scale to `fp32_bf16_buffer_names`; `_restore_fp32_checkpoint_buffers` rereads the checkpoint value |
+| BF16 scale load | The loader passed `keep_in_fp32_modules` to Accelerate, which still cast the scale to BF16 (`gptqmodel/models/loader.py:2355`) | The loader adds the scale to `fp32_bf16_buffer_names`; `_restore_checkpoint_buffers` rereads the checkpoint value |
 | Missing or mismatched scale | Could leave a default or rounded buffer | Raises `RuntimeError`; the model is not returned |
 
-The restore step reads selected `weight_scale_inv` tensors from a single
+For BF16, the restore step reads selected `weight_scale_inv` tensors from a single
 `.safetensors` file or the shards named by a `.safetensors.index.json` file.
 For single-file checkpoints, it reads the key-converted temporary file when a
 model definition remaps checkpoint keys. It validates each buffer's shape,
@@ -42,6 +43,7 @@ For example, an E5M2 code of `57344` with inverse scale `65792` produces
 `0.87109375` for BF16 input `1`. Rounding that scale to BF16 `65536` instead
 produces `0.875`, a measured relative difference of about `0.00448`.
 
-Packed FP8 weight dtype handling is outside this scale restoration flow.
+Packed weights and FP32 metadata share checkpoint selection and restoration;
+see [Packed FP8 weight lifecycle](fp8-packed-weight-lifecycle.md).
 
 Introduced in [PR #3741](https://github.com/ModelCloud/GPTQModel/pull/3741).

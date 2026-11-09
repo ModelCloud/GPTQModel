@@ -826,6 +826,8 @@ model.save(quant_path)
 
 See [FP8 inverse-scale checkpoint loading](docs/fp8-inverse-scale-checkpoint-loading.md)
 for how FP32 scales are preserved when loading a BF16 model.
+See [packed FP8 weight lifecycle](docs/fp8-packed-weight-lifecycle.md) for
+checkpoint reload, module moves, and persistent storage.
 
 ```py
 from gptqmodel import BACKEND, GPTQModel

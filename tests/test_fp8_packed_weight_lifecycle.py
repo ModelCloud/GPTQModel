@@ -77,11 +77,13 @@ def _assert_oracle_and_no_cache(model, payload, dtype, monkeypatch):
     reference_weight = weight.float() / expanded_scale
     oracle = (x.float() @ reference_weight.T + bias.float()).to(dtype)
     refs = []
+    temporary_bytes = []
     dequantize = model.proj.dequantize_weight
 
     def tracked_dequantize(*args, **kwargs):
         temporary = dequantize(*args, **kwargs)
         refs.append(weakref.ref(temporary))
+        temporary_bytes.append(temporary.numel() * temporary.element_size())
         return temporary
 
     monkeypatch.setattr(model.proj, "dequantize_weight", tracked_dequantize)
@@ -92,6 +94,7 @@ def _assert_oracle_and_no_cache(model, payload, dtype, monkeypatch):
     assert first.dtype == dtype
     torch.testing.assert_close(first, oracle, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(second, first, rtol=0, atol=0)
+    assert temporary_bytes == [4096, 4096]
     assert all(ref() is None for ref in refs)
     _assert_packed(model.proj, payload)
 
@@ -174,6 +177,38 @@ def test_fp8_reload_rejects_expanded_source_weight(tmp_path):
             keep_in_fp32_modules=["proj.weight_scale_inv", "proj.bias"],
             packed_fp8_buffer_dtypes={"proj.weight": torch.float8_e5m2},
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_reload_keeps_fp32_bias_for_cancellation(tmp_path, dtype):
+    packed = torch.zeros((32, 32), dtype=torch.float8_e5m2)
+    packed[:, 0] = -57344.0
+    payload = (
+        packed,
+        torch.ones((32,), dtype=torch.float32),
+        torch.full((32,), 65792.0, dtype=torch.float32),
+    )
+    checkpoint = _save_checkpoint(tmp_path, payload, sharded=False)
+    model = _Model()
+    load_checkpoint_in_model_then_tie_weights(
+        model,
+        checkpoint=str(checkpoint),
+        dtype=dtype,
+        device_map={"": "cpu"},
+        keep_in_fp32_modules=["proj.weight_scale_inv", "proj.bias"],
+        fp32_bf16_buffer_names=["proj.weight_scale_inv", "proj.bias"],
+        packed_fp8_buffer_dtypes={"proj.weight": torch.float8_e5m2},
+    )
+    x = torch.zeros((1, 32), dtype=dtype)
+    x[0, 0] = 1.1484375
+    oracle = (x[:, :1].float() * -57344.0 + 65792.0).expand(1, 32).to(dtype)
+
+    with torch.inference_mode():
+        actual = model(x)
+
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+    _assert_packed(model.proj, payload)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
