@@ -825,6 +825,47 @@ def test_fused_unpack_matches_torch_decode(rows, out):
     assert torch.equal(fused.view(torch.uint8), expected.view(torch.uint8))
 
 
+@pytest.mark.parametrize("layout", ["packed_rows", "packed_columns", "output_rows", "output_columns"])
+def test_fused_unpack_respects_strided_input_and_caller_output(layout):
+    if not w4a_kernels_available():
+        pytest.skip(_W4A_GPU_REASON)
+
+    rows, columns = 256, 64
+    generator = torch.Generator().manual_seed(1753)
+    packed = torch.randint(0, 2**31 - 1, (rows // 8, columns), generator=generator, dtype=torch.int64)
+    packed = packed.to(device="cuda", dtype=torch.int32)
+    expected = (unpack_int4_codes(packed.cpu()).to(torch.int16) - 8).to(torch.float8_e4m3fn).cuda()
+    argument = packed
+    output = torch.empty((rows, columns), device="cuda", dtype=torch.float8_e4m3fn)
+    untouched = None
+    if layout.startswith("packed"):
+        if layout.endswith("rows"):
+            storage = torch.empty((rows // 8, columns + 8), device="cuda", dtype=torch.int32)
+            argument = storage[:, :columns]
+        else:
+            storage = torch.empty((rows // 8, columns * 2), device="cuda", dtype=torch.int32)
+            argument = storage[:, ::2]
+        argument.copy_(packed)
+        assert not argument.is_contiguous()
+    else:
+        if layout.endswith("rows"):
+            storage = torch.empty((rows, columns + 8), device="cuda", dtype=torch.float8_e4m3fn)
+            output = storage[:, :columns]
+            untouched = storage[:, columns:]
+        else:
+            storage = torch.empty((rows, columns * 2), device="cuda", dtype=torch.float8_e4m3fn)
+            output = storage[:, ::2]
+            untouched = storage[:, 1::2]
+        storage.view(torch.uint8).fill_(0xA5)
+        assert not output.is_contiguous()
+
+    assert _fused_unpack()(argument, output) is output
+    torch.cuda.synchronize()
+    assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+    if untouched is not None:
+        assert bool((untouched.view(torch.uint8) == 0xA5).all())
+
+
 def test_fused_unpack_rejects_bad_arguments():
     """Wrong dtype/shape/device must be refused instead of silently decoded."""
     if not w4a_kernels_available():
