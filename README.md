@@ -1540,3 +1540,4 @@ The following reference pages document features proposed from the working fork.
 - [carry K3.1 source and bounded calibration adapters](docs/kimi-k31-calibration.md)
 - [add bounded native core calibration and EXL3 sources](docs/glm-core-calibration.md)
 - [carry native full-MTP alignment and source loading](docs/glm-native-mtp.md)
+- [carry Flash core and MTP calibration adapters](docs/glm-flash-native-calibration.md)
