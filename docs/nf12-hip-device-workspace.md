@@ -219,8 +219,11 @@ env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=2 PYTHON_GIL=0 \
 
 Result: **51 passed, 1 skipped in 25.84 seconds**.
 
-The multi-device test requires two visible AMD devices and is skipped under
-this isolation. CUDA, other AMD architectures, and full-model inference were
+The multi-device test requires two visible AMD devices and was skipped under
+that isolation. A second run with `HIP_VISIBLE_DEVICES=0,2` passed that case
+plus backend naming, bit validation, ROCm LLC, and kernel contract suites:
+**604 passed in 6.09 seconds**, with no skips. Together the runs cover 655
+passing cases. CUDA, other AMD architectures, and full-model inference were
 not revalidated by this sync.
 
 An isolated encode sample uses device-resident random BF16 weights, three
