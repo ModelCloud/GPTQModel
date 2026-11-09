@@ -63,6 +63,22 @@ class TestQuantTelemetry(unittest.TestCase):
         self.assertGreaterEqual(workers["cpu"], 2)
         self.assertLessEqual(workers["cpu"], 8)
 
+    def test_device_thread_pool_cuda_workers_env_override(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch.dict(os.environ, {"GPTQMODEL_CUDA_WORKERS": "5"}, clear=False):
+                _build_device_thread_pool()
+        self.assertEqual(mock_init.call_args.kwargs["workers"]["cuda:per"], 5)
+
+    def test_device_thread_pool_cuda_workers_invalid_override_is_ignored(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch.dict(
+                os.environ,
+                {"GPTQMODEL_CUDA_WORKERS": "not-a-number"},
+                clear=False,
+            ):
+                _build_device_thread_pool()
+        self.assertEqual(mock_init.call_args.kwargs["workers"]["cuda:per"], 4)
+
     def test_log_time_block_is_silent_by_default(self):
         with patch.dict(
             os.environ,

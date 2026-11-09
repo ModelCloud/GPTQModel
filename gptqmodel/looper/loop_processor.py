@@ -318,24 +318,57 @@ class LoopProcessor:
                     "or provide longer calibration samples."
                 )
 
-            # Calculate the average length of the average input_ids
-            total_input_ids_length = 0
-            max_input_id_length = 0
-            for row in calibration:
-                input_ids = row["input_ids"]
-                if isinstance(input_ids, torch.Tensor):
-                    if input_ids.dim() <= 2:
-                        input_ids_length = input_ids.shape[-1]
+            # A disk-backed calibration sequence can provide exact scalar
+            # accounting without being traversed merely for a warning.  This
+            # matters for MTP replay where one logical corpus expands to more
+            # than a million causal positions.
+            calibration_summary = getattr(
+                calibration, "gptqmodel_calibration_summary", None
+            )
+            if calibration_summary is not None:
+                if not isinstance(calibration_summary, dict):
+                    raise TypeError(
+                        "gptqmodel_calibration_summary must be a dictionary"
+                    )
+                summary_batch_count = calibration_summary.get("batch_count")
+                total_input_ids_length = calibration_summary.get(
+                    "input_ids_total_length"
+                )
+                max_input_id_length = calibration_summary.get(
+                    "input_ids_max_length"
+                )
+                if (
+                    isinstance(summary_batch_count, bool)
+                    or not isinstance(summary_batch_count, int)
+                    or summary_batch_count != len(calibration)
+                    or isinstance(total_input_ids_length, bool)
+                    or not isinstance(total_input_ids_length, int)
+                    or total_input_ids_length < 0
+                    or isinstance(max_input_id_length, bool)
+                    or not isinstance(max_input_id_length, int)
+                    or max_input_id_length < 0
+                ):
+                    raise ValueError(
+                        "gptqmodel_calibration_summary is inconsistent"
+                    )
+            else:
+                total_input_ids_length = 0
+                max_input_id_length = 0
+                for row in calibration:
+                    input_ids = row["input_ids"]
+                    if isinstance(input_ids, torch.Tensor):
+                        if input_ids.dim() <= 2:
+                            input_ids_length = input_ids.shape[-1]
+                        else:
+                            raise ValueError(
+                                "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                                    input_ids.dim()))
                     else:
-                        raise ValueError(
-                            "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
-                                input_ids.dim()))
-                else:
-                    input_ids_length = len(input_ids)
+                        input_ids_length = len(input_ids)
 
-                if input_ids_length > max_input_id_length:
-                    max_input_id_length = input_ids_length
-                total_input_ids_length += input_ids_length
+                    if input_ids_length > max_input_id_length:
+                        max_input_id_length = input_ids_length
+                    total_input_ids_length += input_ids_length
             avg = total_input_ids_length / len(calibration)
 
             if avg < min_calibration_dataset_input_ids_avg_length:
@@ -376,6 +409,20 @@ class LoopProcessor:
 
         if not calibration_dataset:
             return 0
+        calibration_summary = getattr(
+            calibration_dataset, "gptqmodel_calibration_summary", None
+        )
+        if isinstance(calibration_summary, dict):
+            total = calibration_summary.get("total_calibration_tokens")
+            if (
+                isinstance(total, bool)
+                or not isinstance(total, int)
+                or total < 0
+            ):
+                raise ValueError(
+                    "gptqmodel_calibration_summary has an invalid token total"
+                )
+            return total
         total = 0
         for row in calibration_dataset:
             if not isinstance(row, dict):
@@ -1033,6 +1080,59 @@ class LoopProcessor:
         """Override point for the main per-module quantization or capture step."""
 
         pass
+
+    def prepare_layer_replay(
+        self,
+        *,
+        model: BaseQModel,
+        layer_module: Module,
+        layer_index: int,
+        layer_count: int,
+        processed_modules: Dict[str, NamedModule],
+        is_lm_head_module: bool,
+    ) -> None:
+        """Finalize layer-wide processor decisions before authoritative replay.
+
+        Per-module quantization normally has no cross-module dependency. Mixed
+        bitrate selection is the exception: every K2 candidate in a layer must
+        be measured before a deterministic K3 quota can be assigned, while the
+        final mixed weights must be installed before the one propagation replay.
+        """
+
+        del (
+            model,
+            layer_module,
+            layer_index,
+            layer_count,
+            processed_modules,
+            is_lm_head_module,
+        )
+
+    def prepare_layer_post_quantize(
+        self,
+        *,
+        model: BaseQModel,
+        layer_module: Module,
+        layer_index: int,
+        processed_modules: Dict[str, NamedModule],
+        is_lm_head_module: bool,
+    ) -> None:
+        """Prepare processor-owned state for the containing module offload.
+
+        Most processors leave ordinary materialized parameters behind, so the
+        default is intentionally empty. Processors that defer dense runtime
+        weights until propagation replay may use this boundary to make a final
+        layer safe for generic model offload without reconstructing weights
+        that will immediately be replaced by packed modules.
+        """
+
+        del (
+            model,
+            layer_module,
+            layer_index,
+            processed_modules,
+            is_lm_head_module,
+        )
 
     # last step, after all loop processor is called
     # submodule_finalize is called in reverse after all next sequential processes are called
