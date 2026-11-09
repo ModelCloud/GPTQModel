@@ -166,6 +166,19 @@ def test_load_all_skips_cuda_only_extensions_on_rocm(monkeypatch):
         assert fakes[name].load_calls == 0
 
 
+def test_load_specific_rocm_error_overrides_stale_build_error(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    fakes["marlin_fp16"].error = "stale CUDA_HOME build failure"
+    monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: True)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", True)
+
+    with pytest.raises(RuntimeError, match="ROCm") as exc_info:
+        extension_api.load(name="marlin_fp16")
+
+    assert "stale CUDA_HOME" not in str(exc_info.value)
+    assert fakes["marlin_fp16"].load_calls == 0
+
+
 def test_load_all_skips_vptq_without_an_nvidia_cuda_device(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
     monkeypatch.setattr(vptq_utils, "_validate_vptq_build_support", lambda: False)
@@ -263,6 +276,7 @@ def test_load_aggregates_extension_failures(monkeypatch):
 def test_use_cache_false_requires_fresh_process_for_loaded_extensions(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
     fakes["qqq"].already_loaded = True
+    fakes["qqq"].error = "stale CUDA_HOME build failure"
 
     with pytest.raises(RuntimeError, match="Restart Python to force recompilation"):
         extension_api.load(name="qqq", use_cache=False)
