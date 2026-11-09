@@ -5,6 +5,9 @@ import hashlib
 import hmac
 import io
 import json
+import subprocess
+import sys
+import textwrap
 import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -260,6 +263,87 @@ def test_scheduler_reuses_next_free_slot_and_durably_resumes(tmp_path) -> None:
         "preflight_sha256": "a" * 64,
         "image_digest": "sha256:" + "b" * 64,
     }
+
+
+def test_assignment_publication_is_exclusive_and_resumes_authoritative_slot(tmp_path) -> None:
+    endpoints = [_endpoint("spark-a")]
+    slots = [_coordinator("cuda:0"), _coordinator("cuda:1")]
+    assignment_store = tmp_path / "assignments"
+    first = EXL3RemoteClient(
+        endpoints=endpoints,
+        token=b"secret",
+        coordinator_slots=slots,
+        timeout_seconds=1,
+        assignment_store_path=assignment_store,
+    )
+    second = EXL3RemoteClient(
+        endpoints=endpoints,
+        token=b"secret",
+        coordinator_slots=slots,
+        timeout_seconds=1,
+        assignment_store_path=assignment_store,
+    )
+    key = "model.layers.0.mlp.experts.0.gate_proj"
+
+    first._persist_assignment(key, "coordinator:cuda:0")
+    with pytest.raises(FileExistsError):
+        second._persist_assignment(key, "coordinator:cuda:1")
+
+    assert second._read_assignment(key) == "coordinator:cuda:0"
+    lease = second.acquire_slot(key)
+    try:
+        assert lease.slot == _coordinator("cuda:0")
+        assert lease.new_assignment is False
+    finally:
+        lease.release()
+
+
+def test_coordinator_slot_lock_is_exclusive_across_processes(tmp_path) -> None:
+    assignment_store = tmp_path / "assignments"
+    client = EXL3RemoteClient(
+        endpoints=[_endpoint("spark-a")],
+        token=b"secret",
+        coordinator_slots=[_coordinator("cuda:0")],
+        timeout_seconds=1,
+        assignment_store_path=assignment_store,
+    )
+    lock_root = client._ensure_slot_lock_directory()
+    slot_id = "coordinator:cuda:0"
+    lock_path = lock_root / f"{hashlib.sha256(slot_id.encode()).hexdigest()}.0.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import sys
+                from filelock import FileLock
+
+                lock = FileLock(sys.argv[1])
+                lock.acquire()
+                print("ready", flush=True)
+                sys.stdin.read()
+                lock.release()
+                """
+            ),
+            str(lock_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        assert client._acquire_cross_process_slot(slot_id) is None
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.close()
+        holder.wait(timeout=5)
+
+    lock = client._acquire_cross_process_slot(slot_id)
+    assert lock is not None
+    lock.release()
 
 
 def test_provenance_requires_token_and_preserves_retry_contract(
