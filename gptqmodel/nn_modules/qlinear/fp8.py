@@ -280,7 +280,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", scale)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=torch.float16)
+            # Preserve the full checkpoint bias range. Forward narrows a
+            # working copy to the activation dtype after reading the buffer.
+            bias_tensor = torch.zeros(self.out_features, dtype=torch.float32)
             if "bias" in self._buffers:
                 self.bias = bias_tensor
             else:
@@ -384,7 +386,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", weight_scale_inv)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -417,7 +419,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.register_buffer("weight_scale_inv", packed_scale)
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
