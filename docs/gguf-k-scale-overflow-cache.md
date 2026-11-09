@@ -221,3 +221,75 @@ not retained after inference.
 
 The Q4_0/Q8_0 range guard was added in
 [PR #3672](https://github.com/ModelCloud/GPTQModel/pull/3672).
+
+## FP16 operand width for other GGUF formats
+
+`_use_fp32_gguf_weight` now makes one decision for the dense and chunked
+Torch inference paths. BF16 stays wide for accuracy. FP16 sign-only Q1_0
+and Q1_0_g128 can keep FP16 weights because a finite stored FP16 scale is
+only multiplied by a sign. Q2_0 and Q8_K join the packed-source cache with
+bounds `|d| × 2` and `|d| × 128`. Q4_0, Q8_0, Q4_K, Q5_K, and Q6_K retain
+their existing selective bounds. The remaining formats use FP32 operands
+conservatively because their scale/minimum or codebook math has not been
+reduced to a cheap packed bound. This choice never stores an expanded weight
+between inference operations.
+
+```mermaid
+flowchart TD
+    A["GGUFTorchLinear dense or chunked forward"] --> B["_use_fp32_gguf_weight"]
+    B --> C{"Activation dtype and qtype?"}
+    C -- "BF16" --> W["Use FP32 operands"]
+    C -- "FP16 sign-only" --> N["Keep activation dtype operands"]
+    C -- "FP16 guarded format" --> D["_k_scale_overflows reads packed-source keyed answer"]
+    C -- "FP16 other format" --> W
+    C -- "Other dtype" --> N
+    D --> E{"Packed bound exceeds FP16?"}
+    E -- "Yes" --> W
+    E -- "No" --> N
+    W --> F{"Dense or chunked path?"}
+    F -- "Dense" --> G["Temporary FP32 weight and FP32 matmul"]
+    F -- "Chunked" --> H["Bounded FP32 weight chunks and FP32 accumulation"]
+    G --> I["Apply optional bias and round output once"]
+    H --> I
+    N --> J["Existing operand path"]
+    J --> I
+    K["Packed qweight mutation"] --> L["tensor_cache_key invalidates cached bound"]
+    L --> D
+    A -. "Old narrow fallback for other formats" .-> X["Infinite weight despite finite FP64 dot"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Dense selection | `gguf.py:1687-1703` used FP32 for BF16 and five FP16 formats only | `_use_fp32_gguf_weight` retains the fast sign-only and guarded formats; other FP16 formats use FP32 |
+| Chunked selection | `gguf.py:1794-1801` guarded only Q4_0/Q8_0/Q4_K/Q5_K/Q6_K | `_forward_fused_k` shares the same width decision and keeps dequantization bounded |
+| Packed bound | `gguf.py:1743-1781` lacked Q2_0/Q8_K bounds | `_compute_k_scale_overflow` checks FP16 Q2_0 `d` times 2 and FP32 Q8_K `d` times 128, keyed by packed source and dtype |
+
+On the NVIDIA GB10, Q2_0 with a large FP16 scale, Q8_K with a large FP32
+scale, and MXFP4 with E8M0 scale `32768` and FP4 code `12` all returned
+infinity on the previous dense and chunked CUDA paths. Independent NumPy
+decoders with FP64 Torch dots give `49984`, `31750`, and `24576` respectively;
+the corrected visible FP16 outputs are `49984`, `31744`, and `24576`. GPU
+tests cover both paths, one/eight rows, bias, positive/negative signed codes,
+ordinary-to-wide packed-weight replacement, and the absence of a persistent
+expanded weight. MXFP4 exercises the conservative branch without a cached
+bound; Q2_0 and Q8_K exercise the new packed bounds.
+
+At K=N=1024 with one resident FP16 row on the same GB10, five warmups and
+the median of seven groups of 20 synchronized wall-clock forwards measured:
+
+| Format | Path | Ordinary before → after | Wide before → after | New wide peak allocator delta |
+| --- | --- | ---: | ---: | ---: |
+| Q2_0 | Dense | 6.0397 → 6.1001 ms | 6.0099 → 4.6729 ms | 37,756,928 bytes |
+| Q2_0 | Chunked | 6.0363 → 6.1493 ms | 6.0082 → 4.7878 ms | 37,756,928 bytes |
+| Q8_K | Dense | 2.1418 → 2.0455 ms | 2.1188 → 0.9404 ms | 37,756,928 bytes |
+| Q8_K | Chunked | 2.2091 → 2.2196 ms | 2.3622 → 1.0306 ms | 37,756,928 bytes |
+| MXFP4 | Dense | 10.6935 → 9.1673 ms | 10.6425 → 9.3491 ms | 37,756,928 bytes |
+| MXFP4 | Chunked | 10.7332 → 9.1873 ms | 10.6710 → 9.1990 ms | 37,756,928 bytes |
+
+Old wide outputs were infinity; new wide outputs are finite. Q2_0/Q8_K
+ordinary peak allocator deltas remain 35,655,680 bytes for dense and
+35,659,776 bytes for chunked. MXFP4 uses temporary FP32 operands even for
+ordinary weights, adding about 2.1 MB to peak allocation; no expanded
+weight remains after inference.
