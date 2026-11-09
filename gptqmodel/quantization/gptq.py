@@ -2159,6 +2159,13 @@ class GPTQ:
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
                 self.quantizer.find_params(W, weight=True)
 
+        static_group_perm = None
+        if self.qcfg.static_groups:
+            if self.qcfg.desc_act and use_hessian:
+                static_group_perm = perm
+            elif self.qcfg.act_group_aware and use_hessian:
+                static_group_perm = final_perm
+
         if use_hessian:
             try:
                 ordering = "desc_act" if self.qcfg.desc_act else (
@@ -2356,7 +2363,10 @@ class GPTQ:
                     block_group_size = self.qcfg.group_size
                     uniform_group = block_group_size == -1 or (
                         i1 // block_group_size == (i2 - 1) // block_group_size
-                        and (not self.qcfg.static_groups or not self.qcfg.desc_act)
+                        and (
+                            not self.qcfg.static_groups
+                            or static_group_perm is None
+                        )
                     )
                     if uniform_group:
                         # Every column of this block resolves to the same
@@ -2398,8 +2408,14 @@ class GPTQ:
                                         zero.append(self.quantizer.zero)
                                         now_idx += 1
                                 else:
-                                    idx = perm[column] if self.qcfg.desc_act else column
-                                    self.quantizer = groups[idx // self.qcfg.group_size]
+                                    source_column = (
+                                        static_group_perm[column].item()
+                                        if static_group_perm is not None
+                                        else column
+                                    )
+                                    self.quantizer = groups[
+                                        source_column // self.qcfg.group_size
+                                    ]
 
                             key = id(self.quantizer.scale)
                             group_index = parameter_indices.get(key)
@@ -2437,8 +2453,8 @@ class GPTQ:
                                     now_idx += 1
                             else:
                                 idx = i1 + i
-                                if self.qcfg.desc_act:
-                                    idx = perm[idx]
+                                if static_group_perm is not None:
+                                    idx = static_group_perm[idx].item()
 
                                 self.quantizer = groups[idx // self.qcfg.group_size]
 
@@ -2504,16 +2520,20 @@ class GPTQ:
         elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm).to(device=Q.device)
             Q = Q[:, inv_final]
-            inv_global_perm = invert_perm(global_perm)
-            inv_global_perm_list = inv_global_perm.tolist()
-            reordered_group_count = len(inv_global_perm_list)
-            temp_scale = [scale[i] for i in inv_global_perm_list]
-            temp_scale.extend(scale[reordered_group_count:])
-            scale = temp_scale
-            temp_zero = [zero[i] for i in inv_global_perm_list]
-            temp_zero.extend(zero[reordered_group_count:])
-            zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
+            if not self.qcfg.static_groups:
+                # Dynamic parameters were measured in reordered group order.
+                # Static parameters were measured before reordering and already
+                # match the original-column g_idx returned below.
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                reordered_group_count = len(inv_global_perm_list)
+                temp_scale = [scale[i] for i in inv_global_perm_list]
+                temp_scale.extend(scale[reordered_group_count:])
+                scale = temp_scale
+                temp_zero = [zero[i] for i in inv_global_perm_list]
+                temp_zero.extend(zero[reordered_group_count:])
+                zero = temp_zero
+            del final_perm, inv_final, global_perm, local_perms
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
