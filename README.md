@@ -813,6 +813,9 @@ model.save(quant_path)
 
 ##### FP8 Example: Llama 3.2 1B Instruct
 
+See [FP8 inverse-scale checkpoint loading](docs/fp8-inverse-scale-checkpoint-loading.md)
+for how FP32 scales are preserved when loading a BF16 model.
+
 ```py
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.quantization import FP8Config
