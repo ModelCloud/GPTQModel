@@ -148,6 +148,85 @@ def _compute_awq_weight_mean(
     return (w_sum / row_count).to(first_weight.dtype)
 
 
+def _awq_affine_qparams(
+    w: torch.Tensor, bits: int, *, scaled_zero_offset: bool = False
+):
+    """Choose affine metadata whose used codes can be decoded in the input dtype."""
+
+    zero = torch.zeros_like(w[:, :1])
+    maximum = torch.maximum(w.amax(dim=1, keepdim=True), zero)
+    minimum = torch.minimum(w.amin(dim=1, keepdim=True), zero)
+    max_code = (1 << bits) - 1
+    limits = torch.finfo(w.dtype)
+    scales = (maximum - minimum).clamp(min=1e-5) / max_code
+
+    # A finite input range can overflow its low-precision subtraction. The
+    # maximum code can also decode outside the dtype even when the scale itself
+    # is finite (for example 15 * 4368 > FP16_MAX).
+    scale_limit = limits.max / max_code
+    repair_mask = ~torch.isfinite(scales) | (scales.float() > scale_limit)
+    repair = bool(repair_mask.any())
+    if repair:
+        wide_scales = (
+            maximum.float() / max_code - minimum.float() / max_code
+        ).clamp(min=1e-5 / max_code)
+        scales = torch.where(~torch.isfinite(scales), wide_scales.to(w.dtype), scales)
+
+        # One-sided groups can keep their endpoint code by lowering the scale
+        # one representable step below the largest safe scale.
+        one_sided = (minimum == 0) | (maximum == 0)
+        safe_scale = torch.tensor(
+            scale_limit * (1 - limits.eps), dtype=w.dtype, device=w.device
+        )
+        scales = torch.where(
+            one_sided & (scales.float() > scale_limit),
+            safe_scale,
+            scales,
+        )
+
+    zeros = (-torch.round(minimum / scales)).clamp_(0, max_code)
+    if repair and scaled_zero_offset:
+        # GEMV-fast stores -scale * zero in FP16. Both that offset and every
+        # possible decoded code must fit, including after zero-point rounding.
+        for _ in range(max_code + 1):
+            distance = torch.maximum(zeros, max_code - zeros).float().clamp(min=1)
+            safe_scale = (
+                (limits.max / distance) * (1 - limits.eps)
+            ).to(w.dtype)
+            scales = torch.where(scales < safe_scale, scales, safe_scale)
+            zeros = (-torch.round(minimum / scales)).clamp_(0, max_code)
+            distance = torch.maximum(zeros, max_code - zeros).float()
+            offset_wide = -scales.float() * zeros.float()
+            offset_exact = offset_wide.to(w.dtype).float() == offset_wide
+            # A rounded offset biases zero-valued weights in the native half
+            # FMA. For boundary groups, move down to the nearest scale whose
+            # offset is exactly representable in the checkpoint dtype.
+            needs_step = (scales.float() * distance > limits.max) | (repair_mask & ~offset_exact)
+            if not bool(needs_step.any()):
+                break
+            scales = torch.where(
+                needs_step,
+                (scales.float() * (1 - limits.eps)).to(w.dtype),
+                scales,
+            )
+        else:
+            raise ValueError("AWQ scaled zero point cannot be represented")
+
+    return scales, zeros, repair
+
+
+def _awq_bound_affine_codes(
+    codes: torch.Tensor, zeros: torch.Tensor, scales: torch.Tensor, max_code: int
+) -> torch.Tensor:
+    """Move an overflowing endpoint code one step into the finite range."""
+
+    limit = torch.finfo(codes.dtype).max
+    decoded = (codes.float() - zeros.float()) * scales.float()
+    codes = torch.where(decoded < -limit, codes + 1, codes)
+    codes = torch.where(decoded > limit, codes - 1, codes)
+    return codes.clamp_(0, max_code)
+
+
 class AWQProcessor(LoopProcessor):
     """Captures activations and quantizes layers with the AWQ scaling workflow."""
 
@@ -1961,7 +2040,13 @@ class AWQProcessor(LoopProcessor):
 
         return best_max_val.squeeze(1)
 
-    def pseudo_quantize_tensor(self, w: torch.Tensor, bits: Optional[int] = None):
+    def pseudo_quantize_tensor(
+        self,
+        w: torch.Tensor,
+        bits: Optional[int] = None,
+        group_size: Optional[int] = None,
+        format: Optional[FORMAT] = None,
+    ):
         """Simulates AWQ quantization and returns dequantized weights plus scales/zeros.
 
         ``bits`` defaults to the global width. Pass the per-module width when the
@@ -1970,23 +2055,31 @@ class AWQProcessor(LoopProcessor):
         """
 
         org_w_shape = w.shape
+        input_dtype = w.dtype
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
-        if self.qcfg.group_size > 0:
-            assert org_w_shape[-1] % self.qcfg.group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({self.qcfg.group_size})!"
-            w = w.reshape(-1, self.qcfg.group_size)
+        configured_group_size = (
+            self.qcfg.group_size if group_size is None else group_size
+        )
+        if configured_group_size > 0:
+            assert org_w_shape[-1] % configured_group_size == 0, (
+                f"org_w_shape ({org_w_shape[-1]}) must be a multiple of "
+                f"group_size ({configured_group_size})!"
+            )
+            w = w.reshape(-1, configured_group_size)
         assert w.dim() == 2
 
-        # zero point quantization
         if not self.qcfg.sym:
-            max_val = w.amax(dim=1, keepdim=True)
-            min_val = w.amin(dim=1, keepdim=True)
             max_int = 2**bits - 1
-            min_int = 0
-            scales = (max_val - min_val).clamp(min=1e-5) / max_int
-            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
-            w = (
-                torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
-            ) * scales
+            effective_format = self.qcfg.format if format is None else format
+            scales, zeros, repair = _awq_affine_qparams(
+                w,
+                bits,
+                scaled_zero_offset=effective_format in (FORMAT.GEMV_FAST, FORMAT.LLM_AWQ),
+            )
+            codes = torch.clamp(torch.round(w / scales) + zeros, 0, max_int)
+            if repair:
+                codes = _awq_bound_affine_codes(codes, zeros, scales, max_int)
+            w = (codes - zeros) * scales
             zeros = zeros.view(org_w_shape[0], -1)
         else:
             max_val = w.abs().amax(dim=1, keepdim=True)
@@ -2000,6 +2093,9 @@ class AWQProcessor(LoopProcessor):
         # NaN dequantized weights are independent failures, but each full-tensor
         # scan previously synchronized the stream separately.
         assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
+        if input_dtype.is_floating_point:
+            limits = torch.finfo(input_dtype)
+            w.clamp_(limits.min, limits.max)
 
         scales = scales.view(org_w_shape[0], -1)
 
@@ -2022,6 +2118,8 @@ class AWQProcessor(LoopProcessor):
         dst: torch.Tensor,
         abs_max: torch.Tensor = None,
         bits: Optional[int] = None,
+        group_size: Optional[int] = None,
+        format: Optional[FORMAT] = None,
     ) -> None:
         """Writes pseudo-quantized values into a destination tensor without reallocating.
 
@@ -2033,26 +2131,34 @@ class AWQProcessor(LoopProcessor):
         # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
         org_shape = src.shape
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
-        if self.qcfg.group_size > 0:
-            src_view = src.view(-1, self.qcfg.group_size)
-            dst_view = dst.view(-1, self.qcfg.group_size)
+        configured_group_size = (
+            self.qcfg.group_size if group_size is None else group_size
+        )
+        if configured_group_size > 0:
+            src_view = src.view(-1, configured_group_size)
+            dst_view = dst.view(-1, configured_group_size)
         else:
             src_view = src.reshape(org_shape[0], -1)
             dst_view = dst.reshape_as(src_view)
 
         if not self.qcfg.sym:
-            max_val = src_view.amax(dim=1, keepdim=True)
-            min_val = src_view.amin(dim=1, keepdim=True)
             max_int = 2 ** bits - 1
-            min_int = 0
-            scales = (max_val - min_val).clamp(min=1e-5) / max_int
-            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+            effective_format = self.qcfg.format if format is None else format
+            scales, zeros, repair = _awq_affine_qparams(
+                src_view,
+                bits,
+                scaled_zero_offset=effective_format in (FORMAT.GEMV_FAST, FORMAT.LLM_AWQ),
+            )
 
             dst_view.copy_(src_view)
             dst_view.div_(scales)
             torch.round(dst_view, out=dst_view)
             dst_view.add_(zeros)
-            dst_view.clamp_(min_int, max_int)
+            dst_view.clamp_(0, max_int)
+            if repair:
+                dst_view.copy_(
+                    _awq_bound_affine_codes(dst_view, zeros, scales, max_int)
+                )
             dst_view.sub_(zeros)
             dst_view.mul_(scales)
         else:
@@ -2067,14 +2173,12 @@ class AWQProcessor(LoopProcessor):
             max_int = 2 ** (bits - 1) - 1
             scales = max_val / max_int
 
-            # Divide straight into the destination instead of copying first. The
-            # symmetric magnitude that produced `scales` bounds `src_view`, so
-            # `src_view / scales` cannot exceed `max_int` and the rounded value
-            # already sits inside the signed range: the clamp the asymmetric
-            # path needs (where `zeros` shifts the value) never changes one here.
             torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
             dst_view.mul_(scales)
+        if dst_view.dtype.is_floating_point:
+            limits = torch.finfo(dst_view.dtype)
+            dst_view.clamp_(limits.min, limits.max)
 
 
     def _compute_best_scale(
@@ -2600,7 +2704,13 @@ class AWQProcessor(LoopProcessor):
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
 
             wq, scales, zeros = self.pseudo_quantize_tensor(
-                weight_for_quant, bits=module_bits
+                weight_for_quant,
+                bits=module_bits,
+                format=resolve_quant_format(
+                    self.qcfg.dynamic_get(named_module.full_name, "format", self.qcfg.format)
+                    or self.qcfg.format,
+                    self.qcfg.method,
+                ),
             )
 
             from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar

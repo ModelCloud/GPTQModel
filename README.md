@@ -220,6 +220,8 @@ contract.
 
 GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `METHOD.QQQ`, `METHOD.FP8`, `METHOD.PARO`, and `METHOD.RTN` paths. Staged block training currently supports dense Llama GPTQ and AWQ export. Each path retains its method's existing checkpoint format; method-specific GSQ constraints are described below.
 
+AWQ FP16 boundary staging and packed decode follow the [AWQ affine range contract](docs/awq-affine-range.md).
+
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
 On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
