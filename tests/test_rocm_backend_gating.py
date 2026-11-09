@@ -431,8 +431,12 @@ def test_cuda_only_extensions_are_skipped_by_load_all_on_rocm(monkeypatch):
     """``extension.load("all")`` must not start a doomed hipcc build."""
 
     from gptqmodel import extension as extension_api
+    from gptqmodel.utils import marlin as marlin_utils
 
     monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: True)
+    # The Marlin rejection message comes from marlin.IS_ROCM, not the
+    # extension gate; pin it so this simulated-ROCm case is host-independent.
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", True)
 
     selected = extension_api._resolve_requested_extensions("all")
     for name in ("awq", "qqq", "marlin_fp16", "marlin_bf16"):

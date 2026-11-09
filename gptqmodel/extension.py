@@ -79,8 +79,11 @@ _EXTENSION_SPECS = (
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),
         supported=_native_cuda_extension_supported,
-        unsupported_error=lambda: _resolve_attr(
-            "gptqmodel.utils.awq", "AWQ_EXTENSION_ROCM_UNSUPPORTED"
+        unsupported_error=lambda: (
+            "The native AWQ JIT extension is CUDA-only and cannot be built by hipcc. "
+            "On ROCm use BACKEND.AWQ_GEMM_TRITON (FORMAT.GEMM) or "
+            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV/GEMV_FAST/LLM_AWQ), which run "
+            "the same packed layouts in Triton."
         ),
     ),
     _ExtensionSpec(
@@ -89,7 +92,7 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qqq", "_QQQ_TORCH_OPS_EXTENSION"),
         supported=_native_cuda_extension_supported,
         unsupported_error=lambda: _resolve_attr(
-            "gptqmodel.utils.qqq", "QQQ_EXTENSION_ROCM_UNSUPPORTED"
+            "gptqmodel.nn_modules.qlinear.qqq", "QQQ_ROCM_UNSUPPORTED"
         ),
     ),
     _ExtensionSpec(

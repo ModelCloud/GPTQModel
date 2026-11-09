@@ -124,8 +124,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // `v_dot2_f32_bf16` is gated on the `dot12-insts` target feature, which only
 // gfx1200/gfx1201 provide. gfx1250 has no such instruction, so the family-wide
 // build must not emit it there. The fallback is the same arithmetic with two
-// FP32 FMAs: BF16 operands widen exactly to FP32, so only the final add order
-// can differ (<= 1 ULP) from the packed-dot target.
+// FP32 FMAs: BF16 operands widen exactly to FP32, so ordinary inputs differ by
+// at most one ULP in add order.
+//
+// The packed dot keeps both products in a wider intermediate, so finite BF16
+// inputs can still cancel after an FP32 overflow (for example +bf16_max and
+// -bf16_max multiplied by 2). Two sequential FP32 FMAs turn that into -inf.
+// Keep the FMA fast path and recompute in FP64 only when an intermediate is
+// non-finite, which preserves both the ordinary bit pattern and the packed
+// dot's cancellation semantics.
 #if defined(NF12_HIP_FORCE_NO_BF16_DOT2)
 #define NF12_HIP_HAS_BF16_DOT2 0
 #elif defined(__gfx1200__) || defined(__gfx1201__)
@@ -142,7 +149,17 @@ __device__ __forceinline__ float bf16x2_dot(const __hip_bfloat162 a,
 #else
   const float2 af = __bfloat1622float2(a);
   const float2 bf = __bfloat1622float2(b);
-  return __builtin_fmaf(af.x, bf.x, __builtin_fmaf(af.y, bf.y, acc));
+  const float inner = __builtin_fmaf(af.y, bf.y, acc);
+  if (!__builtin_isfinite(inner)) {
+    return float(double(acc) + double(af.x) * double(bf.x) +
+                 double(af.y) * double(bf.y));
+  }
+  const float outer = __builtin_fmaf(af.x, bf.x, inner);
+  if (!__builtin_isfinite(outer)) {
+    return float(double(acc) + double(af.x) * double(bf.x) +
+                 double(af.y) * double(bf.y));
+  }
+  return outer;
 #endif
 }
 

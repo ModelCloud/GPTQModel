@@ -17,18 +17,6 @@ from .cpp import (
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
 _AWQ_OPS_NAMESPACE = "gptqmodel_awq"
 
-# ``gptqmodel_ext/awq`` is a CUDA extension: its GEMV entry points include
-# ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified reduction rejects
-# wave32.  ROCm uses the portable Triton GEMM/GEMV kernels instead, so the
-# native extension must never be JIT-built there (not even by
-# ``extension.load("all")``).
-AWQ_EXTENSION_ROCM_UNSUPPORTED = (
-    "The native AWQ JIT extension is CUDA-only and cannot be built by hipcc. "
-    "On ROCm use BACKEND.AWQ_GEMM_TRITON (FORMAT.GEMM) or "
-    "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV/GEMV_FAST/LLM_AWQ), which run the "
-    "same packed layouts in Triton."
-)
-
 
 def _awq_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "awq"

@@ -454,6 +454,29 @@ def test_hip_linear_accepts_padded_activation_rows():
         torch.testing.assert_close(got.float(), expected.float(), rtol=2e-3, atol=2e-3)
 
 
+def test_hip_linear_preserves_finite_overflow_cancellation():
+    """Finite BF16 operands may overflow FP32 before they cancel.
+
+    ``+bf16_max`` and ``-bf16_max`` multiplied by 2 are finite in BF16 but
+    overflow FP32. The packed dot keeps a wider intermediate and returns 0;
+    a naive two-FMA gfx1250 fallback returned ``-inf``. The fallback must
+    detect the non-finite intermediate and recompute in FP64.
+    """
+    hip = _hip_runtime_or_skip()
+    weight = torch.zeros(16, 64, dtype=torch.bfloat16)
+    weight[:, 0] = torch.finfo(torch.bfloat16).max
+    weight[:, 1] = -torch.finfo(torch.bfloat16).max
+    x = torch.ones(1, 64, dtype=torch.bfloat16)
+    x[:, :2] = 2
+
+    packed, escapes, exp_base = nf12_codec.encode(weight)
+    actual = hip.linear(x.cuda(), packed.cuda(), escapes.cuda(), int(exp_base))
+    expected = x.double() @ weight.double().T
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=2e-3, atol=2e-3)
+
+
 def test_nf12_module_preserves_leading_dimensions_on_hip():
     """The quant-linear module must not flatten a multi-dim activation."""
     _hip_runtime_or_skip()
