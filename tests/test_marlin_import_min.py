@@ -5,6 +5,10 @@ from gptqmodel import extension
 from gptqmodel.nn_modules.qlinear import marlin as marlin_mod
 
 
+@pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="NVIDIA CUDA required (Marlin has no HIP kernel)",
+)
 def test_marlin_runtime_chain_test():
     """
     extension.load -> marlin_runtime_available -> (if error: marlin_runtime_error)

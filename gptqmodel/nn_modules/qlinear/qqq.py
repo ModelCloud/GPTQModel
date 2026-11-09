@@ -718,13 +718,11 @@ class QQQTorchLinear(QQQLinear):
                 )
         accum = accum * s1
         accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
-        D = accum.to(dtype=A_dtype).reshape(out_shape)
-
         if self.bias is not None:
-            bias = self.bias
-            if bias.device != D.device or bias.dtype != D.dtype:
-                bias = bias.to(device=D.device, dtype=D.dtype)
-            D.add_(bias)
+            # The INT8 reduction and scales are still FP32 here. Add bias
+            # before the output cast so a finite sum cannot overflow in FP16.
+            accum = accum + self.bias.to(device=accum.device, dtype=accum.dtype)
+        D = accum.to(dtype=A_dtype).reshape(out_shape)
 
         if self.adapter:
             D = self.adapter.apply(x=A_flat, out=D)

@@ -75,6 +75,7 @@ from ..utils.hf import (
     suspend_hf_weight_init,
 )
 from ..utils.importer import (
+    _selector_devices,
     auto_select_device,
     expand_selector_device_family,
     get_kernel_for_backend,
@@ -380,27 +381,29 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
     `device=("cuda:1", "cuda:2")` is a request for exactly those two GPUs.
     Before this helper both the layer-wise placement map and the quantization
     device pool ignored the sequence and expanded to *every* visible
-    accelerator, so asking for two GPUs silently used all four. Only fully
-    qualified ordinals qualify: an abstract family selector, a bare `cuda`, or
-    a single-element request keep the historical "span every visible device"
-    behaviour. Repeated ordinals still request that one concrete GPU.
+    accelerator, so asking for two GPUs silently used all four. An abstract
+    family selector or a bare `cuda` keeps the historical family-wide path.
+    A sequence of one or more concrete ordinals requests exactly those devices. Integer
+    ordinals use the active accelerator namespace. Mixing a concrete ordinal
+    with an abstract selector is ambiguous and must not expand the request.
     """
-    if not isinstance(device, (tuple, list)) or len(device) < 2:
+    if not isinstance(device, (tuple, list)):
         return None
 
-    resolved: List[torch.device] = []
-    for item in device:
-        if isinstance(item, DEVICE):
-            return None
-        try:
-            target = item if isinstance(item, torch.device) else torch.device(str(item))
-        except (RuntimeError, ValueError, TypeError):
-            return None
-        if target.type == "cpu" or target.index is None:
-            return None
-        if target not in resolved:
-            resolved.append(target)
-    return resolved
+    targets = _selector_devices(device)
+    concrete = [
+        target for target in targets
+        if isinstance(target, torch.device) and target.type != "cpu" and target.index is not None
+    ]
+    if not concrete:
+        return None
+    if len(concrete) != len(targets):
+        raise ValueError(
+            "A device sequence cannot mix concrete accelerator ordinals with abstract selectors; "
+            "use only concrete ordinals or one accelerator family."
+        )
+    selector_device_family(targets)  # validate every selected family/capability
+    return concrete
 
 
 def _explicit_layerwise_devices(device) -> Optional[List[str]]:
@@ -445,6 +448,16 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
             return [f"npu:{index}" for index in range(num_gpus)]
         raise RuntimeError("NPU is not available")
     return ["cpu"] * num_gpus
+
+
+def _resolve_default_layerwise_device(device, backend: BACKEND):
+    """Keep explicit device sequences intact instead of collapsing singletons."""
+    requested = _explicit_requested_devices(device)
+    if requested is not None:
+        return tuple(requested)
+    normalized = normalize_device_device_map(device, None)
+    selected = auto_select_device(normalized, backend)
+    return expand_selector_device_family(selected)
 
 
 def _external_runtime_device_kwargs(
@@ -1466,7 +1479,7 @@ def ModelLoader(cls):
             cls,
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-            device: Optional[Union[str, int]] = None,
+            device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
@@ -1512,18 +1525,15 @@ def ModelLoader(cls):
                 explicit_device_map = {"": explicit_device}
                 requested_device_map = explicit_device_map
 
-        # normalized device + device_map into single device
-        normalized_device = device if requested_device_map is None else None  # let device_map dictate placement when present
-        device = normalize_device_device_map(normalized_device, requested_device_map)
-
         # Keep string inputs compatible while allowing canonical method-prefixed names.
         backend = normalize_backend(backend)
-        device = auto_select_device(device, backend)
         if requested_device_map is None:
-            # The default layer-wise map below spans every visible accelerator.
-            # Expand the family now so kernel validation sees the same concrete
-            # devices (and rejects heterogeneous GPU capabilities explicitly).
-            device = expand_selector_device_family(device)
+            # Preserve explicit sequences; normalization reduces a singleton
+            # sequence to a scalar, which would broaden the layer-wise map.
+            device = _resolve_default_layerwise_device(device, backend)
+        else:
+            # The explicit device map determines placement and kernel targets.
+            device = auto_select_device(normalize_device_device_map(None, requested_device_map), backend)
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)

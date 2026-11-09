@@ -276,18 +276,19 @@ def _read_safetensors_header(path: str) -> Tuple[Dict[str, object], int]:
     return header, data_start
 
 
-def _resolve_source_dir(from_model) -> str:
+def _resolve_source_input(from_model) -> Tuple[str, Optional[str]]:
     if isinstance(from_model, (str, os.PathLike)):
         path = os.fspath(from_model)
         if os.path.isdir(path):
-            return path
+            return path, None
         if os.path.isfile(path) and path.endswith((".safetensors", ".safetensors.index.json")):
-            return os.path.dirname(os.path.abspath(path))
-        raise FileNotFoundError(f"`from_model` is not a checkpoint directory: {path!r}")
+            selected_file = os.path.abspath(path)
+            return os.path.dirname(selected_file), selected_file
+        raise FileNotFoundError(f"`from_model` is not a checkpoint directory or safetensors file: {path!r}")
 
     local_path = getattr(from_model, "model_local_path", None)
     if local_path is not None and os.path.isdir(os.fspath(local_path)):
-        return os.fspath(local_path)
+        return os.fspath(local_path), None
     raise TypeError(
         "`from_model` must be a checkpoint directory/path or a loaded GPTQModel with a local `model_local_path`."
     )
@@ -408,8 +409,10 @@ def _discover_safetensors(source_dir: str) -> List[str]:
     return sorted(paths)
 
 
-def _scan_unindexed_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
-    paths = _discover_safetensors(source_dir)
+def _scan_unindexed_checkpoint(
+    source_dir: str, paths: Optional[Sequence[str]] = None
+) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    paths = _discover_safetensors(source_dir) if paths is None else paths
     if not paths:
         raise FileNotFoundError(
             f"No safetensors checkpoint found in {source_dir!r}. "
@@ -433,14 +436,60 @@ def _scan_unindexed_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], 
     return refs, metadata
 
 
-def _scan_checkpoint(source_dir: str) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+def _index_containing_file(source_dir: str, selected_file: str) -> Optional[str]:
+    """Keep a named shard attached to its complete standard checkpoint."""
+    selected_index: Optional[str] = None
+    selected_map: Optional[Dict[str, str]] = None
     for index_name in _SOURCE_INDEX_NAMES:
         index_path = os.path.join(source_dir, index_name)
-        if os.path.isfile(index_path):
-            refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
-            break
+        if not os.path.isfile(index_path):
+            continue
+        try:
+            with open(index_path, encoding="utf-8") as handle:
+                index = json.load(handle)
+            weight_map = index.get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                continue
+            resolved_map = {
+                str(name): _resolve_shard_path(source_dir, str(shard))
+                for name, shard in weight_map.items()
+            }
+        except (OSError, ValueError, AttributeError):
+            # An unrelated invalid index must not override a named file.
+            continue
+        if selected_file not in resolved_map.values():
+            continue
+        if selected_map is not None and resolved_map != selected_map:
+            raise ValueError(
+                f"Selected shard '{selected_file}' belongs to conflicting checkpoint "
+                f"indexes '{selected_index}' and '{index_path}'; select an index file explicitly."
+            )
+        selected_index, selected_map = index_path, resolved_map
+    return selected_index
+
+
+def _scan_checkpoint(
+    source_dir: str, selected_file: Optional[str] = None
+) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
+    if selected_file is not None:
+        # A named index is authoritative. A named shard in a standard index
+        # still means the complete checkpoint, not an incomplete subset.
+        if selected_file.endswith(".safetensors.index.json"):
+            refs, metadata = _scan_indexed_checkpoint(source_dir, selected_file)
+        else:
+            index_path = _index_containing_file(source_dir, selected_file)
+            if index_path is not None:
+                refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+            else:
+                refs, metadata = _scan_unindexed_checkpoint(source_dir, (selected_file,))
     else:
-        refs, metadata = _scan_unindexed_checkpoint(source_dir)
+        for index_name in _SOURCE_INDEX_NAMES:
+            index_path = os.path.join(source_dir, index_name)
+            if os.path.isfile(index_path):
+                refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+                break
+        else:
+            refs, metadata = _scan_unindexed_checkpoint(source_dir)
 
     if not refs:
         raise ValueError(f"No tensors found in checkpoint: {source_dir}")
@@ -733,9 +782,11 @@ def reshard(
     """Rewrite an existing checkpoint into a new shard layout.
 
     Args:
-        from_model: Source checkpoint directory, a ``model.safetensors`` or
-            ``model.safetensors.index.json`` path, or a loaded ``GPTQModel``
-            whose ``model_local_path`` points at the checkpoint.
+        from_model: Source checkpoint directory, a specific ``.safetensors``
+            or ``.safetensors.index.json`` path, or a loaded ``GPTQModel``
+            whose ``model_local_path`` points at the checkpoint. A standalone
+            file selects only itself; an indexed shard retains the complete
+            checkpoint, and a named index selects its own shards.
         to_model_path: Destination directory. Weights are copied byte-for-byte;
             config, tokenizer, and other non-weight files are copied alongside.
         config: :class:`ShardConfig`. Defaults to
@@ -768,12 +819,12 @@ def reshard(
         else:
             raise TypeError("`config` must be a ShardConfig instance.")
 
-    source_dir = _resolve_source_dir(from_model)
+    source_dir, selected_file = _resolve_source_input(from_model)
     target_dir = os.fspath(to_model_path)
     _validate_paths(source_dir, target_dir)
     _validate_destination(target_dir, overwrite)
 
-    refs, metadata = _scan_checkpoint(source_dir)
+    refs, metadata = _scan_checkpoint(source_dir, selected_file)
     prefixes = _resolve_layer_prefixes(
         from_model,
         source_dir,

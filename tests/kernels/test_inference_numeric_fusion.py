@@ -71,6 +71,27 @@ def test_qqq_quantization_layout_and_empty(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("layout", ["padded_rows", "column_stride"])
+def test_qqq_direct_triton_quantizes_strided_views(dtype, layout):
+    from gptqmodel.nn_modules.qlinear.qqq_triton import dynamic_quant
+
+    generator = torch.Generator(device="cuda").manual_seed(536)
+    storage_width = 136 if layout == "padded_rows" else 256
+    storage = torch.randn((7, storage_width), device="cuda", dtype=dtype, generator=generator)
+    x = storage[:, :128] if layout == "padded_rows" else storage[:, ::2]
+    assert not x.is_contiguous()
+    expected_scale = x.float().abs().amax(dim=-1, keepdim=True).div(127.0)
+    expected_codes = (x.float() / expected_scale).round().clamp(-128, 127).to(torch.int8)
+
+    codes, scales = dynamic_quant(x)
+    torch.cuda.synchronize()
+    assert codes.shape == x.shape and scales.shape == (7, 1)
+    torch.testing.assert_close(codes, expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(scales, expected_scale, rtol=1e-6, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("bits", ["q4_0", "q8_0", "q4_k", "q5_k", "q6_k"])
 def test_gguf_fused_chunk_accumulation(dtype, bits):
     from .test_gguf_torch_cpu import _build_module, _oracle_dequantize

@@ -153,10 +153,7 @@ class Lora(Adapter):
         #self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        """Adds the LoRA update to the kernel output, reshaping batched outputs when needed."""
-
-        # original code
-        # out = out + ((x @ self.lora_A) @ self.lora_B)
+        """Return the base output plus LoRA without modifying the base tensor."""
 
         # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
         if x.dtype != self.lora_A.dtype or x.device != self.lora_A.device:
@@ -167,17 +164,19 @@ class Lora(Adapter):
             self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
+        update = (x @ self.lora_A) @ self.lora_B
+
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
         # out.dim() > x.dim() is used to exclude these kernels without additional processing
+        original_shape = None
         if out.dim() > x.dim() and out.shape[0] > 1:
-            out_orgi_shape = out.shape
+            original_shape = out.shape
             out = out.view(-1, out.shape[-1])
-            out.add_((x @ self.lora_A) @ self.lora_B)
-            out = out.view(out_orgi_shape)
-            return out
-        else:
-            return out.add_((x @ self.lora_A) @ self.lora_B)
+        if torch.broadcast_shapes(out.shape, update.shape) != out.shape:
+            raise RuntimeError("LoRA update would expand the base output shape")
+        result = out + update
+        return result.view(original_shape) if original_shape is not None else result
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
         """Loads, caches, and materializes LoRA tensors for the target module."""
