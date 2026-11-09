@@ -12,7 +12,9 @@ import json
 import math
 import operator
 import os
+import secrets
 import shutil
+import stat
 import struct
 import tempfile
 import threading
@@ -96,10 +98,37 @@ _DTYPE_SAFE_MAP = {
     torch.bool: ("BOOL", 1),
 }
 
+# TODO: keep the float8 entries below in sync with ``_FLOAT8_DTYPE_NAMES``.
+#
+# Gotcha 1 — the header identifier is NOT ``"F8_" + name.upper()``. The
+# safetensors JSON schema uses short names that drop the ``fn`` suffix and the
+# ``fnu`` marker: ``torch.float8_e4m3fn`` -> ``F8_E4M3``,
+# ``torch.float8_e5m2`` -> ``F8_E5M2``, ``torch.float8_e8m0fnu`` -> ``F8_E8M0``.
+# Guessing the identifier (e.g. emitting ``F8_E4M3FN``) makes the reader reject the
+# whole file with "unknown variant" while unpacking the header. Verified against
+# safetensors 0.8.0. Add new entries by checking the accepted spelling, never by
+# transforming the torch dtype name.
+#
+# Gotcha 2 — every supported float8 dtype needs an entry here as well as in
+# ``_FLOAT8_DTYPE_NAMES``. The FNUZ variants use the explicit safetensors IDs
+# ``F8_E4M3FNUZ`` and ``F8_E5M2FNUZ``; streaming export and reference offload
+# both use this map when writing their headers.
+#
+# The failure mode when a dtype is missing here is a hard ``NotImplementedError``
+# from ``_torch_dtype_to_safetensors`` at export time, not silent byte corruption.
+# A widened ``_FLOAT8_DTYPE_NAMES`` does NOT automatically become exportable: the
+# two tuples are intentionally separate (sizes vs. serializable identifiers), so
+# adding a name in one place without the other silently leaves the dtype
+# unexportable. This is a known wart; deriving both from a single
+# ``(torch_name, safetensors_id, num_bytes)`` table would remove it.
 if hasattr(torch, "float8_e4m3fn"):
     _DTYPE_SAFE_MAP[torch.float8_e4m3fn] = ("F8_E4M3", 1)
 if hasattr(torch, "float8_e5m2"):
     _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
+if hasattr(torch, "float8_e4m3fnuz"):
+    _DTYPE_SAFE_MAP[torch.float8_e4m3fnuz] = ("F8_E4M3FNUZ", 1)
+if hasattr(torch, "float8_e5m2fnuz"):
+    _DTYPE_SAFE_MAP[torch.float8_e5m2fnuz] = ("F8_E5M2FNUZ", 1)
 if hasattr(torch, "float8_e8m0fnu"):
     _DTYPE_SAFE_MAP[torch.float8_e8m0fnu] = ("F8_E8M0", 1)
 
@@ -2130,33 +2159,19 @@ def _generate_offload_search_paths(offload_root, module_path):
     return paths
 
 
-def _generate_entry_keys(module_path, leaf):
-    """
-        Generate fallback entry keys for lookup inside `index`.
-
-        Given:
-            module_path = "code2wav.upsample.0.1"
-            leaf = "gamma"
-
-        This function produces a list of possible lookup keys, ordered from
-        least specific to most specific, so that the caller can try them in order.
-
-        Example output:
-            [
-                "gamma",
-                "1.gamma",
-                "0.1.gamma",
-                "upsample.0.1.gamma",
-                "code2wav.upsample.0.1.gamma",
-            ]
-    """
-    keys = [leaf]
-    if module_path:
-        parts = module_path.split(".")
-        for i in range(len(parts)-1, -1, -1):
-            suffix = ".".join(parts[i:])
-            keys.append(f"{suffix}.{leaf}")
-    return keys
+def _generate_entry_keys(
+    module_path: str, leaf: str, index_dir: str, offload_root: str
+) -> tuple[str, ...]:
+    """Use the selected index's scope, then allow a fully qualified key."""
+    full_name = f"{module_path}.{leaf}" if module_path else leaf
+    index_scope = os.path.relpath(index_dir, offload_root)
+    if index_scope == ".":
+        return (full_name,)
+    index_scope = index_scope.replace(os.sep, ".")
+    if module_path != index_scope and not module_path.startswith(f"{index_scope}."):
+        raise ValueError(f"Offload index scope '{index_scope}' does not contain '{full_name}'")
+    relative_name = full_name[len(index_scope) + 1:]
+    return (relative_name, full_name) if relative_name != full_name else (relative_name,)
 
 
 def _resolve_offload_entry(
@@ -2192,14 +2207,22 @@ def _resolve_offload_entry(
     if not index:
         return None
 
-    keys = _generate_entry_keys(module_path, leaf)
-    entry = None
+    keys = _generate_entry_keys(module_path, leaf, module_dir, offload_root)
+    matches = []
     for key in keys:
         entry = index.get(key)
         if entry is not None:
-            break
-    if entry is None:
+            matches.append((key, entry))
+    if not matches:
         return None
+    if len(matches) > 1 and matches[0][1] != matches[1][1]:
+        name = f"{module_path}.{leaf}" if module_path else leaf
+        raise ValueError(
+            f"Ambiguous offload index entries for tensor '{name}' in "
+            f"'{os.path.join(module_dir, 'index.json')}': "
+            f"'{matches[0][0]}' and '{matches[1][0]}' differ."
+        )
+    entry = matches[0][1]
 
     resolved_dtype = _dtype_string_to_torch(entry.get("dtype"), dtype)
     if "shape" in entry:
@@ -2582,6 +2605,78 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
     return converted_path
 
 
+def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
+    """Read tensor shapes from a safetensors file, directory, or index.
+
+    NF12-AD stores a data-dependent escape table. The module cannot know its
+    row count from `in_features`/`out_features` alone, so the loader must size
+    that buffer before accelerate assigns checkpoint tensors.
+    """
+
+    if checkpoint is None:
+        return {}
+    path = os.fspath(checkpoint)
+    if isinstance(path, bytes):
+        path = path.decode()
+    files: List[str] = []
+    if os.path.isdir(path):
+        files = [
+            os.path.join(path, name)
+            for name in os.listdir(path)
+            if name.endswith(".safetensors")
+        ]
+    elif path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+        except (OSError, ValueError):
+            return {}
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+    elif path.endswith(".safetensors"):
+        files = [path]
+
+    shapes: Dict[str, Tuple[int, ...]] = {}
+    for file in files:
+        try:
+            with safe_open(file, framework="pt", device="cpu") as handle:
+                for key in handle.keys():
+                    shapes[key] = tuple(handle.get_slice(key).get_shape())
+        except Exception:
+            # A malformed or non-safetensors shard is accelerate's problem to
+            # report; shape discovery is best effort.
+            continue
+    return shapes
+
+
+def _prepare_variable_quant_buffers(model, checkpoint) -> None:
+    """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
+
+    shapes = _checkpoint_tensor_shapes(checkpoint)
+    if not shapes:
+        return
+    # Only the escape table is data-dependent. `nf12_packed`,
+    # `nf12_exp_base`, and `bias` shapes follow from the module geometry.
+    suffixes = (".nf12_escapes", ".nf12_exp_base")
+    for key, shape in shapes.items():
+        suffix = next((item for item in suffixes if key.endswith(item)), None)
+        if suffix is None:
+            continue
+        module_name = key[: -len(suffix)]
+        try:
+            module = model.get_submodule(module_name)
+        except AttributeError:
+            continue
+        if getattr(module, "QUANT_TYPE", None) != "nf12_ad":
+            continue
+        buffer_name = suffix[1:]
+        current = getattr(module, buffer_name, None)
+        if not isinstance(current, torch.Tensor) or tuple(current.shape) == shape:
+            continue
+        dtype = current.dtype
+        module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype, device=current.device))
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
@@ -2593,6 +2688,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         if converted_checkpoint is not None:
             kwargs["checkpoint"] = converted_checkpoint
     try:
+        _prepare_variable_quant_buffers(
+            model,
+            kwargs.get("checkpoint", checkpoint),
+        )
         accelerate.load_checkpoint_in_model(model, *args, **kwargs)
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
@@ -2769,19 +2868,52 @@ def _existing_shard_matches(
 
 
 @contextmanager
-def _atomic_shard_file(path: str):
-    """Keep the current shard and any mapped source tensors alive until commit."""
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
-        dir=os.path.dirname(os.path.abspath(path)),
-    )
+def _atomic_shard_path(path: str):
+    """Stage a shard beside its destination and publish it only on success."""
+    directory = os.path.dirname(os.path.abspath(path))
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            yield handle
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        existing_mode = None
+
+    # os.open applies the process umask to a new file without changing it.
+    # O_EXCL and a random name keep the temporary private to this export.
+    for _ in range(10):
+        temporary = os.path.join(
+            directory, f".{os.path.basename(path)}.{secrets.token_hex(16)}.tmp"
+        )
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o666 if existing_mode is None else 0o600,
+            )
+        except FileExistsError:
+            continue
+        break
+    else:
+        raise FileExistsError(f"Could not create a temporary shard beside {path}")
+
+    try:
+        if existing_mode is not None:
+            os.chmod(temporary, existing_mode)
+        os.close(descriptor)
+        descriptor = None
+        yield temporary
         os.replace(temporary, path)
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+@contextmanager
+def _atomic_shard_file(path: str):
+    """Keep the current shard and any mapped source tensors alive until commit."""
+    with _atomic_shard_path(path) as temporary:
+        with open(temporary, "wb") as handle:
+            yield handle
 
 
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
@@ -2862,6 +2994,31 @@ def _plan_shards(entries: List[TensorSource], max_shard_size: Optional[int]) -> 
     return shards
 
 
+def _validate_offload_sources_outside_save_dir(
+    state_dict: Dict[str, TensorSource], save_dir: str
+) -> None:
+    """Keep source artifacts out of the export directory we may rewrite or clean."""
+    save_roots = (os.path.abspath(save_dir), os.path.realpath(save_dir))
+    for entry in state_dict.values():
+        source = entry.source
+        if not isinstance(source, OffloadTensorRef):
+            continue
+        source_paths = (os.path.abspath(source.path), os.path.realpath(source.path))
+        for save_root, source_path in zip(save_roots, source_paths):
+            try:
+                if os.path.commonpath((save_root, source_path)) == save_root:
+                    break
+            except ValueError:  # Paths on different Windows drives cannot overlap.
+                continue
+        else:
+            continue
+        raise ValueError(
+            f"Offloaded tensor '{entry.name}' references '{source.path}' inside "
+            f"the export directory '{save_dir}'; choose a different save_dir "
+            "so shard writes and cleanup cannot destroy the source."
+        )
+
+
 def streaming_state_dict_to_shards(
     state_dict: Dict[str, TensorSource],
     save_dir: str,
@@ -2870,6 +3027,7 @@ def streaming_state_dict_to_shards(
     metadata: Dict[str, str],
     max_shard_size: Optional[int],
 ) -> Tuple[List[str], Dict[str, str], int]:
+    _validate_offload_sources_outside_save_dir(state_dict, save_dir)
     entries = list(state_dict.values())
     shards = _plan_shards(entries, max_shard_size)
     num_shards = len(shards)

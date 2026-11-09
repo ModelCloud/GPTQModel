@@ -428,6 +428,10 @@ def cuda_rms_norm(hidden, weight, epsilon):
             or hidden.ndim != 3 or weight.shape != (hidden.shape[-1],)
             or hidden.shape[-1] > 8192):
         return None
+    # CUDA/HIP reject a zero-block launch. An empty output needs no kernel and
+    # must keep the same dtype and device as the regular fused path.
+    if hidden.numel() == 0:
+        return torch.empty_like(hidden)
     backend = _functions(hidden.device.index)
     if backend is None:
         return None
@@ -491,6 +495,10 @@ def cuda_relaxed_scalar_weights(logits, scales, initial, valid, uniform, group_s
     if initial is None or initial.ndim != 2 or logits.ndim != 3:
         return None
     rows, columns = initial.shape
+    # The fused forward and backward both launch over rows * columns. Let the
+    # eager path handle empty geometry so its autograd contract stays intact.
+    if rows == 0 or columns == 0:
+        return None
     if (_disabled()
             or logits.device.type != 'cuda' or logits.dtype not in (torch.bfloat16, torch.float32)
             or initial.dtype != torch.float32

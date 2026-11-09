@@ -54,6 +54,8 @@ from ..utils.hf import (
 from ..utils.logger import setup_logger
 from ..utils.model import (
     TensorSource,
+    _atomic_shard_path,
+    _validate_offload_sources_outside_save_dir,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -118,6 +120,30 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
+# Source-only config fields are preserved, but a live value always wins. These
+# keys are excluded because they are either stripped on purpose or are fully
+# regenerated for the export.
+_CONFIG_MERGE_SKIP_KEYS = frozenset(
+    {
+        "attn_implementation",
+        "_attn_implementation",
+        "quantization_config",
+        "quantize_config",
+    }
+)
+
+
+def _merge_missing_config_fields(saved: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Fill keys the saved config dropped, recursively, without overriding live values."""
+    for key, value in source.items():
+        if key in _CONFIG_MERGE_SKIP_KEYS:
+            continue
+        if key not in saved:
+            saved[key] = value
+        elif isinstance(saved[key], dict) and isinstance(value, dict):
+            _merge_missing_config_fields(saved[key], value)
+
+
 def _save_model_configs_without_weights(
         model: torch.nn.Module,
         save_dir: str,
@@ -144,29 +170,35 @@ def _save_model_configs_without_weights(
     if callable(is_remote_code) and is_remote_code():
         custom_object_save(model, save_dir, config=config)
 
+    # Read the source config before serializing: an in-place export overwrites
+    # ``config.json`` and would otherwise lose the fields we are trying to keep.
+    source_config: Optional[Dict[str, Any]] = None
+    if source_model_dir is not None:
+        source_config_path = os.path.join(source_model_dir, "config.json")
+        if os.path.isfile(source_config_path):
+            with open(source_config_path, "r", encoding="utf-8") as handle:
+                source_config = json.load(handle)
+            if not isinstance(source_config, dict):
+                raise ValueError("Model config.json must contain a JSON object.")
+
     config.save_pretrained(save_dir)
 
     # Some remote model configurations contain runtime-significant extension
     # fields that their registered Transformers config class does not declare.
     # Loading and reserializing such a config silently drops those fields (for
-    # example DeepSeek V4's ``num_hash_layers``). Preserve source-only fields
-    # while allowing the live serialized config—including the new
+    # example DeepSeek V4's ``num_hash_layers``). Preserve source-only fields,
+    # including ones nested in sub-configs such as ``text_config``, while
+    # allowing the live serialized config—including the new
     # quantization_config—to override every field it knows about.
-    if source_model_dir is not None:
-        source_config_path = os.path.join(source_model_dir, "config.json")
+    if source_config is not None:
         saved_config_path = os.path.join(save_dir, "config.json")
-        if os.path.isfile(source_config_path):
-            with open(source_config_path, "r", encoding="utf-8") as handle:
-                source_config = json.load(handle)
-            with open(saved_config_path, "r", encoding="utf-8") as handle:
-                saved_config = json.load(handle)
-            if not isinstance(source_config, dict) or not isinstance(saved_config, dict):
-                raise ValueError("Model config.json must contain a JSON object.")
-            for key, value in source_config.items():
-                if key not in {"attn_implementation", "_attn_implementation"}:
-                    saved_config.setdefault(key, value)
-            with open(saved_config_path, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+        with open(saved_config_path, "r", encoding="utf-8") as handle:
+            saved_config = json.load(handle)
+        if not isinstance(saved_config, dict):
+            raise ValueError("Model config.json must contain a JSON object.")
+        _merge_missing_config_fields(saved_config, source_config)
+        with open(saved_config_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
 
     can_generate = getattr(model, "can_generate", None)
     generation_config = getattr(model, "generation_config", None)
@@ -354,6 +386,7 @@ def _save_module_replacement_safetensors(
     matched_shards_by_prefix: Dict[str, List[str]] = {}
     for prefix in prefixes:
         checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
+        runtime_prefix = {prefix}
         matched_shards = []
         for tensor_name, shard_name in turtle_model._weight_map.items():
             if _tensor_matches_prefixes(tensor_name, checkpoint_prefixes):
@@ -362,15 +395,14 @@ def _save_module_replacement_safetensors(
                     removed_tensor_names.append(tensor_name)
                 if shard_name not in matched_shards:
                     matched_shards.append(shard_name)
-        for leaf in ("weight", "bias"):
-            runtime_name = f"{prefix}.{leaf}"
-            runtime_shard = existing_weight_map.get(runtime_name)
-            if runtime_shard:
-                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_name)
-                if runtime_name not in removed_tensor_names:
-                    removed_tensor_names.append(runtime_name)
-                if runtime_shard not in matched_shards:
-                    matched_shards.append(runtime_shard)
+        for tensor_name, shard_name in existing_weight_map.items():
+            if not _tensor_matches_prefixes(tensor_name, runtime_prefix):
+                continue
+            drop_by_shard.setdefault(shard_name, set()).add(tensor_name)
+            if tensor_name not in removed_tensor_names:
+                removed_tensor_names.append(tensor_name)
+            if shard_name not in matched_shards:
+                matched_shards.append(shard_name)
         matched_shards_by_prefix[prefix] = matched_shards
 
     tied_input_shards = list(matched_shards_by_prefix.get(input_prefix, [])) if input_prefix else []
@@ -398,6 +430,7 @@ def _save_module_replacement_safetensors(
     rewritten_files = []
     tensor_to_filename = {}
     total_size_bytes = 0
+    runtime_prefixes = set(prefixes)
     for shard_name, dropped_names in drop_by_shard.items():
         if not shard_name.endswith(".safetensors"):
             raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
@@ -408,13 +441,17 @@ def _save_module_replacement_safetensors(
         tensors = {}
         with safe_open(read_path, framework="pt", device="cpu") as handler:
             for tensor_name in handler.keys():
-                if tensor_name not in dropped_names:
-                    tensors[tensor_name] = handler.get_tensor(tensor_name)
-                    tensor_to_filename[tensor_name] = shard_name
+                if tensor_name in dropped_names or _tensor_matches_prefixes(tensor_name, runtime_prefixes):
+                    if tensor_name not in removed_tensor_names:
+                        removed_tensor_names.append(tensor_name)
+                    continue
+                tensors[tensor_name] = handler.get_tensor(tensor_name)
+                tensor_to_filename[tensor_name] = shard_name
         for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
             tensors[tensor_name] = tensor
             tensor_to_filename[tensor_name] = shard_name
-        save_file(tensors, target_path, metadata=metadata)
+        with _atomic_shard_path(target_path) as temporary:
+            save_file(tensors, temporary, metadata=metadata)
         rewritten_files.append(shard_name)
         total_size_bytes += os.path.getsize(target_path)
     return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
@@ -1182,6 +1219,10 @@ def ModelWriter(cls):
             state_dict = _convert_checkpoint_state_dict_keys(state_dict, checkpoint_key_for_save)
         state_dict.update(out_of_model_state_dict)
         out_of_model_state_dict.clear()
+
+        # The layer split path writes into several subdirectories, so guard
+        # references against the export root before any group can be written.
+        _validate_offload_sources_outside_save_dir(state_dict, save_dir)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"

@@ -6,7 +6,7 @@ import torch
 
 from gptqmodel.looper.gptq_processor import enable_w4afp8_replay
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
-from gptqmodel.nn_modules.qlinear.w4a_triton import _token_fp8_quant
+from gptqmodel.nn_modules.qlinear.w4a_triton import _token_fp8_quant, fp8_linear_prepacked
 from gptqmodel.quantization.activation_floatx import fp8_token_qdq
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND, backend_for_activation
@@ -181,6 +181,45 @@ def test_gb10_fp8_random_columns_and_partial_tile():
     magnitude = magnitude * token_scale
     torch.cuda.synchronize()
     _assert_native_gemm_close(actual, oracle, magnitude)
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+@pytest.mark.parametrize("operand", ["q", "q_columns", "weight", "scales", "row_scale", "bias"])
+def test_prepacked_fp8_gemm_accepts_strided_operands(operand):
+    rows, k, n = 7, 256, 64
+    q = (torch.arange(rows * k, device="cuda").reshape(rows, k) % 3 - 1).to(torch.float8_e4m3fn)
+    weight = (torch.arange(k * n, device="cuda").reshape(k, n) % 5 - 2).to(torch.float8_e4m3fn)
+    scales = torch.tensor([[0.5] * n, [1.0] * n], device="cuda", dtype=torch.float32)
+    row_scale = torch.arange(1, rows + 1, device="cuda", dtype=torch.float32) / 4
+    bias = (torch.arange(n, device="cuda") % 3 - 1).float()
+    arguments = {"q": q, "weight": weight, "scales": scales, "row_scale": row_scale, "bias": bias}
+
+    source = arguments["q" if operand == "q_columns" else operand]
+    if operand == "q_columns":
+        storage = torch.empty((rows, k * 2), device="cuda", dtype=source.dtype)
+        view = storage[:, ::2]
+    elif source.ndim == 2:
+        storage = torch.empty((source.shape[0], source.shape[1] + 8), device="cuda", dtype=source.dtype)
+        view = storage[:, :source.shape[1]]
+    else:
+        storage = torch.empty((source.numel() * 2,), device="cuda", dtype=source.dtype)
+        view = storage[::2]
+    view.copy_(source)
+    assert not view.is_contiguous()
+    arguments["q" if operand == "q_columns" else operand] = view
+
+    expected = torch.zeros((rows, n), device="cuda", dtype=torch.float32)
+    for group in range(k // 128):
+        sl = slice(group * 128, (group + 1) * 128)
+        expected += (q.float()[:, sl] @ weight.float()[sl]) * scales[group]
+    expected = expected * row_scale[:, None] + bias
+    actual = fp8_linear_prepacked(
+        arguments["q"], arguments["row_scale"], arguments["weight"], arguments["scales"],
+        arguments["bias"], torch.float32,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def _round_toward_zero_to_fp16(value: torch.Tensor) -> torch.Tensor:

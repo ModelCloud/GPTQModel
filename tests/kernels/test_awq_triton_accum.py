@@ -227,6 +227,7 @@ def test_awq_triton_module_noncontiguous_bias_and_backward():
     module.scales.copy_(scales.cuda())
     module.bias.copy_(bias.cuda())
     module.post_init()
+    module.bias.requires_grad_(True)
     module.train()
     # Shape is [batch, sequence, K], but storage is deliberately non-contiguous.
     x = torch.randn(2, 3, K, device="cuda", dtype=torch.float16).transpose(0, 1).requires_grad_()
@@ -245,6 +246,8 @@ def test_awq_triton_module_noncontiguous_bias_and_backward():
     grad_diff = (x.grad - expected_grad).abs()
     assert grad_diff.max().item() <= 1.0
     assert grad_diff.mean().item() <= 0.02
+    expected_bias_grad = grad_output.float().reshape(-1, N).sum(0).to(module.bias.dtype)
+    torch.testing.assert_close(module.bias.grad, expected_bias_grad, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AWQ Triton CUDA Graph test")
