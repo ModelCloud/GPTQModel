@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel.utils import nf12_codec
+
 
 @pytest.fixture(scope="module")
 def native():
@@ -36,7 +38,67 @@ def native():
     lib.nf12_ad_moe_silu_mul.restype = C.c_int
     lib.nf12_ad_moe_combine.argtypes = [p, i, i, i, i, p, i, p]
     lib.nf12_ad_moe_combine.restype = C.c_int
+    lib.nf12_ad_linear_wmma_workspace_bytes.argtypes = [i, i, i]
+    lib.nf12_ad_linear_wmma_workspace_bytes.restype = C.c_size_t
+    lib.nf12_ad_linear_wmma_bf16t.argtypes = [p, p, p, i, i, i, p, p, C.c_size_t, p]
+    lib.nf12_ad_linear_wmma_bf16t.restype = C.c_int
     return hip, lib
+
+
+def test_bf16t_launcher_uses_shared_split_dispatch():
+    source = (
+        Path(__file__).parents[1]
+        / "gptqmodel_ext"
+        / "nf12_hip"
+        / "nf12_ad_wmma.hip"
+    ).read_text(encoding="utf-8")
+    assert "NF12_AD_SWITCH(WeightSource::kBf16t)" in source
+    assert "kBf16t, false, kMaxTiles, 1" not in source
+
+
+@pytest.mark.parametrize(
+    "n,k,m",
+    [
+        (4096, 4096, 16),  # four-way split
+        (4096, 4096, 64),  # two-way split
+        (2048, 4096, 16),  # eight-way split
+    ],
+)
+def test_bf16t_wmma_matches_nf12_split_k_plans(native, n, k, m):
+    hip, lib = native
+    if lib.nf12_ad_wmma_supported(m) == 0:
+        pytest.skip(f"WMMA path unavailable for m={m}")
+    workspace_bytes = lib.nf12_ad_linear_wmma_workspace_bytes(n, k, m)
+    assert workspace_bytes > 0
+
+    torch.manual_seed(m)
+    weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    activations = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = hip.encode(weight)
+    twin = nf12_codec.pack_bf16t(weight.cpu()).cuda()
+    workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device="cuda")
+    twin_out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+
+    expected = hip.linear(activations, packed, escapes, int(exp_base))
+    status = lib.nf12_ad_linear_wmma_bf16t(
+        twin.data_ptr(),
+        activations.data_ptr(),
+        twin_out.data_ptr(),
+        n,
+        k,
+        m,
+        None,
+        workspace.data_ptr(),
+        workspace_bytes,
+        torch.cuda.current_stream().cuda_stream,
+    )
+    torch.cuda.synchronize()
+
+    assert status == 0
+    assert torch.equal(
+        twin_out.view(torch.int16),
+        expected.view(torch.int16),
+    )
 
 
 @pytest.mark.parametrize("magnitude,bias_value", [(2.**25, 1.), (1., 2.**-25), (2.**127, 2.**127)])
