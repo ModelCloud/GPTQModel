@@ -903,8 +903,12 @@ if _TRITON_AVAILABLE:
                     other=0.0,
                 )
 
-                weight = tl.cast(q, tl.float16) * scale[None, :]
-                accumulator += tl.dot(a, weight)
+                if scale_ptr.dtype.element_ty == tl.float32:
+                    weight = tl.cast(q, tl.float32) * scale[None, :]
+                    accumulator += tl.dot(a.to(tl.float32), weight, input_precision="ieee")
+                else:
+                    weight = tl.cast(q, tl.float16) * scale[None, :]
+                    accumulator += tl.dot(a, weight)
 
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
@@ -1832,9 +1836,17 @@ class GGUFTritonKernel(GGUFTorchLinear):
         if self.gguf_tensor_qtype == "Q6_K":
             ql = blocks[..., :128].permute(1, 2, 0).contiguous()
             qh = blocks[..., 128:192].permute(1, 2, 0).contiguous()
-            scale = blocks[..., 192:208].contiguous().view(torch.int8).to(torch.float16)
-            d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1)
-            scale = (d.unsqueeze(-1) * scale).permute(1, 2, 0).contiguous()
+            subscales = blocks[..., 192:208].contiguous().view(torch.int8).to(torch.float32)
+            d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).to(torch.float32)
+            scale = d.unsqueeze(-1) * subscales
+            # Q6_K codes are signed [-32, 31]. A finite matmul can require
+            # weights outside FP16 even when activations are FP16.
+            scale_dtype = (
+                torch.float32
+                if bool((scale.abs() * 32 > torch.finfo(torch.float16).max).any())
+                else torch.float16
+            )
+            scale = scale.to(scale_dtype).permute(1, 2, 0).contiguous()
             return {
                 "ql": ql,
                 "qh": qh,
