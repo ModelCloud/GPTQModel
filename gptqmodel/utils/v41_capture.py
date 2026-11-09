@@ -98,6 +98,7 @@ class V41Capture:
         if self.device.type == "cuda" and torch.backends.cuda.matmul.allow_tf32:
             raise ValueError("direct capture requires TF32 disabled")
         try:
+            batch.validate()
             self._routes(None, (batch.hidden, batch.indices, batch.weights))
             for index in self.expert_ids:
                 tokens, slots = torch.where(batch.indices == index)
