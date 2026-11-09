@@ -35,7 +35,20 @@ Independent NumPy GGUF decoders and FP64 Torch matmuls on an NVIDIA GB10 show
 the old BF16 dense fallback returned `0` for finite outputs of `1` (Q1_0),
 `28` (Q4_0), and `28` (Q8_0). The corrected path matches those references.
 The regression suite covers one and eight rows, optional bias, output dtype,
-repeated forwards, and the absence of a persistent expanded weight. These
+repeated forwards, input gradients, and the absence of a persistent expanded weight. These
 formats use sign-only, nibble, and signed-byte packed representations,
 respectively. The [K-scale overflow cache](gguf-k-scale-overflow-cache.md)
 documents the existing selective FP16 range guard.
+
+On the GB10 with K=N=1024 and one resident BF16 row, five warmups and the
+median of seven groups of 20 synchronized wall-clock forwards measured:
+
+| Format | Before | After | Peak allocator delta before → after |
+| --- | ---: | ---: | ---: |
+| Q1_0 | 0.1447 ms | 0.1460 ms | 35,655,680 → 37,756,928 bytes |
+| Q4_0 | 0.1656 ms | 0.1679 ms | 35,655,680 → 37,756,928 bytes |
+| Q8_0 | 0.1270 ms | 0.1283 ms | 35,655,680 → 37,756,928 bytes |
+
+The additional FP32 weight is temporary for the current matmul. The test
+checks that no expanded weight remains in module state after repeated
+inference forwards.

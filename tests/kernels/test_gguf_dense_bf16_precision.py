@@ -76,3 +76,27 @@ def test_bf16_dense_fallback_matches_independent_fp64_oracle(bits, rows, bias):
         torch.is_tensor(value) and value.numel() >= module.in_features * module.out_features
         for value in vars(module).values()
     )
+
+
+@requires_gpu
+@pytest.mark.cuda
+def test_bf16_dense_fallback_preserves_input_gradient():
+    source, packed = _cancelling_blocks("q4_0", bias=False)
+    module = GGUFTorchLinear(
+        bits="q4_0", group_size=-1, sym=True, desc_act=False,
+        in_features=256, out_features=64, bias=False,
+    ).to("cuda").eval()
+    module.load_state_dict(source.state_dict(), strict=True)
+    module.gguf_fused_cuda_max_rows = 0
+    inputs = torch.full(
+        (1, 256), 2**-5, device="cuda", dtype=torch.bfloat16, requires_grad=True,
+    )
+    expected = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(packed, "Q4_0")[0]
+    ).to(device="cuda", dtype=torch.bfloat16).unsqueeze(0)
+
+    (module(inputs).float().sum() / 64).backward()
+
+    assert inputs.grad is not None
+    assert torch.isfinite(inputs.grad).all()
+    torch.testing.assert_close(inputs.grad, expected, rtol=2e-3, atol=2e-3)
