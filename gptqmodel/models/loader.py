@@ -2349,16 +2349,23 @@ def ModelLoader(cls):
             BACKEND.AWQ_BITBLAS,
         ]:
             keep_in_fp32_modules = []
+            gguf_bias_names = []
             for name, module in model.named_modules():
+                prefix = f"{name}." if name else ""
                 if getattr(module, "weight_scale_inv", None) is not None:
-                    prefix = f"{name}." if name else ""
                     keep_in_fp32_modules.append(f"{prefix}weight_scale_inv")
-                    if getattr(module, "bias", None) is not None:
-                        keep_in_fp32_modules.append(f"{prefix}bias")
+                if getattr(module, "bias", None) is not None and (
+                    getattr(module, "weight_scale_inv", None) is not None
+                    or hasattr(module, "gguf_tensor_qtype")
+                ):
+                    keep_in_fp32_modules.append(f"{prefix}bias")
+                    if isinstance(module, GGUFTorchLinear):
+                        gguf_bias_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
+                fp32_bf16_buffer_names=gguf_bias_names,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,

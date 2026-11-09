@@ -4,15 +4,19 @@
 weight for the current matmul. BF16 activations can be represented exactly in
 FP32, while decoding each weight into BF16 before a signed reduction can erase
 small, finite differences. The dense fallback therefore decodes every GGUF
-format into FP32 for BF16 inputs, performs the matmul and optional bias in
-FP32, and rounds the output once to BF16. The FP16 K-quant overflow guard
-remains selective. FP16 sign-only formats keep their ordinary path; formats
-with established packed bounds select FP32 only when needed, and the other
-formats use FP32 conservatively to preserve finite dot products.
+format into FP32 for BF16 inputs. CPU FP16/BF16 calls with bias also multiply
+and add in FP32 before rounding once to the activation dtype. The FP16 K-quant
+overflow guard remains selective for other calls. FP16 sign-only formats keep
+their ordinary path; formats with established packed bounds select FP32 only
+when needed, and the other formats use FP32 conservatively to preserve finite
+dot products.
 
 ```mermaid
 flowchart TD
-    A["GGUFTorchLinear.forward chooses dense fallback"] --> B["_use_fp32_gguf_weight checks activation dtype and qtype"]
+    A["GGUFTorchLinear.forward chooses dense fallback"] --> Z{"CPU low precision with bias?"}
+    Z -- "Yes" --> Y["_forward_dequant_matmul uses FP32 weight, input and bias"]
+    Y --> G["Round output once to activation dtype"]
+    Z -- "No" --> B["_use_fp32_gguf_weight checks activation dtype and qtype"]
     B -- "BF16 or FP16 other format" --> C["dequantize_weight returns temporary FP32 weight"]
     B -- "FP16 guarded format" --> D["_k_scale_overflows checks packed source"]
     D -- "Wide" --> C
@@ -26,6 +30,57 @@ flowchart TD
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
     class X failure
 ```
+
+## FP32 GGUF bias across checkpoint load and forward
+
+PR #3727 keeps an FP32 GGUF checkpoint bias through BF16 model loading and
+through `GGUFTorchLinear.forward`. Accelerate's `keep_in_fp32_modules` handles
+FP16 model loads, but its BF16 path narrows every floating tensor. The loader
+therefore names only GGUF bias buffers for a second, selective read of their
+original checkpoint values. Single-file and indexed safetensors read only the
+named tensors; legacy PyTorch shards use `torch.load` with memory mapping where
+available. The restored bias remains a registered FP32 buffer on its assigned
+device. No dense weight or expanded cache is retained.
+
+```mermaid
+flowchart TD
+    A["ModelLoader.from_quantized collects GGUF bias names"] --> B["load_checkpoint_in_model_then_tie_weights"]
+    B --> C{"Requested dtype BF16?"}
+    C -- "No" --> D["Accelerate loads checkpoint; FP16 keep list applies"]
+    C -- "Yes" --> E["Accelerate loads checkpoint as BF16"]
+    E --> F["_restore_fp32_checkpoint_buffers reads named source bias tensors"]
+    F -- "Missing or mismatched model slot" --> X["Raise RuntimeError"]
+    F --> G["Replace registered GGUF bias with FP32 source value"]
+    D --> H["GGUFTorchLinear.forward selects fused or dense path"]
+    G --> H
+    H -- "Fused" --> J["_forward_fused_k moves and adds FP32 bias before output cast"]
+    H -- "Dense" --> K["forward moves FP32 bias and passes it to _forward_dequant_matmul"]
+    J --> L["Return activation dtype"]
+    K --> L
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| BF16 checkpoint load | `models/loader.py:2351-2364` passed a keep list that Accelerate ignores for BF16 | `utils/model.py:_restore_fp32_checkpoint_buffers` reads GGUF bias values from the checkpoint after loading |
+| Checkpoint source selection | A second read could choose a different whole-file format in a directory or silently miss an indexed bias | The restoration read follows Accelerate's file preference and raises if any requested bias is absent |
+| Dense forward bias | `nn_modules/qlinear/gguf.py:1913-1916` cast FP32 bias to the activation dtype before `_forward_dequant_matmul` | `GGUFTorchLinear.forward` moves bias across devices without narrowing it, then rounds the output once |
+| Packed weight storage | GGUF packed bytes persisted; dense fallback weight was temporary | The same packed bytes persist and the temporary dense weight is released after each forward |
+
+The independent FP64 Q8_0 oracle uses a 1 × 32 activation and one output.
+For FP16, a 100000 dot and -100000 FP32 bias should return zero; before this
+change the public dense forward returned `-inf`. For BF16, a 99840 dot and
+-100000 FP32 bias should return -160; before this change it returned zero.
+Both outputs now match the oracle exactly, including after single-file,
+indexed-shard and PyTorch checkpoint reloads, and after a safetensors key
+remap. The focused CPU suite passed 11 tests on
+Torch 2.16.0.dev20261102+cu130; CUDA, ROCm and llama.cpp paths were not run
+on that host. PR #3728 already widened the CPU dense reduction; this PR leaves
+that arithmetic and CPU autocast handling untouched. Passing the original FP32
+bias through public `forward` also removes a pre-dispatch narrowing that
+affected #3728's public path. Other cancellation and autocast cases belong in
+a separate follow-up PR.
 
 | Mechanism | Before | After |
 | --- | --- | --- |

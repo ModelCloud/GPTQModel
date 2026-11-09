@@ -2677,11 +2677,78 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
         module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype, device=current.device))
 
 
+def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None:
+    """Restore selected buffers after Accelerate narrows a BF16 checkpoint load.
+
+    Accelerate's ``keep_in_fp32_modules`` applies only when ``dtype`` is FP16.
+    Read only the named safetensors values, including indexed shards, so an
+    FP32 GGUF bias is never reconstructed from its rounded BF16 copy.
+    """
+    checkpoint = os.fspath(checkpoint)
+    if os.path.isdir(checkpoint):
+        # Match Accelerate's directory resolution so the second read comes
+        # from the same checkpoint that populated the rest of the model.
+        for filename in ("pytorch_model.bin", "model.safetensors"):
+            candidate = os.path.join(checkpoint, filename)
+            if os.path.isfile(candidate):
+                checkpoint = candidate
+                break
+        else:
+            indexes = [name for name in os.listdir(checkpoint) if name.endswith(".index.json")]
+            if len(indexes) != 1:
+                raise ValueError(f"Cannot resolve checkpoint for FP32 GGUF bias restoration: {checkpoint}")
+            checkpoint = os.path.join(checkpoint, indexes[0])
+
+    if checkpoint.endswith(".index.json"):
+        with open(checkpoint, encoding="utf-8") as handle:
+            weight_map = json.load(handle)["weight_map"]
+        files: dict[str, set[str]] = {}
+        for name in names:
+            shard = weight_map.get(name)
+            if shard is not None:
+                files.setdefault(os.path.join(os.path.dirname(checkpoint), shard), set()).add(name)
+    else:
+        files = {checkpoint: names}
+
+    restored: set[str] = set()
+    for path, selected in files.items():
+        if path.endswith(".safetensors"):
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                values = {name: handle.get_tensor(name) for name in selected & set(handle.keys())}
+        else:
+            try:
+                state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+            except RuntimeError as error:
+                if "mmap" not in str(error):
+                    raise
+                state = torch.load(path, map_location="cpu", weights_only=True)
+            values = {name: state[name] for name in selected & set(state)}
+
+        for name, value in values.items():
+            module_name, _, buffer_name = name.rpartition(".")
+            module = model.get_submodule(module_name) if module_name else model
+            current = module._buffers.get(buffer_name)
+            if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
+                raise RuntimeError(f"Cannot restore FP32 GGUF bias buffer {name!r}: missing or mismatched model slot")
+            if current.device.type == "meta":
+                raise RuntimeError(f"Cannot restore FP32 GGUF bias buffer {name!r} on a meta device")
+            module._buffers[buffer_name] = value.to(device=current.device, dtype=torch.float32)
+            restored.add(name)
+
+    missing = names - restored
+    if missing:
+        raise RuntimeError(
+            "Cannot restore FP32 GGUF bias buffers missing from checkpoint: "
+            + ", ".join(sorted(missing))
+        )
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
         checkpoint = args[0]
     key_converter = kwargs.pop("key_converter", None)
+    fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
     converted_checkpoint = None
     if callable(key_converter) and checkpoint is not None:
         converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
@@ -2693,6 +2760,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             kwargs.get("checkpoint", checkpoint),
         )
         accelerate.load_checkpoint_in_model(model, *args, **kwargs)
+        if fp32_bf16_buffer_names and str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
+            _restore_fp32_checkpoint_buffers(
+                model, kwargs.get("checkpoint", checkpoint), fp32_bf16_buffer_names
+            )
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
         if converted_checkpoint is not None:

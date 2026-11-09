@@ -103,7 +103,7 @@ documents per-row BF16/FP32 normalization before fused GGUF matmuls.
 The [GGUF packed scale overflow cache](docs/gguf-k-scale-overflow-cache.md)
 documents FP16 operand-width selection for GGUF Torch inference.
 The [GGUF dense fallback precision](docs/gguf-dense-fallback-precision.md)
-page explains BF16 weight reconstruction and output rounding across formats.
+page explains BF16 weight reconstruction, FP32 bias reload, and output rounding across formats.
 
 `BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
 8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime

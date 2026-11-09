@@ -1208,7 +1208,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.register_buffer("qweight", qweight)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=torch.float16)
+            # Keep FP32 source/checkpoint bias values before the forward path
+            # chooses its compute dtype.
+            bias_tensor = torch.zeros(self.out_features, dtype=torch.float32)
             if "bias" in self._buffers:
                 self.bias = bias_tensor
             else:
@@ -1317,7 +1319,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.register_buffer("qweight", qweight)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -1911,9 +1913,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             output = self._forward_fused_k(x_flat, bias=self.bias)
         else:
             bias = self.bias
-            if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-                bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+            if bias is not None and bias.device != x_flat.device:
+                bias = bias.to(device=x_flat.device)
             output = self._forward_dequant_matmul(x_flat, bias=bias)
+            if output.dtype != x_flat.dtype:
+                output = output.to(dtype=x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
