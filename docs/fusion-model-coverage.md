@@ -327,3 +327,5 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m pytest \
 
 See [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567) for the
 implementation and Llama end-to-end validation.
+
+`dots3_note`: explicit fork calibration/expert adapter; fusion remains unqualified, with no profile enabled by this extraction.

@@ -5886,6 +5886,10 @@
     "zdtaichu5_0": {
       "definition": "ZDTaichu5QModel",
       "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
+    "dots3_note": {
+      "definition": "Dots3NoteQModel",
+      "reason": "Explicit native calibration/expert adapter; fusion executor is unqualified and no profile is enabled by this extraction."
     }
   }
 }
