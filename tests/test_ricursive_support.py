@@ -539,7 +539,7 @@ def test_generate_patch_stands_down_for_native_fix():
 
     class _NativeFixed:
         device = torch.device("cpu")
-        _ricursive_tf5_native_fix = "2026-11-05"
+        _ricursive_tf5_native_fix = "2026-11-09"
 
         def prepare_inputs_for_generation(self, *args, **kwargs):  # pragma: no cover - untouched
             return {"input_ids": None}

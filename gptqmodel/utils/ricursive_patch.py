@@ -49,11 +49,15 @@ build may bake the fast paths into its own ``modeling_ricursive.py``; the
 upstream file must not.
 """
 
+from functools import wraps
+
 import torch
 import torch.nn.functional as F
+from transformers.generation.utils import GenerationMixin
 
 
 _PATCH_FLAG = "_gptqmodel_ricursive_generate_patched"
+_NATIVE_CONTRACT_VERSION = "2026-11-09"
 
 # set on the inner `RicursiveModel` class once `_update_causal_mask` is wrapped
 _MASK_PATCH_FLAG = "_gptqmodel_ricursive_mask_patched"
@@ -155,15 +159,9 @@ def _cache_layer_seq_length(past_key_values, layer_idx: int):
 
 
 def _prepare_inputs_for_generation(
-    self,
-    input_ids: torch.LongTensor,
-    past_key_values=None,
-    attention_mask=None,
-    inputs_embeds=None,
-    cache_position=None,
-    use_cache=None,
-    position_ids=None,
-    **kwargs,
+    self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None,
+    cache_position=None, use_cache=None, position_ids=None,
+    next_sequence_length=None, is_first_iteration=None, **kwargs,
 ):
     """Prepare a full prompt or a new-only block for cached generation.
 
@@ -174,9 +172,9 @@ def _prepare_inputs_for_generation(
     ``cache_position``. Attention masks may be padded to cache capacity and
     therefore cannot identify which input layout the caller supplied.
     """
-    # transformers 5.x no longer moves remote-code inputs onto the model device for this
-    # model, so a plain CPU `input_ids` reaches the embedding lookup and raises. Its own
-    # generation helper does this move, so mirror it here.
+    # transformers 5.x does not move remote-code inputs onto the model device for
+    # this model, so a plain CPU `input_ids` reaches the embedding lookup and
+    # raises. Its own generation helper performs this move, so mirror it here.
     device = getattr(self, "device", None)
     if device is not None and getattr(device, "type", None) != "meta":
         if input_ids is not None and input_ids.device != device:
@@ -185,13 +183,19 @@ def _prepare_inputs_for_generation(
             attention_mask = attention_mask.to(device)
         if inputs_embeds is not None and inputs_embeds.device != device:
             inputs_embeds = inputs_embeds.to(device)
-        # transformers derives `position_ids` from the *caller's* tensors before this
-        # hook runs, so a CPU prompt yields CPU positions even after the move above.
-        # RoPE then multiplies them against CUDA frequencies and fails.
+        # transformers derives `position_ids` from the *caller's* tensors before
+        # this hook runs, so a CPU prompt yields CPU positions even after the
+        # move above. RoPE then multiplies them against CUDA frequencies and fails.
         if position_ids is not None and position_ids.device != device:
             position_ids = position_ids.to(device)
 
     past_length = _cache_seq_length(past_key_values)
+
+    use_embeds = inputs_embeds is not None and (
+        is_first_iteration or past_length == 0 or input_ids is None or input_ids.numel() == 0
+    )
+    input_tensor = inputs_embeds if use_embeds else input_ids
+    input_length = input_tensor.shape[1]
 
     if cache_position is None:
         # Inputs no longer than the cache are treated as new-only blocks.
@@ -199,32 +203,52 @@ def _prepare_inputs_for_generation(
         # Mask width/content cannot distinguish a longer new-only block from
         # a full prompt with a capacity-sized mask (even an all-visible one).
         # Callers supplying longer new-only blocks must pass cache_position.
-        input_length = input_ids.shape[1]
         full_prompt = past_length > 0 and input_length > past_length
-        new_len = input_length - past_length if full_prompt else input_length
-        cache_position = torch.arange(past_length, past_length + new_len, device=input_ids.device)
-
-    # Only slice when the cache is warm and `input_ids` still carries cached tokens.
-    # The upstream code sliced unconditionally, which turned a ``None`` cache position
-    # into ``input_ids[:, None]`` and added a bogus axis.
-    sliced = past_length > 0 and input_ids.shape[1] > cache_position.numel()
-    if sliced:
-        input_ids = input_ids[:, cache_position]
-
-    if inputs_embeds is not None and cache_position.numel() and int(cache_position[0]) == 0:
-        model_inputs = {"inputs_embeds": inputs_embeds}
+        new_len = (
+            next_sequence_length if next_sequence_length is not None
+            else input_length - past_length if full_prompt else input_length
+        )
+        cache_position = torch.arange(
+            past_length, past_length + new_len, device=input_tensor.device
+        )
     else:
-        model_inputs = {"input_ids": input_ids}
+        cache_position = cache_position.to(input_tensor.device)
 
-    # Derive per-row positions from the padding mask. Using `cache_position` for every
-    # row is only correct when nothing is padded: with left padding the real tokens of
-    # a short row sit at higher indices, so a shared position vector shifts its RoPE
-    # phases and the row decodes to garbage.
+    # Only slice when the cache is warm and `input_ids` still carries cached
+    # tokens. Slicing unconditionally turned a `None` cache position into
+    # `input_ids[:, None]` and injected a bogus axis.
+    new_len = cache_position.numel()
+    sliced = past_length > 0 and input_length > new_len
+    if sliced:
+        # During continuation, input_ids may contain only the new prompt
+        # and generated tokens. Absolute cache offsets cannot index that
+        # shorter buffer. Both layouts end with the unprocessed tokens.
+        input_tensor = input_tensor[:, -new_len:] if new_len else input_tensor[:, :0]
+
+    if use_embeds:
+        model_inputs = {"inputs_embeds": input_tensor}
+    else:
+        model_inputs = {"input_ids": input_tensor}
+
+    sequence_length = input_tensor.shape[1]
+    if attention_mask is not None and attention_mask.dim() == 2 and new_len:
+        required_length = int(cache_position[-1]) + 1
+        if attention_mask.shape[-1] < required_length:
+            # A current-block mask omits an implicitly visible cached prefix.
+            attention_mask = F.pad(attention_mask, (required_length - attention_mask.shape[-1], 0), value=1)
+
+    # Derive per-row positions from the padding mask. Using `cache_position` for
+    # every row is only correct when nothing is padded: with left padding the real
+    # tokens of a short row sit at higher indices, so a shared position vector
+    # shifts its RoPE phases and the row decodes to garbage.
     if position_ids is not None:
         # Callers may supply positions for the full prompt/capacity, or may
         # already have selected just the positions for the current block.
-        if position_ids.shape[-1] != input_ids.shape[1]:
-            position_ids = position_ids[:, cache_position]
+        if position_ids.shape[-1] != sequence_length:
+            if new_len and position_ids.shape[-1] > int(cache_position[-1]):
+                position_ids = position_ids[:, cache_position]
+            else:
+                position_ids = position_ids[:, -sequence_length:] if sequence_length else position_ids[:, :0]
     elif attention_mask is not None and attention_mask.dim() == 2:
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
@@ -243,12 +267,45 @@ def _prepare_inputs_for_generation(
             "cache_position": cache_position,
         }
     )
+    # Generation output flags and model-specific forward options must reach
+    # forward. Labels are never generation inputs.
+    model_inputs.update({key: value for key, value in kwargs.items() if key != "labels"})
     if use_cache is not False:
-        # Greedy/sampling generation only ever reads the last position. Keeping
-        # just that row avoids projecting the whole prompt through the 100k-way
-        # LM head, which is several GiB of transient memory at eval batch sizes.
-        model_inputs["logits_to_keep"] = 1
+        # Generation only reads the final position. Requesting one row keeps
+        # the 100k-way LM head from projecting the whole prompt.
+        model_inputs.setdefault("logits_to_keep", 1)
     return model_inputs
+
+
+def _update_model_kwargs_for_generation(
+    self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1
+):
+    """Advance explicit positions when the generation backend leaves them unchanged."""
+    position_ids = model_kwargs.get("position_ids")
+    cache_position = model_kwargs.get("cache_position")
+    model_kwargs = GenerationMixin._update_model_kwargs_for_generation(self,
+        outputs, model_kwargs, is_encoder_decoder=is_encoder_decoder,
+        num_new_tokens=num_new_tokens,
+    )
+    # Transformers 4 leaves positions unchanged; Transformers 5 already extends them.
+    if position_ids is not None and model_kwargs.get("position_ids") is position_ids:
+        offsets = torch.arange(
+            1, num_new_tokens + 1, device=position_ids.device, dtype=position_ids.dtype
+        )
+        model_kwargs["position_ids"] = torch.cat(
+            [position_ids, position_ids[:, -1:] + offsets], dim=-1
+        )
+    # Transformers 5 no longer maintains cache_position. Keep an explicitly
+    # supplied vector in sync, without advancing it twice on Transformers 4.
+    if cache_position is not None and model_kwargs.get("cache_position") is cache_position:
+        if model_kwargs.get("use_cache", True):
+            model_kwargs["cache_position"] = cache_position[-1:] + num_new_tokens
+        else:
+            offsets = torch.arange(
+                1, num_new_tokens + 1, device=cache_position.device, dtype=cache_position.dtype
+            )
+            model_kwargs["cache_position"] = torch.cat([cache_position, cache_position[-1:] + offsets])
+    return model_kwargs
 
 
 def _ensure_generation_config(model) -> None:
@@ -270,46 +327,41 @@ def _ensure_generation_config(model) -> None:
         model.generation_config = GenerationConfig()
 
 
-def _update_causal_mask(
-    self,
-    attention_mask,
-    input_tensor,
-    cache_position,
-    past_key_values,
-):
-    """Corrected ``RicursiveModel._update_causal_mask``.
-
-    The published version has two defects that only show up when an explicit mask is
-    built (i.e. for padded batches):
-
-    * it seeds the mask with ``finfo.min`` and only writes the allowed diagonal via
-      ``triu`` when ``sequence_length != 1``. Every decode step therefore comes out
-      fully masked, so a padded batch decodes to a constant token;
-    * it uses ``1.0`` (not ``0.0``) for allowed positions, so SDPA adds a constant
-      bias to every score.
-
-    It also calls ``past_key_values.get_max_cache_shape()``, which transformers 5
-    removed. This implementation derives the key span from ``cache_position`` -- the
-    same value the attention layer sizes its key tensor from -- and returns a mask
-    that is ``0.0`` where a key is visible and ``finfo.min`` elsewhere.
-    """
+def _update_causal_mask(self, attention_mask, input_tensor, cache_position, past_key_values):
     if attention_mask is None:
         return None
+    if attention_mask.dim() == 4:
+        # A caller-provided 4D mask already defines visibility (or additive
+        # bias). Preserve it; each local layer still applies its window.
+        dtype = torch.bool if attention_mask.dtype == torch.bool else input_tensor.dtype
+        return attention_mask.to(device=input_tensor.device, dtype=dtype)
     if torch.all(attention_mask == 1):
         return None
 
+    # Only build an explicit mask when we have a padding mask
     dtype, device = input_tensor.dtype, input_tensor.device
     sequence_length = input_tensor.shape[1]
 
     if cache_position is None:
         query_positions = torch.arange(sequence_length, device=device)
-        target_length = sequence_length
     else:
         query_positions = cache_position.to(device=device).reshape(-1)
-        target_length = int(query_positions[-1].item()) + 1
 
-    # Padding can outrun the position span when the caller keeps a longer mask.
+    # Size the key axis from `cache_position`, which is exactly what the
+    # attention layer uses to size its key tensor.
+    # `past_key_values.get_max_cache_shape()` was removed in transformers 5,
+    # and its replacement reports the *capacity* (e.g. `sliding_window`),
+    # which disagrees with the live key count whenever the cache is not full.
+    target_length = int(query_positions[-1].item()) + 1
     target_length = max(target_length, attention_mask.shape[-1])
+
+    # A shorter padding mask leaves the trailing keys unspecified; treat them as
+    # visible -- the causal term below still applies.
+    if attention_mask.shape[-1] < target_length:
+        pad = attention_mask.new_ones(
+            attention_mask.shape[0], target_length - attention_mask.shape[-1]
+        )
+        attention_mask = torch.cat([pad, attention_mask], dim=-1)
 
     key_positions = torch.arange(target_length, device=device)
     allowed = key_positions[None, :] <= query_positions[:, None]
@@ -320,6 +372,9 @@ def _update_causal_mask(
         dtype=dtype,
         device=device,
     )
+    # `0.0` for visible keys (not `1.0`, which would bias every score) and the
+    # dtype minimum elsewhere. Building the mask from `allowed` also keeps a
+    # single-token decode step from coming out fully masked.
     return causal_mask.masked_fill(~allowed, torch.finfo(dtype).min)
 
 
@@ -735,15 +790,28 @@ def _patch_gqa_attention(model) -> bool:
             )[None, None]
 
         is_causal = bool(attention_mask is None and q.shape[2] > 1)
+        # Keep the SDPA result even when returning diagnostic weights. Rebuilding
+        # the output from rounded BF16 probabilities changes logits and token IDs.
         attn_output = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
+            q, k, v, attn_mask=attention_mask, dropout_p=0.0, is_causal=is_causal,
             enable_gqa=self.num_kv_groups > 1,
         )
+        attn_weights = None
+        if output_attentions:
+            # SDPA does not expose weights; compute them separately only on request.
+            weight_keys = k.repeat_interleave(self.num_kv_groups, dim=1)
+            with torch.autocast(device_type=q.device.type, enabled=False):
+                scores = torch.matmul(q.float(), weight_keys.float().transpose(-1, -2)) * self.head_dim**-0.5
+                if is_causal:
+                    causal = torch.ones(q_len, weight_keys.shape[2], dtype=torch.bool, device=q.device).tril()
+                    scores = scores.masked_fill(~causal, float("-inf"))
+                if attention_mask is not None:
+                    if attention_mask.dtype == torch.bool:
+                        scores = scores.masked_fill(~attention_mask, float("-inf"))
+                    else:
+                        scores = scores + attention_mask.float()
+                attn_weights = F.softmax(scores, dim=-1).nan_to_num().to(q.dtype)
+
         attn_output = attn_output.transpose(1, 2).contiguous()
 
         if self.config.use_gated_attention:
@@ -756,7 +824,7 @@ def _patch_gqa_attention(model) -> bool:
             attn_output = attn_output.view(bsz, q_len, -1)
 
         attn_output = self.o_proj(attn_output)
-        return attn_output, None, past_key_value
+        return attn_output, attn_weights, past_key_value
 
     forward._gptqmodel_original = original
     cls.forward = forward
@@ -768,25 +836,23 @@ _LOGITS_TO_KEEP_PATCH_FLAG = "_gptqmodel_logits_to_keep_patch"
 
 
 def _patch_logits_to_keep(model) -> bool:
-    """Honour the ``logits_to_keep`` forward argument that speculative decoders pass.
+    """Honour ``logits_to_keep`` on older remote forwards and every model instance.
 
     ``[upstream-eligible: contract + memory]``
-    The shipped forward accepts ``logits_to_keep`` via ``**kwargs`` and ignores
-    it, so it silently violates its own documented signature. Honouring it is a
-    pure fix: the returned rows are unchanged for callers that do not pass it,
-    and callers that do pass it stop getting a wrong-shaped result plus an
-    unnecessary ``batch x seq x vocab`` allocation.
-
-    DFlash-style drafters call the target with ``logits_to_keep=1`` and expect a
-    single position back.  The reference Ripple implementation accepts the
-    argument through ``**kwargs`` and silently ignores it, so the caller receives
-    one row per prompt token and the speculation loop breaks.  Slicing after the
-    LM head keeps the output identical while restoring the documented contract.
+    A temporary hook selects the LM head input on unlabeled calls. Labeled
+    calls retain all rows for FP32 loss, then trim returned logits in either
+    dict or tuple outputs. Each call uses its own instance's current head and
+    removes the hook even on failure. Current native forwards already implement
+    this contract and are left intact.
     """
 
     if model is None:
         return False
     cls = type(model)
+    if getattr(cls, "_ricursive_tf5_native_fix", None) == _NATIVE_CONTRACT_VERSION:
+        # The native forward already slices before projection and handles both
+        # tuple outputs and FP32 loss. Preserve its signature and implementation.
+        return False
     if getattr(cls, _LOGITS_TO_KEEP_PATCH_FLAG, False):
         return False
     if not callable(getattr(cls, "forward", None)):
@@ -794,6 +860,7 @@ def _patch_logits_to_keep(model) -> bool:
 
     original = cls.forward
 
+    @wraps(original)
     def forward(self, *args, **kwargs):
         keep = kwargs.pop("logits_to_keep", None)
         head = getattr(self, "lm_head", None)
@@ -805,38 +872,45 @@ def _patch_logits_to_keep(model) -> bool:
         if labels is None and len(args) > 5:
             labels = args[5]
         slice_input = bool(keep) and head is not None and labels is None
+        hook = None
         if slice_input:
-            # Slice the LM head's *input* so the full [batch, seq, vocab]
-            # projection never materialises: prefill on a long prompt otherwise
-            # costs several GiB that a single position needs.
-            head._gptqmodel_keep_last = int(keep)
+            # Bind the hook to this instance and this call. A class-level
+            # installation flag must not leave later instances unwrapped.
+            def select_rows(_module, inputs):
+                hidden_states, *rest = inputs
+                return (hidden_states[:, -int(keep):, :], *rest)
+
+            hook = head.register_forward_pre_hook(select_rows)
         try:
             outputs = original(self, *args, **kwargs)
         finally:
-            if head is not None:
-                head._gptqmodel_keep_last = None
-        if keep and getattr(outputs, "logits", None) is not None:
-            # The loss (if any) was computed on the full logits above; trimming
-            # the returned tensor afterwards keeps the documented output shape.
-            outputs.logits = outputs.logits[..., -int(keep):, :]
+            if hook is not None:
+                hook.remove()
+        logits_index = 1 if labels is not None else 0
+        logits = outputs[logits_index] if isinstance(outputs, tuple) else outputs.logits
+        if labels is not None:
+            # Old remote forwards reduce loss in activation dtype. FP16 CPU
+            # reduction can overflow even though every individual logit is finite.
+            loss = F.cross_entropy(
+                logits[..., :-1, :].float().reshape(-1, logits.shape[-1]),
+                labels[..., 1:].to(logits.device).reshape(-1),
+            )
+            if isinstance(outputs, tuple):
+                outputs = (loss,) + outputs[1:]
+            else:
+                outputs.loss = loss
+        if keep:
+            logits = logits[..., -int(keep):, :]
+            if isinstance(outputs, tuple):
+                outputs = outputs[:logits_index] + (logits,) + outputs[logits_index + 1:]
+            else:
+                outputs.logits = logits
         return outputs
 
     forward._gptqmodel_original = original
     cls.forward = forward
     setattr(cls, _LOGITS_TO_KEEP_PATCH_FLAG, True)
 
-    head = getattr(model, "lm_head", None)
-    if head is not None and not getattr(head, "_gptqmodel_keep_wrapped", False):
-        base = head.forward
-
-        def head_forward(hidden_states, *args, **kwargs):
-            keep = getattr(head, "_gptqmodel_keep_last", None)
-            if keep and hidden_states.dim() == 3 and hidden_states.shape[1] > keep:
-                hidden_states = hidden_states[:, -keep:, :]
-            return base(hidden_states, *args, **kwargs)
-
-        head.forward = head_forward
-        head._gptqmodel_keep_wrapped = True
     return True
 
 
@@ -855,19 +929,17 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
     #   UPSTREAM_ELIGIBLE_PATCHES   correctness + memory; candidates for
     #                               ricursiveAI/Ripple-65B-Preview.
     #
-    # The fast paths below are numerically identical to the reference
-    # implementation but are bound to this model's head layout and this Torch
-    # build, so they are installed even when the checkpoint already ships the
-    # transformers-5 correctness fixes inline -- the two concerns are
-    # independent, and a fixed checkpoint still benefits from them locally.
+    # The fast paths below are validated against the reference and a Torch
+    # oracle; fused normalization can differ in low-precision rounding. They
+    # stay local and can also accelerate checkpoints with native fixes.
     _patch_fused_rms_norm(model)
     _patch_gqa_attention(model)
     _patch_logits_to_keep(model)
     _patch_chunked_mlp(model)
 
-    # A checkpoint that already ships the native transformers-5 fixes needs nothing
-    # from us. `modeling_ricursive.py` sets `_ricursive_tf5_native_fix` on the class.
-    if getattr(cls, "_ricursive_tf5_native_fix", None):
+    # Only the current native contract includes all generation and masking fixes.
+    # The older 2026-11-05 marker must not suppress these newer corrections.
+    if getattr(cls, "_ricursive_tf5_native_fix", None) == _NATIVE_CONTRACT_VERSION:
         _ensure_generation_config(model)
         return False
 
@@ -902,6 +974,7 @@ def apply_ricursive_generate_patch(model=None, model_cls=None) -> bool:
         target = type(cls.__name__, (cls, GenerationMixin), {**cls.__dict__})
 
     target.prepare_inputs_for_generation = _prepare_inputs_for_generation
+    target._update_model_kwargs_for_generation = _update_model_kwargs_for_generation
     setattr(target, _PATCH_FLAG, True)
     _PATCHED_CLASSES[cls] = target
 
