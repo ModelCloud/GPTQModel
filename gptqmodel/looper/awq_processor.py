@@ -1961,7 +1961,12 @@ class AWQProcessor(LoopProcessor):
 
         return best_max_val.squeeze(1)
 
-    def pseudo_quantize_tensor(self, w: torch.Tensor, bits: Optional[int] = None):
+    def pseudo_quantize_tensor(
+        self,
+        w: torch.Tensor,
+        bits: Optional[int] = None,
+        group_size: Optional[int] = None,
+    ):
         """Simulates AWQ quantization and returns dequantized weights plus scales/zeros.
 
         ``bits`` defaults to the global width. Pass the per-module width when the
@@ -1970,22 +1975,49 @@ class AWQProcessor(LoopProcessor):
         """
 
         org_w_shape = w.shape
+        input_dtype = w.dtype
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
-        if self.qcfg.group_size > 0:
-            assert org_w_shape[-1] % self.qcfg.group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({self.qcfg.group_size})!"
-            w = w.reshape(-1, self.qcfg.group_size)
+        configured_group_size = (
+            self.qcfg.group_size if group_size is None else group_size
+        )
+        if configured_group_size > 0:
+            assert org_w_shape[-1] % configured_group_size == 0, (
+                f"org_w_shape ({org_w_shape[-1]}) must be a multiple of "
+                f"group_size ({configured_group_size})!"
+            )
+            w = w.reshape(-1, configured_group_size)
         assert w.dim() == 2
 
-        # zero point quantization
         if not self.qcfg.sym:
-            max_val = w.amax(dim=1, keepdim=True)
-            min_val = w.amin(dim=1, keepdim=True)
+            zero = torch.zeros_like(w[:, :1])
+            max_val = torch.maximum(
+                w.amax(dim=1, keepdim=True),
+                zero,
+            )
+            min_val = torch.minimum(
+                w.amin(dim=1, keepdim=True),
+                zero,
+            )
             max_int = 2**bits - 1
             min_int = 0
             scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            overflow = ~torch.isfinite(scales)
+            if bool(overflow.any()):
+                span_wide = max_val.float() - min_val.float()
+                scales = torch.where(
+                    overflow,
+                    (span_wide.clamp(min=1e-5) / max_int).to(
+                        dtype=scales.dtype
+                    ),
+                    scales,
+                )
             zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
             w = (
-                torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
+                torch.clamp(
+                    torch.round(w / scales) + zeros,
+                    min_int,
+                    max_int,
+                ) - zeros
             ) * scales
             zeros = zeros.view(org_w_shape[0], -1)
         else:
@@ -2000,6 +2032,9 @@ class AWQProcessor(LoopProcessor):
         # NaN dequantized weights are independent failures, but each full-tensor
         # scan previously synchronized the stream separately.
         assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
+        if input_dtype.is_floating_point:
+            limits = torch.finfo(input_dtype)
+            w.clamp_(limits.min, limits.max)
 
         scales = scales.view(org_w_shape[0], -1)
 
@@ -2022,6 +2057,7 @@ class AWQProcessor(LoopProcessor):
         dst: torch.Tensor,
         abs_max: torch.Tensor = None,
         bits: Optional[int] = None,
+        group_size: Optional[int] = None,
     ) -> None:
         """Writes pseudo-quantized values into a destination tensor without reallocating.
 
@@ -2033,19 +2069,39 @@ class AWQProcessor(LoopProcessor):
         # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
         org_shape = src.shape
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
-        if self.qcfg.group_size > 0:
-            src_view = src.view(-1, self.qcfg.group_size)
-            dst_view = dst.view(-1, self.qcfg.group_size)
+        configured_group_size = (
+            self.qcfg.group_size if group_size is None else group_size
+        )
+        if configured_group_size > 0:
+            src_view = src.view(-1, configured_group_size)
+            dst_view = dst.view(-1, configured_group_size)
         else:
             src_view = src.reshape(org_shape[0], -1)
             dst_view = dst.reshape_as(src_view)
 
         if not self.qcfg.sym:
-            max_val = src_view.amax(dim=1, keepdim=True)
-            min_val = src_view.amin(dim=1, keepdim=True)
+            zero = torch.zeros_like(src_view[:, :1])
+            max_val = torch.maximum(
+                src_view.amax(dim=1, keepdim=True),
+                zero,
+            )
+            min_val = torch.minimum(
+                src_view.amin(dim=1, keepdim=True),
+                zero,
+            )
             max_int = 2 ** bits - 1
             min_int = 0
             scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            overflow = ~torch.isfinite(scales)
+            if bool(overflow.any()):
+                span_wide = max_val.float() - min_val.float()
+                scales = torch.where(
+                    overflow,
+                    (span_wide.clamp(min=1e-5) / max_int).to(
+                        dtype=scales.dtype
+                    ),
+                    scales,
+                )
             zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
 
             dst_view.copy_(src_view)
@@ -2067,14 +2123,12 @@ class AWQProcessor(LoopProcessor):
             max_int = 2 ** (bits - 1) - 1
             scales = max_val / max_int
 
-            # Divide straight into the destination instead of copying first. The
-            # symmetric magnitude that produced `scales` bounds `src_view`, so
-            # `src_view / scales` cannot exceed `max_int` and the rounded value
-            # already sits inside the signed range: the clamp the asymmetric
-            # path needs (where `zeros` shifts the value) never changes one here.
             torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
             dst_view.mul_(scales)
+        if dst_view.dtype.is_floating_point:
+            limits = torch.finfo(dst_view.dtype)
+            dst_view.clamp_(limits.min, limits.max)
 
 
     def _compute_best_scale(
