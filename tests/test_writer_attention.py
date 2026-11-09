@@ -22,7 +22,7 @@ from gptqmodel.models.writer import (
     _quantization_config_for_model_config,
     _save_model_configs_without_weights,
 )
-from gptqmodel.quantization.config import EXL3Config, FORMAT, METHOD
+from gptqmodel.quantization.config import FORMAT, METHOD, EXL3Config
 from gptqmodel.utils.exl3_error_ledger import (
     LEDGER_FILENAME,
     LEDGER_MANIFEST_FILENAME,
