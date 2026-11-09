@@ -1138,7 +1138,9 @@ class GPTQ:
                     self._defer_hessian_sources([source_hessian], self._hessian_ready_event)
                 return
 
-            total_samples = sum(self._device_sample_counts.values())
+            previous_samples = self._hessian_total_samples
+            new_samples = sum(self._device_sample_counts.values())
+            total_samples = previous_samples + new_samples
 
             self._wait_hessian_ready(device)
 
@@ -1152,17 +1154,34 @@ class GPTQ:
             result_accum: torch.Tensor
             if reuse_buffer and self.H.dtype == torch.float32:
                 result_accum = self.H
-                result_accum.zero_()
+                if previous_samples:
+                    result_accum.mul_(float(previous_samples) / float(total_samples))
+                else:
+                    result_accum.zero_()
             else:
                 result_accum = torch.zeros(
                     (self.columns, self.columns),
                     dtype=torch.float32,
                     device=device,
                 )
+                if previous_samples and self.H is not None:
+                    source_hessian = self.H
+                    previous = safe_move_to(
+                        source_hessian, device, dtype=torch.float32
+                    )
+                    result_accum.add_(
+                        previous,
+                        alpha=float(previous_samples) / float(total_samples),
+                    )
+                    if previous is not source_hessian:
+                        self._defer_hessian_sources(
+                            [source_hessian], self._hessian_ready_event
+                        )
 
             if total_samples == 0:
                 self.H = result_accum
                 self.nsamples = 0
+                self._hessian_total_samples = 0
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
                 self._device_hessian_partials.clear()
@@ -1207,19 +1226,22 @@ class GPTQ:
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     if reduction_staging is not None and partial.device.type == "cuda":
                         reduction_staging.copy_(partial, non_blocking=True)
-                        result_accum.add_(reduction_staging)
+                        result_accum.add_(
+                            reduction_staging,
+                            alpha=2.0 / float(total_samples),
+                        )
                     else:
                         result_accum.add_(
-                            safe_move_to(partial, result_accum.device, dtype=torch.float32)
+                            safe_move_to(partial, result_accum.device, dtype=torch.float32),
+                            alpha=2.0 / float(total_samples),
                         )
                 else:
-                    result_accum.add_(partial)
+                    result_accum.add_(partial, alpha=2.0 / float(total_samples))
             del reduction_staging
-
-            result_accum.mul_(2.0 / float(total_samples))
 
             self.H = result_accum
             self.nsamples = total_samples
+            self._hessian_total_samples = total_samples
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
             self._device_hessian_partials.clear()
