@@ -380,8 +380,22 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         out = self._native_forward(x, bias)
         if out is None:
             # Bounded scratch: the decoded matrix lives only for this forward.
-            weight = self.dequantize_weight(device=x.device, dtype=x.dtype)
-            out = linear_fp32_reduce(x, weight, bias)
+            # On CPU, decode and multiply wide so a BF16 checkpoint value that
+            # cannot be represented as the FP16 activation dtype is not lost
+            # before the product is rounded.
+            compute_dtype = torch.float32 if x.device.type == "cpu" else x.dtype
+            weight = self.dequantize_weight(device=x.device, dtype=compute_dtype)
+            if compute_dtype == torch.float32:
+                out_shape = x.shape[:-1] + (self.out_features,)
+                out = torch.mm(
+                    x.reshape(-1, x.shape[-1]).float(),
+                    weight.t(),
+                )
+                if bias is not None:
+                    out = out + bias.float()
+                out = out.to(x.dtype).reshape(out_shape)
+            else:
+                out = linear_fp32_reduce(x, weight, bias)
             del weight
 
         if self.adapter is not None:
