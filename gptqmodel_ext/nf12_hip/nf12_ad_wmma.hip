@@ -53,6 +53,7 @@ extern "C" size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 
 #include <hip/hip_runtime_api.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace nf12_hip {
@@ -88,6 +89,10 @@ constexpr int kLdPadded = kSuperAtomCols + 8;
 
 // CTAs resident on all 32 CUs at one per CU: one wave on this part.
 constexpr int64_t kCtasPerWave = 32;
+
+// Slots for the per-device capability cache in `wmma_available`. A host with
+// more devices than this simply re-probes, which is correct, only slower.
+constexpr int kMaxDevices = 64;
 
 // Row mapping for the routed (mixture-of-experts) launch. A dense launch passes
 // an all-null route and the kernel addresses `x`/`out` directly; a routed launch
@@ -182,10 +187,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // `base + (lane & 15) * ld + 8 * (lane >> 4)`, so only the row differs.
   auto load_a = [&](int64_t kb, int64_t j, int64_t tr) {
     if constexpr (kRouted) {
-      // A tail tile with fewer than 16 rows reads past the expert; clamp into
-      // the assignment array and let the epilogue drop those rows.
+      // A tail tile with fewer than 16 rows reads past the expert; clamp to
+      // THIS expert's last valid assignment and let the epilogue drop the
+      // repeated row. Clamping to `max_assignments` instead would read the
+      // dropped tail of `gather`, which SPEC.md 9.2 leaves unspecified: its
+      // value can name any row (or none), so the load would be out of bounds.
       int64_t pos = route.row_base + tr + (lane & 15);
-      if (pos >= route.max_assignments) pos = route.max_assignments - 1;
+      if (pos >= route.row_base + m) pos = route.row_base + m - 1;
       const int64_t in = route.gather ? int64_t(route.gather[pos]) / route.gather_div : pos;
       return *reinterpret_cast<const WmmaA*>(x + in * route.ldx + kb * kSuperAtomCols +
                                              16 * j + 8 * (lane >> 4));
@@ -433,15 +441,33 @@ static int wmma_arch_ok(int device) {
           arch[4] == '2' && arch[5] == '0' && (arch[6] == '0' || arch[6] == '1'));
 }
 
-// True when the current device has wmma-128b-insts. Cached for the process:
-// the arch of a device never changes, and the routed MoE route is hot enough
-// that a per-launch runtime query would show up.
+// True when the CURRENT device has wmma-128b-insts.
+//
+// Cached per device, not per process. The arch of a given device never changes,
+// so caching is safe, but a single process can see a mix of gfx1201 and gfx1250
+// (two cards, or a container that maps a subset). A process-wide bool captured
+// from whichever device happened to be current on the first call would then
+// send the other device down a matrix-core route it cannot run -- the same
+// class of bug as a shared scratch buffer, just in the capability check.
+//
+// Cached because hipGetDeviceProperties is not free and this sits on the launch
+// path of the hottest kernels. 0 = not yet probed, 1 = yes, -1 = no; two
+// threads racing on the same slot compute the same answer and store it twice,
+// which is harmless.
+static bool wmma_arch_cached(int device) {
+  static std::atomic<int8_t> state[kMaxDevices];
+  int8_t ok = state[device].load(std::memory_order_acquire);
+  if (ok == 0) {
+    ok = wmma_arch_ok(device) ? 1 : -1;
+    state[device].store(ok, std::memory_order_release);
+  }
+  return ok > 0;
+}
+
 static bool wmma_available() {
-  static const bool ok = []() {
-    int device = 0;
-    return hipGetDevice(&device) == hipSuccess && wmma_arch_ok(device) != 0;
-  }();
-  return ok;
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= kMaxDevices) return false;
+  return wmma_arch_cached(device);
 }
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
@@ -461,19 +487,30 @@ static bool wmma_available() {
 //   8192x8192    64 CTAs, 128 k-blocks   s1 / s1
 //   8192x57344  448 CTAs, 128 k-blocks   s2 / s2
 //   2048x8192    64 CTAs,  32 k-blocks   s1 / s1
-//   896x4864     38 CTAs,  14 k-blocks   s1 / s2
+//   896x4864     38 CTAs,  14 k-blocks   s1 / s1
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   constexpr int64_t kOneWave = kCtasPerWave;
   // Narrow N: 7 CTAs is under a quarter wave, and every extra CTA is free
   // because the splits read disjoint k slices.
   if (blocks_x * 4 < kOneWave) return 8;
   // Very wide N: the weight is HBM-resident and a 2-way split hides the extra
-  // latency (8192x57344 m=128: 2598 -> 2418 us). It costs 0.3% at m=16.
-  if (blocks_x >= 8 * kOneWave) return 2;
+  // latency. It only pays when the launch is already several waves deep
+  // (8192x57344 m=128/192/256: 2414/4638/4949 -> 2392/4317/4669 us) or when a
+  // single token tile leaves the machine idle; at m=32/64 the extra CTAs only
+  // add the reduce pass (1260/1371 -> 1230/1293 us).
+  if (blocks_x >= 8 * kOneWave) return (m >= 128 || m <= 16) ? 2 : 1;
+  // Wide N already fills the machine several times over, so a split only adds
+  // the reduce pass. Measured on gfx1201 against the same launch with one K
+  // pass: 4096x28672 (224 CTAs) lost 6.5% / 11.1% / 23.7% at m=16/32/64 when
+  // split four ways. 5120x25600 (200 CTAs, 80 k-blocks) is the exception: at
+  // one token tile the extra CTAs still win 2.6% (372.7 -> 363.1 us), and its
+  // longer K is what separates it from 4096x28672 (64 k-blocks), where the
+  // same split loses 6.8% (312.8 -> 334.1 us).
   if (blocks_x > kOneWave + kOneWave / 4) {
-    // Wide but short K still benefits from more CTAs at small M
-    // (5120x25600 m=16: 371 -> 360 us); a long K does not.
-    if (m <= 64 && k_blocks < kOneWave * 4 && blocks_x >= 4 * kOneWave) return 4;
+    // Only the mid-length K (64 < k_blocks < 128) wins here. A very long K
+    // (8192x8192, 128 k-blocks) already fills the machine, and splitting it
+    // costs 6% at m=16 (170.6 -> 181.1 us).
+    if (m <= 16 && k_blocks > kOneWave * 2 && k_blocks < kOneWave * 4) return 4;
     return 1;
   }
   // One wave or less. Split only when there is enough K to give every split a
@@ -485,8 +522,19 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // leaves room for the extra CTAs (4096x4096 m=32: 30.1 -> 27.1 us), but from
   // kMt = 4 the ~135 VGPRs already cap a CU at three CTAs, so the fourth split
   // only queues (m=64: 38.2 -> 43.3 us).
-  if (k_blocks >= kOneWave && k_blocks < kOneWave * 4) return (m <= 32) ? 4 : 2;
-  if (m > 64 && k_blocks < kOneWave) return 2;
+  if (k_blocks >= kOneWave && k_blocks < kOneWave * 4) {
+    if (m <= 32) return 4;
+    if (m == 64) return 2;
+    // From m=128 a full wave of CTAs already covers the GPU, so the extra
+    // splits only add the reduce pass: 4096x4096 goes 70.8 -> 54.6 us at m=128
+    // and 158.2 -> 112.4 us at m=256. A half-wave grid still needs them
+    // (4096x2048, 16 CTAs: 34.3 us unsplit at m=128).
+    return blocks_x >= kOneWave ? 1 : 2;
+  }
+  // Very long K on a narrow grid still benefits, but only for the tiny grids:
+  // 896x4864 (38 CTAs, 14 k-blocks) loses 24% at m=128 when split
+  // (20.7 -> 27.3 us), while 896x1024 (8 CTAs) gains 12% at m=256.
+  if (m > 64 && k_blocks < kOneWave && blocks_x <= 8) return 2;
   return 1;
 }
 
@@ -556,26 +604,25 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   if constexpr (Src == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
-  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+  // Both strides are used as k / 64 and n / 16 below, so a shape that is not a
+  // multiple would truncate rather than fail.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+    return hipErrorInvalidValue;
+  }
 
   int tiles, splits;
   int64_t m_blocks;
-  if constexpr (Src == WeightSource::kBf16t) {
-    if (!wmma_available()) return hipErrorNotSupported;
-    // The twin is the exactness reference, not a hot path, so it takes one
-    // fixed configuration instead of the tuned nf12 dispatch: eight 16-token
-    // tiles per CTA, one K pass, no split, any M.
-    if (m < 16) return hipErrorInvalidValue;
-    tiles = kMaxTiles;
-    splits = 1;
-    m_blocks = (m + kMaxTiles * 16 - 1) / (kMaxTiles * 16);
-  } else {
-    if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
-    const WmmaPlan plan = wmma_plan(n, k, m);
-    tiles = plan.tiles;
-    splits = plan.splits;
-    m_blocks = plan.m_blocks;
-  }
+  // The bf16t twin is the exactness reference for the nf12 route, so it MUST
+  // run the identical (tiles, splits, m_blocks) plan. SPEC.md 6.2 promises
+  // bitwise equality for the same configuration; a twin that always ran eight
+  // tiles with one K pass could only be compared under a tolerance, which
+  // cannot distinguish a decode error from a different reduction order.
+  if (!wmma_available()) return hipErrorNotSupported;
+  if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
+  const WmmaPlan plan = wmma_plan(n, k, m);
+  tiles = plan.tiles;
+  splits = plan.splits;
+  m_blocks = plan.m_blocks;
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
@@ -607,61 +654,70 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   } else {
     // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
     // no reduce pass; every other case reduces from a partial plane.
-#define NF12_AD_DISPATCH(T, D, P)               \
+#define NF12_AD_DISPATCH(SRC, T, D, P)          \
   do {                                          \
     if (splits == 1) {                          \
-      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 1, D, P);    \
+      NF12_AD_LAUNCH(SRC, false, T, 1, D, P);   \
     } else if (splits == 2) {                   \
-      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 2, D, P);    \
+      NF12_AD_LAUNCH(SRC, false, T, 2, D, P);   \
     } else if (splits == 4) {                   \
-      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 4, D, P);    \
+      NF12_AD_LAUNCH(SRC, false, T, 4, D, P);   \
     } else {                                    \
-      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 8, D, P);    \
+      NF12_AD_LAUNCH(SRC, false, T, 8, D, P);   \
     }                                           \
   } while (0)
 
-    // Double buffering only pays while the extra LDS and VGPRs still leave room
-    // for more than one CTA per CU; above six tiles they do not (m=128 at
-    // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
-    // exactly one of the two variants, so the kernel count is unchanged.
-    //
-    // The padded shared stride (36 KiB/CTA instead of 32) costs one resident CTA
-    // per CU. That is free while the whole launch fits under three CTAs per CU
-    // and a loss beyond it, so the launcher picks the variant from the grid size.
-    const bool pad = n_blocks * m_blocks <= 96;
-    const int64_t ctas = n_blocks * m_blocks * splits;
-    const int lds_kib = pad ? 36 : 32;
-    const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
-    const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
-    const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
-    // Only the two smallest tile counts get the runtime buffer choice; from
-    // three tiles up the buffer is unconditional, so those stay single.
-#define NF12_AD_TILES(T, D)                                                     \
+  // Double buffering only pays while the extra LDS and VGPRs still leave room
+  // for more than one CTA per CU; above six tiles they do not (m=128 at
+  // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
+  // exactly one of the two variants, so the kernel count is unchanged.
+  //
+  // The padded shared stride (36 KiB/CTA instead of 32) costs one resident CTA
+  // per CU. That is free while the whole launch fits under three CTAs per CU
+  // and a loss beyond it, so the launcher picks the variant from the grid size.
+  const bool pad = n_blocks * m_blocks <= 96;
+  const int64_t ctas = n_blocks * m_blocks * splits;
+  const int lds_kib = pad ? 36 : 32;
+  const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
+  const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
+  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
+  // Only the two smallest tile counts get the runtime buffer choice; from
+  // three tiles up the buffer is unconditional, so those stay single.
+#define NF12_AD_TILES(SRC, T, D)                                                \
   do {                                                                          \
     if (pad) {                                                                  \
-      NF12_AD_DISPATCH(T, D, true);                                             \
+      NF12_AD_DISPATCH(SRC, T, D, true);                                        \
     } else {                                                                    \
-      NF12_AD_DISPATCH(T, D, false);                                            \
+      NF12_AD_DISPATCH(SRC, T, D, false);                                       \
     }                                                                           \
   } while (0)
-#define NF12_AD_TILES_DYN(T)                                                    \
+#define NF12_AD_TILES_DYN(SRC, T)                                               \
   do {                                                                          \
     if (dbl) {                                                                  \
-      NF12_AD_TILES(T, true);                                                   \
+      NF12_AD_TILES(SRC, T, true);                                              \
     } else {                                                                    \
-      NF12_AD_TILES(T, false);                                                  \
+      NF12_AD_TILES(SRC, T, false);                                             \
     }                                                                           \
   } while (0)
-    switch (tiles) {
-      case 1: NF12_AD_TILES_DYN(1); break;
-      case 2: NF12_AD_TILES_DYN(2); break;
-      case 3: NF12_AD_TILES(3, true); break;
-      case 4: NF12_AD_TILES(4, true); break;
-      case 5: NF12_AD_TILES(5, true); break;
-      case 6: NF12_AD_TILES(6, true); break;
-      case 7: NF12_AD_TILES(7, false); break;
-      default: NF12_AD_TILES(kMaxTiles, false); break;
-    }
+#define NF12_AD_SWITCH(SRC)                                                     \
+  do {                                                                          \
+    switch (tiles) {                                                            \
+      case 1: NF12_AD_TILES_DYN(SRC, 1); break;                                 \
+      case 2: NF12_AD_TILES_DYN(SRC, 2); break;                                 \
+      case 3: NF12_AD_TILES(SRC, 3, true); break;                               \
+      case 4: NF12_AD_TILES(SRC, 4, true); break;                               \
+      case 5: NF12_AD_TILES(SRC, 5, true); break;                               \
+      case 6: NF12_AD_TILES(SRC, 6, true); break;                               \
+      case 7: NF12_AD_TILES(SRC, 7, false); break;                               \
+      default: NF12_AD_TILES(SRC, kMaxTiles, false); break;                      \
+    }                                                                           \
+  } while (0)
+  if constexpr (Src == WeightSource::kBf16t) {
+    NF12_AD_SWITCH(WeightSource::kBf16t);
+  } else {
+    NF12_AD_SWITCH(WeightSource::kNf12);
+  }
+#undef NF12_AD_SWITCH
 #undef NF12_AD_TILES_DYN
 #undef NF12_AD_TILES
 #undef NF12_AD_DISPATCH
@@ -698,7 +754,8 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                                   int64_t max_assignments, const float* row_scale, void* out,
                                   int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
   if (!wmma_available()) return hipErrorNotSupported;
-  if (n % kSuperAtomRows != 0 || num_experts < 1 || max_assignments <= 0) {
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 ||
+      num_experts < 1 || max_assignments <= 0) {
     return hipErrorInvalidValue;
   }
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
@@ -745,7 +802,9 @@ int nf12_ad_wmma_supported(int64_t m) {
   if (m < 16 || m > 2 * kMaxTokens) return 0;
   int device = 0;
   if (hipGetDevice(&device) != hipSuccess) return 0;
-  return wmma_arch_ok(device);
+  // Cached: the torch wrapper calls this on every linear launch, and
+  // hipGetDeviceProperties is far too expensive for that path.
+  return wmma_arch_cached(device) ? 1 : 0;
 }
 
 // There is deliberately NO process-wide split-K scratch here. A static pointer
