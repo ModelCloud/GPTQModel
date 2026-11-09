@@ -1545,3 +1545,4 @@ The following reference pages document features proposed from the working fork.
 - [carry V4.1 native source and mapped PLE replay](docs/v41-native-source.md)
 - [carry V4.1 routed capture and adjacent recovery](docs/v41-routed-calibration.md)
 - [persist authenticated typed V4.1 frontiers](docs/v41-durable-frontiers.md)
+- [carry V4.1 main-input and dSpark replay adapters](docs/v41-dspark-replay.md)
