@@ -634,7 +634,26 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.optimized = False
 
     def _apply(self, fn, recurse=True):
-        result = super()._apply(fn, recurse=recurse)
+        # Module.to()/half()/bfloat16() normally cast every floating buffer.
+        # FP8 codes, inverse scales, and the checkpoint bias are storage
+        # metadata; move their bytes without changing their native dtypes.
+        native_buffers = {
+            id(value): (value.dtype, value.shape)
+            for name in ("weight", "weight_scale_inv", "bias")
+            if isinstance(value := self._buffers.get(name), torch.Tensor)
+        }
+
+        def preserve_storage(tensor):
+            native = native_buffers.get(id(tensor))
+            if native is None:
+                return fn(tensor)
+            dtype, shape = native
+            raw = fn(tensor.reshape(-1).view(torch.uint8))
+            if raw.dtype != torch.uint8 or raw.numel() != tensor.numel() * tensor.element_size():
+                raise RuntimeError("FP8 buffer move changed its packed byte representation")
+            return raw.view(dtype).reshape(shape)
+
+        result = super()._apply(preserve_storage, recurse=recurse)
         self._invalidate_compiled()
         return result
 

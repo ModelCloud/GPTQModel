@@ -173,6 +173,16 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             module = loaded_bf16.model.get_submodule(name.removesuffix(".weight_scale_inv"))
             assert module.weight_scale_inv.dtype == torch.float32
             torch.testing.assert_close(module.weight_scale_inv.cpu(), scale, rtol=0, atol=0)
+        for reloaded in (loaded, loaded_bf16):
+            for name, packed in saved.items():
+                if packed.dtype != torch.float8_e5m2:
+                    continue
+                module = reloaded.model.get_submodule(name.removesuffix(".weight"))
+                assert module.weight.dtype == torch.float8_e5m2
+                assert module.weight.numel() * module.weight.element_size() == packed.numel()
+                assert torch.equal(module.weight.cpu().view(torch.uint8), packed.view(torch.uint8))
+                assert torch.equal(reloaded.model.state_dict()[name].cpu().view(torch.uint8),
+                                   packed.view(torch.uint8))
     if method == "fp8_calibrated":
         for name, (_, fitted_scale) in fitted_payloads.items():
             reloaded = loaded.model.get_submodule(name)

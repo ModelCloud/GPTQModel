@@ -2677,13 +2677,11 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
         module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype, device=current.device))
 
 
-def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None:
-    """Restore selected buffers after Accelerate narrows a BF16 checkpoint load.
-
-    Accelerate's ``keep_in_fp32_modules`` applies only when ``dtype`` is FP16.
-    Read only named checkpoint tensors, including indexed shards, so FP8
-    inverse scales and GGUF biases are not reconstructed from rounded copies.
-    """
+def _restore_checkpoint_buffers(
+    model, checkpoint, dtypes: dict[str, torch.dtype], *, exact_source_names: set[str] = frozenset(),
+) -> None:
+    """Restore checkpoint-owned buffers that Accelerate cast during loading."""
+    names = set(dtypes)
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
         # Match Accelerate's directory resolution so the second read comes
@@ -2696,7 +2694,7 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
         else:
             indexes = [name for name in os.listdir(checkpoint) if name.endswith(".index.json")]
             if len(indexes) != 1:
-                raise ValueError(f"Cannot resolve checkpoint for FP32 buffer restoration: {checkpoint}")
+                raise ValueError(f"Cannot resolve checkpoint for buffer restoration: {checkpoint}")
             checkpoint = os.path.join(checkpoint, indexes[0])
 
     if checkpoint.endswith(".index.json"):
@@ -2729,18 +2727,27 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
             module = model.get_submodule(module_name) if module_name else model
             current = module._buffers.get(buffer_name)
             if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
-                raise RuntimeError(f"Cannot restore FP32 buffer {name!r}: missing or mismatched model slot")
+                raise RuntimeError(f"Cannot restore checkpoint buffer {name!r}: missing or mismatched model slot")
             if current.device.type == "meta":
-                raise RuntimeError(f"Cannot restore FP32 buffer {name!r} on a meta device")
-            module._buffers[buffer_name] = value.to(device=current.device, dtype=torch.float32)
+                raise RuntimeError(f"Cannot restore checkpoint buffer {name!r} on a meta device")
+            if name in exact_source_names and value.dtype != dtypes[name]:
+                raise RuntimeError(
+                    f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
+                )
+            module._buffers[buffer_name] = value.to(device=current.device, dtype=dtypes[name])
             restored.add(name)
 
     missing = names - restored
     if missing:
         raise RuntimeError(
-            "Cannot restore FP32 buffers missing from checkpoint: "
+            "Cannot restore checkpoint buffers missing from checkpoint: "
             + ", ".join(sorted(missing))
         )
+
+
+def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None:
+    """Restore FP32 buffers narrowed by Accelerate's BF16 load path."""
+    _restore_checkpoint_buffers(model, checkpoint, dict.fromkeys(names, torch.float32))
 
 
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
@@ -2749,6 +2756,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         checkpoint = args[0]
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
+    packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
     converted_checkpoint = None
     if callable(key_converter) and checkpoint is not None:
         converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
@@ -2760,9 +2768,13 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             kwargs.get("checkpoint", checkpoint),
         )
         accelerate.load_checkpoint_in_model(model, *args, **kwargs)
-        if fp32_bf16_buffer_names and str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
-            _restore_fp32_checkpoint_buffers(
-                model, kwargs.get("checkpoint", checkpoint), fp32_bf16_buffer_names
+        restore_dtypes = dict(packed_fp8_buffer_dtypes)
+        if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
+            restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
+        if restore_dtypes:
+            _restore_checkpoint_buffers(
+                model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
+                exact_source_names=set(packed_fp8_buffer_dtypes),
             )
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
