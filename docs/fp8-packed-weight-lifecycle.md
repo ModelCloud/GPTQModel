@@ -58,3 +58,5 @@ With bias, the CPU forward creates a **4,096-byte** FP32 dequantized operand
 for the current matmul; the module retains no reference after the call.
 Tests compare every packed byte and the visible FP16/BF16 output with an
 independent Torch decode and matmul oracle.
+
+Introduced in [PR #3749](https://github.com/ModelCloud/GPTQModel/pull/3749).
