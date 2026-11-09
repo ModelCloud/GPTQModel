@@ -5,14 +5,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from fractions import Fraction
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import tempfile
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -84,10 +84,9 @@ class InlineMixedPolicy:
             "target_bpw": (
                 f"{self.target_bpw.numerator}/{self.target_bpw.denominator}"
             ),
-            "projection_ratio": {
-                projection: ratio
-                for projection, ratio in zip(PROJECTION_ORDER, self.projection_ratio)
-            },
+            "projection_ratio": dict(
+                zip(PROJECTION_ORDER, self.projection_ratio)
+            ),
             "score_kind": self.score_kind,
         }
         if self.logical_layer_count is not None:
@@ -447,7 +446,7 @@ class InlineMixedTierPlanStore:
         selected = plan.get("selected")
         if not isinstance(selected, list) or len(selected) != sum(quotas.values()):
             raise ValueError("EXL3 inline-mixed tier plan selection count is invalid")
-        observed = {projection: 0 for projection in PROJECTION_ORDER}
+        observed = dict.fromkeys(PROJECTION_ORDER, 0)
         identities: set[tuple[int, str]] = set()
         modules: set[str] = set()
         normalized_order: list[tuple[int, int]] = []
