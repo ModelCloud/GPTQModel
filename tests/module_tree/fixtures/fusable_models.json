@@ -5851,6 +5851,10 @@
       "definition": "TeleChat2QModel",
       "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
     },
+    "unlimited_ocr": {
+      "definition": "UnlimitedOCRQModel",
+      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+    },
     "unlimited-ocr": {
       "definition": "UnlimitedOCRQModel",
       "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."

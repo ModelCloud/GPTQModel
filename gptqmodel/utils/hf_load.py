@@ -264,25 +264,42 @@ def hf_gptqmodel_prepare_model_for_load(
     if not _is_native_gptqmodel_config(qcfg):
         return None
 
-    # Serialized qweights are authoritative; dynamic rules may also name dense modules.
+    # Serialized packed tensors are authoritative; dynamic rules may also name
+    # dense modules. NF12-AD stores its packed weight under `nf12_packed`.
+    packed_suffix = (
+        ".nf12_packed"
+        if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.NF12_AD
+        else ".qweight"
+    )
     tensor_keys = _checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
     quantized_module_names = tuple(
-        sorted(key.removesuffix(".qweight") for key in tensor_keys if key.endswith(".qweight"))
+        sorted(
+            key.removesuffix(packed_suffix)
+            for key in tensor_keys
+            if key.endswith(packed_suffix)
+        )
     )
     if not quantized_module_names:
         raise ValueError(
-            "The GPTQModel checkpoint does not expose any `.qweight` tensors in its checkpoint manifest."
+            "The GPTQModel checkpoint does not expose any "
+            f"`{packed_suffix}` tensors in its checkpoint manifest."
         )
 
     import defuser
 
-    from ..models.auto import MODEL_MAP
+    from ..models.auto import MODEL_MAP_CASEFOLD
     from ..models.base import BaseQModel
     from .importer import hf_normalize_device_device_map
-    from .model import _module_has_meta_tensors, find_modules, get_module_by_name_prefix, make_quant
+    from .model import (
+        _module_has_meta_tensors,
+        _prepare_variable_quant_buffers,
+        find_modules,
+        get_module_by_name_prefix,
+        make_quant,
+    )
 
     model_type = str(getattr(model.config, "model_type", "")).lower()
-    model_definition = MODEL_MAP.get(model_type, BaseQModel)
+    model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
     defuser.replace_fused_blocks(model_type)
 
     # Rebuild fused model structures before matching serialized module names.
@@ -329,6 +346,11 @@ def hf_gptqmodel_prepare_model_for_load(
         device=target_device,
         dtype=dtype,
     )
+    if packed_suffix == ".nf12_packed":
+        # The escape row count depends on the encoded weights, so resize the
+        # placeholder buffers before Transformers assigns checkpoint tensors.
+        for checkpoint_file in _checkpoint_files(checkpoint_files) or [checkpoint_path]:
+            _prepare_variable_quant_buffers(model, checkpoint_file)
     log.info(
         "Transformers/Optimum: prepared `%s` native GPTQModel modules from the checkpoint manifest.",
         len(quantized_module_names),

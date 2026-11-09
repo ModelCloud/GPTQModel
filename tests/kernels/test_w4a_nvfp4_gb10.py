@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear, _swizzle_scales, nvfp4_input
-from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_pack_and_swizzle
+from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_decode, nvfp4_pack_and_swizzle
 from gptqmodel.quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     nvfp4_block_qdq,
@@ -105,6 +105,30 @@ def test_small_dynamic_nvfp4_operands_match_replay_and_oracle(dtype, maximum):
     torch.testing.assert_close(encoded.global_scale, expected_scale, rtol=1e-6, atol=1e-20)
     torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-12)
     torch.testing.assert_close(replay, expected, rtol=1e-6, atol=1e-12)
+
+
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(0, 128), (2, 0, 128)])
+def test_empty_nvfp4_replay_matches_runtime_transport(dtype, shape):
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import (
+        round_w4a_activation,
+        round_w4a_replay_operand,
+    )
+
+    x = torch.empty(shape, device="cuda", dtype=dtype)
+    packed = pack_activation(x, "w4a_nvfp4")
+    assert packed.global_scale.dtype == torch.float32
+    torch.testing.assert_close(packed.global_scale, torch.ones((), device=x.device))
+
+    rounded = round_w4a_activation(x, "w4a_nvfp4")
+    operand = round_w4a_replay_operand(x, "w4a_nvfp4")
+    assert rounded.shape == operand.shape == packed.decode().shape == shape
+    assert rounded.dtype == dtype
+    assert operand.dtype == torch.float32
+    torch.testing.assert_close(rounded, packed.decode())
+    torch.testing.assert_close(operand, packed.decode(torch.float32))
 
 
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
@@ -359,6 +383,62 @@ def test_fused_nvfp4_pack_matches_torch_codes_and_scale_layout(rows, width, reci
     torch.cuda.synchronize()
     assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
     assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize(
+    "recipe", ["nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"]
+)
+@pytest.mark.parametrize("layout,dtype", [("padded_rows", torch.bfloat16), ("column_stride", torch.float16)])
+def test_fused_nvfp4_pack_matches_torch_for_strided_input(recipe, layout, dtype):
+    generator = torch.Generator(device="cuda").manual_seed(2038)
+    width = 256
+    storage_width = width + 8 if layout == "padded_rows" else width * 2
+    storage = torch.randn((7, storage_width), generator=generator, device="cuda", dtype=dtype)
+    x = storage[:, :width] if layout == "padded_rows" else storage[:, ::2]
+    x[0, :16] = 0
+    assert not x.is_contiguous()
+    global_scale = torch.tensor(0.03125, device="cuda")
+
+    packed, swizzled = nvfp4_pack_and_swizzle(x, global_scale, recipe=recipe)
+    reference_codes, reference_scales = nvfp4_input(x, global_scale, recipe=recipe)
+    expected_scales = torch.stack([
+        _swizzle_scales(reference_scales[:, group * 8:(group + 1) * 8])
+        for group in range(width // 128)
+    ])
+    torch.cuda.synchronize()
+    assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("layout", ["codes_rows", "codes_columns", "scales_rows", "scales_columns"])
+def test_nvfp4_decode_accepts_strided_packed_operands(layout):
+    generator = torch.Generator(device="cuda").manual_seed(1281)
+    x = torch.randn((7, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
+    x[0, :16] = 0
+    global_scale = torch.tensor(0.03125, device="cuda")
+    codes, scales = nvfp4_pack_and_swizzle(x, global_scale)
+    source = codes if layout.startswith("codes") else scales
+    if layout.endswith("rows"):
+        storage = torch.empty((source.shape[0], source.shape[1] + 8), device="cuda", dtype=source.dtype)
+        view = storage[:, :source.shape[1]]
+    else:
+        storage = torch.empty((source.shape[0], source.shape[1] * 2), device="cuda", dtype=source.dtype)
+        view = storage[:, ::2]
+    view.view(torch.uint8).copy_(source.view(torch.uint8))
+    assert not view.is_contiguous()
+
+    actual = nvfp4_decode(
+        view if layout.startswith("codes") else codes,
+        view if layout.startswith("scales") else scales,
+        global_scale, x.shape[1], torch.float32,
+    )
+    expected = _independent_nvfp4_qdq(x, global_scale)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 @GLUON_FP8

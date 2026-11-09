@@ -59,6 +59,8 @@ class AwqGemmFn(torch.autograd.Function):
         ctx.save_for_backward(qweight, qzeros, scales)
         ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features
+        ctx.bias_shape = None if bias is None else bias.shape
+        ctx.bias_dtype = None if bias is None else bias.dtype
 
         out_shape = x.shape[:-1] + (out_features,)
         rows = input_rows(x)
@@ -94,10 +96,14 @@ class AwqGemmFn(torch.autograd.Function):
         qweight, qzeros, scales = ctx.saved_tensors
 
         grad_input = None
+        grad_bias = None
+        if len(ctx.needs_input_grad) > 6 and ctx.needs_input_grad[6]:
+            grad_bias = grad_output.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
         if ctx.needs_input_grad[0]:
             if ctx.input_rows == 0:
                 grad_input = grad_output.new_empty(ctx.input_shape)
-                return grad_input, None, None, None, None, None, None, None, None, None
+                gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None)
+                return gradients[:len(ctx.needs_input_grad)]
             weights = awq_dequantize_weights(
                 qweight, scales, qzeros, 1, 0, 0, False
             ).to(grad_output.dtype)
@@ -106,7 +112,8 @@ class AwqGemmFn(torch.autograd.Function):
             grad_input = torch.matmul(grad_output_2d, weights.transpose(-1, -2))
             grad_input = grad_input.reshape(ctx.input_shape)
 
-        return grad_input, None, None, None, None, None, None, None, None, None
+        gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None)
+        return gradients[:len(ctx.needs_input_grad)]
 
 
 class AwqGEMMLinear(AWQuantLinear):
@@ -218,7 +225,12 @@ class AwqGEMMLinear(AWQuantLinear):
 
         self._ensure_runtime_dtype(compute_dtype)
 
-        ctx = nullcontext() if self.training else torch.inference_mode()
+        # Keep eval-mode autograd and in-place adapter application viable;
+        # only ordinary no-grad inference needs an inference tensor here.
+        needs_grad = torch.is_grad_enabled() and (
+            x.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        )
+        ctx = nullcontext() if self.training or needs_grad or self.adapter else torch.inference_mode()
         with ctx:
             out = AwqGemmFn.apply(
                 x,

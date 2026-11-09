@@ -26,18 +26,72 @@ def _wants_fp32_reduce(x: torch.Tensor) -> bool:
     )
 
 
-def matmul_fp32_reduce(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Keep CUDA low-precision partial sums in FP32 without changing global cuBLAS flags."""
+def _needs_wide_autograd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> bool:
+    return torch.is_grad_enabled() and (
+        x.requires_grad or weight.requires_grad or (bias is not None and bias.requires_grad)
+    )
+
+
+class _CudaWideMatmul(torch.autograd.Function):
+    """Differentiate a CUDA FP32-output GEMM, whose aten backward is unavailable."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None):
+        ctx.input_shape = x.shape
+        ctx.x_dtype = x.dtype
+        ctx.weight_dtype = weight.dtype
+        ctx.bias_shape = None if bias is None else bias.shape
+        ctx.bias_dtype = None if bias is None else bias.dtype
+        # Keep only the low-precision operands needed by backward. In particular,
+        # a bias-only gradient must not hold a dequantized weight until backward.
+        ctx.save_for_backward(x if weight.requires_grad else None, weight if x.requires_grad else None)
+        flat_x = x.reshape(-1, x.shape[-1])
+        if bias is None:
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32)
+        else:
+            output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
+        return output.to(x.dtype).reshape(x.shape[:-1] + (weight.shape[-1],))
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        saved_x, saved_weight = ctx.saved_tensors
+        grad = grad_output.reshape(-1, grad_output.shape[-1])
+        grad_x = grad_weight = grad_bias = None
+        if ctx.needs_input_grad[0]:
+            grad_x = torch.mm(grad, saved_weight.t(), out_dtype=torch.float32)
+            grad_x = grad_x.to(ctx.x_dtype).reshape(ctx.input_shape)
+        if ctx.needs_input_grad[1]:
+            flat_x = saved_x.reshape(-1, saved_x.shape[-1])
+            grad_weight = torch.mm(flat_x.t(), grad, out_dtype=torch.float32).to(ctx.weight_dtype)
+        if ctx.needs_input_grad[2]:
+            grad_bias = grad.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
+        return grad_x, grad_weight, grad_bias
+
+
+def matmul_fp32_reduce(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Keep the CUDA reduction and optional bias in FP32 until output rounding."""
     if _wants_fp32_reduce(x):
+        if _needs_wide_autograd(x, weight, bias):
+            return _CudaWideMatmul.apply(x, weight, bias)
         shape = x.shape[:-1] + (weight.shape[-1],)
         # FP32 output also keeps split reductions wide, while retaining low-precision
         # tensor-core operands. No expanded FP32 weight copy is needed.
-        return torch.mm(x.reshape(-1, x.shape[-1]), weight, out_dtype=torch.float32).to(x.dtype).reshape(shape)
-    return torch.matmul(x, weight)
+        flat_x = x.reshape(-1, x.shape[-1])
+        if bias is not None:
+            output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
+        else:
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32)
+        return output.to(x.dtype).reshape(shape)
+    output = torch.matmul(x, weight)
+    return output + bias if bias is not None else output
 
 
 def linear_fp32_reduce(x, weight, bias=None):
     if _wants_fp32_reduce(x):
+        if _needs_wide_autograd(x, weight, bias):
+            return _CudaWideMatmul.apply(x, weight.t(), bias)
         shape = x.shape[:-1] + (weight.shape[0],)
         output = torch.mm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=torch.float32)
         if bias is not None:

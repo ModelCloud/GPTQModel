@@ -227,6 +227,7 @@ def paroquant_gemm_kernel(
     c_ptr,
     zeros_ptr,
     scales_ptr,
+    bias_ptr,
     M,
     N,
     K,
@@ -235,6 +236,7 @@ def paroquant_gemm_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     USE_FP32_ACCUM: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -305,11 +307,15 @@ def paroquant_gemm_kernel(
         a_ptrs += BLOCK_SIZE_K
         b_ptrs += BLOCK_SIZE_K * (N // 8)
 
-    c = accumulator.to(c_ptr.type.element_ty)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + N * offs_cm[:, None] + offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs_cn, mask=offs_cn < N, other=0).to(tl.float32)
+        c = (accumulator.to(tl.float32) + bias[None, :]).to(c_ptr.type.element_ty)
+    else:
+        c = accumulator.to(c_ptr.type.element_ty)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -349,6 +355,11 @@ def paroquant_dequantize_triton(
     assert group_size <= K
     assert group_size in PAROQUANT_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
+    # The dequant kernel uses dense offsets for all packed operands.
+    qweight = qweight.contiguous()
+    scales = scales.contiguous()
+    qzeros = qzeros.contiguous()
+
     result = torch.empty(
         qweight.shape[0],
         qweight.shape[1] * 8,
@@ -387,6 +398,7 @@ def _paroquant_gemm_triton(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     *,
+    bias: torch.Tensor | None = None,
     block_size_m: int,
     block_size_n: int,
     block_size_k: int,
@@ -395,6 +407,15 @@ def _paroquant_gemm_triton(
     fp32_accum: bool = FP32_ACCUM,
 ) -> torch.Tensor:
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
+    # The fused GEMM uses dense row and column offsets for every operand.
+    input = input.contiguous()
+    qweight = qweight.contiguous()
+    scales = scales.contiguous()
+    qzeros = qzeros.contiguous()
+    if bias is not None:
+        if bias.shape != (N,) or bias.device != input.device or not bias.is_floating_point():
+            raise ValueError("ParoQuant Triton bias must be a floating [N] tensor on the input device.")
+        bias = bias.contiguous()
 
     # ``paroquant_gemm_kernel`` loads one scale/zero group per K tile and
     # broadcasts it across the whole tile, so a tile may never span more than
@@ -414,6 +435,7 @@ def _paroquant_gemm_triton(
             result,
             qzeros,
             scales,
+            bias if bias is not None else scales,
             M,
             N,
             K,
@@ -421,7 +443,8 @@ def _paroquant_gemm_triton(
             BLOCK_SIZE_M=block_size_m,
             BLOCK_SIZE_N=block_size_n,
             BLOCK_SIZE_K=block_size_k,
-            USE_FP32_ACCUM=fp32_accum,
+            USE_FP32_ACCUM=fp32_accum or bias is not None,
+            HAS_BIAS=bias is not None,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -434,6 +457,7 @@ def paroquant_gemm_triton_decode(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
         paroquant_gemm_launch_config("decode", input.device, rows=input.shape[0])
@@ -443,6 +467,7 @@ def paroquant_gemm_triton_decode(
         qweight,
         scales,
         qzeros,
+        bias=bias,
         block_size_m=block_size_m,
         block_size_n=block_size_n,
         block_size_k=block_size_k,
@@ -457,6 +482,7 @@ def paroquant_gemm_triton_prefill(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
         paroquant_gemm_launch_config("prefill", input.device, rows=input.shape[0])
@@ -466,6 +492,7 @@ def paroquant_gemm_triton_prefill(
         qweight,
         scales,
         qzeros,
+        bias=bias,
         block_size_m=block_size_m,
         block_size_n=block_size_n,
         block_size_k=block_size_k,

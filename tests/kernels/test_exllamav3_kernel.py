@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 

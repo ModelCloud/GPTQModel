@@ -706,8 +706,10 @@ def regularize_and_transform_hessian_(
         H.ndim != 2
         or H.shape[0] != H.shape[1]
         or H.dtype != torch.float32
+        or not isinstance(su, torch.Tensor)
         or su.shape != (H.shape[0], 1)
         or su.device != H.device
+        or not isinstance(diag_mean, torch.Tensor)
         or diag_mean.numel() != 1
         or diag_mean.device != H.device
     ):
@@ -726,8 +728,9 @@ def regularize_and_transform_hessian_(
 
     regularization = float(sigma_reg) * float(diag_mean.item())
     transformed = H.to(dtype=torch.float64)
-    idx = torch.arange(H.shape[0], device=H.device)
-    transformed[idx, idx] += regularization
+    # ``diagonal()`` is a view, so this avoids the index tensors and the
+    # gather/scatter pair that advanced indexing performs.
+    transformed.diagonal().add_(regularization)
     su_fp64 = su.to(dtype=torch.float64)
     transformed *= su_fp64.transpose(0, 1)
     blockwise_preapply_had_r_(transformed, had_k)

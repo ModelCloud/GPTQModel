@@ -7,8 +7,11 @@ unchanged. Keeping the outer sum in FP64 avoids losing small contributions
 when a full calibration stream contains thousands of bounded products.
 """
 from __future__ import annotations
+
 import os
+
 import torch
+
 
 HESSIAN_ACCUMULATION_CONTRACT = "fp32-products-k128-fp64-sum-fp32-storage-v1"
 

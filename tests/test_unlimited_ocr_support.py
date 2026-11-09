@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from PIL import Image
 from torch import nn
@@ -12,8 +13,14 @@ from gptqmodel.utils.hf import normalize_hf_config_compat
 from gptqmodel.utils.model import MODALITY
 
 
-def test_unlimited_ocr_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="unlimited-ocr")
+# `unlimited_ocr` is the model_type published by baidu/Unlimited-OCR.
+# `unlimited-ocr` is kept as a backward-compatibility alias.
+UNLIMITED_OCR_MODEL_TYPES = ("unlimited_ocr", "unlimited-ocr")
+
+
+@pytest.mark.parametrize("model_type", UNLIMITED_OCR_MODEL_TYPES)
+def test_unlimited_ocr_model_type_selects_definition(monkeypatch, model_type):
+    fake_config = SimpleNamespace(model_type=model_type)
 
     monkeypatch.setattr(
         auto,
@@ -63,8 +70,9 @@ def test_unlimited_ocr_module_tree_expands_mha_and_moe_paths():
     assert "mlp.experts.0.down_proj" in flat_modules
 
 
-def test_unlimited_ocr_restores_remote_parent_config_defaults():
-    config = SimpleNamespace(model_type="unlimited-ocr", sliding_window_size=128)
+@pytest.mark.parametrize("model_type", UNLIMITED_OCR_MODEL_TYPES)
+def test_unlimited_ocr_restores_remote_parent_config_defaults(model_type):
+    config = SimpleNamespace(model_type=model_type, sliding_window_size=128)
 
     normalize_hf_config_compat(config, trust_remote_code=True)
 
@@ -82,10 +90,11 @@ def test_unlimited_ocr_restores_remote_parent_config_defaults():
     assert config.use_cache is True
 
 
-def test_unlimited_ocr_config_compat_preserves_checkpoint_values():
+@pytest.mark.parametrize("model_type", UNLIMITED_OCR_MODEL_TYPES)
+def test_unlimited_ocr_config_compat_preserves_checkpoint_values(model_type):
     config = SimpleNamespace(
         attention_dropout=0.25,
-        model_type="unlimited-ocr",
+        model_type=model_type,
         rope_theta=500000.0,
         sliding_window=64,
         sliding_window_size=128,
