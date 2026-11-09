@@ -96,6 +96,8 @@ portable backends.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.
+The [GGUF Triton activation range](docs/gguf-triton-activation-range.md)
+documents per-row BF16/FP32 normalization before fused GGUF matmuls.
 The [GGUF packed scale overflow cache](docs/gguf-k-scale-overflow-cache.md)
 documents FP16 operand-width selection for GGUF Torch inference.
 The [GGUF dense fallback precision](docs/gguf-dense-fallback-precision.md)

@@ -43,6 +43,42 @@ def triton_available() -> bool:
 
 
 if _TRITON_AVAILABLE:
+    @triton.jit
+    def _gguf_cast_wide_input_kernel(
+        x_ptr, half_ptr, scale_ptr, K: tl.constexpr, BLOCK_K: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        columns = tl.arange(0, BLOCK_K)
+        values = tl.load(x_ptr + row * K + columns, columns < K, other=0).to(tl.float32)
+        maximum = tl.max(tl.abs(values), 0)
+        # FP16 cannot represent the full BF16/FP32 activation range. Keep the
+        # largest element inside FP16's finite range; for a tiny
+        # row, lift it out of the FP16 subnormal/underflow range instead.
+        # A power-of-two scale preserves BF16 activation values exactly when
+        # they are moved into FP16's exponent range.
+        wide_scale = tl.exp2(tl.ceil(tl.log2(maximum / 65504.0)))
+        scale = tl.where(maximum > 65504.0, wide_scale,
+                         tl.where((maximum > 0) & (maximum < 1.0 / 16384.0), maximum * 2.0, 1.0))
+        scale = tl.where((scale > 0) & (scale < 3.4028235e38), scale, 1.0)
+        tl.store(half_ptr + row * K + columns, values / scale, columns < K)
+        tl.store(scale_ptr + row, scale)
+
+    @triton.jit
+    def _gguf_restore_wide_output_kernel(
+        output_ptr, scale_ptr, bias_ptr, result_ptr,
+        N: tl.constexpr, ELEMENTS: tl.constexpr, HAS_BIAS: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offsets < ELEMENTS
+        result = tl.load(output_ptr + offsets, mask, other=0).to(tl.float32)
+        scale = tl.load(scale_ptr + offsets // N, mask, other=1)
+        result = result * scale
+        if HAS_BIAS:
+            bias = tl.load(bias_ptr + offsets % N, mask, other=0).to(tl.float32)
+            result = result + bias
+        tl.store(result_ptr + offsets, result, mask)
+
     _GGUF_TRITON_SMALL_CONFIGS = [
         triton.Config(
             {
@@ -2012,16 +2048,35 @@ class GGUFTritonKernel(GGUFTorchLinear):
         x_flat = x.reshape(-1, x.shape[-1])
 
         input_dtype = x_flat.dtype
+        row_scales = None
         if input_dtype != torch.float16:
-            x_work = x_flat.to(dtype=torch.float16)
+            # A plain .half() can turn a finite BF16/FP32 input into inf or
+            # zero. The fused matmuls still receive FP16 activations, with a
+            # per-row scale restored before bias and output rounding.
+            x_dense = x_flat.contiguous()
+            x_work = torch.empty(x_dense.shape, device=x_dense.device, dtype=torch.float16)
+            row_scales = torch.empty((x_dense.shape[0],), device=x_dense.device, dtype=torch.float32)
+            _gguf_cast_wide_input_kernel[(x_dense.shape[0],)](
+                x_dense, x_work, row_scales, x_dense.shape[-1],
+                triton.next_power_of_2(x_dense.shape[-1]),
+                num_warps=4 if x_dense.shape[-1] <= 4096 else 8,
+            )
         else:
             x_work = x_flat
 
         output = self._forward_triton(
-            x_work, output_dtype=torch.float32 if self.bias is not None else None,
+            x_work, output_dtype=torch.float32 if row_scales is not None or self.bias is not None else None,
         )
 
-        if self.bias is not None:
+        if row_scales is not None:
+            result = torch.empty(output.shape, device=output.device, dtype=input_dtype)
+            bias = None if self.bias is None else self.bias.to(device=output.device, dtype=torch.float32).contiguous()
+            _gguf_restore_wide_output_kernel[(triton.cdiv(output.numel(), 256),)](
+                output, row_scales, output if bias is None else bias, result,
+                output.shape[-1], output.numel(), bias is not None, 256,
+            )
+            output = result
+        elif self.bias is not None:
             bias = self.bias.to(device=output.device, dtype=torch.float32)
             output = output + bias
 
