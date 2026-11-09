@@ -6,11 +6,13 @@ SPDX-License-Identifier: Apache-2.0 -->
 `GPTQ.add_batch` records new Hessian partials. `GPTQ.materialize_global_hessian`
 combines those partials with the already normalized `H` when capture resumes
 after a previous finalization. `GPTQ.finalize_hessian` returns that accumulated
-matrix to the quantizer. This flow was corrected in PR #3721.
+matrix to the quantizer. `GPTQ.adopt_hessian_from` copies the leader's sample
+count as well as its matrix. This flow was corrected in PR #3721.
 
 ```mermaid
 flowchart TD
     A["GPTQ.add_batch records new partials"] --> B["GPTQ.finalize_hessian"]
+    AA["GPTQ.adopt_hessian_from copies H and sample count"] --> B
     B --> C["GPTQ.materialize_global_hessian"]
     C --> D{"_hessian_dirty?"}
     D -- No --> E["Return existing H"]
@@ -27,6 +29,7 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Sample count | `gptqmodel/quantization/gptq.py:1141` counted only new partials | `materialize_global_hessian` includes `_hessian_total_samples` |
+| Adopted sample count | `gptqmodel/quantization/gptq.py:1290` copied `H` and `nsamples` but omitted `_hessian_total_samples` | `adopt_hessian_from` copies the cumulative count |
 | Reused output | `gptqmodel/quantization/gptq.py:1155` zeroed the previous `H` | Previous normalized `H` contributes with its sample weight |
 | Normalization | `gptqmodel/quantization/gptq.py:1219` scaled only the new sum | Each new partial contributes `2 / total_samples` before final storage |
 

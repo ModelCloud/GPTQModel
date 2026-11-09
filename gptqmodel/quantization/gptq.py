@@ -1290,6 +1290,7 @@ class GPTQ:
         with self.lock:
             self.H = copy
             self.nsamples = nsamples
+            self._hessian_total_samples = nsamples
             self.fwd_counter = fwd_counter
             self._device_hessian_partials.clear()
             self._device_hessian_partial_ready.clear()
