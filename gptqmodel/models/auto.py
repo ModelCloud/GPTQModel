@@ -457,6 +457,14 @@ if ZDTaichu5QModel is not None:
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
+# A few legacy registrations retain camelCase model types (for example
+# RefinedWeb). The casing of `config.model_type` is not part of the lookup
+# contract, so resolve definitions case-insensitively instead of letting
+# `.lower()` miss a registered key.
+MODEL_MAP_CASEFOLD = {
+    model_type.lower(): definition for model_type, definition in MODEL_MAP.items()
+}
+
 
 def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     """Return the first activation-quantization field that makes this config unsupported.
@@ -588,10 +596,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
 
     # Unsupported model types use BaseQModel and fail closed unless the caller
     # supplies an explicit model definition/module tree.
-    if model_type not in SUPPORTED_MODELS:
-        return BaseQModel
-
-    return MODEL_MAP[model_type]
+    return MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
 
 
 def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:

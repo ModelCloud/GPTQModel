@@ -287,7 +287,7 @@ def hf_gptqmodel_prepare_model_for_load(
 
     import defuser
 
-    from ..models.auto import MODEL_MAP
+    from ..models.auto import MODEL_MAP_CASEFOLD
     from ..models.base import BaseQModel
     from .importer import hf_normalize_device_device_map
     from .model import (
@@ -299,7 +299,7 @@ def hf_gptqmodel_prepare_model_for_load(
     )
 
     model_type = str(getattr(model.config, "model_type", "")).lower()
-    model_definition = MODEL_MAP.get(model_type, BaseQModel)
+    model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
     defuser.replace_fused_blocks(model_type)
 
     # Rebuild fused model structures before matching serialized module names.
