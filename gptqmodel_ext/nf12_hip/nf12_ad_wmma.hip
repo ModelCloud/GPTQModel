@@ -90,7 +90,7 @@ constexpr int64_t kMaxWmmaGridY = 0xffffLL;
 // resident CTAs per CU from 4 to 3. That is free while the whole launch fits
 // in three CTAs per CU and a loss beyond it, so the launcher picks kPad from
 // the grid size (n_blocks * m_blocks <= 96) rather than paying it always.
-constexpr int kLdPadded = kSuperAtomCols + 8;
+[[maybe_unused]] constexpr int kLdPadded = kSuperAtomCols + 8;
 
 // CTAs resident on all 32 CUs at one per CU: one wave on this part.
 constexpr int64_t kCtasPerWave = 32;

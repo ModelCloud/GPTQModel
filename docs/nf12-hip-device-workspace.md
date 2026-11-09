@@ -117,6 +117,47 @@ flowchart TD
 | Ordinal 64 or above | Returned false before probing, despite the cache comment promising a fresh probe | Calls `wmma_arch_ok(device)` without indexing the bounded cache |
 | Invalid device query | Returned false | Returns false |
 
+## Native MoE input validation
+
+Native MoE callers are checked before a launch: decode slices stay inside the
+specified weight, BF16 row strides satisfy vector alignment, and byte spans fit
+signed 64-bit indexing. `nf12_ad_validation.cuh` is staged with the JIT sources
+and included in source distributions. The helpers mirror NF12's common C-ABI
+validation; no device allocation, synchronization, or retained weight cache is
+introduced.
+
+```mermaid
+flowchart TD
+    A["nf12_ad_moe_decode / silu_mul / combine"] --> B{"Dimensions, slice and metadata valid?"}
+    B -- No --> X["hipErrorInvalidValue; no writes"]
+    B -- Yes --> C{"Empty operation?"}
+    C -- Yes --> R["hipSuccess; no launch"]
+    C -- No --> D{"BF16 buffers aligned; strides and byte spans valid?"}
+    D -- No --> X
+    D -- Yes --> L["Existing native kernel on caller stream"]
+    G["nf12_ad_moe_grouped_operands"] --> H{"Metadata valid?"}
+    H -- No --> X
+    H -- Yes --> I{"Gather supplied?"}
+    I -- Yes --> D
+    I -- No --> J["One CTA publishes group ends; no matrix copy"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Before at `b19447f37` | Current behavior |
+| --- | --- |
+| Decode accepted slices past N (`nf12_ad_moe.hip:482`) | Reject `rows > n - row0` without overflow or output writes |
+| SiLU and combine accepted undersized/misaligned strides (`nf12_ad_moe.hip:469`, `:454`) | Check pointers, vector row strides, and input/output byte spans |
+| Grouped gather accepted invalid buffers and assignment bounds (`nf12_ad_moe.hip:503`) | Check metadata and optional gather buffers; no-gather mode computes only group ends |
+
+The native regression suite adds 24 rejection cases: 8 decode slice/stride
+cases, 12 SiLU/combine buffer cases, and 4 grouped-gather cases. All return
+`hipErrorInvalidValue` (1) and leave output guards unchanged. Existing tests
+continue to cover valid padded buffers, empty calls, and calls without gather.
+On two R9700s with GIL disabled, ROCm 10.1.0 / HIP 7.16.26385, the NF12 and
+backend contract suites pass **683 tests in 19.32 seconds**. Ruff and diff checks
+pass. CUDA kernels and persistent storage are unchanged.
+
 ## Routing bounds and empty alignment
 
 ### WMMA launch dimensions
