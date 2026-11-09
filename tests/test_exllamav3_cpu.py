@@ -102,7 +102,9 @@ def _codebook_3inst(encoded: torch.Tensor) -> torch.Tensor:
     raw = 0x3B603B60 ^ (raw & 0x8FFF8FFF)
     halves = torch.stack((raw & 0xFFFF, (raw >> 16) & 0xFFFF), dim=-1)
     halves = halves.to(torch.uint16).contiguous().view(torch.float16).double()
-    return halves[..., 0] + halves[..., 1]
+    # Native decode_3inst uses __hadd, which rounds the sum to FP16 before
+    # the decoded value is widened for the Hadamard transforms.
+    return (halves[..., 0] + halves[..., 1]).half().double()
 
 
 def _tensor_core_perm_inverse() -> torch.Tensor:

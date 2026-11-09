@@ -264,7 +264,7 @@ def test_gguf_forward_uses_dense_when_fused_autotune_loses(bits: str, monkeypatc
     monkeypatch.setattr(
         module,
         "_forward_dequant_matmul",
-        lambda x_flat: calls.append("dense") or torch.zeros(
+        lambda x_flat, bias=None: calls.append(("dense", bias is not None)) or torch.zeros(
             x_flat.shape[0], module.out_features, dtype=x_flat.dtype
         ),
     )
@@ -277,5 +277,5 @@ def test_gguf_forward_uses_dense_when_fused_autotune_loses(bits: str, monkeypatc
     with torch.inference_mode():
         output = module(x)
 
-    assert calls == ["dense"]
+    assert calls == [("dense", True)]
     assert output.shape == (x.shape[0], module.out_features)

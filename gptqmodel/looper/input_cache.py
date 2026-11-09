@@ -170,9 +170,15 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def _xxh3_128_file(path: Path) -> str:
-    # Keep the optional crash-recovery hash dependency out of GPTQModel's
-    # ordinary import path.  DeepSeek V4 quantization images provide xxhash.
-    import xxhash
+    # Keep the hash dependency out of GPTQModel's ordinary import path. The
+    # disk-backed writer hashes every shard, so this is required by that
+    # feature (not only by the recovery path).
+    try:
+        import xxhash
+    except ImportError as error:
+        raise ImportError(
+            "disk-backed layer outputs require the `xxhash` package"
+        ) from error
 
     digest = xxhash.xxh3_128()
     with path.open("rb") as source:
@@ -181,24 +187,48 @@ def _xxh3_128_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _contained_path(root: Path, name: Any) -> Path:
+    """Resolve a manifest-relative shard path and reject escapes."""
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("disk-backed layer output shard path is invalid")
+    raw = root / name
+    if raw.is_symlink():
+        raise ValueError("disk-backed layer output shard is a symlink")
+    candidate = raw.resolve()
+    root = root.resolve()
+    if candidate == root or not candidate.is_relative_to(root):
+        raise ValueError("disk-backed layer output shard path escapes its root")
+    return candidate
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     encoded = _canonical_json(value) + b"\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as output:
-        temporary = Path(output.name)
-        output.write(encoded)
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(temporary, path)
+    temporary: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(encoded)
+            output.flush()
+            os.chmod(temporary, 0o644)
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -250,11 +280,15 @@ class DiskBackedLayerOutputSequence(Sequence[List[torch.Tensor]]):
             raise ValueError("disk-backed layer output manifest digest differs")
         expected_start = 0
         for shard in manifest["shards"]:
-            path = root / shard.get("path", "")
+            try:
+                path = _contained_path(root, shard.get("path"))
+            except ValueError as error:
+                raise ValueError(
+                    "disk-backed layer output shard set is malformed"
+                ) from error
             shapes = shard.get("shapes")
             if (
                 not path.is_file()
-                or path.is_symlink()
                 or shard.get("start") != expected_start
                 or not isinstance(shapes, list)
                 or not shapes
@@ -435,7 +469,12 @@ class DiskBackedLayerOutputWriter:
             expected_count = min(
                 self.shard_batches, self.expected_batches - start
             )
-            file_path = self.temporary / shard.get("path", "")
+            try:
+                file_path = _contained_path(self.temporary, shard.get("path"))
+            except ValueError as error:
+                raise ValueError(
+                    "disk-backed output progress shard differs"
+                ) from error
             if (
                 len(shapes) != expected_count
                 or not file_path.is_file()
@@ -549,10 +588,13 @@ class DiskBackedLayerOutputWriter:
                 _canonical_json(body)
             ).hexdigest()
             _atomic_json(self.temporary / "manifest.json", body)
-            progress = self.temporary / "progress.json"
-            progress.unlink()
             _fsync_directory(self.temporary)
             os.replace(self.temporary, self.destination)
+            # Drop the partial marker only after the rename commits. A crash
+            # before this point leaves progress.json behind, so a retry can
+            # restore the completed shards instead of recomputing them.
+            (self.destination / "progress.json").unlink(missing_ok=True)
+            _fsync_directory(self.destination)
             _fsync_directory(self.parent)
             self._complete = DiskBackedLayerOutputSequence.open(
                 self.destination, verify_hashes=False

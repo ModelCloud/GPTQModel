@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import struct
+
 import pytest
 import torch
+
 from gptqmodel.nn_modules.exllamav3_torch import _codebook_lut
 
 

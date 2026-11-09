@@ -148,3 +148,35 @@ def test_capture_batch_spool_payload_contract_changes_storage_identity(tmp_path)
     assert replacement.directory != original.directory
     assert replacement.committed_indices == frozenset()
     assert not original.directory.exists()
+
+
+def test_capture_batch_spool_retries_after_checkpoint_failure(
+    tmp_path, monkeypatch
+) -> None:
+    import gptqmodel.utils.exl3_capture_batch_spool as spool_module
+
+    spool = _open(tmp_path)
+    original_atomic_json = spool_module._atomic_json
+
+    def fail(path, body):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(spool_module, "_atomic_json", fail)
+    with pytest.raises(OSError, match="disk full"):
+        spool.commit(
+            0,
+            tensors={"router_input": torch.zeros(2, 4, dtype=torch.bfloat16)},
+            metadata={"batch": 0},
+        )
+    assert spool.pending_indices == frozenset()
+    assert not (spool.directory / "batch-000000000.safetensors").exists()
+
+    monkeypatch.setattr(spool_module, "_atomic_json", original_atomic_json)
+    record = spool.commit(
+        0,
+        tensors={"router_input": torch.zeros(2, 4, dtype=torch.bfloat16)},
+        metadata={"batch": 0},
+    )
+    assert record["batch_index"] == 0
+    assert (spool.directory / record["file"]).exists()
+    assert spool.committed_indices == frozenset({0})

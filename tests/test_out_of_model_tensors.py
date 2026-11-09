@@ -85,7 +85,9 @@ class _DummyConfig:
 
 
 class _DummyGenerationConfig(_DummyConfig):
-    pass
+    def save_pretrained(self, save_dir):
+        with open(os.path.join(save_dir, "generation_config.json"), "w", encoding="utf-8") as handle:
+            json.dump(self.__dict__, handle)
 
 
 _REAL_GLM4_MOE_CONFIG = {

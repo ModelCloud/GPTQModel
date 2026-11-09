@@ -17,6 +17,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+
 LEDGER_SCHEMA = "ds4rt.exl3-error-ledger"
 LEDGER_SCHEMA_VERSION = 1
 LEDGER_FILENAME = "ds4rt-exl3-error-ledger.jsonl"
@@ -342,6 +343,10 @@ def validate_zero_route_recovery_authorization(
         authorization,
         "zero_route_recovery_authorization",
     )
+    if not isinstance(clean, dict):
+        raise ValueError(
+            "EXL3 zero-route recovery authorization must be a mapping"
+        )
     recipe = zero_route_recovery_recipe(family_join)
     family_join_sha256 = hashlib.sha256(
         _canonical_json_bytes(family_join)
@@ -389,6 +394,8 @@ def validate_route_evidence(
     """Validate one routed expert's exposure and gate-mass accounting."""
 
     clean = _finite_json_value(evidence, "route_evidence")
+    if not isinstance(clean, dict):
+        raise ValueError("EXL3 natural-route evidence must be a mapping")
     integer_fields = (
         "router_calls",
         "router_token_count",
@@ -483,6 +490,8 @@ def validate_zero_route_recovery(
     """Validate one deterministic same-selection under-coverage top-up."""
 
     clean = _finite_json_value(evidence, "zero_route_recovery")
+    if not isinstance(clean, dict):
+        raise ValueError("EXL3 zero-route recovery evidence must be a mapping")
     integer_fields = (
         "natural_sample_count",
         "router_augmented_sample_count",
@@ -874,6 +883,10 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
 
 def _bind_record(record: dict[str, Any]) -> dict[str, Any]:
     clean = _finite_json_value(record)
+    # Re-appending a record that was read back from a journal must hash the
+    # unbound content, not the previous digest. Otherwise the appended line
+    # fails its own digest check on the next index rebuild.
+    clean.pop("record_sha256", None)
     digest = hashlib.sha256(_canonical_json_bytes(clean)).hexdigest()
     return {**clean, "record_sha256": digest}
 

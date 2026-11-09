@@ -13,9 +13,19 @@ import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.nn_modules.qlinear.marlin_awq as marlin_awq_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
+from gptqmodel.models import _const as const_module
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.marlin_scalar_type import scalar_types
+
+
+@pytest.fixture(autouse=True)
+def _cuda_dispatch_surface(monkeypatch):
+    # These tests exercise the CUDA kernel's Python surface, including the
+    # dispatch tests with fake loaders. ROCm refusal is covered by
+    # tests/test_rocm_backend_gating.py; pin the host family so the suite runs
+    # on a HIP host too.
+    monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: False)
 
 
 class _FakeLoader:
@@ -199,12 +209,25 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
 
 
 def test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(marlin_utils, "is_nvcc_compatible", lambda: True)
 
     flags = marlin_utils._marlin_extra_cuda_cflags()
 
     assert flags[0] == "-static-global-template-stub=false"
     assert "-static-global-template-stub=true" not in flags
+
+
+def test_marlin_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm(monkeypatch):
+    """hipcc rejects ``-static-global-template-stub`` even when nvcc is on PATH."""
+
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", True)
+    monkeypatch.setattr(marlin_utils, "is_nvcc_compatible", lambda: True)
+
+    flags = marlin_utils._marlin_extra_cuda_cflags()
+
+    assert "-static-global-template-stub=false" not in flags
 
 
 def test_marlin_extra_cuda_cflags_skip_static_global_template_stub_when_nvcc_is_incompatible(monkeypatch):
@@ -217,6 +240,8 @@ def test_marlin_extra_cuda_cflags_skip_static_global_template_stub_when_nvcc_is_
 
 
 def test_marlin_capability_checks_allow_sm75_but_reject_sm70(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 5))
 
@@ -471,6 +496,8 @@ def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
 
 def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 5))
 
@@ -479,6 +506,8 @@ def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
 
 def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 0))
 
@@ -490,6 +519,8 @@ def test_awq_marlin_validate_device_uses_torch_visible_ordinals(monkeypatch):
     queried_devices = []
 
     monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second,MIG-third")
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
 
@@ -508,6 +539,8 @@ def test_awq_marlin_validate_device_uses_torch_visible_ordinals(monkeypatch):
 
 def test_awq_marlin_validate_device_rejects_no_visible_cuda_device(monkeypatch):
     monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
 
     with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
@@ -518,6 +551,8 @@ def test_awq_marlin_validate_device_rejects_no_visible_cuda_device(monkeypatch):
 
 def test_awq_marlin_validate_device_rejects_pre_ampere(monkeypatch):
     monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
 
@@ -531,6 +566,7 @@ def test_marlin_runtime_device_validation_queries_explicit_device(monkeypatch):
     queried_devices = []
 
     monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
 
     def get_device_capability(device):
         queried_devices.append(device)
@@ -550,6 +586,7 @@ def test_marlin_runtime_device_validation_queries_explicit_device(monkeypatch):
 
 def test_marlin_runtime_device_validation_rejects_cpu(monkeypatch):
     monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+    monkeypatch.setattr(const_module, "IS_ROCM", False)
 
     with pytest.raises(ValueError, match="requires CUDA tensors"):
         marlin_utils.marlin_validate_runtime_device(
@@ -1211,7 +1248,10 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="NVIDIA CUDA required (Marlin has no HIP kernel)",
+)
 def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
     capability = torch.cuda.get_device_capability()
     if capability[0] < 7 or (capability[0] == 7 and capability[1] < 5):

@@ -1664,7 +1664,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
     module.clear_autotune()
     module.clear_weight_cache()
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
@@ -1725,7 +1725,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     module.clear_autotune()
     module.clear_weight_cache()
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 

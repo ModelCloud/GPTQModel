@@ -552,10 +552,11 @@ def prepare_llama_gsq_export(model, run, *, blocks=None):
     from ..quantization.config import FORMAT, GPTQConfig
 
     if blocks is None:
-        from ..models.auto import MODEL_MAP
+        from ..models.auto import MODEL_MAP_CASEFOLD
         from ..quantization.rco import discover_blocks
 
-        blocks = discover_blocks(model, model_definition=MODEL_MAP.get(model.config.model_type))
+        model_type = str(getattr(model.config, "model_type", "")).lower()
+        blocks = discover_blocks(model, model_definition=MODEL_MAP_CASEFOLD.get(model_type))
     if (run['state'] != 'complete' or run['layer_indices'] != [block.index for block in blocks]
             or not any(record is run for record in getattr(model, 'gsq_training_runs', []))):
         raise ValueError('Uniform staged export requires this model’s completed all-layer run')
