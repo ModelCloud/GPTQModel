@@ -154,7 +154,9 @@ compatibility references are `gptqmodel/utils/ricursive_patch.py` at `4e174cb53`
 | Compatibility line 818: only dictionary logits are trimmed. | Preserve the requested shape for tuple outputs too. |
 
 
-The subsequent clean review compared native `948fa2689` and compatibility
+The subsequent clean review fixes and their 38 new regression cases are in
+[GPT-QModel #3710](https://github.com/ModelCloud/GPTQModel/pull/3710).
+That review compared native `948fa2689` and compatibility
 `1efaf4a298` and added these regressions:
 
 | Previous behavior and source | Current behavior |
@@ -231,5 +233,5 @@ PyTorch 2.15.0, CPU, and two NVIDIA RTX 4090 devices:
   training, and AMD ROCm hardware were not exercised.
 
 The code-only fixture is pinned to native commit
-`02996c3baa50ae60e44d5fef74937099ce470ac3` from HF #11. Historical compatibility
+`fe7117095c985351aa06fcf906a7da830b06b441` from HF #11. Historical compatibility
 coverage also loads `da94cc013a8fda04a502f0a185083c7099ea06c1` directly.
