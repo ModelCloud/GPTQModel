@@ -228,7 +228,7 @@ def test_fp8_optimize_compiles_cpu_forward(monkeypatch):
 
     def fake_compile(fn, **kwargs):
         calls.append(kwargs)
-        return lambda value: fn(value)
+        return lambda value, bias=None: fn(value, bias=bias)
 
     monkeypatch.setattr(fp8_module, "TORCH_HAS_COMPILE", True)
     monkeypatch.setattr(fp8_module, "torch_compile", fake_compile)
@@ -252,7 +252,7 @@ def test_fp8_compiled_forward_invalidates_on_move_and_state_load(monkeypatch):
     monkeypatch.setattr(
         fp8_module,
         "torch_compile",
-        lambda fn, **_kwargs: lambda value: fn(value),
+        lambda fn, **_kwargs: lambda value, bias=None: fn(value, bias=bias),
     )
 
     kernel.optimize()
@@ -275,7 +275,8 @@ def test_fp8_compiled_forward_falls_back_to_eager(monkeypatch):
     with torch.inference_mode():
         expected = kernel(x)
 
-    def fail(_value):
+    def fail(_value, bias=None):
+        del bias
         raise RuntimeError("compiled graph failed")
 
     kernel._compiled_forward = fail
@@ -296,7 +297,7 @@ def test_fp8_compiled_forward_reads_live_weight_without_dense_cache(monkeypatch)
     monkeypatch.setattr(
         fp8_module,
         "torch_compile",
-        lambda fn, **_kwargs: lambda value: fn(value),
+        lambda fn, **_kwargs: lambda value, bias=None: fn(value, bias=bias),
     )
     kernel.optimize()
 

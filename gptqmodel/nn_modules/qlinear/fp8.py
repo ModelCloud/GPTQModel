@@ -32,7 +32,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
-from ._numerics import matmul_fp32_reduce
+from ._numerics import autocast_active, matmul_fp32_reduce
 from .gguf import _apply_optional_smoother
 
 
@@ -569,6 +569,22 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if (
+            bias is not None
+            and x_flat.dtype in (torch.float16, torch.bfloat16)
+            and (
+                x_flat.device.type != "cuda"
+                or bias.dtype != x_flat.dtype
+                or autocast_active(x_flat.device.type)
+            )
+        ):
+            # The bias and the reduction can cancel outside the activation
+            # range. Decode into temporary FP32 storage and round only after
+            # their sum; autocast must not narrow this matmul again.
+            with torch.autocast(device_type=x_flat.device.type, enabled=False):
+                weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+                output = torch.matmul(x_flat.float(), weight)
+                return (output + bias.to(device=x_flat.device, dtype=torch.float32)).to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
@@ -632,8 +648,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         bias = self.bias
-        if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        if bias is not None and bias.device != x_flat.device:
+            bias = bias.to(device=x_flat.device)
 
         if self._can_use_scaled_mm(x_flat):
             try:
@@ -649,7 +665,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 bias = None
         elif self._compiled_forward is not None:
             try:
-                output = self._compiled_forward(x_flat)
+                output = self._compiled_forward(x_flat, bias=bias)
+                bias = None
             except Exception as exc:
                 log.warn.once(
                     f"FP8 compiled CPU forward failed; falling back to eager: {exc}"
