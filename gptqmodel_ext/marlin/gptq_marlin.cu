@@ -274,7 +274,28 @@ marlin_device_info_t query_marlin_device_info(int device) {
   return info;
 }
 
+int marlin_device_count() {
+  static std::mutex mutex;
+  static int count = -1;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (count < 0) {
+    int detected = 0;
+    if (cudaGetDeviceCount(&detected) != cudaSuccess || detected < 0) {
+      detected = 0;
+    }
+    count = detected;
+  }
+  return count;
+}
+
 marlin_device_info_t get_marlin_device_info(int device) {
+  // The cache is indexed by the caller's device number, and this is the first
+  // caller that can receive an arbitrary Python integer: a negative index or a
+  // huge one used to read/resize out of bounds.
+  const int device_count = marlin_device_count();
+  TORCH_CHECK(device >= 0 && device < device_count,
+              "marlin device index ", device, " is out of range [0, ",
+              device_count, ")");
   static std::mutex mutex;
   static std::vector<marlin_device_info_t> cache;
   std::lock_guard<std::mutex> lock(mutex);

@@ -60,3 +60,67 @@ def test_field_list_is_stable():
         "max_threads_per_sm",
         "has_tensor_memory",
     )
+
+def test_explicit_device_zero_is_not_treated_as_unset(monkeypatch):
+    """`0` is falsy, so an explicit index 0 must not fall back to the current device."""
+    from gptqmodel.utils import marlin as marlin_mod
+
+    calls = []
+    monkeypatch.setattr(marlin_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(marlin_mod.torch.cuda, "current_device", lambda: 3)
+    monkeypatch.setattr(
+        marlin_mod,
+        "_marlin_resolve_op",
+        lambda **_kwargs: lambda index: calls.append(index)
+        or [0] * len(marlin_mod.MARLIN_DEVICE_PROFILE_FIELDS),
+    )
+
+    marlin_mod.marlin_device_profile(0)
+    assert calls == [0], f"device 0 was resolved to {calls}"
+
+
+def test_index_less_cuda_means_the_current_device(monkeypatch):
+    from gptqmodel.utils import marlin as marlin_mod
+
+    calls = []
+    monkeypatch.setattr(marlin_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(marlin_mod.torch.cuda, "current_device", lambda: 2)
+    monkeypatch.setattr(
+        marlin_mod,
+        "_marlin_resolve_op",
+        lambda **_kwargs: lambda index: calls.append(index)
+        or [0] * len(marlin_mod.MARLIN_DEVICE_PROFILE_FIELDS),
+    )
+
+    marlin_mod.marlin_device_profile("cuda")
+    assert calls == [2]
+
+
+def test_non_cuda_device_is_rejected(monkeypatch):
+    from gptqmodel.utils import marlin as marlin_mod
+
+    monkeypatch.setattr(marlin_mod.torch.cuda, "is_available", lambda: True)
+    with pytest.raises(ValueError, match="requires a CUDA device"):
+        marlin_mod.marlin_device_profile("cpu")
+
+
+@requires_cuda
+def test_out_of_range_index_raises_with_the_number_the_caller_passed():
+    """999 would wrap to -25 inside torch's int8 device index; report 999."""
+    count = torch.cuda.device_count()
+    with pytest.raises(ValueError, match=rf"device index {count + 32} is out of range"):
+        marlin_device_profile(count + 32)
+
+
+@requires_cuda
+def test_negative_index_is_rejected():
+    with pytest.raises(ValueError, match="out of range"):
+        marlin_device_profile(-1)
+
+
+@requires_cuda
+def test_extension_rejects_an_out_of_range_index_directly():
+    """Defence in depth: the C++ side must not index the cache unchecked."""
+    op = torch.ops.gptqmodel_marlin_fp16.marlin_device_profile
+    with pytest.raises(RuntimeError, match="out of range"):
+        op(torch.cuda.device_count() + 4096)
