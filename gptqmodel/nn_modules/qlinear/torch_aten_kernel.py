@@ -16,7 +16,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ._runtime_cache import tensor_cache_key
+from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
 
@@ -218,26 +218,7 @@ class TorchAtenLinear(PackableQuantLinear):
             self._ret_idx_key = key
             return ret_idx
 
-        ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
-        groups = total // group_size
-        remainder = total % group_size
-        g_idx_2 = g_idx * group_size
-
-        if remainder > 0:
-            mask = g_idx == groups
-            if mask.any():
-                g_idx_2[mask] += torch.arange(remainder, device=device, dtype=torch.int32)
-
-        if groups > 0:
-            base = torch.arange(group_size, device=device, dtype=torch.int32)
-            for i in range(groups):
-                mask = g_idx == i
-                if not mask.any():
-                    continue
-                count = int(mask.sum().item())
-                g_idx_2[mask] += base[:count]
-
-        ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
+        ret_idx = build_group_ret_idx(self.g_idx)
         self.ret_idx = ret_idx
         self._ret_idx_identity = None
         self._ret_idx_key = key
