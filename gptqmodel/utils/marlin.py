@@ -384,21 +384,24 @@ def marlin_device_profile(
     if device is None:
         target = torch.device("cuda", torch.cuda.current_device())
     else:
-        # Validate the raw integer before torch converts it: device indices are
-        # stored as int8, so `torch.device("cuda", 999).index` is -25 and the
-        # error would name a number the caller never passed.
-        if isinstance(device, int) and not isinstance(device, bool):
-            count = torch.cuda.device_count()
-            if device < 0 or device >= count:
-                raise ValueError(
-                    f"Marlin device profile: device index {device} is out of range "
-                    f"[0, {count})."
-                )
+        # Torch narrows device indices and wraps values such as
+        # `cuda:256` to device 0. Retain the original ordinal before parsing.
+        raw_index = device if isinstance(device, int) and not isinstance(device, bool) else None
+        if isinstance(device, str) and device.startswith("cuda:") and device[5:].isdecimal():
+            raw_index = int(device[5:])
         target = torch.device(device)
         if target.type != "cuda":
             raise ValueError(
                 f"Marlin device profile requires a CUDA device, got {target!r}."
             )
+        explicit_index = raw_index if raw_index is not None else target.index
+        if explicit_index is not None:
+            count = torch.cuda.device_count()
+            if explicit_index < 0 or explicit_index >= count:
+                raise ValueError(
+                    f"Marlin device profile: device index {explicit_index} is out of range "
+                    f"[0, {count})."
+                )
     # An explicit index must survive as-is: `0` is falsy, and treating it as
     # "unset" silently profiles whatever device happens to be current. `cuda`
     # without an index follows torch's own convention and means the current one.

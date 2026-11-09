@@ -1532,6 +1532,8 @@ std::tuple<int64_t, int64_t> MARLIN_SCRATCH_SIZES_EXPORT_NAME(
 }
 
 std::vector<int64_t> gptq_marlin_device_profile(int64_t device) {
+  TORCH_CHECK(device >= 0 && device <= INT_MAX,
+              "marlin device index ", device, " is out of range");
   const auto info = marlin::get_marlin_device_info(static_cast<int>(device));
   return {info.sms,
           info.max_shared_mem,
