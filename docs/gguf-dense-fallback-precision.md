@@ -52,3 +52,6 @@ median of seven groups of 20 synchronized wall-clock forwards measured:
 The additional FP32 weight is temporary for the current matmul. The test
 checks that no expanded weight remains in module state after repeated
 inference forwards.
+
+This dense fallback correction was introduced in
+[PR #3671](https://github.com/ModelCloud/GPTQModel/pull/3671).
