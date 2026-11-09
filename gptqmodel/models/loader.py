@@ -2350,11 +2350,14 @@ def ModelLoader(cls):
         ]:
             keep_in_fp32_modules = []
             for name, module in model.named_modules():
+                prefix = f"{name}." if name else ""
                 if getattr(module, "weight_scale_inv", None) is not None:
-                    prefix = f"{name}." if name else ""
                     keep_in_fp32_modules.append(f"{prefix}weight_scale_inv")
-                    if getattr(module, "bias", None) is not None:
-                        keep_in_fp32_modules.append(f"{prefix}bias")
+                if getattr(module, "bias", None) is not None and (
+                    getattr(module, "weight_scale_inv", None) is not None
+                    or hasattr(module, "gguf_tensor_qtype")
+                ):
+                    keep_in_fp32_modules.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

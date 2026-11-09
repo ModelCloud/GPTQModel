@@ -1208,7 +1208,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.register_buffer("qweight", qweight)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=torch.float16)
+            # Keep FP32 source/checkpoint bias values before the forward path
+            # chooses its compute dtype.
+            bias_tensor = torch.zeros(self.out_features, dtype=torch.float32)
             if "bias" in self._buffers:
                 self.bias = bias_tensor
             else:
@@ -1317,7 +1319,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.register_buffer("qweight", qweight)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
