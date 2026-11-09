@@ -187,9 +187,10 @@ the AVX512 path ahead of the ATen int4pack fallback when the layer shape
 satisfies the kernel's 32-row and group-size alignment requirements. Supported
 group sizes are 16, 32, 64, 128, 256, and 512.
 
-`BACKEND.GPTQ_TORCH_FUSED` and `BACKEND.AWQ_TORCH_FUSED` keep INT4 weights in
-the packed `int4pack` layout and reorder activations only when the `g_idx`
-permutation is not the identity. See
+`BACKEND.GPTQ_TORCH_FUSED` keeps INT4 weights in the packed `int4pack` layout
+and reorders activations only when the `g_idx` permutation is not the identity;
+`BACKEND.AWQ_TORCH_FUSED` uses the same packed layout without a `g_idx`
+activation reorder. See
 [Torch Fused INT4 transformations](docs/torch_fused_int4_transformations.md)
 for the unpack, pack, and activation-reorder contracts.
 

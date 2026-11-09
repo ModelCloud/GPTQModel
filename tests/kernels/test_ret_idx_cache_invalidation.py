@@ -167,6 +167,20 @@ def test_fused_op_gathers_for_a_non_identity_ret_idx():
     assert captured["x"].is_contiguous()
 
 
+def test_xpu_keeps_the_main_branch_gather_for_an_identity_ret_idx():
+    """XPU must not take the CPU-only identity fast path.
+
+    The XPU kernel has no coverage for activation views with a non-zero storage
+    offset, so it keeps the main-branch unconditional gather even when the
+    permutation is the identity.
+    """
+    module = _module(TorchFusedLinear)
+    module.g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
+    assert module._ret_idx_is_identity()
+    assert module._needs_activation_gather("xpu") is True
+    assert module._needs_activation_gather("cpu") is False
+
+
 def test_identity_fast_path_forwards_a_storage_offset_fp16_activation():
     """A contiguous FP16 view with a non-zero storage offset is forwarded as-is.
 

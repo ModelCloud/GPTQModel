@@ -314,10 +314,22 @@ class TorchFusedLinear(PackableQuantLinear):
 
         return out
 
+    def _needs_activation_gather(self, device_type: str) -> bool:
+        """Whether ``_fused_op_forward`` must gather with ``ret_idx``.
+
+        XPU keeps the main-branch behavior and always gathers, because that
+        path has no coverage for activation views with a non-zero storage
+        offset. CPU may skip the gather when the permutation is the identity.
+        """
+        return device_type == "xpu" or not self._ret_idx_is_identity()
+
     @torch.no_grad
     def _fused_op_forward(self, x):
         self._refresh_fused_op()
-        if not self._ret_idx_is_identity():
+        # The identity fast path is CPU-only. The XPU kernel has no coverage for
+        # activation views with a non-zero storage offset, so keep the
+        # main-branch unconditional gather (and its zero-offset copy) there.
+        if self._needs_activation_gather(x.device.type):
             x = x[:, self._build_ret_idx().to(x.device)].contiguous()
         elif not x.is_contiguous():
             x = x.contiguous()

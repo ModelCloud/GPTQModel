@@ -97,10 +97,10 @@ steps:
    `self.scales`, match the signature of
    `aten._weight_int4pack_mm_with_scales_and_zeros(x, qweight, group_size, scales, qzeros)`.
 
-For XPU execution, `_fused_op_forward` applies the same activation permutation
-described in [Activation permutation and fused matmul](#activation-permutation-and-fused-matmul):
-it gathers with `ret_idx` only when the permutation is not the identity, and
-otherwise only forces contiguity.
+For XPU execution, `_fused_op_forward` keeps the main-branch behavior: it
+always gathers with `ret_idx` and materializes a contiguous zero-offset copy.
+The identity fast path is CPU-only, because the XPU kernel has no coverage for
+activation views with a non-zero storage offset.
 
 This applies the inverse of the group-wise reordering performed in step 3,
 ensuring that column `i` of `qweight` always multiplies the same logical input
@@ -182,29 +182,31 @@ qzeros (G × O, zeroed) ──► scales_and_zeros (G × O × 2)
 
 ## Activation permutation and fused matmul
 
-Both device paths share one activation-reorder guard. `ret_idx` is built once
-from `g_idx` so that unpacked rows can be restored to the calibration order, and
-`_fused_op_forward` applies it to the activation only when it is not the
-identity permutation:
+Both device paths share the same `ret_idx` derivation, but only the CPU path
+takes the identity fast path. `ret_idx` is built once from `g_idx` so that
+unpacked rows can be restored to the calibration order:
 
 ```mermaid
 flowchart TD
     A["TorchFusedLinear._fused_op_forward(x)"] --> B["_refresh_fused_op()"]
-    B --> C{"_ret_idx_is_identity()"}
+    B --> X{"x.device.type == xpu"}
+    X -- "yes" --> G["x = x[:, _build_ret_idx().to(x.device)].contiguous()"]
+    X -- "no" --> C{"_ret_idx_is_identity()"}
     C -- "identity" --> D{"x.is_contiguous()"}
     D -- "yes" --> F["torch_fused_op(x)"]
     D -- "no" --> E["x = x.contiguous()"]
     E --> F
-    C -- "non-identity" --> G["x = x[:, _build_ret_idx().to(x.device)].contiguous()"]
+    C -- "non-identity" --> G
     G --> F
     style G fill:#fff3e0,stroke:#ef6c00
     style F fill:#e8f5e9,stroke:#2e7d32
 ```
 
 `desc_act=False` checkpoints have `g_idx == arange(I) // group_size`, so the
-permutation is the identity and the gather is a no-op copy that is skipped
+permutation is the identity and the CPU gather is a no-op copy that is skipped
 entirely. `TorchAtenLinear` and `TorchCpuAvx512Linear` already used this guard;
-`TorchFusedLinear` now reuses it instead of gathering unconditionally.
+`TorchFusedLinear` now reuses it instead of gathering unconditionally on CPU.
+XPU still gathers unconditionally to preserve the main-branch zero-offset copy.
 
 The matmul then multiplies the (possibly reordered) `x` with the packed
 `qweight`:
@@ -250,8 +252,14 @@ drop the verdict:
 | `_build_ret_idx()` rebuild (key miss) | cleared, recomputed on the next check |
 | `_build_ret_idx()` cache hit | untouched, the key still matches |
 | `_build_ret_idx()` called explicitly by a caller | cleared by the rebuild path |
-| `g_idx` replaced or mutated without an explicit rebuild | key mismatch forces a recompute |
+| `g_idx` replaced or mutated without an explicit rebuild (versioned tensor) | key mismatch forces a recompute |
 | `clear_weight_cache()` (state-dict load, `_apply` device/dtype move) | cleared with `ret_idx` and `_ret_idx_key` |
+
+For inference tensors, `tensor_cache_key()` has no version counter to observe an
+in-place write. A `g_idx` mutated in place inside `InferenceMode` without an
+explicit `clear_weight_cache()` can therefore still serve a stale verdict; this
+is the same contract documented in
+`gptqmodel/nn_modules/qlinear/_runtime_cache.py`.
 
 ## Comparing XPU vs CPU transformations
 
@@ -269,7 +277,7 @@ debugging.
 | Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = zero` (`float`)      |
 | Fused kernel call          | `_weight_int4pack_mm_with_scales_and_zeros(x, qW, gsz, s, z)`  | `_weight_int4pack_mm_for_cpu(x, qW, gsz, scales_and_zeros)`       |
 | Alignment requirements     | Determined by manual pack loop (only needs `I % 8 == 0`)       | Kernel enforces `I % 16 == 0` and `O % 16 == 0`                   |
-| Activation permutation     | gather only when `_ret_idx_is_identity()` is false; otherwise `x.contiguous()` when needed | Same guard and cache (`PackableQuantLinear._ret_idx_is_identity`) |
+| Activation permutation     | always `x[:, ret_idx].contiguous()` (zero-offset copy)          | gather only when `_ret_idx_is_identity()` is false; otherwise `x.contiguous()` when needed |
 
 Visually, you can think of the difference as *row-major lane packing* (XPU)
 versus *byte-tiling* (CPU):
