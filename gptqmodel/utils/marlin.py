@@ -358,6 +358,60 @@ def marlin_scratch_sizes(
     return int(sizes[0]), int(sizes[1])
 
 
+MARLIN_DEVICE_PROFILE_FIELDS = (
+    "sms",
+    "max_shared_mem",
+    "capability_major",
+    "capability_minor",
+    "l2_cache_size",
+    "max_threads_per_sm",
+    "has_tensor_memory",
+)
+
+
+def marlin_device_profile(
+        device: Optional[Union[int, str, torch.device]] = None,
+        dtype: torch.dtype = torch.float16,
+) -> Dict[str, int]:
+    """Return the cached device profile Marlin uses to pick a kernel.
+
+    Probed once per device inside the extension, so repeated calls are cheap.
+    ``has_tensor_memory`` reports tcgen05 tensor memory, which the datacenter
+    Blackwell parts have and the consumer ones do not.
+    """
+    if IS_ROCM or not torch.cuda.is_available():
+        raise RuntimeError("Marlin device profile requires CUDA.")
+    if device is None:
+        target = torch.device("cuda", torch.cuda.current_device())
+    else:
+        # Validate the raw integer before torch converts it: device indices are
+        # stored as int8, so `torch.device("cuda", 999).index` is -25 and the
+        # error would name a number the caller never passed.
+        if isinstance(device, int) and not isinstance(device, bool):
+            count = torch.cuda.device_count()
+            if device < 0 or device >= count:
+                raise ValueError(
+                    f"Marlin device profile: device index {device} is out of range "
+                    f"[0, {count})."
+                )
+        target = torch.device(device)
+        if target.type != "cuda":
+            raise ValueError(
+                f"Marlin device profile requires a CUDA device, got {target!r}."
+            )
+    # An explicit index must survive as-is: `0` is falsy, and treating it as
+    # "unset" silently profiles whatever device happens to be current. `cuda`
+    # without an index follows torch's own convention and means the current one.
+    index = target.index if target.index is not None else torch.cuda.current_device()
+    op = _marlin_resolve_op(dtype=dtype, op_name="marlin_device_profile")
+    values = op(index)
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if not isinstance(values, (tuple, list)) or len(values) != len(MARLIN_DEVICE_PROFILE_FIELDS):
+        raise RuntimeError(f"Marlin device profile op returned invalid value: {values!r}")
+    return dict(zip(MARLIN_DEVICE_PROFILE_FIELDS, (int(value) for value in values)))
+
+
 # Validate marlin support
 def _validate_marlin_device_support(device: Optional[torch.device] = None) -> bool:
     """
