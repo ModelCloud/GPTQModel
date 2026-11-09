@@ -312,6 +312,39 @@ def test_linear_e2e_matches_fp32_oracle_on_cpu():
     assert {"nf12_packed", "nf12_escapes", "nf12_exp_base"} <= state
 
 
+@pytest.mark.parametrize(
+    ("weight_value", "activation_value"),
+    [
+        (1.00117e-8, 10.0),
+        (99840.0, 0.064),
+    ],
+)
+def test_linear_fallback_keeps_bf16_weight_range_for_fp16_input(
+    weight_value,
+    activation_value,
+):
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((256, 256), dtype=torch.bfloat16)
+    weight[0, 0] = weight_value
+    bias = torch.zeros(256, dtype=torch.bfloat16)
+    linear = NF12ADLinear(
+        bits=12,
+        in_features=256,
+        out_features=256,
+        bias=True,
+    )
+    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    x = torch.zeros((1, 256), dtype=torch.float16)
+    x[0, 0] = activation_value
+    expected = (
+        x.float() @ weight.float().t() + bias.float()
+    ).to(torch.float16)
+
+    assert torch.equal(linear(x), expected)
+
+
 def test_hip_kernel_is_bit_exact_when_available():
     """RDNA4 HIP decode must reproduce every BF16 bit the Torch codec encodes."""
     if not torch.cuda.is_available() or torch.version.hip is None:
