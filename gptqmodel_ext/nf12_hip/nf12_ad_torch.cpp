@@ -211,8 +211,14 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
   // kernel on every shape (see the RDNA4 README table), so the fused route
   // stops at 15 and 16 joins the wmma route below.
   const int64_t m = x.numel() / k;
-  if (x.dim() == 2 && x.is_contiguous() && m < 16 &&
-      nf12_ad_linear_fused_small_m_supported(m)) {
+  // Every route below indexes rows of a contiguous [m, k] matrix, so a sliced
+  // or padded activation (a legal torch layout) must be normalized here. The
+  // kernels cannot honour a wider row stride: forwarding it silently read the
+  // wrong rows. The output keeps the caller's leading dimensions.
+  const torch::Tensor x2 = x.contiguous().reshape({m, k});
+  std::vector<int64_t> out_sizes(x.sizes().begin(), x.sizes().end());
+  out_sizes.back() = n;
+  if (m < 16 && nf12_ad_linear_fused_small_m_supported(m)) {
     check_arch(packed);
     TORCH_CHECK(packed.is_contiguous() && escapes.is_contiguous(),
                 "nf12_ad_hip.linear: packed and escapes must be contiguous");
@@ -226,7 +232,7 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
                     escapes.size(1) == 8,
                 "nf12_ad_hip.linear: escapes must be int16 [E, 8]");
-    auto out = torch::empty({x.size(0), n}, x.options());
+    auto out = torch::empty({m, n}, x.options());
     // Bias is folded into the kernel's FP32 accumulator, not added to the
     // rounded BF16 result (see the comment in nf12_ad_decode.hip).
     const bool has_bias = bias.has_value() && bias->defined();
@@ -237,12 +243,12 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     }
     const hipError_t status = nf12_ad_linear_fused(
         packed.data_ptr<uint8_t>(), reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-        static_cast<uint32_t>(exp_base), static_cast<const void*>(x.data_ptr()),
+        static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m,
         has_bias ? static_cast<const void*>(b.data_ptr()) : nullptr, current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.linear (fused) failed: ",
                 hipGetErrorString(status));
-    return out;
+    return out.reshape(out_sizes);
   }
 
   // Larger M: decode the weight and hand it to rocBLAS (SPEC.md 6.5). Decode
@@ -287,13 +293,13 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     const hipError_t status = nf12_ad_linear_wmma(
         packed.data_ptr<uint8_t>(),
         reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-        static_cast<uint32_t>(exp_base), static_cast<const void*>(x.data_ptr()),
+        static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr,
         workspace_bytes > 0 ? workspace.data_ptr() : nullptr, workspace_bytes,
         current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_ad_hip.linear (wmma) failed: ",
                 hipGetErrorString(status));
-    return out;
+    return out.reshape(out_sizes);
   }
 
   // Slice height: large enough that rocBLAS keeps its efficiency (a 256-row
@@ -330,12 +336,13 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
       // 2e-5 / 99.99% for addmm. The CUDA kernel also accumulates bias in
       // FP32 before writing BF16 (csrc/linear/small_m.cu), so addmm matches it.
       const torch::Tensor bs = bias->to(ws.device(), ws.scalar_type()).narrow(0, n0, rows);
-      slice_out.push_back(at::addmm(bs, x, ws.t()));
+      slice_out.push_back(at::addmm(bs, x2, ws.t()));
     } else {
-      slice_out.push_back(at::matmul(x, ws.t()));
+      slice_out.push_back(at::matmul(x2, ws.t()));
     }
   }
-  return slice_out.size() == 1 ? slice_out[0] : at::cat(slice_out, 1);
+  const torch::Tensor dense = slice_out.size() == 1 ? slice_out[0] : at::cat(slice_out, 1);
+  return dense.reshape(out_sizes);
 }
 
 // ---------------------------------------------------------------------------

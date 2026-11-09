@@ -405,3 +405,68 @@ def test_hip_split_k_calls_on_distinct_streams_keep_their_own_workspace():
         torch.cuda.synchronize(device)
         torch.testing.assert_close(actual_a.cpu().float(), expected_a.float(), rtol=2e-3, atol=2e-3)
         torch.testing.assert_close(actual_b.cpu().float(), expected_b.float(), rtol=2e-3, atol=2e-3)
+
+
+def _hip_runtime_or_skip():
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("requires an AMD ROCm device")
+    from gptqmodel.utils import nf12_ad_hip
+
+    if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
+        pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+    return nf12_ad_hip
+
+
+def test_hip_linear_preserves_leading_dimensions():
+    """A 3-D activation keeps its leading dims; only the last dim becomes N."""
+    hip = _hip_runtime_or_skip()
+    torch.manual_seed(7)
+    n, k = 256, 256
+    weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = nf12_codec.encode(weight.cpu())
+    packed, escapes = packed.cuda(), escapes.cuda()
+    for shape in [(1, 8, k), (2, 8, k), (2, 32, k)]:
+        x = (torch.randn(shape, device="cuda") * 0.05).to(torch.bfloat16)
+        got = hip.linear(x, packed, escapes, int(exp_base))
+        assert tuple(got.shape) == (*shape[:-1], n), shape
+        expected = torch.nn.functional.linear(x, weight)
+        torch.testing.assert_close(got.float(), expected.float(), rtol=2e-3, atol=2e-3)
+
+
+def test_hip_linear_accepts_padded_activation_rows():
+    """A sliced activation is a legal torch layout; the op normalizes it.
+
+    The HIP kernels index contiguous rows, so forwarding a wider row stride
+    silently read the wrong rows (3562/4096 elements out of tolerance at M=16).
+    """
+    hip = _hip_runtime_or_skip()
+    torch.manual_seed(8)
+    n, k = 256, 256
+    weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = nf12_codec.encode(weight.cpu())
+    packed, escapes = packed.cuda(), escapes.cuda()
+    storage = (torch.randn(64, k + 8, device="cuda") * 0.05).to(torch.bfloat16)
+    for m in (2, 16, 64):
+        x = storage[:m, :k]
+        assert x.stride(0) == k + 8 and not x.is_contiguous()
+        got = hip.linear(x, packed, escapes, int(exp_base))
+        expected = torch.nn.functional.linear(x, weight)
+        torch.testing.assert_close(got.float(), expected.float(), rtol=2e-3, atol=2e-3)
+
+
+def test_nf12_module_preserves_leading_dimensions_on_hip():
+    """The quant-linear module must not flatten a multi-dim activation."""
+    _hip_runtime_or_skip()
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    torch.manual_seed(9)
+    n, k = 256, 256
+    weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16)
+    layer = NF12ADLinear(bits=12, in_features=k, out_features=n)
+    layer.load_quant_result(quantize_nf12_ad_weight(weight))
+    layer = layer.cuda()
+    for shape in [(1, 8, k), (2, 32, k)]:
+        x = (torch.randn(shape, device="cuda") * 0.05).to(torch.bfloat16)
+        got = layer(x)
+        assert tuple(got.shape) == (*shape[:-1], n), shape

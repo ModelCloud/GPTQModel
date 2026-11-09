@@ -901,7 +901,8 @@ explains device selection, native encoder measurements, and Torch fallback.
 The [NF12 installed extension flow](docs/nf12-installed-extension.md) describes
 how the runtime checks an installed `nf12` package before reusing its operators.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
-describes matrix-core device selection and split-K scratch ownership.
+describes matrix-core device selection, split-K scratch ownership, and the
+activation-layout normalization that preserves the caller's output shape.
 
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 

@@ -44,3 +44,46 @@ multi-device and concurrent-stream results on suitable RDNA4 hosts. The
 existing math and packed-weight storage.
 
 Introduced in #3635.
+
+## Activation layout and output shape
+
+Every HIP route indexes rows of a contiguous `[m, k]` matrix: the fused
+small-M kernel, the matrix-core kernel, and the decode-then-GEMM slices all
+take a row pointer plus `k`. A sliced activation (`storage[:m, :k]` of a wider
+allocation) or a 3-D activation therefore cannot be forwarded as-is. The
+op layer normalizes once at entry and restores the caller's leading
+dimensions on every return.
+
+```mermaid
+flowchart TD
+    A["linear_dispatch receives x of any shape"] --> B["k = x.size(-1), m = x.numel() / k"]
+    B --> C["x2 = x.contiguous().reshape({m, k})"]
+    C --> D["out_sizes = x.sizes(); out_sizes.back() = n"]
+    D --> E{"m < 16 and fused small-M supported?"}
+    E -- Yes --> F["nf12_ad_linear_fused on x2"]
+    F --> F1["return out.reshape(out_sizes)"]
+    E -- No --> G{"nf12_ad_wmma_supported(m)?"}
+    G -- Yes --> H["nf12_ad_linear_wmma on x2 with caller-sized workspace"]
+    H --> H1["return out.reshape(out_sizes)"]
+    G -- No --> I["decode_dispatch per row slice"]
+    I --> J["at::matmul / at::addmm on x2"]
+    J --> K["cat slices, then return dense.reshape(out_sizes)"]
+    classDef entry fill:#e8f0ff,stroke:#003f8a,color:#111;
+    class C,D entry;
+```
+
+| Mechanism | Before | Current |
+| --- | --- | --- |
+| Fused small-M eligibility | Required `x.dim() == 2 && x.is_contiguous()`, so a 3-D or sliced input silently took a slower route (`08cf3857b:gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:214`) | Route decision uses only `m`, after `x2 = x.contiguous().reshape({m, k})` (`gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:218-221`) |
+| Kernel input pointer | Passed `x.data_ptr()` to the fused and WMMA kernels (`08cf3857b:...:240`, `:290`) | Passes `x2.data_ptr()`, which is contiguous by construction (`...:246`, `:296`) |
+| GEMM operand | `at::matmul(x, ...)` / `at::addmm(bs, x, ...)` (`08cf3857b:...:338`) | `at::matmul(x2, ...)` / `at::addmm(bs, x2, ...)` (`...:339-341`) |
+| Output shape | Returned `[m, n]`, flattening `[2, 8, 256]` to `[16, 256]` (`08cf3857b:...:245`, `:296`, `:338`) | Returns `out.reshape(out_sizes)` / `dense.reshape(out_sizes)` (`...:251`, `:302`, `:345`) |
+
+Failure path: a shape the kernels cannot honour (`n % 16 != 0`, `k % 64 != 0`,
+`packed` not contiguous) still raises `TORCH_CHECK` before any launch, so the
+normalization never converts a rejection into a wrong answer. The raw C ABI
+keeps rejecting a padded `ldx` explicitly; only the torch op normalizes.
+
+`tests/test_nf12_ad_codec.py` asserts the 3-D shape round-trip, the padded
+row-slice result against `F.linear`, and the `NF12ADLinear` module shape on a
+RDNA4 host.
