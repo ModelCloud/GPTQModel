@@ -512,7 +512,142 @@ parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
   on `gfx1250`, so it compiles a trap stub and the host still rejects
   `gfx1250` at load time. `extension.load("all")` skips the CUDA-only AWQ, QQQ,
   Marlin, Machete, VPTQ, Swordfish, and ExLlamaV2 extensions on ROCm instead
-  of starting a doomed hipcc build.
+  of starting a doomed hipcc build. See [Kernel selection and RDNA4 fallbacks](#kernel-selection-and-rdna4-fallbacks) for the flow diagrams and before/after evidence.
+
+## Kernel selection and RDNA4 fallbacks
+
+This section is the reference for how GPT-QModel decides which HIP kernels to
+build on ROCm, why `extension.load("all")` no longer starts CUDA-only builds,
+and how the RDNA4 targets differ. It covers PR #3686.
+
+### Extension selection
+
+`extension.load("all")` resolves the concrete extension list through
+`_resolve_requested_extensions("all")`, which drops every spec whose
+`supported` predicate is false. `_load_one` re-checks the same predicate, so an
+explicit request cannot bypass it. On ROCm, AWQ, QQQ, Marlin fp16, and Marlin
+bf16 use `_native_cuda_extension_supported` and are refused before any
+`TorchOpsJitExtension` is resolved or built.
+
+```mermaid
+flowchart TD
+    A["extension.load(name)"] --> B{"name == all"}
+    B -- yes --> C["_resolve_requested_extensions('all')"]
+    C --> D{"_spec_supported(spec)"}
+    D -- no --> E["skip spec"]
+    D -- yes --> F["_load_one(spec)"]
+    B -- no --> G["_resolve_single_extension_name(name)"]
+    G --> H{"_spec_supported(spec)"}
+    H -- no --> I["RuntimeError with actionable ROCm message"]
+    H -- yes --> F
+    F --> J{"TorchOpsJitExtension.load()"}
+    J -- success --> K["result True"]
+    J -- failure --> L["RuntimeError with build error"]
+    style E fill:#e8f5e9,stroke:#2e7d32
+    style I fill:#ffebee,stroke:#c62828
+    style L fill:#ffebee,stroke:#c62828
+```
+
+`_native_cuda_extension_supported()` is `not _host_is_rocm()`
+(`gptqmodel/extension.py:42-54`). The gate is attached to the AWQ, QQQ, and
+Marlin specs at `gptqmodel/extension.py` lines 78-96 and 132-147; the filter
+runs in `_spec_supported` (line 198) and `_resolve_requested_extensions`
+(line 207), and the explicit refusal is in `_load_one` (line 250).
+
+| Area | Before (base `8a701a846`) | After (this PR) |
+|---|---|---|
+| `load("all")` on ROCm | AWQ/QQQ/Marlin specs had no `supported` predicate, so `all` selected them and started hipcc (`gptqmodel/extension.py` lines 63, 68, 106, 111) | `supported=_native_cuda_extension_supported`; `all` drops them (`gptqmodel/extension.py` lines 78-96, 132-147, 198, 207) |
+| Explicit CUDA-only load on ROCm | resolved the extension and hit a raw hipcc failure (`gptqmodel/extension.py` line 216) | raises `_spec_unsupported_error` before resolving (`gptqmodel/extension.py` line 250) |
+| Marlin/Machete nvcc flag | added whenever `is_nvcc_compatible()` was true (`gptqmodel/utils/marlin.py` line 239, `gptqmodel/utils/machete.py` line 626) | added only when `not IS_ROCM` (`gptqmodel/utils/marlin.py` line 240, `gptqmodel/utils/machete.py` line 627) |
+
+### NF12 fused dot on gfx1250
+
+The fused small-M decode kernel accumulates BF16 dot products in FP32. On
+gfx1200/gfx1201 the packed `v_dot2_f32_bf16` instruction is used. gfx1250 has
+no `dot12-insts`, so `bf16x2_dot` uses two FP32 FMAs and recomputes the pair in
+FP64 when an intermediate is non-finite. The FP64 path is required because
+finite BF16 operands can overflow FP32 before they cancel, and the packed dot
+preserves that cancellation.
+
+```mermaid
+flowchart TD
+    A["bf16x2_dot(a, b, acc)"] --> B{"NF12_HIP_HAS_BF16_DOT2"}
+    B -- "gfx1200 or gfx1201" --> C["v_dot2_f32_bf16"]
+    B -- "gfx1250 or force flag" --> D["inner = fma(a.y, b.y, acc)"]
+    D --> E{"__builtin_isfinite(inner)"}
+    E -- no --> F["FP64 recompute: acc + a.x*b.x + a.y*b.y"]
+    E -- yes --> G["outer = fma(a.x, b.x, inner)"]
+    G --> H{"__builtin_isfinite(outer)"}
+    H -- no --> F
+    H -- yes --> I["return outer"]
+    F --> J["return float(sum)"]
+    style F fill:#fff3e0,stroke:#ef6c00
+```
+
+| Area | Before | After |
+|---|---|---|
+| gfx1200/gfx1201 fused dot | direct `__builtin_amdgcn_fdot2_f32_bf16` (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 203-221) | same builtin behind `bf16x2_dot` (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 144-165) |
+| gfx1250 fused dot | same builtin; hipcc rejects the target with `needs target feature dot12-insts` | FMA fast path plus FP64 recompute on non-finite (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 147-165) |
+| Finite-input overflow/cancellation | not reachable on gfx1250; the naive FMA fallback returned `-inf` | FP64 recompute matches the packed dot (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 153-160) |
+
+`gptqmodel/utils/nf12_ad_hip.py` line 35 lists `gfx1200`, `gfx1201`, and
+`gfx1250`; line 126 adds the `GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK`
+validation switch.
+
+### AllSpark gfx1250: compilation vs runtime support
+
+AllSpark's HIP kernel is built on the 16x16x16 gfx12 WMMA instruction, which
+gfx1250 does not provide. The source now compiles a trap stub for gfx1250 so a
+family-wide `PYTORCH_ROCM_ARCH` build succeeds, but the host still refuses to
+launch it. Compilation and runtime support are separate contracts.
+
+```mermaid
+flowchart TD
+    A["hipcc --offload-arch=gfx1250"] --> B{"__gfx1200__ or __gfx1201__"}
+    B -- yes --> C["wmma_f16 / wmma_bf16: gfx12 WMMA"]
+    B -- no --> D["trap stub in wmma_f16 / wmma_bf16"]
+    D --> E["shared object builds"]
+    E --> F["allspark_hip_supported(device)"]
+    F --> G{"arch in gfx1200/gfx1201"}
+    G -- yes --> H["launch kernel"]
+    G -- no --> I["NotImplementedError; Torch fallback"]
+    style I fill:#ffebee,stroke:#c62828
+    style D fill:#fff3e0,stroke:#ef6c00
+```
+
+| Area | Before | After |
+|---|---|---|
+| gfx1250 compilation | `#error` in `allspark_utils_hip.cuh` (`gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh` lines 41-44) | compiles a trap stub (lines 44-52, 214-232) |
+| gfx1250 runtime | unreachable because compilation failed | `allspark_hip_supported` returns false (`gptqmodel/utils/allspark_hip.py` lines 157-163), `validate_allspark_hip_device` raises (lines 166-180), Torch fallback |
+| gfx1200/gfx1201 runtime | gfx12 WMMA path | unchanged (`gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh` lines 214-232) |
+
+The trap stub is never launched: `AllSparkLinear.validate_device` calls
+`validate_allspark_hip_device` before the kernel
+(`gptqmodel/nn_modules/qlinear/allspark.py` line 84), and `validate_once`
+rejects the device when `allspark_hip_available()` is false (lines 87-92).
+
+### Failure contract
+
+| Situation | Before | After |
+|---|---|---|
+| ROCm `extension.load("all")` | AWQ/QQQ/Marlin started hipcc and failed | they are skipped; only supported specs build |
+| ROCm explicit AWQ | raw hipcc error | `RuntimeError` naming `AWQ_GEMM_TRITON` / `AWQ_GEMV_TRITON` |
+| ROCm explicit QQQ | raw hipcc error | `RuntimeError` naming `QQQ_TORCH` |
+| ROCm explicit Marlin | raw hipcc error or nvcc flag error | `RuntimeError` "not supported on ROCm" |
+| gfx1250 NF12 fused dot | compile error | FMA fallback; FP64 on non-finite |
+| gfx1250 AllSpark | compile `#error` | compiles; runtime refuses and falls back to Torch |
+| Marlin/Machete with nvcc on PATH | hipcc rejects `-static-global-template-stub` | flag is not added on ROCm |
+
+### Tests that pin the contract
+
+| Test | Invariant |
+|---|---|
+| `tests/test_extension_load_api.py::test_load_all_skips_cuda_only_extensions_on_rocm` | `all` excludes AWQ/QQQ/Marlin on ROCm |
+| `tests/test_rocm_backend_gating.py::test_cuda_only_extensions_are_skipped_by_load_all_on_rocm` | explicit loads refuse with actionable, host-independent messages |
+| `tests/test_nf12_ad_codec.py::test_hip_linear_preserves_finite_overflow_cancellation` | finite BF16 overflow/cancellation matches the FP64 oracle |
+| `tests/test_allspark_hip.py::test_arch_allowlist` | gfx1250 is rejected at runtime |
+| `tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | no nvcc-only flag on ROCm |
+| `tests/test_machete_jit.py::test_machete_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | same for Machete |
 
 ## Verification commands
 
