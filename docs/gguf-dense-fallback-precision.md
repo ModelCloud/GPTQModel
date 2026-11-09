@@ -64,6 +64,7 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | BF16 checkpoint load | `models/loader.py:2351-2364` passed a keep list that Accelerate ignores for BF16 | `utils/model.py:_restore_fp32_checkpoint_buffers` reads GGUF bias values from the checkpoint after loading |
+| Checkpoint source selection | A second read could choose a different whole-file format in a directory or silently miss an indexed bias | The restoration read follows Accelerate's file preference and raises if any requested bias is absent |
 | Dense forward bias | `nn_modules/qlinear/gguf.py:1913-1916` cast FP32 bias to the activation dtype before `_forward_dequant_matmul` | `GGUFTorchLinear.forward` moves bias across devices without narrowing it, then rounds the output once |
 | Packed weight storage | GGUF packed bytes persisted; dense fallback weight was temporary | The same packed bytes persist and the temporary dense weight is released after each forward |
 

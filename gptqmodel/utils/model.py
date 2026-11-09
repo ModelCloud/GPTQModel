@@ -2686,7 +2686,9 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     """
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
-        for filename in ("model.safetensors", "pytorch_model.bin"):
+        # Match Accelerate's directory resolution so the second read comes
+        # from the same checkpoint that populated the rest of the model.
+        for filename in ("pytorch_model.bin", "model.safetensors"):
             candidate = os.path.join(checkpoint, filename)
             if os.path.isfile(candidate):
                 checkpoint = candidate
@@ -2708,6 +2710,7 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     else:
         files = {checkpoint: names}
 
+    restored: set[str] = set()
     for path, selected in files.items():
         if path.endswith(".safetensors"):
             with safe_open(path, framework="pt", device="cpu") as handle:
@@ -2730,6 +2733,14 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
             if current.device.type == "meta":
                 raise RuntimeError(f"Cannot restore FP32 GGUF bias buffer {name!r} on a meta device")
             module._buffers[buffer_name] = value.to(device=current.device, dtype=torch.float32)
+            restored.add(name)
+
+    missing = names - restored
+    if missing:
+        raise RuntimeError(
+            "Cannot restore FP32 GGUF bias buffers missing from checkpoint: "
+            + ", ".join(sorted(missing))
+        )
 
 
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):

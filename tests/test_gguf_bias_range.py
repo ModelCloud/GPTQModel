@@ -9,7 +9,10 @@ import torch
 from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
+from gptqmodel.utils.model import (
+    _restore_fp32_checkpoint_buffers,
+    load_checkpoint_in_model_then_tie_weights,
+)
 
 
 def test_gguf_packing_preserves_fp32_bias_range():
@@ -152,3 +155,30 @@ def test_gguf_bias_survives_checkpoint_key_remap(tmp_path):
 
     assert restored.proj.bias.dtype == torch.float32
     torch.testing.assert_close(restored.proj(restored.x), restored.expected, rtol=0, atol=0)
+
+
+def test_gguf_bias_restore_rejects_missing_index_entry(tmp_path):
+    source = _CheckpointModel(torch.bfloat16)
+    save_file(
+        {"proj.qweight": source.proj.qweight},
+        tmp_path / "weights.safetensors",
+        metadata={"format": "pt"},
+    )
+    index = tmp_path / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"proj.qweight": "weights.safetensors"}}))
+
+    with pytest.raises(RuntimeError, match="proj.bias"):
+        _restore_fp32_checkpoint_buffers(source, index, {"proj.bias"})
+
+
+def test_gguf_bias_restore_uses_same_directory_checkpoint_as_accelerate(tmp_path):
+    source = _CheckpointModel(torch.bfloat16)
+    torch.save(source.state_dict(), tmp_path / "pytorch_model.bin")
+    alternate = {name: value.clone() for name, value in source.state_dict().items()}
+    alternate["proj.bias"].fill_(1.0)
+    save_file(alternate, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    source.proj.bias.zero_()
+
+    _restore_fp32_checkpoint_buffers(source, tmp_path, {"proj.bias"})
+
+    assert source.proj.bias.item() == -100000.0
