@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,7 +212,10 @@ class EXL3CaptureFrontierStore:
             raise EXL3CaptureFrontierError("capture-frontier root is unsafe")
         changed = False
         for path in self.root.iterdir():
-            if path.name.startswith(".capture-") and path.name.endswith(".tmp"):
+            if (
+                path.name.startswith((".capture-", ".discard-"))
+                and path.name.endswith(".tmp")
+            ):
                 if not path.is_dir() or path.is_symlink():
                     raise EXL3CaptureFrontierError("incomplete capture entry is unsafe")
                 shutil.rmtree(path)
@@ -726,7 +730,10 @@ class EXL3CaptureFrontierStore:
                     )
                 if namespaces != {block_namespace}:
                     continue
-            shutil.rmtree(path)
+            tombstone = self.root / f".discard-{path.name}-{uuid.uuid4().hex}.tmp"
+            os.rename(path, tombstone)
+            _fsync_directory(self.root)
+            shutil.rmtree(tombstone)
             changed = True
         if changed:
             _fsync_directory(self.root)

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import gptqmodel.utils.exl3_capture_frontier as frontier_module
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureDescriptor,
@@ -180,6 +181,35 @@ def test_scoped_discard_keeps_other_block_namespace(tmp_path) -> None:
 
     store.discard_through(0, block_namespace="mtp")
     assert list(store.root.iterdir()) == []
+
+
+def test_scoped_discard_uses_restart_safe_tombstone(tmp_path, monkeypatch) -> None:
+    store = EXL3CaptureFrontierStore(tmp_path / "frontier", family_join=FAMILY_JOIN)
+    hessian = torch.eye(4, dtype=torch.float32)
+    store.commit(
+        layer_index=3,
+        subset_index=0,
+        subset_total=1,
+        subset=_subset(),
+        states=_states(hessian),
+    )
+
+    def interrupted_rmtree(path):
+        raise RuntimeError(f"simulated interruption for {path.name}")
+
+    real_rmtree = frontier_module.shutil.rmtree
+    monkeypatch.setattr(frontier_module.shutil, "rmtree", interrupted_rmtree)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        store.discard_through(3, block_namespace="base")
+
+    entries = list(store.root.iterdir())
+    assert len(entries) == 1
+    assert entries[0].name.startswith(".discard-")
+    assert entries[0].name.endswith(".tmp")
+
+    monkeypatch.setattr(frontier_module.shutil, "rmtree", real_rmtree)
+    store._prune_incomplete()
+    assert not list(store.root.iterdir())
 
 
 def test_scoped_discard_rejects_unknown_namespace(tmp_path) -> None:
