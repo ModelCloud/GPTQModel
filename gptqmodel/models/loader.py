@@ -2348,9 +2348,18 @@ def ModelLoader(cls):
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:
+            keep_in_fp32_modules = []
+            for name, module in model.named_modules():
+                if getattr(module, "weight_scale_inv", None) is not None:
+                    keep_in_fp32_modules.append(
+                        f"{name}.weight_scale_inv"
+                        if name
+                        else "weight_scale_inv"
+                    )
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
+                keep_in_fp32_modules=keep_in_fp32_modules or None,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
