@@ -466,8 +466,10 @@ static bool wmma_arch_cached(int device) {
 
 static bool wmma_available() {
   int device = 0;
-  if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= kMaxDevices) return false;
-  return wmma_arch_cached(device);
+  if (hipGetDevice(&device) != hipSuccess || device < 0) return false;
+  // Device ordinals beyond the bounded cache still need an architecture
+  // probe. Treating them as unsupported changes the answer on large hosts.
+  return device < kMaxDevices ? wmma_arch_cached(device) : wmma_arch_ok(device);
 }
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
