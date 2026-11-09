@@ -159,16 +159,17 @@ class ParoLinear(AwqTorchLinear):
         else:
             self.channel_scales = channel_scales
 
-    def post_init(self):
-        """Refresh cached runtime state after weights or rotation buffers change."""
-        super().post_init()
-        self._clear_rotation_runtime_cache()
-        self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
-
     def clear_weight_cache(self) -> None:
         """Drop packed-weight and rotation-derived state after a mutation."""
         super().clear_weight_cache()
         self._clear_rotation_runtime_cache()
+        # A meta/offloaded buffer has no values to inspect. Keep the shortcut
+        # disabled until a materialized load or move clears the cache again.
+        self._rotation_identity = (
+            not self.theta.is_meta
+            and not self.channel_scales.is_meta
+            and is_identity_rotation(self.theta, self.channel_scales)
+        )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
