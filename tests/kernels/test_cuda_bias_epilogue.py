@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA quantized linear output rounding and wide-GEMM gradients."""
+"""CUDA/ROCm quantized linear output rounding and wide-GEMM gradients."""
 
 import weakref
 
@@ -13,12 +13,13 @@ from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT
 
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.version.hip is not None,
-    reason="NVIDIA CUDA required for FP32 bias epilogue",
+    not torch.cuda.is_available(),
+    reason="GPU required for FP32 bias epilogue",
 )
 
 
@@ -59,6 +60,22 @@ def _awq(dtype):
     return module.eval().to(device="cuda", dtype=dtype), 41.25, 50, -1000
 
 
+def _tritonv2(dtype):
+    k = n = 32
+    module = TritonV2Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=k, out_features=n, bias=True,
+        format=FORMAT.GPTQ_V2, register_buffers=True,
+    )
+    # Each packed nibble is 15; the zero point is 0, giving 15 * 2.75.
+    module.qweight.fill_(-1)
+    module.qzeros.zero_()
+    module.scales.fill_(2.75)
+    module.bias.fill_(-1000)
+    module.post_init()
+    return module.eval().to(device="cuda", dtype=dtype), 41.25, 50, -1000
+
+
 def _fp8(dtype, scaled):
     k = n = 32
     module = TorchFP8Linear(
@@ -89,7 +106,23 @@ def _gguf(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("backend", ["gptq", "gptq_streaming", "awq", "fp8_dense", "fp8_scaled", "gguf_dense"])
+def test_matmul_fp32_reduce_fuses_bias_before_rounding(dtype):
+    x = torch.full((129, 128), 516, device="cuda", dtype=dtype)
+    weight = torch.ones((128, 128), device="cuda", dtype=dtype)
+    bias = torch.full((128,), -1024, device="cuda", dtype=dtype)
+    expected = (x.double() @ weight.double() + bias.double()).to(dtype)
+
+    actual = matmul_fp32_reduce(x, weight, bias)
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "backend",
+    ["gptq", "gptq_streaming", "awq", "tritonv2", "fp8_dense", "fp8_scaled", "gguf_dense"],
+)
 def test_cuda_bias_cancellation_rounds_once(backend, dtype):
     if backend == "gptq":
         module, weight, value, bias = _gptq(dtype, streaming=False)
@@ -97,6 +130,8 @@ def test_cuda_bias_cancellation_rounds_once(backend, dtype):
         module, weight, value, bias = _gptq(dtype, streaming=True)
     elif backend == "awq":
         module, weight, value, bias = _awq(dtype)
+    elif backend == "tritonv2":
+        module, weight, value, bias = _tritonv2(dtype)
     elif backend == "fp8_dense":
         module, weight, value, bias = _fp8(dtype, scaled=False)
     elif backend == "fp8_scaled":

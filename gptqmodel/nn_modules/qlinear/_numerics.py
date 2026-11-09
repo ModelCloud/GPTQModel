@@ -14,7 +14,7 @@ from ...utils.rocm import IS_ROCM
 # identical to the low-precision matmul across 96 shape/dtype/bit cases and 150
 # random matmuls, while the wide path cost +4% to +40% latency and up to
 # +144 MiB of transient allocation. Keep the wide request on CUDA only, but
-# preserve the fused bias epilogue for HIP linear calls below.
+# preserve the fused bias epilogues for HIP linear/matmul calls below.
 _WIDE_REDUCE_DEVICES = ("cuda",)
 
 
@@ -84,6 +84,18 @@ def matmul_fp32_reduce(
         else:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
         return output.to(x.dtype).reshape(shape)
+    if (
+        bias is not None
+        and x.device.type == "cuda"
+        and bias.device == x.device
+        and bias.dtype == x.dtype
+    ):
+        # HIP keeps the low-precision output because the wide FP32 request is
+        # CUDA-only, so a separate add rounds (and can overflow) the partial
+        # sum before the bias cancels it. Fuse the bias into the GEMM epilogue
+        # instead; addmm matches `(x @ w + bias)` in FP32 on HIP bitwise.
+        flat_x = x.reshape(-1, x.shape[-1])
+        return torch.addmm(bias, flat_x, weight).reshape(x.shape[:-1] + (weight.shape[-1],))
     output = torch.matmul(x, weight)
     return output + bias if bias is not None else output
 

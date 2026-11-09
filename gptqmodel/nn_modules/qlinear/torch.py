@@ -535,7 +535,7 @@ class TorchLinear(PackableQuantLinear):
         compute_stream = torch.cuda.current_stream(device=device)
         wide_reduce = _wants_fp32_reduce(x)
         bias = self.bias
-        if wide_reduce and bias is not None and (bias.device != device or bias.dtype != x.dtype):
+        if bias is not None and (bias.device != device or bias.dtype != x.dtype):
             bias = bias.to(device=device, dtype=x.dtype)
         stream_dequant = self._stream_get_dequant_stream(device)
         zeros = self._stream_decode_qzeros()
@@ -570,9 +570,13 @@ class TorchLinear(PackableQuantLinear):
 
             out_slice = out.narrow(1, start, width)
             weight_tile = buffers[buffer_idx].narrow(1, 0, width)
+            tile_bias = bias.narrow(0, start, width) if bias is not None else None
             if wide_reduce:
-                tile_bias = bias.narrow(0, start, width) if bias is not None else None
                 out_slice.copy_(matmul_fp32_reduce(x, weight_tile, bias=tile_bias))
+            elif tile_bias is not None:
+                # Fuse the bias into the GEMM epilogue; rounding `out` before
+                # `out.add_(bias)` overflows/cancels in the activation dtype.
+                torch.addmm(tile_bias, x, weight_tile, beta=1.0, alpha=1.0, out=out_slice)
             else:
                 out_slice.zero_()
                 torch.addmm(out_slice, x, weight_tile, beta=0.0, alpha=1.0, out=out_slice)
@@ -586,9 +590,6 @@ class TorchLinear(PackableQuantLinear):
 
         buffers.clear()
         out = out.reshape(out_shape)
-
-        if bias is not None and not wide_reduce:
-            out.add_(bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
