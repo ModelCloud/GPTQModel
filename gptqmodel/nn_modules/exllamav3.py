@@ -63,6 +63,8 @@ class ExllamaV3Linear(nn.Module):
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
         self._inner: Optional["LinearEXL3"] = None
         self._inner_signature: Optional[tuple[Any, ...]] = None
+        self._torch_inner = None
+        self._torch_inner_signature: Optional[tuple[Any, ...]] = None
 
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
@@ -146,6 +148,8 @@ class ExllamaV3Linear(nn.Module):
                 pass
         self._inner = None
         self._inner_signature = None
+        self._torch_inner = None
+        self._torch_inner_signature = None
 
     def _stored_features(self) -> tuple[int, int]:
         """Infer storage geometry; architecture dimensions remain logical."""
@@ -220,6 +224,31 @@ class ExllamaV3Linear(nn.Module):
         self._inner_signature = signature
         return self._inner
 
+    def _ensure_torch_inner(self):
+        """Build the bounded FP32 reconstruction path for wide inputs."""
+        from .exllamav3_torch import ExllamaV3TorchLinear
+
+        signature = self._current_signature()
+        if (
+            self._torch_inner is not None
+            and signature == self._torch_inner_signature
+        ):
+            return self._torch_inner
+
+        tensors = {
+            name: getattr(self, name, None)
+            for name in _EXL3_BUFFER_NAMES
+        }
+        self._torch_inner = ExllamaV3TorchLinear(
+            in_features=self.in_features,
+            out_features=self.out_features,
+            name=self.name,
+            tensors=tensors,
+            out_dtype=self.out_dtype,
+        )
+        self._torch_inner_signature = signature
+        return self._torch_inner
+
     def post_init(self) -> None:
         self._drop_inner()
         self._coerce_buffer_dtypes()
@@ -233,13 +262,12 @@ class ExllamaV3Linear(nn.Module):
         return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        inner = self._ensure_inner()
         input_dtype = x.dtype
-        # The native GEMM accepts FP16 or FP32 only. Use FP32 for BF16 and
-        # other wide inputs so converting to the kernel does not narrow range.
-        runtime_dtype = (
-            torch.float16 if input_dtype == torch.float16 else torch.float32
-        )
+        if input_dtype != torch.float16:
+            return self._ensure_torch_inner().forward(x)
+
+        inner = self._ensure_inner()
+        runtime_dtype = torch.float16
         result = inner.forward(
             x.to(dtype=runtime_dtype),
             {},
