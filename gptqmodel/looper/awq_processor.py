@@ -414,8 +414,13 @@ class AWQProcessor(LoopProcessor):
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
-        if target_format == FORMAT.GEMM and self._module_bits(module_name) != 4:
-            return AwqTorchLinear
+        if target_format == FORMAT.GEMM:
+            if (
+                self._module_bits(module_name) != 4
+                or self._module_group_size(module_name)
+                not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
+            ):
+                return AwqTorchLinear
         if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
