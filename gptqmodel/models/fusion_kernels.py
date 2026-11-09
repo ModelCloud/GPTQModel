@@ -70,6 +70,10 @@ class FusionKernelSpec:
         return getattr(module, "_cpu_transform_dtype", None) or getattr(module, self.scale_name).dtype
 
     def prepare(self, modules, dtype=None):
+        if self.layout == "int8":
+            for module in modules:
+                module._refresh_int8_runtime()
+            return
         if self.layout == "exllamav2":
             for module in modules:
                 metadata = getattr(module, "q_tensors", None) or {}
@@ -164,6 +168,10 @@ class FusionKernelSpec:
         if hasattr(first, "_weight_metadata"):
             fused._weight_metadata = type(first._weight_metadata)(fused)
         fused.out_features = sum(module.out_features for module in modules)
+        if self.layout == "int8":
+            # The fused executor owns concatenated runtime codes. Its copied
+            # checkpoint buffers still describe only the first source leaf.
+            fused._int8_fusion_view = True
         for name, axis in self.axes:
             tensor = getattr(first, name, None)
             if tensor is None:
@@ -205,6 +213,7 @@ class FusionKernelSpec:
             from ..nn_modules.qlinear.torch_int8 import Int8PackedModule
 
             module.int8_module = Int8PackedModule(module.int8_weight_nk, module.int8_channel_scale).eval()
+            module._int8_source_signature = module._source_signature()
             return
         if self.layout == "exllamav2":
             metadata = getattr(module, "q_tensors", None)
