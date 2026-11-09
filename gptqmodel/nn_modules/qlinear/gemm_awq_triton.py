@@ -312,9 +312,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             out = out.to(dtype=input_dtype)
 
         if self.adapter:
-            # LoRA updates the output in place. A custom-Function result can
-            # be a view, which autograd forbids modifying in place.
-            out = self.adapter.apply(x=x, out=out.clone())
+            out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 
