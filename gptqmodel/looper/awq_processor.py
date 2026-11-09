@@ -79,7 +79,7 @@ class _AWQLayerState:
 
 def _accumulate_awq_weight_mean(
     layers: List[nn.Linear],
-    group_size: int,
+    group_size: int | List[int],
 ) -> Tuple[torch.Tensor, int]:
     """Accumulates normalized per-channel weight sums across a group of linears."""
 
@@ -88,44 +88,35 @@ def _accumulate_awq_weight_mean(
 
     first_weight = layers[0].weight.detach()
     num_channels = first_weight.shape[1]
-    effective_group_size = group_size if group_size > 0 else num_channels
-    if num_channels % effective_group_size != 0:
-        raise ValueError(
-            f"Expected in_features ({num_channels}) to be divisible by group_size ({effective_group_size})."
-        )
-
-    if first_weight.device.type == CPU:
-        weights = []
-        row_count = 0
-        for layer in layers:
-            weight = layer.weight.detach()
-            if weight.shape[1] != num_channels:
-                raise ValueError(
-                    f"Expected consistent in_features across layers ({num_channels}), "
-                    f"got {weight.shape[1]} for layer {layer}."
-                )
-            weights.append(weight.to(dtype=torch.float32))
-            row_count += weight.shape[0]
-
-        weight = torch.cat(weights, dim=0)
-        weight = weight.abs().reshape(row_count, -1, effective_group_size)
-        group_scale = weight.amax(dim=2, keepdim=True)
-        weight.div_(group_scale.add_(1e-6))
-        return weight.reshape(row_count, num_channels).sum(dim=0), row_count
+    group_sizes = (
+        [group_size] * len(layers)
+        if isinstance(group_size, int)
+        else list(group_size)
+    )
+    if len(group_sizes) != len(layers):
+        raise ValueError("Expected one AWQ group size per linear layer.")
 
     w_sum = torch.zeros(num_channels, dtype=torch.float32, device=first_weight.device)
     row_count = 0
 
-    for layer in layers:
+    for layer, configured_group_size in zip(layers, group_sizes):
         weight = layer.weight.detach()
         if weight.shape[1] != num_channels:
             raise ValueError(
                 f"Expected consistent in_features across layers ({num_channels}), "
                 f"got {weight.shape[1]} for layer {layer}."
             )
+        effective_group_size = (
+            configured_group_size if configured_group_size > 0 else num_channels
+        )
+        if num_channels % effective_group_size != 0:
+            raise ValueError(
+                f"Expected in_features ({num_channels}) to be divisible by "
+                f"group_size ({effective_group_size})."
+            )
 
         rows = weight.shape[0]
-        weight_abs = weight.abs()
+        weight_abs = weight.abs().to(dtype=torch.float32)
         weight_view = weight_abs.reshape(rows, -1, effective_group_size)
         group_scale = weight_view.amax(dim=2, keepdim=True)
         weight_view.div_(group_scale.add_(1e-6))
@@ -137,7 +128,7 @@ def _accumulate_awq_weight_mean(
 
 def _compute_awq_weight_mean(
     layers: List[nn.Linear],
-    group_size: int,
+    group_size: int | List[int],
 ) -> torch.Tensor:
     """Returns the average normalized per-channel weight magnitude for AWQ scaling."""
 
@@ -423,8 +414,13 @@ class AWQProcessor(LoopProcessor):
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
-        if target_format == FORMAT.GEMM and self._module_bits(module_name) != 4:
-            return AwqTorchLinear
+        if target_format == FORMAT.GEMM:
+            if (
+                self._module_bits(module_name) != 4
+                or self._module_group_size(module_name)
+                not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
+            ):
+                return AwqTorchLinear
         if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
@@ -451,6 +447,17 @@ class AWQProcessor(LoopProcessor):
             return int(self.qcfg.runtime_bits)
         return int(override)
 
+    def _module_group_size(self, module_name: Optional[str]) -> int:
+        """Resolve the group size this module is staged and packed with."""
+        if not module_name:
+            return int(self.qcfg.group_size)
+        override = self.qcfg.dynamic_get(
+            module_name, "group_size", self.qcfg.group_size
+        )
+        if override is False or override is None:
+            return int(self.qcfg.group_size)
+        return int(override)
+
     def _full_module_name(self, layer_module: Optional[nn.Module], module: nn.Module) -> Optional[str]:
         """Build a model-level module name from a layer and one of its children."""
         try:
@@ -465,6 +472,14 @@ class AWQProcessor(LoopProcessor):
     def _bits_for(self, layer_module: Optional[nn.Module], module: nn.Module) -> int:
         """Resolve the effective width of one layer child."""
         return self._module_bits(self._full_module_name(layer_module, module))
+
+    def _group_size_for(
+        self, layer_module: Optional[nn.Module], module: nn.Module
+    ) -> int:
+        """Resolve the effective group size of one layer child."""
+        return self._module_group_size(
+            self._full_module_name(layer_module, module)
+        )
 
     def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
         """Returns the mutable tracking state for a specific transformer layer."""
@@ -1744,7 +1759,10 @@ class AWQProcessor(LoopProcessor):
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
         # |w| by its per-group max so the values land on a [0, 1] scale, then accumulate the totals
         # per output channel so the mean can be computed without allocating the combined tensor.
-        w_mean = _compute_awq_weight_mean(layers, self.qcfg.group_size)
+        group_sizes = [
+            self._group_size_for(module, layer) for layer in layers
+        ]
+        w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # Stream directly on the source device to avoid creating full CPU copies while still enforcing
@@ -1822,6 +1840,7 @@ class AWQProcessor(LoopProcessor):
             replay_batch_size=replay_batch_size,
             prepared_forward=prepared_forward,
             bits=[self._bits_for(module, layer) for layer in layers] if bits is None else bits,
+            group_sizes=group_sizes,
         )
 
         return (
@@ -1849,7 +1868,10 @@ class AWQProcessor(LoopProcessor):
             move_to(linear, device=target_device)
 
             max_val = self._compute_best_clip(
-                linear.weight, input_feat[name], bits=self._bits_for(layer, linear)
+                linear.weight,
+                input_feat[name],
+                bits=self._bits_for(layer, linear),
+                group_size=self._group_size_for(layer, linear),
             )
             clip_list.append((name, max_val))
             move_to(linear, device=original_device)
@@ -1865,6 +1887,7 @@ class AWQProcessor(LoopProcessor):
             max_shrink=0.5,
             n_sample_token=512,
             bits: Optional[int] = None,
+            group_size: Optional[int] = None,
     ):
         """Finds the clipping bound that minimizes reconstruction error for a weight tensor.
 
@@ -1876,7 +1899,14 @@ class AWQProcessor(LoopProcessor):
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
         # input_feat  [n_token, ci] -> [1, n_token, n_group, group size]
-        group_size = self.qcfg.group_size if self.qcfg.group_size > 0 else org_w_shape[1]
+        configured_group_size = (
+            self.qcfg.group_size if group_size is None else group_size
+        )
+        group_size = (
+            configured_group_size
+            if configured_group_size > 0
+            else org_w_shape[1]
+        )
         input_feat = input_feat.view(-1, input_feat.shape[-1])
         input_feat = input_feat.reshape(1, input_feat.shape[0], -1, group_size)
 
@@ -1994,6 +2024,7 @@ class AWQProcessor(LoopProcessor):
                     quant_slice.reshape(-1, 1, n_group, group_w),
                     abs_max=max_val,
                     bits=bits,
+                    group_size=configured_group_size,
                 )
 
                 # (input_feat * quant).sum(-1) per candidate, sliced over tokens
@@ -2107,7 +2138,7 @@ class AWQProcessor(LoopProcessor):
         if self.qcfg.sym:
             zeros = torch.full_like(scales, 0 + 2 ** (bits - 1))
 
-        w = w.reshape(org_w_shape)
+        w = w.reshape(org_w_shape).to(dtype=input_dtype)
 
         return w, scales, zeros
 
@@ -2193,6 +2224,7 @@ class AWQProcessor(LoopProcessor):
         replay_batch_size: Optional[int] = None,
         prepared_forward: Optional[Tuple[torch.Tensor, Dict]] = None,
         bits: Optional[int | List[int]] = None,
+        group_sizes: Optional[int | List[int]] = None,
     ):
         """
         Compute loss and select best scales
@@ -2213,6 +2245,14 @@ class AWQProcessor(LoopProcessor):
             layer_bits = list(bits)
         if len(layer_bits) != len(linears2scale):
             raise ValueError("AWQ scale search requires one bit width per linear")
+        if group_sizes is None:
+            layer_group_sizes = [self.qcfg.group_size] * len(linears2scale)
+        elif isinstance(group_sizes, int):
+            layer_group_sizes = [group_sizes] * len(linears2scale)
+        else:
+            layer_group_sizes = list(group_sizes)
+        if len(layer_group_sizes) != len(linears2scale):
+            raise ValueError("AWQ scale search requires one group size per linear")
 
         # Stash a pristine master copy of every scaled linear once so the per-ratio
         # quantize/restore cycle never reaches back to host memory. The master stays on
@@ -2309,8 +2349,15 @@ class AWQProcessor(LoopProcessor):
             # `apply_scaled_weights` rebuilds the product from that master, so the
             # restore the previous iteration needed is folded into this step.
             apply_scaled_weights(scales_view)
-            for fc, module_bits in zip(linears2scale, layer_bits):
-                self._pseudo_quantize_tensor_into(fc.weight, fc.weight, bits=module_bits)
+            for fc, module_bits, module_group_size in zip(
+                linears2scale, layer_bits, layer_group_sizes
+            ):
+                self._pseudo_quantize_tensor_into(
+                    fc.weight,
+                    fc.weight,
+                    bits=module_bits,
+                    group_size=module_group_size,
+                )
                 fc.weight.div_(scales_view)
 
             # W * X
@@ -2690,6 +2737,9 @@ class AWQProcessor(LoopProcessor):
             # assigns widths per module through `dynamic`, so reading the global
             # `qcfg.bits` here would stage the wrong code range.
             module_bits = self._module_bits(named_module.full_name)
+            module_group_size = self._module_group_size(
+                named_module.full_name
+            )
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -2706,6 +2756,7 @@ class AWQProcessor(LoopProcessor):
             wq, scales, zeros = self.pseudo_quantize_tensor(
                 weight_for_quant,
                 bits=module_bits,
+                group_size=module_group_size,
                 format=resolve_quant_format(
                     self.qcfg.dynamic_get(named_module.full_name, "format", self.qcfg.format)
                     or self.qcfg.format,
@@ -2717,7 +2768,11 @@ class AWQProcessor(LoopProcessor):
 
             gsq = getattr(self.qcfg, "gsq", None)
             if gsq_enabled_for(gsq, named_module.full_name):
-                group_size = self.qcfg.group_size if self.qcfg.group_size > 0 else wq.shape[1]
+                group_size = (
+                    module_group_size
+                    if module_group_size > 0
+                    else wq.shape[1]
+                )
                 groups = torch.arange(wq.shape[1], device=wq.device, dtype=torch.int32) // group_size
                 fitted = refine_affine_scalar(
                     wq, scales, zeros, groups, target=weight_for_quant.detach().float(),
@@ -2735,8 +2790,10 @@ class AWQProcessor(LoopProcessor):
 
             if pad_cols:
                 wq = wq[:, :original_cols]
-                if self.qcfg.group_size > 0:
-                    valid_groups = max(1, math.ceil(original_cols / self.qcfg.group_size))
+                if module_group_size > 0:
+                    valid_groups = max(
+                        1, math.ceil(original_cols / module_group_size)
+                    )
                     scales = scales[:, :valid_groups]
                     if zeros is not None:
                         zeros = zeros[:, :valid_groups]

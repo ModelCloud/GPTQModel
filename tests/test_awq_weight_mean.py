@@ -1302,7 +1302,8 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     w = torch.ones(64, 16, dtype=torch.float16)
     input_feat = torch.ones(4, 16, dtype=torch.float16)
 
-    def nan_quantize(src, dst, abs_max=None, bits=None):
+    def nan_quantize(src, dst, abs_max=None, bits=None, group_size=None):
+        assert group_size == processor.qcfg.group_size
         dst.fill_(float("nan"))
 
     processor._pseudo_quantize_tensor_into = nan_quantize
@@ -1628,7 +1629,9 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         replay_batch_size=None,
         prepared_forward=None,
         bits=None,
+        group_sizes=None,
     ):
+        assert group_sizes == [self.qcfg.group_size] * len(layers_arg)
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
             _compute_legacy_w_mean(layers_arg, self.qcfg.group_size).detach().to(torch.float32).cpu()
