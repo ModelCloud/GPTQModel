@@ -663,6 +663,45 @@ def test_merge_prefixed_tensors_rejects_incomplete_declared_tensors(tmp_path, fa
     assert state_dict == {}
 
 
+@pytest.mark.parametrize("selector_kind", ["suffix", "exact"])
+@pytest.mark.parametrize("failure", ["missing-shard", "unreadable-shard", "missing-tensor"])
+def test_merge_suffix_and_exact_selectors_reject_incomplete_declared_tensors(
+    tmp_path, selector_kind, failure
+):
+    present_tensor = (
+        "model.layers.0.ffn.gate.bias_vl"
+        if selector_kind == "suffix"
+        else "image_start"
+    )
+    missing_tensor = (
+        "model.layers.1.ffn.gate.bias_vl"
+        if selector_kind == "suffix"
+        else "image_end"
+    )
+    save_file({present_tensor: torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    if failure == "unreadable-shard":
+        (tmp_path / "second.safetensors").write_bytes(b"truncated")
+    elif failure == "missing-tensor":
+        save_file({"model.weight": torch.ones(2)}, str(tmp_path / "second.safetensors"))
+    _write_index(
+        tmp_path,
+        {
+            present_tensor: "first.safetensors",
+            missing_tensor: "second.safetensors",
+        },
+    )
+    suffixes = [".ffn.gate.bias_vl"] if selector_kind == "suffix" else []
+    tensor_names = ["image_start", "image_end"] if selector_kind == "exact" else []
+
+    with pytest.raises(
+        ValueError,
+        match=r"missing from or unreadable in \['second.safetensors'\], e\.g\.",
+    ):
+        _merge_selected_tensors_into_state_dict(
+            [], suffixes, tensor_names, str(tmp_path), {}
+        )
+
+
 def test_merge_prefixed_tensors_keeps_undeclared_prefix_optional(tmp_path):
     save_file({"model.weight": torch.ones(2)}, str(tmp_path / "first.safetensors"))
     _write_index(tmp_path, {"model.weight": "first.safetensors", "model.bias": "absent.safetensors"})
