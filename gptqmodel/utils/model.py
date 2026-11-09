@@ -2681,8 +2681,8 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     """Restore selected buffers after Accelerate narrows a BF16 checkpoint load.
 
     Accelerate's ``keep_in_fp32_modules`` applies only when ``dtype`` is FP16.
-    Read only the named safetensors values, including indexed shards, so an
-    FP32 GGUF bias is never reconstructed from its rounded BF16 copy.
+    Read only named checkpoint tensors, including indexed shards, so FP8
+    inverse scales and GGUF biases are not reconstructed from rounded copies.
     """
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -2696,7 +2696,7 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
         else:
             indexes = [name for name in os.listdir(checkpoint) if name.endswith(".index.json")]
             if len(indexes) != 1:
-                raise ValueError(f"Cannot resolve checkpoint for FP32 GGUF bias restoration: {checkpoint}")
+                raise ValueError(f"Cannot resolve checkpoint for FP32 buffer restoration: {checkpoint}")
             checkpoint = os.path.join(checkpoint, indexes[0])
 
     if checkpoint.endswith(".index.json"):
@@ -2729,16 +2729,16 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
             module = model.get_submodule(module_name) if module_name else model
             current = module._buffers.get(buffer_name)
             if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
-                raise RuntimeError(f"Cannot restore FP32 GGUF bias buffer {name!r}: missing or mismatched model slot")
+                raise RuntimeError(f"Cannot restore FP32 buffer {name!r}: missing or mismatched model slot")
             if current.device.type == "meta":
-                raise RuntimeError(f"Cannot restore FP32 GGUF bias buffer {name!r} on a meta device")
+                raise RuntimeError(f"Cannot restore FP32 buffer {name!r} on a meta device")
             module._buffers[buffer_name] = value.to(device=current.device, dtype=torch.float32)
             restored.add(name)
 
     missing = names - restored
     if missing:
         raise RuntimeError(
-            "Cannot restore FP32 GGUF bias buffers missing from checkpoint: "
+            "Cannot restore FP32 buffers missing from checkpoint: "
             + ", ".join(sorted(missing))
         )
 

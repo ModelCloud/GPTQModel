@@ -161,6 +161,18 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             assert torch.equal(saved[f"{name}.weight_scale_inv"], fitted_scale)
     loaded = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
                             dtype=torch.float16, attn_implementation="eager")
+    if method == "fp8_e5m2":
+        from safetensors.torch import load_file
+
+        saved = load_file(checkpoint / "model.safetensors")
+        loaded_bf16 = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
+                                     dtype=torch.bfloat16, attn_implementation="eager")
+        for name, scale in saved.items():
+            if not name.endswith(".weight_scale_inv"):
+                continue
+            module = loaded_bf16.model.get_submodule(name.removesuffix(".weight_scale_inv"))
+            assert module.weight_scale_inv.dtype == torch.float32
+            torch.testing.assert_close(module.weight_scale_inv.cpu(), scale, rtol=0, atol=0)
     if method == "fp8_calibrated":
         for name, (_, fitted_scale) in fitted_payloads.items():
             reloaded = loaded.model.get_submodule(name)
