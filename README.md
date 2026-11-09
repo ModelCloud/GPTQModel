@@ -100,6 +100,8 @@ The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
 rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
 portable backends.
+The [GPTQ Torch CPU bias epilogue](docs/gptq-torch-cpu-bias-epilogue.md)
+documents fused low-precision bias addition and FP32 checkpoint bias handling.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.

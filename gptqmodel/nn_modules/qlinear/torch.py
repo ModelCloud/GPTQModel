@@ -423,15 +423,28 @@ class TorchLinear(PackableQuantLinear):
 
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self.dequantize_weight(num_itr=num_itr)
-        if weights.device != x.device or weights.dtype != x.dtype:
-            # Quantized modules can be staged on a different accelerator than the
-            # caller tensor during multi-device kernel validation; matmul still
-            # needs both operands on the same device and dtype.
-            weights = weights.to(device=x.device, dtype=x.dtype)
         bias = self.bias
-        if bias is not None and (bias.device != x.device or bias.dtype != x.dtype):
-            bias = bias.to(device=x.device, dtype=x.dtype)
-        out = matmul_fp32_reduce(x, weights, bias=bias).reshape(out_shape)
+        if x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16) and bias is not None:
+            weights = weights.to(device=x.device)
+            bias = bias.to(device=x.device)
+            # CPU matmul rounds the product before a separate bias addition.
+            # addmm keeps the reduction and bias in one epilogue. If checkpoint
+            # metadata has a wider dtype, preserve its range through FP32.
+            with torch.autocast(device_type="cpu", enabled=False):
+                if weights.dtype == x.dtype and bias.dtype == x.dtype:
+                    out = torch.addmm(bias, x, weights)
+                else:
+                    out = torch.addmm(bias.float(), x.float(), weights.float()).to(x.dtype)
+            out = out.reshape(out_shape)
+        else:
+            if weights.device != x.device or weights.dtype != x.dtype:
+                # Quantized modules can be staged on a different accelerator than the
+                # caller tensor during multi-device kernel validation; matmul still
+                # needs both operands on the same device and dtype.
+                weights = weights.to(device=x.device, dtype=x.dtype)
+            if bias is not None and (bias.device != x.device or bias.dtype != x.dtype):
+                bias = bias.to(device=x.device, dtype=x.dtype)
+            out = matmul_fp32_reduce(x, weights, bias=bias).reshape(out_shape)
         del weights
 
         if self.adapter:
