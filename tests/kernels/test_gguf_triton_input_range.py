@@ -12,8 +12,8 @@ from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 
 
-def _packed_pair(bits: str, *, bias: bool):
-    k, n = 256, 64
+def _packed_pair(bits: str, *, bias: bool, in_features: int = 256):
+    k, n = in_features, 64
     linear = torch.nn.Linear(k, n, bias=bias)
     with torch.no_grad():
         linear.weight.fill_(0.0005)
@@ -91,3 +91,17 @@ def test_wide_activation_replays_inside_cuda_graph():
         graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(output, expected)
+
+
+@pytest.mark.cuda
+def test_wide_activation_with_padded_gguf_input_width():
+    source, target = _packed_pair("q4_k", bias=False, in_features=257)
+    dense = torch.from_numpy(_dequantize_gguf_tensor_numpy(
+        source.qweight.cpu().numpy(), source.gguf_tensor_qtype,
+    ))[:, :257].to(device="cuda", dtype=torch.float64)
+    x = torch.full((2, 257), 100000.0, device="cuda", dtype=torch.bfloat16)
+    expected = (x.double() @ dense.t()).to(x.dtype)
+    with torch.inference_mode():
+        actual = target(x)
+    assert actual.shape == (2, 64)
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=0)

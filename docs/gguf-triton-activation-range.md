@@ -45,7 +45,9 @@ overflow and whole-row underflow while retaining the fused packed-weight path.
 On GB10 with Torch 2.15.0+cu132 and Triton 3.9.0, 34 packed-weight oracle
 cases passed across Q1_0, Q4_K, Q5_K, and Q6_K, BF16/FP32, one/nine rows, and
 large/tiny inputs, including bias and a sliced input. The warmed Q4_K graph
-replayed with the same output. Across the 32 unbiased oracle cases, maximum
+replayed with the same output. A 257-column activation also matched its
+packed-weight oracle after GGUF block padding. Across the 32 unbiased
+un-padded oracle cases, maximum
 relative error against FP64 was 0.2297% for BF16, entirely from mandatory
 output rounding; the difference from the once-rounded BF16 oracle was zero.
 FP32 maximum relative error was 0.0574% against both FP64 and the rounded
