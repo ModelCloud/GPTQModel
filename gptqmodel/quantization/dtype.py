@@ -811,6 +811,13 @@ def dequantize_f4_e2m1(
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
+
+    # Safetensors may expose byte-packed FP4 checkpoints as signed INT8 even
+    # when the payload is purely bitwise. Normalize storage without changing
+    # any bits before selecting the native or reference decoder.
+    if tensor.dtype is torch.int8:
+        tensor = tensor.view(torch.uint8)
+
     if _can_use_fast_path(
         tensor,
         scale if scale is not None else scale_inv,

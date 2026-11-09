@@ -8,7 +8,7 @@ from safetensors.torch import save_file
 from transformers import GenerationConfig
 
 from gptqmodel.models import GPTQModel, auto, loader
-from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.quantization import AutoModuleDecoderConfig, EXL3Config, QuantizeConfig
 from gptqmodel.utils import BACKEND, PROFILE
 from gptqmodel.utils import model as model_utils
 from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
@@ -245,6 +245,70 @@ def test_gptqmodel_load_forwards_backend_and_profile_to_from_pretrained(monkeypa
     assert captured["quantize_config"] is None
     assert captured["kwargs"]["backend"] == BACKEND.GGUF_TORCH
     assert captured["kwargs"]["profile"] == PROFILE.LOW_MEMORY
+
+
+def test_gptqmodel_load_treats_supported_floatx_checkpoint_as_source_with_auto_decoder(monkeypatch, tmp_path):
+    model_dir = tmp_path / "native-floatx-source"
+    model_dir.mkdir()
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "fp8", "fmt": "e4m3"})
+    target_config = EXL3Config(
+        bits=2.0,
+        preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
+    )
+    sentinel = object()
+    captured = {}
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_pretrained",
+        classmethod(
+            lambda cls, model_id_or_path, quantize_config, **kwargs: captured.update(
+                path=model_id_or_path,
+                quantize_config=quantize_config,
+            )
+            or sentinel
+        ),
+    )
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected inference load"))),
+    )
+
+    result = GPTQModel.load(str(model_dir), quantize_config=target_config)
+
+    assert result is sentinel
+    assert captured["path"] == str(model_dir)
+    assert captured["quantize_config"] is target_config
+
+
+def test_gptqmodel_from_pretrained_allows_supported_floatx_source_with_auto_decoder(monkeypatch):
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "fp8", "fmt": "e4m3"})
+    target_config = EXL3Config(
+        bits=2.0,
+        preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
+    )
+    sentinel = object()
+
+    class FakeModelDefinition:
+        @classmethod
+        def from_pretrained(cls, pretrained_model_id_or_path, quantize_config, **kwargs):
+            assert pretrained_model_id_or_path == "native-floatx-source"
+            assert quantize_config is target_config
+            return sentinel
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: FakeModelDefinition)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected inference load"))),
+    )
+
+    assert GPTQModel.from_pretrained("native-floatx-source", quantize_config=target_config) is sentinel
 
 
 def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
