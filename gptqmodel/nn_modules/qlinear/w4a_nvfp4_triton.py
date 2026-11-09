@@ -253,6 +253,8 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     if rows == 0:
         return (torch.empty((0, width // 2), device=x.device, dtype=torch.float4_e2m1fn_x2),
                 torch.empty((width // 128, 0), device=x.device, dtype=torch.float8_e4m3fn))
+    # All three pack kernels address X as row * width + column.
+    x = x.contiguous()
     padded_rows = triton.cdiv(rows, 128) * 128
     packed = torch.empty((rows, width // 2), device=x.device, dtype=torch.uint8)
     scales = torch.empty((width // 128, padded_rows * 8), device=x.device, dtype=torch.float8_e4m3fn)

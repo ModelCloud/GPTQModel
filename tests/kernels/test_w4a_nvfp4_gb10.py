@@ -386,6 +386,33 @@ def test_fused_nvfp4_pack_matches_torch_codes_and_scale_layout(rows, width, reci
 
 
 @GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize(
+    "recipe", ["nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"]
+)
+@pytest.mark.parametrize("layout,dtype", [("padded_rows", torch.bfloat16), ("column_stride", torch.float16)])
+def test_fused_nvfp4_pack_matches_torch_for_strided_input(recipe, layout, dtype):
+    generator = torch.Generator(device="cuda").manual_seed(2038)
+    width = 256
+    storage_width = width + 8 if layout == "padded_rows" else width * 2
+    storage = torch.randn((7, storage_width), generator=generator, device="cuda", dtype=dtype)
+    x = storage[:, :width] if layout == "padded_rows" else storage[:, ::2]
+    x[0, :16] = 0
+    assert not x.is_contiguous()
+    global_scale = torch.tensor(0.03125, device="cuda")
+
+    packed, swizzled = nvfp4_pack_and_swizzle(x, global_scale, recipe=recipe)
+    reference_codes, reference_scales = nvfp4_input(x, global_scale, recipe=recipe)
+    expected_scales = torch.stack([
+        _swizzle_scales(reference_scales[:, group * 8:(group + 1) * 8])
+        for group in range(width // 128)
+    ])
+    torch.cuda.synchronize()
+    assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@GLUON_FP8
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_nvfp4_block_scale_rounding_holds_at_e4m3_midpoint_neighbours():
     """E4M3 block scales must round like the Torch oracle on every architecture.
