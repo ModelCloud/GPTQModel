@@ -1,249 +1,176 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
 from types import SimpleNamespace
 
 import pytest
 import torch
-from defuser.model_registry import MODEL_CONFIG
 from torch import nn
 
-from gptqmodel.models import auto
-from gptqmodel.models.definitions.glm5_next import Glm5NextQModel
-from gptqmodel.models.loader import _convert_model_with_defuser
-from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
-from gptqmodel.utils.model import find_modules
-from gptqmodel.utils.structure import LazyTurtle
+from gptqmodel.models.definitions.glm5_next import (
+    GLM5_NEXT_CAPTURE_INPUT_IDS,
+    GLM5_NEXT_ROUTED_EXPERT_PATTERN,
+    Glm5NextQModel,
+    _prune_glm5_next_replay_frontier,
+)
 
 
-def _tiny_text_config():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
-    return glm5_next.Glm5NextTextConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=64,
-        moe_intermediate_size=16,
-        num_hidden_layers=5,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        n_routed_experts=2,
-        n_shared_experts=1,
-        num_experts_per_tok=1,
-        q_lora_rank=16,
-        kv_lora_rank=8,
-        qk_nope_head_dim=8,
-        qk_rope_head_dim=0,
-        v_head_dim=8,
-        index_topk=4,
-        index_kpool=2,
-        index_head_dim=8,
-        index_n_heads=2,
-        linear_head_dim=8,
-        linear_num_heads=4,
-        hc_mult=2,
-        max_position_embeddings=32,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
+def test_routed_expert_pattern_includes_target_and_checkpoint_mtp_only():
+    import re
+
+    pattern = re.compile(GLM5_NEXT_ROUTED_EXPERT_PATTERN)
+    assert pattern.fullmatch(
+        "model.language_model.layers.3.mlp.experts.0.gate_proj"
+    )
+    assert pattern.fullmatch(
+        "model.language_model.layers.45.mlp.experts.287.down_proj"
+    )
+    assert not pattern.fullmatch(
+        "model.language_model.layers.2.mlp.experts.0.gate_proj"
+    )
+    assert not pattern.fullmatch(
+        "model.language_model.layers.46.mlp.experts.0.gate_proj"
+    )
+    assert not pattern.fullmatch(
+        "model.language_model.layers.3.mlp.shared_experts.gate_proj"
     )
 
 
-def test_glm5_next_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="glm5_next")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("glm-5.3-flash-fixture") is Glm5NextQModel
-
-
-def test_glm5_next_module_tree_matches_reference_quantization_boundary():
-    config = SimpleNamespace(text_config=SimpleNamespace(n_routed_experts=2))
-    layer_modules = Glm5NextQModel.simple_layer_modules(
-        model_config=config,
-        quantize_config=SimpleNamespace(dynamic=None),
-    )
-    flat = {name for block in layer_modules for name in block}
-
-    assert {
-        "self_attn.q_proj",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
-        "self_attn.q_b_proj",
-        "self_attn.kv_b_proj",
-        "self_attn.o_proj",
-        "mlp.experts.0.gate_proj",
-        "mlp.experts.1.up_proj",
-        "mlp.experts.1.down_proj",
-    } <= flat
-    assert {
-        "self_attn.q_a_proj",
-        "self_attn.kv_a_proj_with_mqa",
-        "self_attn.indexer.wq_b",
-        "self_attn.indexer.wk",
-        "self_attn.indexer.weights_proj",
-        "mlp.shared_experts.gate_proj",
-    }.isdisjoint(flat)
-
-    full = {
-        name
-        for block in Glm5NextQModel.full_layer_modules(model_config=config)
-        for name in block
-    }
-    assert "self_attn.q_a_proj:!" in full
-    assert "mlp.shared_experts.gate_proj:!" in full
-    assert Glm5NextQModel.out_of_model_tensors == {
-        "prefixes": ["model.language_model.layers.45"]
-    }
-
-
-def test_glm5_next_quantizes_every_loaded_decoder_layer():
-    layer = SimpleNamespace(config=SimpleNamespace(num_hidden_layers=45))
-    assert "should_quantize_layer" not in Glm5NextQModel.__dict__
-    assert all(
-        Glm5NextQModel.should_quantize_layer(
-            layer=layer,
-            layer_name=f"model.language_model.layers.{index}",
-            layer_index=index,
-            quantize_config=SimpleNamespace(),
+def test_route_recovery_resolves_nested_mtp_as_conventional_replay():
+    layers = [nn.Identity() for _ in range(46)]
+    adapter = Glm5NextQModel.__new__(Glm5NextQModel)
+    adapter.model = SimpleNamespace(
+        model=SimpleNamespace(
+            language_model=SimpleNamespace(layers=nn.ModuleList(layers))
         )
-        for index in range(45)
     )
 
-
-def test_glm5_next_defuser_registry_preserves_expert_forward():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
-    assert "glm5_next" in MODEL_CONFIG
-    text_model = glm5_next.Glm5NextTextModel(_tiny_text_config()).eval()
-
-    class TinyOuter(nn.Module):
-        def __init__(self, language_model):
-            super().__init__()
-            self.config = SimpleNamespace(model_type="glm5_next")
-            self.model = nn.Module()
-            self.model.language_model = language_model
-
-    model = TinyOuter(text_model)
-    experts = model.model.language_model.layers[3].mlp.experts
-    hidden_states = torch.randn(4, text_model.config.hidden_size)
-    topk_indices = torch.tensor([[0], [1], [0], [1]])
-    topk_weights = torch.ones(4, 1)
-
-    with torch.no_grad():
-        expected = experts(hidden_states, topk_indices, topk_weights)
-
-    assert _convert_model_with_defuser(Glm5NextQModel, model, cleanup_original=False) is True
-
-    with torch.no_grad():
-        actual = experts(hidden_states, topk_indices, topk_weights)
-    torch.testing.assert_close(actual, expected)
-
-    modules = find_modules(model)
-    assert "model.language_model.layers.0.self_attn.q_proj" in modules
-    assert "model.language_model.layers.3.self_attn.q_b_proj" in modules
-    assert "model.language_model.layers.3.self_attn.kv_b_proj" in modules
-    assert "model.language_model.layers.3.mlp.experts.0.gate_proj" in modules
-    assert "model.language_model.layers.3.mlp.experts.0.up_proj" in modules
-    assert "model.language_model.layers.3.mlp.experts.0.down_proj" in modules
-
-    layer_modules = Glm5NextQModel.simple_layer_modules(
-        model_config=SimpleNamespace(text_config=text_model.config),
-        quantize_config=SimpleNamespace(dynamic=None),
+    assert adapter.zero_route_recovery_block_identity(layers[3]) == (
+        "base",
+        3,
+        "model.language_model.layers.3.mlp.experts.",
     )
-    suffixes = {name for block in layer_modules for name in block}
-    matched = {name for name in modules if any(name.endswith(suffix) for suffix in suffixes)}
-    assert "model.language_model.layers.0.self_attn.q_proj" in matched
-    assert "model.language_model.layers.3.self_attn.q_b_proj" in matched
-    assert "model.language_model.layers.3.mlp.experts.0.gate_proj" in matched
-    assert not any(name.endswith("self_attn.indexer.weights_proj") for name in matched)
-
-
-def test_glm5_next_lazy_turtle_materializes_defused_experts(tmp_path):
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
-    config = glm5_next.Glm5NextConfig(
-        text_config=_tiny_text_config().to_dict(),
-        vision_config={
-            "depth": 1,
-            "hidden_size": 16,
-            "intermediate_size": 32,
-            "projection_intermediate_size": 32,
-            "out_hidden_size": 32,
-            "num_heads": 4,
-            "in_channels": 3,
-            "image_size": 4,
-            "patch_size": 2,
-            "spatial_merge_size": 1,
-            "temporal_patch_size": 1,
-        },
-        image_token_id=60,
-        video_token_id=61,
-        image_start_token_id=62,
-        image_end_token_id=63,
-        video_start_token_id=58,
-        video_end_token_id=59,
+    assert adapter.zero_route_recovery_block_identity(layers[45]) == (
+        "base",
+        45,
+        "model.language_model.layers.45.mlp.experts.",
     )
-    source = glm5_next.Glm5NextForConditionalGeneration(config).eval()
-    packed_experts = source.model.language_model.layers[3].mlp.experts
-    expected_gate, expected_up = packed_experts.gate_up_proj[0].detach().chunk(2, dim=0)
-    expected_down = packed_experts.down_proj[0].detach().clone()
-    source.save_pretrained(tmp_path)
+    with pytest.raises(RuntimeError, match="canonical decoder block"):
+        adapter.zero_route_recovery_block_identity(nn.Identity())
 
-    with torch.device("meta"):
-        shell = glm5_next.Glm5NextForConditionalGeneration(config).eval()
-    assert _convert_model_with_defuser(Glm5NextQModel, shell, cleanup_original=False) is True
 
-    turtle = LazyTurtle.maybe_create(
-        model_local_path=str(tmp_path),
-        config=shell.config,
-        model_init_kwargs={"device_map": {"": "cpu"}},
-        module_tree=Glm5NextQModel.module_tree,
-        hf_conversion_map_reversed=Glm5NextQModel.resolve_hf_conversion_map_reversed(
-            target_model=shell
-        ),
-        target_model=shell,
+def test_replay_frontier_prunes_only_older_exact_layer_directories(tmp_path):
+    old_complete = tmp_path / "layer-000003"
+    old_partial = tmp_path / ".layer-000004.partial"
+    current = tmp_path / "layer-000005"
+    future = tmp_path / "layer-000006"
+    unrelated = tmp_path / "layer-not-a-frontier"
+    for path in (old_complete, old_partial, current, future, unrelated):
+        path.mkdir()
+
+    _prune_glm5_next_replay_frontier(tmp_path, before_layer=5)
+
+    assert not old_complete.exists()
+    assert not old_partial.exists()
+    assert current.is_dir()
+    assert future.is_dir()
+    assert unrelated.is_dir()
+
+
+def test_capture_preserves_original_token_ids_for_mtp_replay():
+    adapter = Glm5NextQModel.__new__(Glm5NextQModel)
+    input_ids = torch.tensor([[11, 12, 13, 14]])
+
+    adapter.begin_input_capture_example(
+        {"input_ids": input_ids}, batch_device=torch.device("cpu")
     )
-    assert turtle is not None
-
-    layer = shell.model.language_model.layers[3]
-    turtle.materialize_submodule(
-        target_model=shell,
-        target_submodule=layer,
-        device=torch.device("cpu"),
-        module_path="model.language_model.layers.3",
-        show_progress=False,
+    captured = adapter.capture_first_layer_input_kwargs(
+        args=(),
+        kwargs={},
+        batch_device=torch.device("cpu"),
+        layer_input_kwargs={"ordinary": True},
     )
+    adapter.end_input_capture_example()
 
-    expert0 = layer.mlp.experts[0]
-    torch.testing.assert_close(expert0.gate_proj.weight, expected_gate)
-    torch.testing.assert_close(expert0.up_proj.weight, expected_up)
-    torch.testing.assert_close(expert0.down_proj.weight, expected_down)
+    assert captured["ordinary"] is True
+    assert torch.equal(captured[GLM5_NEXT_CAPTURE_INPUT_IDS], input_ids)
+    assert adapter._glm5_next_capture_input_ids is None
 
 
-def test_glm5_next_replay_propagates_dsa_topk_indices():
-    model_def = Glm5NextQModel.__new__(Glm5NextQModel)
-    topk_indices = torch.tensor([[[1, 2], [0, 3]]])
-    kwargs = {}
+def test_prepare_replay_exposes_shifted_tokens_only_to_mtp():
+    adapter = Glm5NextQModel.__new__(Glm5NextQModel)
+    input_ids = torch.tensor([[11, 12, 13, 14]])
+    common = {
+        GLM5_NEXT_CAPTURE_INPUT_IDS: input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "position_ids": torch.arange(4).unsqueeze(0),
+        "position_embeddings": None,
+        "prev_topk_indices": torch.tensor([[2, 3]]),
+        "use_cache": False,
+    }
 
-    returned = model_def.update_layer_replay_kwargs_from_output(
-        layer=SimpleNamespace(),
-        layer_output=(torch.zeros(1, 2, 4), topk_indices),
+    ordinary = adapter.prepare_layer_replay_kwargs(
+        layer=SimpleNamespace(layer_idx=44),
+        layer_input=[torch.empty(1, 4, 2, 8)],
+        additional_inputs=dict(common),
+        target_device=torch.device("cpu"),
+    )
+    assert GLM5_NEXT_CAPTURE_INPUT_IDS not in ordinary
+    assert "input_ids" not in ordinary
+    assert ordinary["attention_mask"].shape == (1, 4)
+
+    mtp = adapter.prepare_layer_replay_kwargs(
+        layer=SimpleNamespace(layer_idx=45),
+        layer_input=[torch.empty(1, 4, 2, 8)],
+        additional_inputs=dict(common),
+        target_device=torch.device("cpu"),
+    )
+    assert torch.equal(mtp["input_ids"], torch.tensor([[12, 13, 14]]))
+    assert torch.equal(mtp["attention_mask"], torch.ones(1, 3, dtype=torch.long))
+    assert torch.equal(mtp["position_ids"], torch.tensor([[1, 2, 3]]))
+    assert "prev_topk_indices" not in mtp
+    assert "position_embeddings" not in mtp
+    assert GLM5_NEXT_CAPTURE_INPUT_IDS not in mtp
+
+
+def test_target_terminal_layer_discards_router_state_without_slicing_tokens():
+    adapter = Glm5NextQModel.__new__(Glm5NextQModel)
+    input_ids = torch.tensor([[11, 12, 13, 14]])
+    kwargs = {
+        GLM5_NEXT_CAPTURE_INPUT_IDS: input_ids,
+        "prev_topk_indices": torch.tensor([[2, 3]]),
+    }
+
+    result = adapter.update_layer_replay_kwargs_from_output(
+        layer=SimpleNamespace(layer_idx=44),
+        layer_output=(torch.empty(1, 4, 2, 8), None),
         layer_input_kwargs=kwargs,
         target_device=torch.device("cpu"),
     )
-    assert returned is kwargs
-    torch.testing.assert_close(kwargs["prev_topk_indices"], topk_indices)
+
+    assert "prev_topk_indices" not in result
+    assert torch.equal(result[GLM5_NEXT_CAPTURE_INPUT_IDS], input_ids)
 
 
-def test_glm5_next_moe_calibration_uses_clamped_fused_gate():
-    class Experts:
-        @staticmethod
-        def _apply_gate(gate_up):
-            gate, up = gate_up.chunk(2, dim=-1)
-            return torch.nn.functional.silu(gate.clamp(max=1.0)) * up.clamp(-1.0, 1.0)
+def test_prepare_replay_slices_route_capture_mask_only_for_mtp():
+    adapter = Glm5NextQModel.__new__(Glm5NextQModel)
+    keep_mask = torch.tensor([[False, True, True, False]])
+    hidden = [torch.empty(1, 4, 2, 8)]
 
-    gate = torch.tensor([[3.0, -2.0]])
-    up = torch.tensor([[4.0, -4.0]])
-    actual = GateUpDownMoELifecycleHooks().apply_expert_activation(
-        experts_module=Experts(),
-        expert=SimpleNamespace(),
-        gate_out=gate,
-        up_out=up,
+    ordinary = adapter.prepare_layer_replay_keep_mask(
+        layer=SimpleNamespace(layer_idx=44),
+        layer_input=hidden,
+        additional_inputs={},
+        keep_mask=keep_mask,
+        target_device=torch.device("cpu"),
     )
-    expected = Experts._apply_gate(torch.cat([gate, up], dim=-1))
-    torch.testing.assert_close(actual, expected)
+    assert ordinary is keep_mask
+
+    mtp = adapter.prepare_layer_replay_keep_mask(
+        layer=SimpleNamespace(layer_idx=45),
+        layer_input=hidden,
+        additional_inputs={},
+        keep_mask=keep_mask,
+        target_device=torch.device("cpu"),
+    )
+    assert torch.equal(mtp, torch.tensor([[True, True, False]]))
