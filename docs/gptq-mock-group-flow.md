@@ -42,3 +42,6 @@ flowchart LR
 The boundary and group-aware regressions live in
 `tests/test_gptq_mock_group_order.py`. A final short group remains within its
 last block; no extra scale or zero-point entry is emitted.
+The packed roundtrip in `tests/test_gptq_static_group_order.py` also runs in
+mock mode after PR #3719, checking the combined group reordering, metadata,
+packed words, and decoded weight against an independent affine oracle.

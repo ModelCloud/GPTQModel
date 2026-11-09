@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -51,7 +52,10 @@ def test_gptq_static_groups_follow_group_aware_column_permutation():
     torch.testing.assert_close(actual, expected, rtol=0, atol=1e-6)
 
 
-def test_static_group_aware_pack_roundtrip_matches_independent_affine_oracle(monkeypatch):
+@pytest.mark.parametrize("mock_quantization", [False, True])
+def test_static_group_aware_pack_roundtrip_matches_independent_affine_oracle(
+    monkeypatch, mock_quantization
+):
     # The second group has the larger Hessian diagonal, so GAR moves it first;
     # the increasing first group is also reversed within its group.
     original = torch.cat((2 * torch.arange(16), torch.arange(16) - 15)).float()
@@ -67,6 +71,7 @@ def test_static_group_aware_pack_roundtrip_matches_independent_affine_oracle(mon
         sym=False,
         static_groups=True,
         act_group_aware=True,
+        mock_quantization=mock_quantization,
         fallback=None,
     )
     task = GPTQ(layer, config)
