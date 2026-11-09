@@ -26,7 +26,11 @@ import gptqmodel.utils.model as model_utils
 import gptqmodel.utils.structure as structure_module
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import TensorSource, get_state_dict_for_save, move_to, streaming_state_dict_to_shards
-from gptqmodel.utils.offload import offload_to_disk, offload_to_safetensors_reference, undo_offload_to_disk
+from gptqmodel.utils.offload import (
+    offload_to_disk,
+    offload_to_safetensors_reference,
+    undo_offload_to_disk,
+)
 
 
 LazyTurtle = structure_module.LazyTurtle
@@ -574,6 +578,7 @@ def test_offload_save_preserves_matching_metadata(tmp_path: Path, offload_format
     with safe_open(str(save_dir / expected_files[0]), framework="pt") as handler:
         for name, tensor in original_state.items():
             torch.testing.assert_close(handler.get_tensor(name), tensor)
+
 
 
 def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_children(tmp_path):
@@ -1897,6 +1902,71 @@ def test_sync_all_meta_reports_logbar_progress(monkeypatch):
     assert fake_logger.progress.draw_calls[0] == (0, True)
     assert fake_logger.progress.draw_calls[-1] == (3, False)
     assert fake_logger.progress.closed is True
+
+
+def test_sync_all_meta_throttles_progress_for_large_moe_shell(monkeypatch):
+    class _FakeProgress:
+        def __init__(self):
+            self.current_iter_step = 0
+            self.draw_calls = []
+
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self, force: bool = False):
+            self.draw_calls.append((self.current_iter_step, force))
+            return self
+
+        def close(self):
+            return None
+
+    class _FakeLogger:
+        def __init__(self):
+            self.progress = _FakeProgress()
+
+        def pb(self, _iterable, *, output_interval=None):
+            del output_interval
+            return self.progress
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    shell_model = nn.Module()
+    shell_model.experts = nn.ModuleList(nn.Identity() for _ in range(1000))
+    turtle = LazyTurtle.__new__(LazyTurtle)
+    turtle._lock = threading.RLock()
+    visited_modules = []
+
+    def _fake_materialize(self, *, module_path, **_kwargs):
+        del self, _kwargs
+        visited_modules.append(module_path)
+        return 0
+
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(structure_module, "log", fake_logger)
+    monkeypatch.setattr(
+        LazyTurtle, "_materialize_direct_meta_tensors", _fake_materialize
+    )
+
+    materialized = turtle.sync_all_meta(
+        shell_model=shell_model, tie_after=False
+    )
+
+    assert materialized == 0
+    assert len(visited_modules) == 1002
+    # Initial forced draw plus at most ~201 before/after checkpoints.
+    assert len(fake_logger.progress.draw_calls) <= 405
+    assert fake_logger.progress.draw_calls[0] == (0, True)
+    assert fake_logger.progress.draw_calls[-1][0] == 1002
 
 
 def test_copy_checkpoint_tensors_into_submodule_reports_load_progress(tmp_path, monkeypatch):

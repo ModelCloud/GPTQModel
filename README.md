@@ -1531,3 +1531,4 @@ The following reference pages document features proposed from the working fork.
 - [preserve lazy native sources across replay and export](docs/lazy-source-replay-contracts.md)
 - [carry causal replay and durable recovery callbacks](docs/looper-causal-replay.md)
 - [integrate resumable distributed and mixed-tier execution](docs/exl3-durable-execution.md)
+- [compose native checkpoint passthrough and save overlays](docs/native-checkpoint-export.md)
