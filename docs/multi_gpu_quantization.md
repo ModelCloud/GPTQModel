@@ -134,15 +134,65 @@ measured by the probe (the probe itself performs a direct copy). Enablement is
 still kept for PyTorch's own paths; GPT-QModel moves in that direction are
 staged through host memory.
 
-Inference is **not** covered by this routing. Loading the quantized model with
-`device_map="auto"` installs accelerate's `AlignDevicesHook`, whose
-`send_to_device` moves activations with a plain `Tensor.to`; on an asymmetric
-ROCm topology that still segfaults (exit 139) inside `hipMemcpyPeerAsync`.
-Measured on 2x R9700 (`gfx1201`, ROCm 7.16.26385): quantization completes, then
-`generate()` on the same two devices crashes from
-`accelerate.hooks.AlignDevicesHook.pre_forward -> send_to_device`. Until that
-move is routed through `safe_move_to`, run inference on a single device on such
-a topology.
+Inference uses the same routing. Loading the quantized model with
+`device_map="auto"` installs `GPTQModelAlignDevicesHook`, a subclass of
+accelerate's `AlignDevicesHook`. Its `pre_forward` moves activations through
+`safe_move_to` before delegating to accelerate, and `post_forward` returns the
+output to the caller's input device the same way, so the upstream
+`send_to_device` only ever sees tensors already on the target device. This
+closes the crash measured on 2x R9700 (`gfx1201`, ROCm 7.16.26385), where
+quantization completed but `generate()` died (exit 139) in
+`accelerate.hooks.AlignDevicesHook.pre_forward -> send_to_device`. The
+quantization-side `simple_dispatch_model` installs the safe hook directly, and
+`gptqmodel.utils.accelerate_hooks.install_safe_align_devices_hooks(model)`
+upgrades hooks that another dispatcher (for example
+`accelerate.dispatch_model`) already attached, including ones nested in a
+`SequentialHook`.
+
+### Inference hook routing
+
+The hook moves activations before accelerate's own `pre_forward` runs, so the
+upstream `send_to_device` only sees tensors already on the execution device and
+its plain `Tensor.to` becomes a no-op. The decision is per direction, using the
+same capability/probe verdict as the quantization-side moves.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(device_map='auto')"] --> B["simple_dispatch_model"]
+    B --> C["GPTQModelAlignDevicesHook attached"]
+    C --> D["pre_forward: safe_send_to_device"]
+    D --> E{"safe_move_to: can_transfer_directly(src, dst)?"}
+    E -- yes --> F["Tensor.to on the peer link"]
+    E -- no --> G["_stage_through_host: pinned CPU relay"]
+    F --> H["AlignDevicesHook.pre_forward: inputs already on target"]
+    G --> H
+    H --> I["module forward"]
+    I --> J["post_forward: safe_send_to_device(output, input_device)"]
+    J --> K["caller receives output on its input device"]
+    classDef fail fill:#ffe8e8,stroke:#b30000,color:#111;
+    class G fail;
+```
+
+| Mechanism | Before | After |
+|---|---|---|
+| Hook installed by `simple_dispatch_model` | `AlignDevicesHook` (`gptqmodel/utils/model.py:1505` on `origin/main`) | `GPTQModelAlignDevicesHook` (`gptqmodel/utils/model.py:1507`, `gptqmodel/utils/accelerate_hooks.py:76`) |
+| Activation move | module-level `accelerate.hooks.send_to_device` -> `Tensor.to` | `safe_send_to_device` -> `safe_move_to` (`gptqmodel/utils/accelerate_hooks.py:37`, `gptqmodel/utils/p2p.py:844`) |
+| Unsupported directed pair | direct peer copy, SIGSEGV on the affected ROCm rig | `_stage_through_host` pinned relay (`gptqmodel/utils/p2p.py:813`) |
+| Output return to caller | plain `Tensor.to(input_device)` in `post_forward` | `safe_send_to_device(output, input_device)` (`gptqmodel/utils/accelerate_hooks.py:101`) |
+| Hooks attached elsewhere | left as accelerate's class | `install_safe_align_devices_hooks` upgrades them, including nested `SequentialHook` (`gptqmodel/utils/accelerate_hooks.py:120`) |
+
+| Situation | Behavior |
+|---|---|
+| `src -> dst` enabled and not degraded | direct `Tensor.to` on the peer link |
+| `src -> dst` unsupported, unverified, or degraded | pinned host staging |
+| Capability query raises | treated as unsupported, so the move is staged |
+| Same device or CPU leg | direct `.to`, which is a no-op for an already-placed tensor |
+| Non-tensor object exposing `to` | accelerate's `.to` behavior is preserved |
+| `execution_device` is `None` | upstream `AlignDevicesHook.pre_forward` handles the call |
+
+This routing changes activation placement only. It does not add, retain, or
+dequantize weights: the hook moves the inputs and outputs of one forward and
+holds no tensor after the move.
 
 Configuration:
 

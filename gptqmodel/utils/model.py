@@ -1446,7 +1446,9 @@ def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Uni
 
 
 def simple_dispatch_model(model, device_map):
-    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.hooks import add_hook_to_module
+
+    from .accelerate_hooks import GPTQModelAlignDevicesHook, install_safe_align_devices_hooks
 
     device_map = dict(device_map)
     single_root = "" in device_map and len(device_map) == 1
@@ -1502,9 +1504,13 @@ def simple_dispatch_model(model, device_map):
                 for child_name, child_device in device_map.items()
             )
             # A mixed-device child means the parent hook may move inputs, but not descendants.
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
+            hook = GPTQModelAlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
+
+    # Any hook that was already attached (for example by accelerate's
+    # dispatch_model) must use the same safe activation path.
+    install_safe_align_devices_hooks(model)
 
     model.hf_device_map = device_map
 

@@ -20,7 +20,9 @@ except ImportError:
 
 
 def simple_dispatch_model(model, device_map):
-    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.hooks import add_hook_to_module
+
+    from ....utils.accelerate_hooks import GPTQModelAlignDevicesHook, install_safe_align_devices_hooks
 
     if "" in device_map:
         d = device_map[""]
@@ -54,9 +56,10 @@ def simple_dispatch_model(model, device_map):
         m = get_module_by_name_suffix(model, n)
         if d != "cpu":
             d = torch.device(d)
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
+            hook = GPTQModelAlignDevicesHook(d, io_same_device=True, place_submodules=True)
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
+    install_safe_align_devices_hooks(model)
     model.hf_device_map = device_map
 
     return model
