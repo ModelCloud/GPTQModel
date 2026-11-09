@@ -867,6 +867,8 @@ model.save(quant_path)
 
 See [EXL3 inference buffer lifecycle](docs/exl3-native-bias-lifecycle.md) for
 native-handle invalidation and checkpoint-stable Torch wide-input inference.
+See [EXL3 wide activation dispatch](docs/exl3-wide-activation-dispatch.md) for
+BF16/FP32 routing, the 32-row native boundary, and packed-weight reconstruction.
 
 ##### VPTQ Example: Llama 3.2 1B Instruct
 
