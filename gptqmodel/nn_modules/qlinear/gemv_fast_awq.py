@@ -29,6 +29,14 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
     unpacked_qweight = unpacked_qweight.to(torch.int32) & 15
     N = unpacked_qweight.shape[0]
     K = unpacked_qweight.shape[1]
+    if N % interleave:
+        raise ValueError(
+            f"GEMV-fast out_features must be divisible by {interleave}: actual={N}"
+        )
+    if K % kstride:
+        raise ValueError(
+            f"GEMV-fast in_features must be divisible by {kstride}: actual={K}"
+        )
 
     # np.arange(32).reshape(4, 4, 2).transpose(1, 0, 2) => [0, 1, 8, 9, 16, 17, 24, 25, ...]
     Packed_Kernel = unpacked_qweight.reshape(N, K // 32, 4, 4, 2).permute(0, 1, 3, 2, 4)
@@ -65,14 +73,14 @@ class AwqGEMVFastLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 30}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
 
     # The decode path calls the same native CUDA AWQ extension as
     # ``AwqGEMVLinear`` (``gemv_fast_forward_decode``/``gemm_fast_forward_prefill``),
@@ -293,14 +301,14 @@ class LLMAwqLinear(AwqGEMVFastLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 100}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
 
     # Inherits the native-CUDA-only restriction from ``AwqGEMVFastLinear``; see
     # ``gemv_awq.AWQ_GEMV_ROCM_UNSUPPORTED``.

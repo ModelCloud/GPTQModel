@@ -121,14 +121,14 @@ class AwqGEMMLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 60}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
@@ -157,6 +157,33 @@ class AwqGEMMLinear(AWQuantLinear):
             return False, ValueError(awq_runtime_error() or "CUDA AWQ extension not available; cannot select AwqGEMMLinear")
         else:
             return True, None
+
+    @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        group_size = args.get("group_size")
+        in_features = args.get("in_features")
+        out_features = args.get("out_features")
+        effective_group_size = (
+            in_features if group_size == -1 and in_features is not None else group_size
+        )
+        if (
+            effective_group_size is not None
+            and out_features is not None
+            and (
+                effective_group_size % 32
+                or out_features % effective_group_size
+            )
+        ):
+            return False, NotImplementedError(
+                "AWQ GEMM requires a group size divisible by 32 and "
+                "out_features divisible by that group size: "
+                f"got out_features={out_features}, group_size={effective_group_size}"
+            )
+        return True, None
 
     def __init__(
         self,

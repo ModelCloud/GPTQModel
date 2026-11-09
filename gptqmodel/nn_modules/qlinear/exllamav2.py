@@ -17,6 +17,7 @@ from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
     EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED,
     ScratchSpace,
+    exllamav2_free_q_matrix,
     exllamav2_gemm_half_q_half,
     exllamav2_gptq_runtime_available,
     exllamav2_gptq_runtime_error,
@@ -24,6 +25,7 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -106,6 +108,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
         self.q_handle = None
         self.q_tensors = None
+        self._q_handle_key = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -132,21 +135,44 @@ class ExllamaV2Linear(GPTQQuantLinear):
         #     if self.bias is not None:
         #         self.bias.resize_(self.out_features)
 
+        self._release_q_handle()
         # ext_make_q_matrix only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
+        self.q_tensors = None
+        self._ensure_q_handle()
 
-        self.q_tensors = {
+        super().post_init()
+
+    def _release_q_handle(self) -> None:
+        if self.q_handle is not None:
+            exllamav2_free_q_matrix(self.q_handle)
+            self.q_handle = None
+        self._q_handle_key = None
+
+    def clear_weight_cache(self) -> None:
+        """Release native pointers derived from the current packed buffers."""
+
+        self._release_q_handle()
+        self.q_tensors = None
+
+    def _ensure_q_handle(self) -> int:
+        tensors = {
             "qweight": self.qweight,
             "qzeros": self.qzeros,
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        # No dense reconstruction buffer is attached to the handle: the
-        # quantized kernel decodes inside its launch, and the row-count
-        # fallback in the extension allocates a transient tensor per call.
-        self.q_handle = self.ext_make_q_matrix(self.q_tensors)
-
-        super().post_init()
+        if self.q_tensors is None:
+            self.q_tensors = tensors
+        else:
+            self.q_tensors.update(tensors)
+        key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
+        if self.q_handle is not None and self._q_handle_key != key:
+            self._release_q_handle()
+        if self.q_handle is None:
+            self.q_handle = self.ext_make_q_matrix(self.q_tensors)
+            self._q_handle_key = key
+        return self.q_handle
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -167,7 +193,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
 
-        handle, temporaries = self.q_handle, None
+        handle, temporaries = self._ensure_q_handle(), None
         if getattr(self, "_fusion_native_view", False):
             from ...utils.exllamav2 import exllamav2_clone_q_matrix
 
@@ -206,7 +232,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
-        x = x.view(-1, x.shape[-1])
+        x = x.reshape(-1, x.shape[-1]).contiguous()
         output = torch.empty((x.shape[0], q4_width), dtype=x.dtype, device=x.device)
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)

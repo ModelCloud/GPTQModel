@@ -93,13 +93,25 @@ def exl3_quantize_weight_mlx_to_torch(
     return reconstructed, float(proxy_error.item()), out_tensors
 
 
-def _exl3_proxy_error_mlx(weight, quantized, hessian, *, chunk_columns=1024):
-    """Return EXL3's Hessian-weighted relative reconstruction error."""
+def _exl3_proxy_error_mlx(
+    weight,
+    quantized,
+    hessian,
+    *,
+    fallback=False,
+    chunk_columns=1024,
+):
+    """Return normalized reconstruction error for the active EXL3 path."""
     import mlx.core as mx
 
     numerator = mx.zeros((), dtype=mx.float32)
     denominator = mx.zeros((), dtype=mx.float32)
     error = weight - quantized
+    if fallback:
+        return mx.sum(error * error) / mx.maximum(
+            mx.sum(weight * weight),
+            mx.array(1e-8, dtype=mx.float32),
+        )
     for start in range(0, weight.shape[1], chunk_columns):
         stop = min(start + chunk_columns, weight.shape[1])
         weight_chunk = weight[:, start:stop]
@@ -193,7 +205,6 @@ def exl3_quantize_weight_mlx(
             codebook=codebook,
             workspace_bytes=workspace_bytes,
         )
-        proxy_error = mx.zeros((), dtype=mx.float32)
     else:
         quantized, encoded = exl3_ldlq_quantize_mlx(
             regularized,
@@ -202,11 +213,12 @@ def exl3_quantize_weight_mlx(
             codebook=codebook,
             workspace_bytes=workspace_bytes,
         )
-        proxy_error = _exl3_proxy_error_mlx(
-            regularized,
-            quantized,
-            transformed_hessian,
-        )
+    proxy_error = _exl3_proxy_error_mlx(
+        regularized,
+        quantized,
+        transformed_hessian,
+        fallback=fallback,
+    )
 
     reconstructed = exl3_hadamard_128_mlx(quantized, axis=0) * input_scales
     reconstructed = exl3_hadamard_128_mlx(reconstructed, axis=1) * output_scales

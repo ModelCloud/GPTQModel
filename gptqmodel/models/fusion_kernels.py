@@ -182,6 +182,12 @@ class FusionKernelSpec:
         if self.layout in ("cpu_aten", "cpu_legacy"):
             fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
             fused._fused_state_key = None
+            # The fused layer owns concatenated tensors. Do not inherit the
+            # first source's checkpoint snapshot and restore it during the
+            # cache rebuild below.
+            from ..nn_modules.qlinear._fused_train_state import discard_fused_train_state
+
+            discard_fused_train_state(fused)
         if self.cpu:
             # g_idx/ret_idx are input-channel metadata and remain shared.
             fused.linear_mode = first.linear_mode

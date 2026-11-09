@@ -18,9 +18,11 @@ from ...utils.exllamav2 import (
     exllamav2_awq_make_q_matrix,
     exllamav2_awq_runtime_available,
     exllamav2_awq_runtime_error,
+    exllamav2_free_q_matrix,
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -79,6 +81,9 @@ class AwqExllamaV2Linear(AWQuantLinear):
             backend=kwargs.pop("backend", BACKEND.AWQ_EXLLAMA_V2),
             adapter=adapter,
             **kwargs)
+        self.q_handle = None
+        self._awq_repacked = False
+        self._q_handle_key = None
 
     @classmethod
     def validate_once(cls):
@@ -121,33 +126,61 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if not exllamav2_awq_runtime_available():
             raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
+        self._release_q_handle()
         # awq only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
 
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        self.qweight, self.qzeros = unpack_reorder_pack(
-            self.qweight, self.qzeros, self.bits
-        )
-
-        self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales)
+        if not self._awq_repacked:
+            self.qweight, self.qzeros = unpack_reorder_pack(
+                self.qweight, self.qzeros, self.bits
+            )
+            self._awq_repacked = True
+        self._ensure_q_handle()
 
         super().post_init()
+
+    def _release_q_handle(self) -> None:
+        if self.q_handle is not None:
+            exllamav2_free_q_matrix(self.q_handle, awq=True)
+            self.q_handle = None
+        self._q_handle_key = None
+
+    def clear_weight_cache(self) -> None:
+        """Release native pointers derived from the current packed buffers."""
+
+        self._release_q_handle()
+
+    def _ensure_q_handle(self) -> int:
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+        )
+        if self.q_handle is not None and self._q_handle_key != key:
+            self._release_q_handle()
+        if self.q_handle is None:
+            self.q_handle = self.ext_make_q_matrix_awq(
+                self.qweight,
+                self.qzeros,
+                self.scales,
+            )
+            self._q_handle_key = key
+        return self.q_handle
 
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
-        assert self.q_handle is not None, (
-            "module.post_init() must be called before module.forward(). "
-        )
+        self._ensure_q_handle()
         if not exllamav2_awq_runtime_available():
             raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        x = x.view(-1, x.shape[-1])
+        x = x.reshape(-1, x.shape[-1]).contiguous()
 
         out = torch.empty(
             (x.shape[0], self.out_features),

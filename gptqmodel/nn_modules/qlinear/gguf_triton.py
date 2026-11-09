@@ -2052,6 +2052,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
     def forward(self, x: torch.Tensor):
+        if x.ndim == 0 or x.shape[-1] != self.in_features:
+            actual = "scalar" if x.ndim == 0 else x.shape[-1]
+            raise ValueError(
+                f"{self.__class__.__name__} expected input width {self.in_features}, "
+                f"got {actual}."
+            )
         if x.device.type != "cuda":
             raise RuntimeError(
                 f"{self.__class__.__name__} only supports CUDA/ROCm inference. "

@@ -47,6 +47,10 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     const int64_t in_features = weight_f.size(1);
     TORCH_CHECK(g_idx_i32.size(0) == in_features, "g_idx length mismatch");
     TORCH_CHECK(in_features % word_bits == 0, "in_features must be divisible by word_bits");
+    TORCH_CHECK(
+        out_features % word_bits == 0,
+        "out_features must be divisible by word_bits"
+    );
 
     const int64_t groups = scales_f.size(0);
     TORCH_CHECK(scales_f.size(1) == out_features, "scales shape mismatch");

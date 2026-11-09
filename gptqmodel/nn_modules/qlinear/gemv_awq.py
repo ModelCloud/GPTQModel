@@ -62,7 +62,7 @@ class AwqGEMVLinear(AWQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     # The M>8 path uses GEMMV2, whose tile is N=64. Keep the class-wide

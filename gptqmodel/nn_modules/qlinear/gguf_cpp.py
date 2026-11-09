@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -17,6 +18,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
 
@@ -131,6 +133,7 @@ _GGML_CPU_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
 # aborts the whole process rather than raising. The CPU backend does handle
 # TQ1_0/TQ2_0, so this set must not be reused there.
 _GGML_CUDA_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED | frozenset({"TQ1_0", "TQ2_0"})
+_MAX_GGML_CUDA_PLANS = 8
 
 # Upstream enum ggml_type values for constants llama-cpp-python does not export
 # (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35).
@@ -469,9 +472,10 @@ class _GGMLBridge:
         elif x_cuda.dtype == torch.float32:
             ggml_input_type = self.ggml_type_f32
         elif x_cuda.dtype == torch.bfloat16:
-            # ggml in llama-cpp-python does not expose BF16 here, so use native CUDA fp16.
-            x_cuda = x_cuda.to(dtype=torch.float16)
-            ggml_input_type = self.ggml_type_f16
+            # ggml has no BF16 input type here. FP32 preserves the BF16 range;
+            # casting to FP16 can turn finite values into inf or zero.
+            x_cuda = x_cuda.to(dtype=torch.float32)
+            ggml_input_type = self.ggml_type_f32
         else:
             raise RuntimeError(
                 "GGUFCudaKernel only supports float16, bfloat16, or float32 inputs."
@@ -1014,7 +1018,9 @@ class GGUFCudaKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self._ggml_cuda_plans: Dict[tuple[int, int, torch.dtype, int], _GGMLMatmulPlan] = {}
+        self._ggml_cuda_plans: OrderedDict[
+            tuple[int, int, torch.dtype, tuple], _GGMLMatmulPlan
+        ] = OrderedDict()
         # Reject at construction: `create_quant_layer` retries the next AUTO
         # candidate only on a NotImplementedError raised here. A guard in
         # `forward()` is too late to fall back and would surface as a runtime
@@ -1038,14 +1044,32 @@ class GGUFCudaKernel(GGUFTorchLinear):
         self._ggml_cuda_plans.clear()
         return super().clear_weight_cache()
 
-    def _cuda_plan_key(self, x_flat: torch.Tensor) -> tuple[int, int, torch.dtype, int]:
+    def _cuda_plan_key(
+        self,
+        x_flat: torch.Tensor,
+    ) -> tuple[int, int, torch.dtype, tuple]:
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
         return (
             device_index,
             x_flat.shape[0],
             x_flat.dtype,
-            self.qweight.data_ptr(),
+            tensor_cache_key(self.qweight),
         )
+
+    def _remember_cuda_plan(
+        self,
+        plan_key: tuple[int, int, torch.dtype, tuple],
+        plan: _GGMLMatmulPlan,
+        *,
+        cached: bool,
+    ) -> None:
+        if cached:
+            self._ggml_cuda_plans.move_to_end(plan_key)
+            return
+        self._ggml_cuda_plans[plan_key] = plan
+        while len(self._ggml_cuda_plans) > _MAX_GGML_CUDA_PLANS:
+            _, evicted = self._ggml_cuda_plans.popitem(last=False)
+            evicted.close()
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
@@ -1057,15 +1081,20 @@ class GGUFCudaKernel(GGUFTorchLinear):
             )
 
         plan_key = self._cuda_plan_key(x_flat)
+        cached_plan = self._ggml_cuda_plans.get(plan_key)
         output, plan = _get_ggml_bridge().quantized_matmul_cuda(
             qweight=self.qweight,
             x=x_flat,
             gguf_tensor_qtype=self.gguf_tensor_qtype,
             padded_in_features=self.padded_in_features,
             out_features=self.out_features,
-            plan=self._ggml_cuda_plans.get(plan_key),
+            plan=cached_plan,
         )
-        self._ggml_cuda_plans.setdefault(plan_key, plan)
+        self._remember_cuda_plan(
+            plan_key,
+            plan,
+            cached=cached_plan is not None,
+        )
         if output.device != x_flat.device or output.dtype != x_flat.dtype:
             output = output.to(device=x_flat.device, dtype=x_flat.dtype)
 

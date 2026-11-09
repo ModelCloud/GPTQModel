@@ -28,6 +28,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._g_idx import validate_g_idx_bounds
 from ._numerics import _wants_fp32_reduce, autocast_active, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
@@ -255,6 +256,21 @@ class TorchLinear(PackableQuantLinear):
         # else:
         #     self.padded_infeatures = self.in_features
 
+    @classmethod
+    def _validate(cls, **args) -> tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        bits = args.get("bits")
+        pack_dtype = args.get("pack_dtype")
+        if bits == 3 and pack_dtype not in (None, torch.int32):
+            return False, NotImplementedError(
+                "3-bit GPTQ packing requires torch.int32 words: "
+                f"got pack_dtype={pack_dtype}"
+            )
+        return True, None
+
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
@@ -267,6 +283,12 @@ class TorchLinear(PackableQuantLinear):
         #                               device=self.g_idx.device)
 
         super().post_init()
+
+        validate_g_idx_bounds(
+            self.g_idx,
+            self.scales,
+            layer_name=type(self).__name__,
+        )
 
         # torch benefits the most from torch.compile, enable it by default
         self.optimize()
@@ -828,6 +850,8 @@ class TorchLinear(PackableQuantLinear):
         if self.qweight.device.type != "cuda":
             return False
         if self.bits not in (2, 3, 4, 8):
+            return False
+        if self.bits == 3 and self.pack_dtype != torch.int32:
             return False
         # Planar 3-bit words do not match the continuous Triton decode layout.
         if self.planar:

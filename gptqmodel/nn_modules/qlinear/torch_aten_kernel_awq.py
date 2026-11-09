@@ -18,6 +18,7 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -202,8 +203,25 @@ class TorchAtenAwqLinear(AWQuantLinear):
     _refresh_fused_state = TorchAtenLinear._refresh_fused_state
 
     def clear_weight_cache(self):
+        if restore_fused_train_state(self):
+            self.linear_mode = None
+            self.scales_and_zeros = None
+            self._cpu_transformed = False
+            self._cpu_transform_dtype = None
         self._fused_state_key = None
         self._refresh_fused_state()
+
+    def train(self, mode: bool = True):
+        old_train = self.training
+        if mode == old_train:
+            return self
+        if mode and self.linear_mode == "inference":
+            restore_fused_train_state(self)
+            self.linear_mode = None
+            self.scales_and_zeros = None
+            self._cpu_transformed = False
+            self._cpu_transform_dtype = None
+        return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -216,6 +234,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
         ):
+            capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
             self.linear_mode = "inference"
         elif self.linear_mode is None:

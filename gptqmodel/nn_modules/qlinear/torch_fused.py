@@ -16,6 +16,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -141,6 +142,11 @@ class TorchFusedLinear(PackableQuantLinear):
         op is simply rebuilt from the current packed weight and metadata; no
         dense weight is created.
         """
+        if restore_fused_train_state(self):
+            self.linear_mode = None
+            self.torch_fused_op = None
+            self.scales_and_zeros = None
+
         self.ret_idx = None
         self._ret_idx_key = None
         self._ret_idx_identity = None
@@ -200,6 +206,12 @@ class TorchFusedLinear(PackableQuantLinear):
             return self
 
         from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+        if mode and self.linear_mode == LinearMode.INFERENCE:
+            restore_fused_train_state(self)
+            self.linear_mode = None
+            self.torch_fused_op = None
+            self.scales_and_zeros = None
 
         if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
             # training starts
@@ -285,6 +297,7 @@ class TorchFusedLinear(PackableQuantLinear):
             x = x.to(torch.bfloat16)
         if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
+            capture_fused_train_state(self)
             self.transform(x.dtype, x.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":

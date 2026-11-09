@@ -467,6 +467,29 @@ def test_training_and_direct_projection_calls_use_original_execution():
     assert all(g.calls == 0 for g in plan.groups)
 
 
+def test_eval_fused_cpu_then_train_restores_checkpoint_layout():
+    model, _ = _wrapper(automatic=True)
+    plan = model.fuse()
+    modules = [module for group in plan.groups for module in group.modules]
+    original_shapes = {
+        id(module): tuple(module.qweight.shape)
+        for module in modules
+    }
+
+    with torch.inference_mode():
+        model.model(torch.tensor([[1, 2]]))
+    assert any(group.calls for group in plan.groups)
+
+    model.train()
+    assert all(
+        tuple(module.qweight.shape) == original_shapes[id(module)]
+        for module in modules
+    )
+
+    output = model.model(torch.tensor([[1, 2]])).logits
+    output.float().sum().backward()
+
+
 def test_steady_state_uses_compiled_descriptors_and_unchanged_leaf_forwards(monkeypatch):
     model, _ = _wrapper()
     leaves = list(model.model.model.layers[0].self_attn.children())

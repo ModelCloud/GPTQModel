@@ -19,6 +19,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
+from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
@@ -260,6 +261,23 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 "TorchFusedAwqLinear only supports fused transforms on CPU or XPU devices."
             )
 
+    def clear_weight_cache(self) -> None:
+        if restore_fused_train_state(self):
+            self.linear_mode = None
+            self.torch_fused_op = None
+            self.scales_and_zeros = None
+
+    def train(self, mode: bool = True):
+        old_train = self.training
+        if mode == old_train:
+            return self
+        if mode and self.linear_mode == LinearMode.INFERENCE:
+            restore_fused_train_state(self)
+            self.linear_mode = None
+            self.torch_fused_op = None
+            self.scales_and_zeros = None
+        return super().train(mode=mode)
+
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
@@ -273,6 +291,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
         ):
+            capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x_flat.device.type == "cpu":

@@ -179,6 +179,10 @@ class MacheteLinear(GPTQQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = cls.cached_validate_once()
+        if not ok:
+            return ok, err
+
         ok, err = cls._validate(**args)
         if not ok:
             return ok, err
