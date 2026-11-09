@@ -17,7 +17,7 @@ from huggingface_hub import snapshot_download
 
 
 # Pin to the native source reviewed alongside these tests; no model weights.
-RIPPLE_REVISION = "948fa2689b50ce2f713f573682632fe0fad0118d"
+RIPPLE_REVISION = "02996c3baa50ae60e44d5fef74937099ce470ac3"
 
 
 @lru_cache(maxsize=1)
@@ -57,8 +57,8 @@ def compatibility_module():
     return module
 
 
-def make_model(**overrides):
-    root = reference_dir()
+def make_model(*, source_dir=None, **overrides):
+    root = Path(source_dir) if source_dir is not None else reference_dir()
     name = f"ripple_audit_{next(COUNTER)}"
     package = types.ModuleType(name)
     package.__path__ = [str(root)]
