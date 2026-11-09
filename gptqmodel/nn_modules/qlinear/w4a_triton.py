@@ -264,6 +264,13 @@ def fp8_linear_prepacked(q: torch.Tensor, row_scale: torch.Tensor,
     output = torch.empty((rows, n), device=q.device, dtype=output_dtype)
     if not rows:
         return output
+    # The GEMM addresses every operand with dense row or element offsets.
+    q = q.contiguous()
+    row_scale = row_scale.contiguous()
+    weight_e4m3 = weight_e4m3.contiguous()
+    scales = scales.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
     tile_n = 32 if n % 64 else 64
     with _launch_device(q.device):
         _grouped_fp8_gemm[(triton.cdiv(rows, 16), triton.cdiv(n, tile_n))](
