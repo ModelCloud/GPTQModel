@@ -11,6 +11,10 @@ from gptqmodel.nn_modules.qlinear.gguf_cpp import (
 
 
 def _packed_cancellation_case(kernel_type):
+    if kernel_type is GGUFCppKernel:
+        ok, error = kernel_type.cached_validate_once()
+        if not ok:
+            pytest.skip(f"GGML CPU bridge unavailable: {error}")
     module = kernel_type(
         bits="q8_0",
         group_size=-1,
