@@ -345,6 +345,33 @@ def test_linear_fallback_keeps_bf16_weight_range_for_fp16_input(
     assert torch.equal(linear(x), expected)
 
 
+@pytest.mark.parametrize(
+    ("activation_dtype", "bias_dtype"),
+    [(torch.float16, torch.bfloat16), (torch.bfloat16, torch.float32)],
+)
+def test_linear_fallback_adds_mixed_dtype_bias_before_rounding(
+    activation_dtype, bias_dtype
+):
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((16, 64), dtype=torch.bfloat16)
+    weight[0, 0] = -99840.0
+    bias = torch.zeros(16, dtype=bias_dtype)
+    bias[0] = 99840.0
+    linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=True)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    x = torch.zeros((1, 64), dtype=activation_dtype)
+    x[0, 0] = 1.0
+
+    expected = (x.float() @ weight.float().t() + bias.float()).to(x.dtype)
+    actual = linear(x)
+
+    assert torch.equal(actual, expected)
+    assert actual[0, 0].item() == 0.0
+    assert linear.bias.dtype == bias_dtype
+
+
 def test_hip_kernel_is_bit_exact_when_available():
     """RDNA4 HIP decode must reproduce every BF16 bit the Torch codec encodes."""
     if not torch.cuda.is_available() or torch.version.hip is None:
