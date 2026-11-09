@@ -249,7 +249,7 @@ class AwqGEMMLinear(AWQuantLinear):
             out = out.to(dtype=input_dtype)
 
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out.clone())
+            out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 

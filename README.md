@@ -1006,6 +1006,9 @@ print(f"Result: {result}")
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
+See [runtime LoRA output composition](docs/lora-runtime-output.md) for how
+quantized CUDA outputs and adapter gradients are combined.
+
 ### Remote LoRA Adapters 🔒
 
 Adapter paths stored in `quantize_config.json` are confined to the checkpoint's own storage (including same-repository Hugging Face cache blobs); metadata cannot authorize Hub downloads. Loading an adapter hosted on the Hub requires an explicit opt-in with an immutable commit pin and a SHA-256 digest of `adapter_model.safetensors`:
