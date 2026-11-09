@@ -1530,3 +1530,4 @@ The following reference pages document features proposed from the working fork.
 - [dispatch authenticated projections to pipelined workers](docs/exl3-remote-workers.md)
 - [preserve lazy native sources across replay and export](docs/lazy-source-replay-contracts.md)
 - [carry causal replay and durable recovery callbacks](docs/looper-causal-replay.md)
+- [integrate resumable distributed and mixed-tier execution](docs/exl3-durable-execution.md)
