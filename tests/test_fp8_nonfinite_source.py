@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
-from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear, quantize_fp8_weight
 
 
 _FORMATS = (
@@ -37,14 +36,14 @@ def test_fp8_quantizer_rejects_nonfinite_source_before_packing(format, method, d
     weight[0, 5] = invalid
     assert not bool(torch.isfinite(weight).all())  # Independent input contract.
     with pytest.raises(ValueError, match="finite source weights"):
-        quantize_fp8_weight(weight, format=format, **_kwargs(method))
+        fp8_module.quantize_fp8_weight(weight, format=format, **_kwargs(method))
 
 
 def test_fp8_quantizer_rejects_finite_float64_outside_float32_range():
     weight = torch.tensor([[torch.finfo(torch.float64).max, 0.0]], dtype=torch.float64)
     assert bool(torch.isfinite(weight).all())
     with pytest.raises(ValueError, match="representable as float32"):
-        quantize_fp8_weight(weight)
+        fp8_module.quantize_fp8_weight(weight)
 
 
 @pytest.mark.parametrize("format", _FORMATS)
@@ -69,7 +68,7 @@ def test_fp8_valid_code_boundaries_match_independent_torch_oracle(format, method
     # so the independent inverse scale is exactly one. Cast the complete
     # matrix to compare every stored FP8 byte, including signed zero.
     expected_codes = weight.to(fp8_dtype)
-    actual_codes, scale_inv = quantize_fp8_weight(weight, format=format, **_kwargs(method))
+    actual_codes, scale_inv = fp8_module.quantize_fp8_weight(weight, format=format, **_kwargs(method))
     assert torch.equal(scale_inv, torch.ones_like(scale_inv))
     assert torch.equal(actual_codes.view(torch.uint8), expected_codes.view(torch.uint8))
     assert torch.isfinite(actual_codes.float()).all()
@@ -95,7 +94,7 @@ def test_fp8_valid_source_extrema_keep_positive_finite_scales(format, method, dt
     expected_inv = torch.tensor(fp8_max / float(source_max), dtype=torch.float32)
     expected_codes = (weight.double() * expected_inv.double()).clamp(-fp8_max, fp8_max).float().to(fp8_dtype)
 
-    actual_codes, scale_inv = quantize_fp8_weight(weight, format=format, **_kwargs(method))
+    actual_codes, scale_inv = fp8_module.quantize_fp8_weight(weight, format=format, **_kwargs(method))
     assert torch.isfinite(scale_inv).all()
     assert (scale_inv > 0).all()
     torch.testing.assert_close(scale_inv, expected_inv.expand_as(scale_inv), rtol=1e-6, atol=0)
@@ -114,7 +113,7 @@ def test_fp8_pack_rejects_invalid_source_before_state_changes(monkeypatch, inval
     with torch.no_grad():
         linear.weight.fill_(1.0)
         linear.weight[0, 5] = invalid
-    module = TorchFP8Linear(bits=8, group_size=-1, sym=True, desc_act=False,
+    module = fp8_module.TorchFP8Linear(bits=8, group_size=-1, sym=True, desc_act=False,
                             in_features=16, out_features=2, format="float8_e4m3fn",
                             weight_scale_method="row", register_buffers=True)
     before = {name: tensor.clone() for name, tensor in module.state_dict().items()}
@@ -143,7 +142,7 @@ def test_fp8_pack_valid_fp16_extrema_keep_only_quantized_storage():
     with torch.no_grad():
         source.weight.copy_(torch.tensor([maximum, -maximum, 0.0, -0.0] * 4,
                                          dtype=torch.float16).repeat(2, 1))
-    module = TorchFP8Linear(bits=8, group_size=-1, sym=True, desc_act=False,
+    module = fp8_module.TorchFP8Linear(bits=8, group_size=-1, sym=True, desc_act=False,
                             in_features=16, out_features=2, format="float8_e4m3fn",
                             weight_scale_method="row", register_buffers=True)
     expected_inv = torch.tensor(torch.finfo(torch.float8_e4m3fn).max / maximum, dtype=torch.float32)
