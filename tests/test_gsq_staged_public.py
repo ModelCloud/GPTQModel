@@ -7,6 +7,7 @@
 
 import copy
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,6 +24,28 @@ class _UntrustedCheckpoint:
 
     def __reduce__(self):
         return _write_checkpoint_marker, (self.marker,)
+
+
+def test_staged_export_block_discovery_resolves_mixed_case_model_type(monkeypatch):
+    """GSQ block discovery must resolve published model_type casing."""
+
+    from gptqmodel.looper.gsq_training_model import prepare_llama_gsq_export
+    from gptqmodel.models.definitions.rw import RwgQModel
+    from gptqmodel.quantization import rco
+
+    captured = {}
+
+    def fake_discover_blocks(model, model_definition=None):
+        captured["model_definition"] = model_definition
+        return []
+
+    monkeypatch.setattr(rco, "discover_blocks", fake_discover_blocks)
+    model = SimpleNamespace(config=SimpleNamespace(model_type="RefinedWeb"))
+
+    with pytest.raises(ValueError, match="completed all-layer run"):
+        prepare_llama_gsq_export(model, {"state": "incomplete"})
+
+    assert captured["model_definition"] is RwgQModel
 
 
 def test_staged_llama_uses_separate_gptq_train_and_validation_documents(tmp_path, monkeypatch):

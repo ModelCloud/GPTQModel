@@ -100,6 +100,35 @@ def test_hf_load_bridge_uses_checkpoint_manifest_and_preserves_dense_module(tmp_
     assert context.quantize_config.dynamic is not None
 
 
+def test_hf_load_bridge_resolves_mixed_case_model_type_via_casefold(tmp_path, monkeypatch):
+    """A published mixed-case model_type must select the registered definition."""
+
+    import defuser
+
+    from gptqmodel.models.definitions.rw import RwgQModel
+
+    _write_checkpoint(tmp_path)
+    model = _Model(tmp_path)
+    model.config.model_type = "RefinedWeb"
+
+    converted = []
+    monkeypatch.setattr(defuser, "convert_model", lambda module, **kwargs: converted.append(module))
+    # The declared defuser paths are the observable difference between the
+    # registered RwgQModel and the BaseQModel fallback for this model type.
+    monkeypatch.setattr(RwgQModel, "defuser_module_paths", ("model.layers.0",), raising=False)
+
+    context = hf_gptqmodel_prepare_model_for_load(
+        model,
+        checkpoint_files=[tmp_path / "model.safetensors"],
+        device_map={"": "cpu"},
+        backend=BACKEND.GPTQ_TORCH,
+        dtype=torch.float16,
+    )
+
+    assert context is not None
+    assert len(converted) == 2
+
+
 def test_hf_load_bridge_sizes_nf12_escape_buffer_before_weight_assignment(tmp_path):
     """Checkpoint escape rows must fit before Transformers assigns its tensors."""
 
