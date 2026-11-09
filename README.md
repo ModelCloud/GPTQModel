@@ -98,6 +98,8 @@ documents weight update invalidation and the explicit-clear contract for
 inference tensors.
 The [GGUF K-scale overflow cache](docs/gguf-k-scale-overflow-cache.md)
 documents the FP16 reconstruction guard for GGUF Torch fused inference.
+The [GGUF dense fallback precision](docs/gguf-dense-fallback-precision.md)
+page explains BF16 weight reconstruction and output rounding across formats.
 
 `BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
 8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime
