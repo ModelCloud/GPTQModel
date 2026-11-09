@@ -32,7 +32,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
-from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
+from ._numerics import matmul_fp32_reduce
 from .gguf import _apply_optional_smoother
 
 
@@ -619,7 +619,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             weight.t(),
             scale_a=scale_a,
             scale_b=scale_b,
-            out_dtype=torch.float32 if self.bias is not None and _wants_fp32_reduce(x_flat) else x_flat.dtype,
+            # Keep the bias addition ahead of the output rounding on every
+            # accelerator. HIP keeps the wide FP32 request CUDA-only, so gating
+            # this on `_wants_fp32_reduce` rounded (and overflowed) before the
+            # bias could cancel the partial sum there.
+            out_dtype=torch.float32 if self.bias is not None else x_flat.dtype,
         )
 
     def forward(self, x: torch.Tensor):

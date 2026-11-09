@@ -272,8 +272,11 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
 
     fused_dispatch = module._can_use_rocm_gemm(x)
     if fused_dispatch:
-        visible_ref = raw.to(dtype)
+        # The fused kernel keeps the bias in the FP32 epilogue before the
+        # output is narrowed, so the oracle must add it before rounding too.
+        visible_ref = (raw + module.bias).to(dtype) if module.bias is not None else raw.to(dtype)
         path = "fused GEMM"
+        expected_visible = visible_ref
     else:
         split_weight = _decoded_weights(module).to(dtype)
         # The CUDA split path keeps low-precision partial sums in FP32
@@ -281,8 +284,8 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
         # accumulation instead of a default reduced-precision ``torch.matmul``.
         visible_ref = torch.mm(x, split_weight, out_dtype=torch.float32).to(dtype)
         path = "dequantize + matmul"
-    expected_visible = visible_ref + module.bias if module.bias is not None else visible_ref
-    assert torch.equal(visible, expected_visible), f"visible output is not round({path}) + bias"
+        expected_visible = visible_ref + module.bias if module.bias is not None else visible_ref
+    assert torch.equal(visible, expected_visible), f"visible output does not match the {path} contract"
 
     if fused_dispatch:
         raw_rounded = raw.to(dtype)
