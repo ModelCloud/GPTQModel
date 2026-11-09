@@ -264,7 +264,20 @@ class TorchFusedLinear(PackableQuantLinear):
         self.qzeros = zeros.contiguous()
 
     def transform_cpu(self, dtype, do_scales_and_zeros: bool = True):
-        self.scales = self.scales.to(dtype).contiguous()
+        if do_scales_and_zeros:
+            # The CPU op consumes affine offsets, not GPTQ integer zero codes.
+            # Import here because torch_aten_kernel also imports the fused op.
+            from .torch_aten_kernel import _cpu_int4pack_scale_dtype, _cpu_int4pack_zero_offsets
+
+            zero_codes = torch.bitwise_right_shift(
+                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+                self.wf_unsqueeze_zero,
+            ).to(torch.uint8)
+            zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
+            compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, dtype)
+        else:
+            compute_dtype = dtype
+        self.scales = self.scales.to(compute_dtype).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -278,7 +291,7 @@ class TorchFusedLinear(PackableQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
         if do_scales_and_zeros:
-            self.qzeros = torch.zeros_like(self.scales).contiguous()
+            self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).to(compute_dtype).contiguous()
             self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform(self, dtype, device):

@@ -202,7 +202,7 @@ and reorders activations only when the `g_idx` permutation is not the identity;
 `BACKEND.AWQ_TORCH_FUSED` uses the same packed layout without a `g_idx`
 activation reorder. See
 [Torch Fused INT4 transformations](docs/torch_fused_int4_transformations.md)
-for the unpack, pack, and activation-reorder contracts.
+for asymmetric GPTQ zero-point offsets, packing, and activation-reorder contracts.
 
 `BACKEND.QQQ_TORCH` uses the same packed INT4 CPU layout with a QQQ-specific
 integer GEMM that preserves round-to-nearest-even and INT8 saturation for

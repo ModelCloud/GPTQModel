@@ -127,7 +127,11 @@ The CPU path shares the unpack/reorder logic but delegates the final packing to
 PyTorch’s helper so the layout matches
 `aten._weight_int4pack_mm_for_cpu`. Steps:
 
-1. **Scales cast** – identical to the XPU path.
+1. **Unpack zero codes and choose metadata dtype** – unpack each packed GPTQ
+   `qzeros` lane into `[G, O]` integer codes. `_cpu_int4pack_scale_dtype`
+   checks whether the resulting affine offsets remain finite and exact in the
+   activation dtype; it selects FP32 metadata when narrowing would lose the
+   offset. Cast `scales` to that compute dtype.
 2. **Unpack + reorder `qweight`** – same as step 3 above, yielding
    `weight_full = [O, I]` with 4-bit integers.
 3. **Convert to int4pack** – `torch.ops.aten._convert_weight_to_int4pack_for_cpu`
@@ -144,9 +148,11 @@ PyTorch’s helper so the layout matches
    raises `_convert_weight_to_int4pack_cpu : expect N to be dividable by 16`
    otherwise.
 
-4. **Merge scales and zeros** – The fused CPU kernel expects scale and zero
-   offsets in a single tensor, so `pack_scales_and_zeros` stacks them along the
-   last dimension:
+4. **Convert zero codes and merge metadata** –
+   `_cpu_int4pack_zero_offsets` computes `(8 - zero_code) * scale`. The fused
+   CPU kernel dequantizes a nibble as `(code - 8) * scale + offset`, which now
+   equals GPTQ's `(code - zero_code) * scale`. `pack_scales_and_zeros` stacks
+   scales and offsets along the last dimension:
 
    ```
    scales_and_zeros[g, o] = [ scale[g, o], zero[g, o] ]    shape = [G, O, 2]
@@ -157,9 +163,9 @@ PyTorch’s helper so the layout matches
      └─────────────────────────────────┘
    ```
 
-   The current GPTQ fused path only uses symmetric int4, so `self.qzeros` is
-   zeroed before packing (`zero[g, o] = 0`). Non-symmetric per-group offsets
-   would require extending this block.
+   The stored integer `qzeros` become affine offsets only for the transformed
+   inference layout. `capture_fused_train_state` keeps the packed checkpoint
+   tensors for eval-to-train restoration and explicit cache clearing.
 
 5. **Buffers used at runtime** – `self.qweight` is now the `uint8`
    int4pack tensor, `self.scales_and_zeros` stores the merged metadata, and
@@ -176,9 +182,64 @@ weight_full (O × I, ints) ──_convert_weight_to_int4pack_for_cpu──►
      ↑                                                         ↑
      └───────── unpack & transpose from raw qweight ───────────┘
 
-scales (G × O, dtype `dtype`)
-qzeros (G × O, zeroed) ──► scales_and_zeros (G × O × 2)
+packed qzeros (G × O/8) ──unpack──► zero codes (G × O)
+zero codes + scales ──(8 - code) * scale──► affine offsets (G × O)
+scales + offsets ──pack_scales_and_zeros──► (G × O × 2)
 ```
+
+### Asymmetric zero-point lifecycle
+
+```mermaid
+flowchart TD
+    A["TorchFusedLinear.forward: eval on CPU"] --> B["capture_fused_train_state"]
+    B --> C["transform_cpu"]
+    C --> D["Unpack packed qzeros to zero_codes"]
+    D --> E["_cpu_int4pack_scale_dtype"]
+    E --> F{"Narrowed offset finite and exact?"}
+    F -- Yes --> G["Use activation metadata dtype"]
+    F -- No --> H["Use FP32 metadata"]
+    G --> I["_cpu_int4pack_zero_offsets"]
+    H --> I
+    I --> J["Convert qweight to int4pack; pack_scales_and_zeros"]
+    J --> K["_refresh_fused_op"]
+    K --> L["_cpu_int4pack_mm"]
+    J -. Invalid int4pack geometry .-> X["ATen error"]
+    L -. Unsupported matmul contract .-> X
+    M["train or clear_weight_cache"] --> N["restore_fused_train_state: packed checkpoint tensors"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| GPTQ CPU zero points | `transform_cpu` replaced packed `qzeros` with `zeros_like(scales)` (`gptqmodel/nn_modules/qlinear/torch_fused.py:281` before this change). | It unpacks the checkpoint codes and stores `(8 - zero_code) * scale` offsets (`gptqmodel/nn_modules/qlinear/torch_fused.py:272-295`). |
+| Narrow offset range | `scales` were cast directly to the activation dtype. | `_cpu_int4pack_scale_dtype` chooses FP32 when low-precision offsets would be nonfinite or inexact (`gptqmodel/nn_modules/qlinear/torch_fused.py:277`). |
+| Eval-to-train | Packed checkpoint buffers were already snapshotted. | The same packed snapshot is restored on `train()` and `clear_weight_cache()`; the regression checks asymmetric codes survive both paths. |
+
+On `origin/main` at `520809c8`, a two-group packed checkpoint with codes 12,
+zero codes 3 and 11, and scale 0.25 returned 64 instead of 80 for group size
+32 and 256 instead of 320 for group size 128. The CPU regression decodes
+packed words independently in Python, checks group sizes 32/128, FP16/BF16,
+and both activation-order modes, then verifies the packed-only storage and
+eval-to-train restoration.
+
+With two BF16 activation rows and 32 outputs on a single CPU thread, the
+independent packed-word oracle and corrected fused output agreed exactly after
+BF16 output rounding. Three warmups and 20 timed forwards gave:
+
+| Group size | Checkpoint bytes | Reachable tensor storage after forward | Median forward |
+| --- | ---: | ---: | ---: |
+| 32 | 1,440 | 3,264 bytes | 0.0293 ms |
+| 128 | 5,280 | 10,944 bytes | 0.0502 ms |
+
+The reachable count deduplicates storage pointers and includes packed checkpoint
+snapshots, transformed packed weights, affine metadata, and small indexing
+buffers. No dense or expanded weight is retained. `transform_cpu` temporarily
+unpacks a full `[I, O]` code matrix and an `int32` copy for the ATen packer;
+these are released before inference forwards. No temporary peak was measured.
+
+Asymmetric GPTQ fused CPU zero-point conversion was corrected in
+[PR #3746](https://github.com/ModelCloud/GPTQModel/pull/3746).
 
 ## Activation permutation and fused matmul
 
@@ -273,8 +334,8 @@ debugging.
 | Packed `qweight` shape     | `[O, I / 8]`, dtype `int32`                                    | `[O, I / 2]`, dtype `uint8`                                       |
 | Bits per storage lane      | 32-bit lane packs 8 inputs; nibble order `[in+7 … in+0]`       | 8-bit lane packs 2 inputs; high nibble = odd, low nibble = even   |
 | Packing direction          | Manual double-loop packs along **columns** of `weight_full`    | `_convert_weight_to_int4pack_for_cpu` packs along **columns** into bytes |
-| Per-group zeros            | Unpacked to full `[G, O]` tensor and passed separately         | Forced to zero and merged with scales via `pack_scales_and_zeros` |
-| Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = zero` (`float`)      |
+| Per-group zeros            | Unpacked integer codes `[G, O]` passed separately               | Converted to `(8 - zero_code) * scale` offsets and merged with scales |
+| Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = affine offset` (`float`) |
 | Fused kernel call          | `_weight_int4pack_mm_with_scales_and_zeros(x, qW, gsz, s, z)`  | `_weight_int4pack_mm_for_cpu(x, qW, gsz, scales_and_zeros)`       |
 | Alignment requirements     | Determined by manual pack loop (only needs `I % 8 == 0`)       | Kernel enforces `I % 16 == 0` and `O % 16 == 0`                   |
 | Activation permutation     | always `x[:, ret_idx].contiguous()` (zero-offset copy)          | gather only when `_ret_idx_is_identity()` is false; otherwise `x.contiguous()` when needed |
@@ -296,8 +357,8 @@ in the final storage type, accompanying metadata, and fused operator ABI.
 reuses the CPU fused kernel while accepting checkpoints emitted by the AWQ
 tooling. The module always expects `qweight` to be stored in the AWQ layout
 `[in_features, out_features / pack_factor]`, meaning each row corresponds to a
-single logical input channel. `transform_cpu_awq` performs a fixed shim before
-the standard CPU packing runs:
+single logical input channel. `transform_cpu_awq` performs its own CPU
+int4pack transform:
 
 1. **Unpack AWQ rows** – `unpack_awq` expands each column lane into eight
    outputs, yielding `iweight[int8][I, O]` and `izeros[int8][G, O]`. Both
@@ -306,23 +367,14 @@ the standard CPU packing runs:
    logical transformer layout expected by GPTQ.
 2. **Normalize zero codes** – AWQ stores integer zero points per output channel.
    `transform_cpu_awq` converts them into floating offsets compatible with the
-   fused kernel using
-   `zeros_fp16 = (2^{bits-1} - izeros) * scales_fp32`, keeping the result in
-   `float16` so the metadata matches the original AWQ calibration statistics.
-3. **Repack into GPTQ lanes** – The unpacked `iweight` matrix is reshaped to
-   `[I / pack_factor, pack_factor, O]` and re-packed along the `pack_factor`
-   dimension so each row once again represents eight inputs inside a 32-bit
-   lane. After this step `self.qweight` is indistinguishable from a GPTQ v2
-   tensor, which means the regular `transform_cpu` logic can run unchanged.
-4. **Delegate to the base CPU transform** – Calling `super().transform_cpu`
-   converts the temporary GPTQ-formatted `qweight` into the `[O, I/2]` `uint8`
-   int4pack layout and produces `scales_and_zeros` from the (temporarily zeroed)
-   metadata.
-5. **Restore AWQ metadata** – Immediately afterward, the AWQ shim reinstates
-   the real `float16` scales and the converted zero offsets, then rebuilds
-   `scales_and_zeros = pack_scales_and_zeros(scales, zeros_fp16)`. This ensures
-   `_weight_int4pack_mm_for_cpu` receives the same affine parameters the AWQ
-   calibration solved for.
+   fused kernel using `(2^{bits-1} - izeros) * scales_fp32`. It chooses FP32
+   metadata when the offset cannot safely be narrowed.
+3. **Pack the output-major codes** – `transform_cpu_awq` transposes `iweight`
+   and calls `_convert_weight_to_int4pack_for_cpu` directly. It does not call
+   `TorchFusedLinear.transform_cpu`.
+4. **Build AWQ affine metadata** – The AWQ path independently selects a safe
+   metadata dtype, computes `(8 - izeros) * scales`, and calls
+   `pack_scales_and_zeros`. The GPTQ zero-code fix does not change AWQ packing.
 
 Because the shim runs entirely on the CPU path, `TorchFusedAwqLinear`
 currently raises `NotImplementedError` when asked to run the fused transform on
@@ -339,10 +391,10 @@ unavailable), inference falls back to the dense AWQ matmul computed by
 | Packed XPU `qweight`           | `[O, I / 8]`, `int32`                                     | Bits `[3:0]` hold the lowest-numbered channel  |
 | Packed CPU `qweight`           | `[O, I / 2]`, `uint8`                                     | High nibble = odd input, low nibble = even     |
 | `qzeros` (post-XPU transform)  | `[G, O]`, matches `scales`                                | Passed separately to the XPU fused op          |
-| `scales_and_zeros` (CPU only)  | `[G, O, 2]`, float                                        | `[..., 0] = scale`, `[..., 1] = zero`          |
+| `scales_and_zeros` (CPU only)  | `[G, O, 2]`, float                                        | `[..., 0] = scale`, `[..., 1] = affine offset` |
 | Raw AWQ `qweight`              | `[I, O / 8]`, `int32`                                     | Rows are single inputs packed across outputs   |
 | Unpacked AWQ weights/zeros     | `iweight[I, O]`, `izeros[G, O]`, `int8`                    | Produced by `unpack_awq` + `reverse_awq_order` |
-| AWQ zero offsets (final)       | `[G, O]`, `float16`                                       | `(2^{bits-1} - izeros) * scales`; merged via `pack_scales_and_zeros` |
+| AWQ zero offsets (final)       | `[G, O]`, FP16 or FP32                                   | `(2^{bits-1} - izeros) * scales`; merged via `pack_scales_and_zeros` |
 
 These details mirror the expectations of the Intel XPU and CPU fused matmul
 kernels, and the ASCII layouts above describe how rows/columns line up inside
