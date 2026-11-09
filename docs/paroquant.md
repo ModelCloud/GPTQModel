@@ -1,5 +1,51 @@
 # ParoQuant
 
+## Rotation identity lifecycle
+
+`ParoLinear` can skip activation rotation when both rotation buffers
+describe the identity transform. The decision is derived from `theta` and
+`channel_scales` when `clear_weight_cache()` invalidates runtime state. The
+same method runs after `post_init()`, a state-dict load, and a module move.
+Call it after manually changing rotation buffers, including tensors
+created under `torch.inference_mode()` whose version cannot be tracked.
+
+```mermaid
+flowchart TD
+    P["AwqTorchLinear.post_init() or train()"] --> A
+    Q["BaseQuantLinear._load_from_state_dict()"] --> A
+    R["BaseQuantLinear._apply() for module moves"] --> A
+    S["Explicit cache clear after buffer mutation"] --> A
+    A["ParoLinear.clear_weight_cache()"] --> B["AwqTorchLinear.clear_weight_cache()"]
+    B --> C["_clear_rotation_runtime_cache()"]
+    C --> D{"theta or channel_scales on meta?"}
+    D -- "Yes" --> E["Set _rotation_identity to false"]
+    E --> X["Meta storage cannot run forward"]
+    X --> H["Materialized load or move calls clear_weight_cache() again"]
+    H --> A
+    D -- "No" --> F["is_identity_rotation(theta, channel_scales)"]
+    F --> G["Store _rotation_identity"]
+    G --> I["ParoLinear.forward() calls _rotate_inputs()"]
+    I --> J{"_rotation_identity?"}
+    J -- "Yes" --> K["Use input unchanged"]
+    J -- "No" --> L["Apply ParoQuant rotation"]
+    K --> M["AWQ packed matmul"]
+    L --> M
+    classDef blocked fill:#fce8e6,stroke:#a33,color:#111
+    class E,X blocked
+```
+
+| Entry point | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| `post_init()` | `paroquant.py:162-166` recalculated `_rotation_identity` after the AWQ cache clear | Inherited AWQ `post_init()` calls `ParoLinear.clear_weight_cache()`, which recalculates it |
+| Explicit cache clear | `paroquant.py:168-171` dropped runtime tensors but left the old identity decision | `clear_weight_cache()` drops those tensors and recalculates from current rotation buffers |
+| State-dict load or module move | `qlinear/__init__.py:319-337` called the same clear hook, so the old decision survived changed buffers | The clear hook refreshes the decision; meta storage conservatively disables the shortcut until materialized |
+
+The decision is a boolean, not a dense weight cache. The packed AWQ weights
+remain the only persistent weight representation. The CPU dense fallback still
+dequantizes a temporary weight for its current forward.
+
+Introduced in [PR #3744](https://github.com/ModelCloud/GPTQModel/pull/3744).
+
 ## Activation Checkpointing
 
 `ParoConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.

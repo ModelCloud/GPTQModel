@@ -93,6 +93,9 @@ dequantized workspaces. Only zero-point and group-index metadata is cached;
 call `clear_weight_cache()` after manually mutating inference-mode tensors
 without version counters. Normal tensor mutations, checkpoint loads, and
 device/dtype moves invalidate this metadata automatically.
+The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
+explains how rotation buffer changes, state loads, and module moves refresh its
+identity shortcut.
 The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
 rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
