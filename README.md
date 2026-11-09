@@ -347,7 +347,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | StableLM | `stablelm`, `stablelm_epoch` |
 | StarCoder2 | `starcoder2` |
 | TeleChat2 | `telechat` |
-| Unlimited-OCR | `unlimited-ocr` |
+| Unlimited-OCR | `unlimited_ocr` |
 | Voxtral | `voxtral` |
 | [Xing4.0 (29B-A4B)](https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B) | `xing4_0` |
 | XVERSE | `xverse` |

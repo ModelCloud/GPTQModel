@@ -1445,7 +1445,7 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
 
-    if model_type_lower == "unlimited-ocr":
+    if model_type_lower in {"unlimited_ocr", "unlimited-ocr"}:
         # transformers 5 synthesizes an initializer for the remote empty
         # UnlimitedOCRConfig subclass and omits defaults declared by its
         # DeepseekV2Config parent. Restore only missing fields so serialized
