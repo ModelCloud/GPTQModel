@@ -167,11 +167,21 @@ class ExllamaV2Linear(GPTQQuantLinear):
         else:
             self.q_tensors.update(tensors)
         key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
-        if self.q_handle is not None and self._q_handle_key != key:
+        if (
+            self.q_handle is not None
+            and self._q_handle_key is not None
+            and self._q_handle_key != key
+        ):
             self._release_q_handle()
         if self.q_handle is None:
             self.q_handle = self.ext_make_q_matrix(self.q_tensors)
-            self._q_handle_key = key
+            # Act-order matrix creation adds/fills q_perm and q_invperm in
+            # ``q_tensors``. Key the completed dictionary so the next forward
+            # does not mistake those newly inserted tensors for a replacement
+            # and rebuild the native matrix every call.
+            self._q_handle_key = tuple(
+                tensor_cache_key(tensor) for tensor in self.q_tensors.values()
+            )
         return self.q_handle
 
     def list_buffers(self) -> List:

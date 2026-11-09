@@ -89,6 +89,35 @@ def test_exllamav2_forward_uses_jit_gemm(monkeypatch):
     assert torch.allclose(out, torch.full_like(out, 5.0))
 
 
+def test_exllamav2_act_order_handle_is_not_rebuilt_each_forward(monkeypatch):
+    module = _build_module(monkeypatch)
+    module.g_idx[0] = 1
+    make_calls = []
+    free_calls = []
+
+    def fake_make(*args):
+        make_calls.append(args)
+        return 100 + len(make_calls)
+
+    monkeypatch.setattr(
+        exllamav2_module,
+        "exllamav2_make_q_matrix",
+        fake_make,
+    )
+    monkeypatch.setattr(
+        exllamav2_module,
+        "exllamav2_free_q_matrix",
+        free_calls.append,
+    )
+
+    first = module._ensure_q_handle()
+    second = module._ensure_q_handle()
+
+    assert first == second == 101
+    assert len(make_calls) == 1
+    assert free_calls == []
+
+
 def test_exllamav2_validate_once_surfaces_jit_error(monkeypatch):
     # Pin the host family so this exercises the non-ROCm JIT-error path even
     # when the suite runs on a HIP device.
