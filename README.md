@@ -852,7 +852,7 @@ model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V
 model.save(quant_path)
 ```
 
-See [EXL3 native bias lifecycle](docs/exl3-native-bias-lifecycle.md) for padded
+See [EXL3 native buffer lifecycle](docs/exl3-native-bias-lifecycle.md) for padded
 outputs and bias updates during inference.
 
 ##### VPTQ Example: Llama 3.2 1B Instruct

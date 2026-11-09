@@ -111,22 +111,39 @@ class ExllamaV3Linear(nn.Module):
         folding) would then be invisible. ``Tensor._version`` bumps on every
         in-place mutation, so it cheaply distinguishes "alias" from "stale copy".
         A bias loaded under ``torch.inference_mode`` has no version counter;
-        clone it once outside that mode so subsequent mutations remain visible.
+        copy it once outside that mode so subsequent mutations remain visible.
         """
         bias = getattr(self, "bias", None)
         if bias is None or bias.device.type == "meta":
             return None
         if bias.is_inference():
             with torch.inference_mode(False), torch.no_grad():
-                bias = bias.clone()
+                bias = bias.to(device=bias.device, copy=True)
                 self.bias = bias
         return int(bias._version)
+
+    def _normalize_inference_metadata(self) -> None:
+        """Make metadata captured by the native handle observable after edits.
+
+        ``LinearEXL3`` unpacks ``su``/``sv`` into separate sign vectors when it
+        is built. Inference tensors have no version counter, so an in-place edit
+        to those packed fields would otherwise keep the old vectors alive.
+        Rebind only the small metadata buffers as normal, versioned tensors;
+        the packed trellis remains aliased by the native handle and is never
+        duplicated here.
+        """
+        for name in ("suh", "svh", "su", "sv", "mcg", "mul1"):
+            tensor = getattr(self, name, None)
+            if tensor is not None and tensor.device.type != "meta" and tensor.is_inference():
+                with torch.inference_mode(False), torch.no_grad():
+                    setattr(self, name, tensor.to(device=tensor.device, copy=True))
 
     def _current_signature(self) -> tuple[Any, ...]:
         trellis = getattr(self, "trellis", None)
         if trellis is None or trellis.device.type == "meta":
             return ("meta",)
 
+        self._normalize_inference_metadata()
         bias_version = self._bias_version()
         signature: list[Any] = [str(trellis.device)]
         for buffer_name in _EXL3_BUFFER_NAMES:
@@ -134,7 +151,16 @@ class ExllamaV3Linear(nn.Module):
             if tensor is None:
                 signature.append(None)
                 continue
-            signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
+            try:
+                version = None if tensor.is_inference() else tensor._version
+            except RuntimeError:
+                version = None
+            signature.append((
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                str(tensor.dtype),
+                version,
+            ))
         # Only the padded path copies the bias, so only that path needs liveness.
         signature.append(bias_version)
         return tuple(signature)
@@ -150,6 +176,10 @@ class ExllamaV3Linear(nn.Module):
         self._inner_signature = None
         self._torch_inner = None
         self._torch_inner_signature = None
+
+    def clear_weight_cache(self) -> None:
+        """Release derived handles after an unversioned external tensor edit."""
+        self._drop_inner()
 
     def _stored_features(self) -> tuple[int, int]:
         """Infer storage geometry; architecture dimensions remain logical."""
