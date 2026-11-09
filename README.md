@@ -1543,3 +1543,4 @@ The following reference pages document features proposed from the working fork.
 - [carry Flash core and MTP calibration adapters](docs/glm-flash-native-calibration.md)
 - [carry bounded native core and MTP calibration](docs/step5-native-calibration.md)
 - [carry V4.1 native source and mapped PLE replay](docs/v41-native-source.md)
+- [carry V4.1 routed capture and adjacent recovery](docs/v41-routed-calibration.md)
