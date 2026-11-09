@@ -17,6 +17,14 @@ from .cpp import (
 _QQQ_OPS_NAME = "gptqmodel_qqq_ops"
 _QQQ_OPS_NAMESPACE = "gptqmodel_qqq"
 
+# ``gptqmodel_ext/qqq`` is the Marlin-derived W4A8 kernel written against CUDA
+# inline PTX (``cp.async``/``mma.sync``/``ldmatrix``); hipcc cannot assemble it.
+# ROCm uses the portable ``QQQTorchLinear`` path, so never JIT-build it there.
+QQQ_EXTENSION_ROCM_UNSUPPORTED = (
+    "The native QQQ W4A8 extension uses CUDA-only inline PTX and cannot be "
+    "built by hipcc. On ROCm use BACKEND.QQQ_TORCH, which AUTO selects."
+)
+
 
 def _qqq_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "qqq"

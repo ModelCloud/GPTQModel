@@ -623,7 +623,8 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
-    if is_nvcc_compatible():
+    # A ROCm host can still have an nvcc on PATH; hipcc rejects the flag.
+    if not IS_ROCM and is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 

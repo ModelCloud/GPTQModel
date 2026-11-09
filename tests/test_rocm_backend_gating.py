@@ -427,6 +427,25 @@ def test_exllamav2_kernels_reject_rocm_without_jit_build(monkeypatch):
         extension_api.load(name="exllamav2_awq")
 
 
+def test_cuda_only_extensions_are_skipped_by_load_all_on_rocm(monkeypatch):
+    """``extension.load("all")`` must not start a doomed hipcc build."""
+
+    from gptqmodel import extension as extension_api
+
+    monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: True)
+
+    selected = extension_api._resolve_requested_extensions("all")
+    for name in ("awq", "qqq", "marlin_fp16", "marlin_bf16"):
+        assert name not in selected
+
+    with pytest.raises(RuntimeError, match="hipcc"):
+        extension_api.load(name="awq")
+    with pytest.raises(RuntimeError, match="hipcc"):
+        extension_api.load(name="qqq")
+    with pytest.raises(RuntimeError, match="ROCm"):
+        extension_api.load(name="marlin_fp16")
+
+
 def test_auto_on_rocm_never_selects_a_cuda_only_backend(monkeypatch):
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.utils.importer import get_auto_backend_kernel_mapping

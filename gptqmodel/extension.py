@@ -39,6 +39,21 @@ def _resolve_extension_factory(module_name: str, attr_name: str) -> TorchOpsJitE
     return _resolve_attr(module_name, attr_name)()
 
 
+def _host_is_rocm() -> bool:
+    """Return whether the process runs on an AMD ROCm host."""
+
+    try:
+        return bool(_resolve_attr("gptqmodel.utils.rocm", "IS_ROCM"))
+    except Exception:
+        return False
+
+
+def _native_cuda_extension_supported() -> bool:
+    """CUDA-only JIT extensions cannot be built by hipcc."""
+
+    return not _host_is_rocm()
+
+
 _EXTENSION_SPECS = (
     _ExtensionSpec(
         name="pack_block_cpu",
@@ -63,11 +78,19 @@ _EXTENSION_SPECS = (
         name="awq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.awq", "AWQ_EXTENSION_ROCM_UNSUPPORTED"
+        ),
     ),
     _ExtensionSpec(
         name="qqq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qqq", "_QQQ_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.qqq", "QQQ_EXTENSION_ROCM_UNSUPPORTED"
+        ),
     ),
     _ExtensionSpec(
         name="vptq",
@@ -106,11 +129,19 @@ _EXTENSION_SPECS = (
         name="marlin_fp16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_FP16_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.marlin", "_marlin_build_environment_error"
+        )(),
     ),
     _ExtensionSpec(
         name="marlin_bf16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
+        supported=_native_cuda_extension_supported,
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.marlin", "_marlin_build_environment_error"
+        )(),
     ),
     _ExtensionSpec(
         name="swordfish",

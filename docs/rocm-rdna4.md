@@ -505,6 +505,14 @@ parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
   unaffected. Retuning the tile may recover it (see above), but is unmeasured.
 - **RDNA4 support is measured on gfx1201 only.** `gfx1200` / `gfx1250` share the
   same family launch table but have not been run on this hardware.
+- **Family-wide HIP builds compile.** A `PYTORCH_ROCM_ARCH` that lists
+  `gfx1200;gfx1201;gfx1250` builds every RDNA4 kernel. The NF12 fused decode
+  drops the `v_dot2_f32_bf16` packed dot on `gfx1250` (no `dot12-insts`) for an
+  exact BF16-to-FP32 FMA fallback; AllSpark's gfx12 WMMA path is not implemented
+  on `gfx1250`, so it compiles a trap stub and the host still rejects
+  `gfx1250` at load time. `extension.load("all")` skips the CUDA-only AWQ, QQQ,
+  Marlin, Machete, VPTQ, Swordfish, and ExLlamaV2 extensions on ROCm instead
+  of starting a doomed hipcc build.
 
 ## Verification commands
 

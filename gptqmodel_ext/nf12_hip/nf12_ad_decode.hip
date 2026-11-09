@@ -120,6 +120,32 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 //
 // Decoded super-atoms are still reused across every token in flight, so the
 // packed weight is read once per launch rather than once per token.
+
+// `v_dot2_f32_bf16` is gated on the `dot12-insts` target feature, which only
+// gfx1200/gfx1201 provide. gfx1250 has no such instruction, so the family-wide
+// build must not emit it there. The fallback is the same arithmetic with two
+// FP32 FMAs: BF16 operands widen exactly to FP32, so only the final add order
+// can differ (<= 1 ULP) from the packed-dot target.
+#if defined(NF12_HIP_FORCE_NO_BF16_DOT2)
+#define NF12_HIP_HAS_BF16_DOT2 0
+#elif defined(__gfx1200__) || defined(__gfx1201__)
+#define NF12_HIP_HAS_BF16_DOT2 1
+#else
+#define NF12_HIP_HAS_BF16_DOT2 0
+#endif
+
+__device__ __forceinline__ float bf16x2_dot(const __hip_bfloat162 a,
+                                            const __hip_bfloat162 b,
+                                            float acc) {
+#if NF12_HIP_HAS_BF16_DOT2
+  return __builtin_amdgcn_fdot2_f32_bf16(a, b, acc, false);
+#else
+  const float2 af = __bfloat1622float2(a);
+  const float2 bf = __bfloat1622float2(b);
+  return __builtin_fmaf(af.x, bf.x, __builtin_fmaf(af.y, bf.y, acc));
+#endif
+}
+
 template <WeightSource S, int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
@@ -200,25 +226,25 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
       // r[4*j + i] is R_i of atom j: row g uses i = 0 and 2, row g+8 uses
       // i = 1 and 3.
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c0, r[0], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c8, r[2], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c0, r[1], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c8, r[3], acc[mi][1], false);
+      acc[mi][0] = bf16x2_dot(c0, r[0], acc[mi][0]);
+      acc[mi][0] = bf16x2_dot(c8, r[2], acc[mi][0]);
+      acc[mi][1] = bf16x2_dot(c0, r[1], acc[mi][1]);
+      acc[mi][1] = bf16x2_dot(c8, r[3], acc[mi][1]);
 
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c16, r[4], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c24, r[6], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c16, r[5], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c24, r[7], acc[mi][1], false);
+      acc[mi][0] = bf16x2_dot(c16, r[4], acc[mi][0]);
+      acc[mi][0] = bf16x2_dot(c24, r[6], acc[mi][0]);
+      acc[mi][1] = bf16x2_dot(c16, r[5], acc[mi][1]);
+      acc[mi][1] = bf16x2_dot(c24, r[7], acc[mi][1]);
 
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c32, r[8], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c40, r[10], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c32, r[9], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c40, r[11], acc[mi][1], false);
+      acc[mi][0] = bf16x2_dot(c32, r[8], acc[mi][0]);
+      acc[mi][0] = bf16x2_dot(c40, r[10], acc[mi][0]);
+      acc[mi][1] = bf16x2_dot(c32, r[9], acc[mi][1]);
+      acc[mi][1] = bf16x2_dot(c40, r[11], acc[mi][1]);
 
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c48, r[12], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c56, r[14], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c48, r[13], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c56, r[15], acc[mi][1], false);
+      acc[mi][0] = bf16x2_dot(c48, r[12], acc[mi][0]);
+      acc[mi][0] = bf16x2_dot(c56, r[14], acc[mi][0]);
+      acc[mi][1] = bf16x2_dot(c48, r[13], acc[mi][1]);
+      acc[mi][1] = bf16x2_dot(c56, r[15], acc[mi][1]);
     }
   }
 

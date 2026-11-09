@@ -25,6 +25,7 @@ from pathlib import Path
 import torch
 
 from .cpp import TorchOpsJitExtension, default_jit_cuda_cflags, default_torch_ops_build_root
+from .env import env_flag
 
 
 _OPS_NAME = "gptqmodel_nf12_ad_hip_ops"
@@ -122,6 +123,11 @@ def _cuda_cflags() -> list[str]:
         "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
     ]
+    if env_flag("GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK"):
+        # gfx1250 has no `dot12-insts`, so the kernel takes the portable FMA
+        # path there. Force that path on gfx1200/gfx1201 to validate it against
+        # the same oracle without gfx1250 hardware.
+        flags.append("-DNF12_HIP_FORCE_NO_BF16_DOT2=1")
     rocm_root = _rocm_root()
     if rocm_root is not None:
         flags.append(f"--rocm-path={rocm_root}")

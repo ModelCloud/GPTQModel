@@ -37,11 +37,19 @@ namespace allspark_hip {
 // ---------------------------------------------------------------------------
 // Only the RDNA4 wave32 WMMA path is implemented. gfx1250 exposes a different
 // (wave32 but 16x16x32-capable) instruction set and is deliberately not wired
-// up yet.
+// up yet. It still has to compile so a family-wide `PYTORCH_ROCM_ARCH` build
+// succeeds: the kernel body is a trap stub there and the host refuses to
+// launch it (`allspark_hip_supported` accepts gfx1200/gfx1201 only).
 #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1200__) && \
-    !defined(__gfx1201__)
+    !defined(__gfx1201__) && !defined(__gfx1250__)
 #error \
-    "allspark_hip: only gfx1200/gfx1201 are implemented; refusing to emit an empty kernel"
+    "allspark_hip: only RDNA4 (gfx1200/gfx1201/gfx1250) targets are supported"
+#endif
+
+#if defined(__gfx1200__) || defined(__gfx1201__)
+#define ALLSPARK_HIP_HAS_WMMA_GFX12 1
+#else
+#define ALLSPARK_HIP_HAS_WMMA_GFX12 0
 #endif
 
 // Wavefront size. RDNA4 (gfx1200/1201/1250) is wave32 only.
@@ -203,11 +211,27 @@ __device__ __forceinline__ void cvt_8bx4_to_16bx4_bias128_bf16_scaled(
 // This differs from CUDA m16n8k16 and is why the repack below is re-derived
 // rather than copied.
 __device__ __forceinline__ v8f32 wmma_f16(v8f16 a, v8f16 b, v8f32 c) {
+#if ALLSPARK_HIP_HAS_WMMA_GFX12
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+#else
+  // gfx1250 has no wmma-128b-insts. The host never launches this path; trap
+  // rather than return a wrong result if a caller bypasses the arch gate.
+  (void)a;
+  (void)b;
+  __builtin_trap();
+  return c;
+#endif
 }
 
 __device__ __forceinline__ v8f32 wmma_bf16(v8bf16 a, v8bf16 b, v8f32 c) {
+#if ALLSPARK_HIP_HAS_WMMA_GFX12
   return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, c);
+#else
+  (void)a;
+  (void)b;
+  __builtin_trap();
+  return c;
+#endif
 }
 
 }  // namespace allspark_hip
