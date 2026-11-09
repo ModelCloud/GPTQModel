@@ -97,12 +97,10 @@ steps:
    `self.scales`, match the signature of
    `aten._weight_int4pack_mm_with_scales_and_zeros(x, qweight, group_size, scales, qzeros)`.
 
-For XPU execution, `_fused_op_forward` also permutes activations before the
-matmul:
-
-```
-x = x[:, ret_idx]
-```
+For XPU execution, `_fused_op_forward` applies the same activation permutation
+described in [Activation permutation and fused matmul](#activation-permutation-and-fused-matmul):
+it gathers with `ret_idx` only when the permutation is not the identity, and
+otherwise only forces contiguity.
 
 This applies the inverse of the group-wise reordering performed in step 3,
 ensuring that column `i` of `qweight` always multiplies the same logical input
@@ -184,21 +182,76 @@ qzeros (G × O, zeroed) ──► scales_and_zeros (G × O × 2)
 
 ## Activation permutation and fused matmul
 
-Both device paths rely on the same activation permutation:
+Both device paths share one activation-reorder guard. `ret_idx` is built once
+from `g_idx` so that unpacked rows can be restored to the calibration order, and
+`_fused_op_forward` applies it to the activation only when it is not the
+identity permutation:
 
-1. `ret_idx` is built once from `g_idx` so that unpacked rows can be restored to
-   the calibration order.
-2. Before calling any fused matmul, `_fused_op_forward` applies `x = x[:, ret_idx]`.
-3. The matmul then multiplies `x` with the packed `qweight`:
+```mermaid
+flowchart TD
+    A["TorchFusedLinear._fused_op_forward(x)"] --> B["_refresh_fused_op()"]
+    B --> C{"_ret_idx_is_identity()"}
+    C -- "identity" --> D{"x.is_contiguous()"}
+    D -- "yes" --> F["torch_fused_op(x)"]
+    D -- "no" --> E["x = x.contiguous()"]
+    E --> F
+    C -- "non-identity" --> G["x = x[:, _build_ret_idx().to(x.device)].contiguous()"]
+    G --> F
+    style G fill:#fff3e0,stroke:#ef6c00
+    style F fill:#e8f5e9,stroke:#2e7d32
+```
 
-   * XPU: `aten._weight_int4pack_mm_with_scales_and_zeros`
-     consumes `qweight[int32][O, I/8]`, `scales[G, O]`, and `qzeros[G, O]`.
-   * CPU: `aten._weight_int4pack_mm_for_cpu`
-     consumes `qweight[uint8][O, I/2]` and `scales_and_zeros[G, O, 2]`.
+`desc_act=False` checkpoints have `g_idx == arange(I) // group_size`, so the
+permutation is the identity and the gather is a no-op copy that is skipped
+entirely. `TorchAtenLinear` and `TorchCpuAvx512Linear` already used this guard;
+`TorchFusedLinear` now reuses it instead of gathering unconditionally.
+
+The matmul then multiplies the (possibly reordered) `x` with the packed
+`qweight`:
+
+* XPU: `aten._weight_int4pack_mm_with_scales_and_zeros`
+  consumes `qweight[int32][O, I/8]`, `scales[G, O]`, and `qzeros[G, O]`.
+* CPU: `aten._weight_int4pack_mm_for_cpu`
+  consumes `qweight[uint8][O, I/2]` and `scales_and_zeros[G, O, 2]`.
 
 Because the same `ret_idx` is used for both the unpacked weight (during packing)
 and the activation tensor (during inference), every nibble in the packed matrix
 aligns with the correct logical input column.
+
+### Identity-verdict cache and invalidation
+
+`_ret_idx_is_identity()` lives on `PackableQuantLinear`
+(`gptqmodel/nn_modules/qlinear/__init__.py`) so every kernel that reorders
+activations shares one implementation. The verdict is cached in
+`_ret_idx_identity` and validated against `_ret_idx_key`, which holds
+`tensor_cache_key(g_idx)`; repeated forwards therefore stay O(1).
+
+```mermaid
+flowchart TD
+    A["_ret_idx_is_identity()"] --> B{"_ret_idx_identity is set<br/>and _ret_idx_key == tensor_cache_key(g_idx)"}
+    B -- "hit" --> C["return cached verdict"]
+    B -- "miss" --> D["ret_idx = _build_ret_idx()"]
+    D --> E["identity = tensor_equal(ret_idx, arange(numel))"]
+    E --> F["_ret_idx_identity = identity"]
+    F --> G["return identity"]
+    H["_build_ret_idx() rebuild path"] --> I["_ret_idx_identity = None<br/>_ret_idx_key = new key"]
+    J["clear_weight_cache()"] --> K["ret_idx = None<br/>_ret_idx_key = None<br/>_ret_idx_identity = None"]
+    style I fill:#e8f5e9,stroke:#2e7d32
+    style K fill:#e8f5e9,stroke:#2e7d32
+    style C fill:#e3f2fd,stroke:#1565c0
+```
+
+A stale `True` paired with a new `_ret_idx_key` would skip a required gather and
+silently return wrong values, so every path that changes the permutation must
+drop the verdict:
+
+| Path | Effect on `_ret_idx_identity` |
+| --- | --- |
+| `_build_ret_idx()` rebuild (key miss) | cleared, recomputed on the next check |
+| `_build_ret_idx()` cache hit | untouched, the key still matches |
+| `_build_ret_idx()` called explicitly by a caller | cleared by the rebuild path |
+| `g_idx` replaced or mutated without an explicit rebuild | key mismatch forces a recompute |
+| `clear_weight_cache()` (state-dict load, `_apply` device/dtype move) | cleared with `ret_idx` and `_ret_idx_key` |
 
 ## Comparing XPU vs CPU transformations
 
@@ -216,7 +269,7 @@ debugging.
 | Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = zero` (`float`)      |
 | Fused kernel call          | `_weight_int4pack_mm_with_scales_and_zeros(x, qW, gsz, s, z)`  | `_weight_int4pack_mm_for_cpu(x, qW, gsz, scales_and_zeros)`       |
 | Alignment requirements     | Determined by manual pack loop (only needs `I % 8 == 0`)       | Kernel enforces `I % 16 == 0` and `O % 16 == 0`                   |
-| Activation permutation     | `x = x[:, ret_idx]` prior to matmul (same code path)           | Same permutation reuse                                            |
+| Activation permutation     | gather only when `_ret_idx_is_identity()` is false; otherwise `x.contiguous()` when needed | Same guard and cache (`PackableQuantLinear._ret_idx_is_identity`) |
 
 Visually, you can think of the difference as *row-major lane packing* (XPU)
 versus *byte-tiling* (CPU):
