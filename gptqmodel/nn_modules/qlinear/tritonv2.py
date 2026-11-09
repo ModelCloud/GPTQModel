@@ -196,10 +196,8 @@ class TritonV2Linear(TorchLinear):
             self.bits,
             self.pack_dtype_bits,
             self.maxq,
+            self.bias,
         ).reshape(out_shape)
-
-        if self.bias is not None:
-            out.add_(self.bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

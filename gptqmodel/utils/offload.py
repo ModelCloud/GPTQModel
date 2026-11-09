@@ -62,10 +62,10 @@ def get_submodule(root: torch.nn.Module, path: str) -> torch.nn.Module:
 
 def is_meta_module(m: nn.Module) -> bool:
     for p in m.parameters(recurse=True):
-        if getattr(p, "is_meta", False) or (hasattr(p, "device") and p.device is META):
+        if p.is_meta:
             return True
     for b in m.buffers(recurse=True):
-        if hasattr(b, "device") and b.device is META:
+        if b.is_meta:
             return True
     return False
 
@@ -133,18 +133,22 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Op
     return index
 
 
-_SAFETENSORS_DTYPE = {
-    torch.bool: "BOOL",
-    torch.uint8: "U8",
-    torch.int8: "I8",
-    torch.int16: "I16",
-    torch.int32: "I32",
-    torch.int64: "I64",
-    torch.float16: "F16",
-    torch.bfloat16: "BF16",
-    torch.float32: "F32",
-    torch.float64: "F64",
-}
+def _safetensors_dtype(dtype: torch.dtype) -> str:
+    """Resolve the safetensors header spelling through the canonical export map.
+
+    Do not duplicate the table here: the float8 spellings are non-obvious
+    (``F8_E4M3``, not ``F8_E4M3FN``) and a second copy silently drifts. The
+    import is local because ``utils/model.py`` imports this module lazily.
+    """
+
+    from .model import _torch_dtype_to_safetensors
+
+    try:
+        return _torch_dtype_to_safetensors(dtype)
+    except NotImplementedError as error:
+        raise ValueError(
+            f"safetensors reference offload cannot serialize dtype {dtype}"
+        ) from error
 
 
 def offload_to_safetensors_reference(
@@ -161,6 +165,10 @@ def offload_to_safetensors_reference(
     small Accelerate-compatible index, and replace the module tensors with META
     storage. The streaming model writer can then copy the original tensor ranges
     directly instead of materializing a second disk copy.
+
+    Note: no Accelerate offload hooks are attached, so ``undo_offload_to_disk``
+    will not materialize the module again. This path is intended for export via
+    ``get_state_dict_for_save``; the caller keeps ownership of the source file.
     """
 
     if module is None or model is None:
@@ -174,9 +182,38 @@ def offload_to_safetensors_reference(
         raise ValueError("safetensors reference module name differs from the model")
     else:
         full_name = module_name
+
+    module_offload_dir = os.path.join(disk_path, full_name)
+    source_real = os.path.realpath(source)
+    offload_real = os.path.realpath(module_offload_dir)
+    try:
+        source_in_offload_dir = os.path.commonpath((source_real, offload_real)) == offload_real
+    except ValueError:  # Different drives on Windows cannot overlap.
+        source_in_offload_dir = False
+    if source_in_offload_dir:
+        raise ValueError(
+            "safetensors reference source is inside the target offload directory, "
+            "which is cleared before the index is written"
+        )
+
     state = module.state_dict()
     if not state:
         raise ValueError("safetensors reference module has no persistent tensors")
+
+    # ``to_empty`` replaces tensor parameters and buffers, but only persistent
+    # ones are recorded in state_dict()/the index. Optional buffers set to None
+    # stay None; reject only live non-persistent tensors that would be lost.
+    non_persistent_buffers = sorted(
+        f"{prefix}.{buffer_name}" if prefix else buffer_name
+        for prefix, submodule in module.named_modules()
+        for buffer_name in submodule._non_persistent_buffers_set
+        if submodule._buffers.get(buffer_name) is not None
+    )
+    if non_persistent_buffers:
+        raise ValueError(
+            "safetensors reference offload cannot preserve non-persistent buffers "
+            f"(e.g. `{non_persistent_buffers[0]}`)"
+        )
 
     source_size = os.path.getsize(source)
     with open(source, "rb") as handle:
@@ -203,11 +240,10 @@ def offload_to_safetensors_reference(
     ranges: list[tuple[int, int]] = []
     for key, tensor in state.items():
         entry = tensor_header.get(key)
-        expected_dtype = _SAFETENSORS_DTYPE.get(tensor.dtype)
+        expected_dtype = _safetensors_dtype(tensor.dtype)
         offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
         if (
             not isinstance(entry, dict)
-            or expected_dtype is None
             or entry.get("dtype") != expected_dtype
             or entry.get("shape") != list(tensor.shape)
             or not isinstance(offsets, list)
@@ -258,7 +294,6 @@ def offload_to_safetensors_reference(
     ):
         raise ValueError("safetensors reference tensor ranges are not contiguous")
 
-    module_offload_dir = os.path.join(disk_path, full_name)
     _prepare_offload_directory(module_offload_dir)
     index_path = os.path.join(module_offload_dir, "index.json")
     temporary = f"{index_path}.{os.getpid()}.tmp"
@@ -267,14 +302,16 @@ def offload_to_safetensors_reference(
             json.dump(index, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
-            os.fchmod(handle.fileno(), 0o644)
             os.fsync(handle.fileno())
         os.replace(temporary, index_path)
-        directory = os.open(module_offload_dir, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == "posix":
+            directory = os.open(
+                module_offload_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         try:
             os.unlink(temporary)

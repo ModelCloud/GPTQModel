@@ -70,6 +70,7 @@ def _install_fake_extensions(monkeypatch):
     # host support. Pin the host family so the ROCm-gated ExLlamaV2 entries stay
     # resolvable on a HIP host and the assertions stay deterministic.
     monkeypatch.setattr(exllamav2_utils, "IS_ROCM", False)
+    monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: False)
 
     fakes = {
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
@@ -152,6 +153,17 @@ def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
 
     assert "machete" not in result
     assert fakes["machete"].load_calls == 0
+
+
+def test_load_all_skips_cuda_only_extensions_on_rocm(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    monkeypatch.setattr(extension_api, "_host_is_rocm", lambda: True)
+
+    result = extension_api.load()
+
+    for name in ("awq", "qqq", "marlin_fp16", "marlin_bf16"):
+        assert name not in result
+        assert fakes[name].load_calls == 0
 
 
 def test_load_all_skips_vptq_without_an_nvidia_cuda_device(monkeypatch):

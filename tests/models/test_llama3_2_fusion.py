@@ -15,7 +15,12 @@ from gptqmodel import GPTQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
-from tests.benchmark_llama_fusion import storage_footprint
+from tests.benchmark_llama_fusion import (
+    assert_fusion_drift_within_ulp,
+    assert_greedy_divergence_is_tie_break,
+    logit_ulp_envelope,
+    storage_footprint,
+)
 
 
 @pytest.mark.parametrize("method,path,backend", [
@@ -52,24 +57,38 @@ def test_llama32_1b_fusion_save_reload(method, path, backend, tmp_path):
     with torch.inference_mode():
         baseline, separate_seconds = measure(model)
         separate_tokens = model.model.generate(**inputs, max_new_tokens=12, do_sample=False)
+        # Teacher-force both modes on the same token sequence so that any
+        # disagreement can be judged against the margin the unfused model
+        # itself reported at that position.
+        teacher_unfused = model.model(separate_tokens, use_cache=False).logits
     original_storage = storage_footprint(model)
     plan = model.fuse()
-    group_count = 32
+    # One qkv and one gate/up group per decoder layer: derive it, never pin a
+    # literal, so the test also serves checkpoints other than Llama 3.2 1B.
+    layers = model.model.config.num_hidden_layers
+    group_count = 2 * layers
     assert len(plan.groups) == group_count
     with torch.inference_mode():
         model.model(**inputs)  # Allocate packed fusion operands before timing.
         fused, fused_seconds = measure(model)
         fused_tokens = model.model.generate(**inputs, max_new_tokens=12, do_sample=False)
+        teacher_fused = model.model(separate_tokens, use_cache=False).logits
     # Composed model drift accumulates per-projection rounding. Kernel-level
     # elementwise bounds remain in the independent native projection tests.
-    assert torch.equal(fused.argmax(-1), baseline.argmax(-1))
-    assert torch.equal(fused_tokens, separate_tokens)
+    # Fusion widens N, so Marlin may pick a different reduction tree: require the
+    # drift to stay inside a dtype-derived ULP envelope and require greedy output
+    # to diverge only at near-ties, instead of demanding an identical reduction.
+    logit_drift = assert_fusion_drift_within_ulp(fused, baseline)
+    greedy = assert_greedy_divergence_is_tie_break(teacher_fused, teacher_unfused,
+                                                   label=f"{method} greedy decode")
+    assert logit_drift["top1_agreement"] == 1.0
     assert plan.to_dict()["fused_calls"] > 0
     assert set(model.model.state_dict()) == keys
     fused_storage = storage_footprint(model, plan)
     extra_packed_bytes = fused_storage["packed_operand_storage_bytes"] - original_storage["packed_operand_storage_bytes"]
     assert extra_packed_bytes == 0
     print({"method": method, "max_logit_error": (fused - baseline).abs().max().item(),
+           "ulp_envelope": logit_ulp_envelope(baseline), "greedy_tie_breaks": greedy,
            "separate_ms": separate_seconds * 1000, "fused_ms": fused_seconds * 1000,
            "extra_packed_bytes": extra_packed_bytes, "storage": fused_storage,
            "selected_kernel": kernel, "generated_ids": fused_tokens.tolist()})
