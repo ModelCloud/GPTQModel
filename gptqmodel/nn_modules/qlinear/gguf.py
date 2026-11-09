@@ -1681,23 +1681,32 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self._autotune_result = bool(self._gguf_fused_autotune_cache[key])
         return self._autotune_result
 
+    def _use_fp32_gguf_weight(
+        self,
+        activation_dtype: torch.dtype,
+        *,
+        blocks: torch.Tensor | None = None,
+        device: torch.device | None = None,
+    ) -> bool:
+        if activation_dtype == torch.bfloat16:
+            return True
+        if activation_dtype != torch.float16 or self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+            return False
+        if self.gguf_tensor_qtype in ("Q2_0", "Q4_0", "Q8_0", "Q8_K", "Q4_K", "Q5_K", "Q6_K"):
+            return self._k_scale_overflows(blocks, activation_dtype, device=device)
+        # Other GGUF formats have more complex scale/minimum or codebook math.
+        # Reconstruct them wide rather than rounding an out-of-range weight.
+        return True
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if x_flat.dtype == torch.bfloat16 or (
-            x_flat.dtype == torch.float16 and self.gguf_tensor_qtype in ("Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K")
-        ):
-            # BF16 weight rounding can amplify cancellation for any GGUF
-            # format. FP16 needs a wide path for out-of-range decoded terms.
-            use_fp32 = x_flat.dtype == torch.bfloat16
-            if not use_fp32:
-                use_fp32 = self._k_scale_overflows(None, x_flat.dtype, device=x_flat.device)
-            if use_fp32:
-                # Keep the temporary dense fallback wide until the output
-                # (including bias) is rounded once.
-                weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
-                bias_wide = None if bias is None else bias.to(device=x_flat.device, dtype=torch.float32)
-                return matmul_fp32_reduce(x_flat.float(), weight, bias=bias_wide).to(x_flat.dtype)
+        if self._use_fp32_gguf_weight(x_flat.dtype, device=x_flat.device):
+            # Keep the temporary dense fallback wide until the output
+            # (including bias) is rounded once.
+            weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+            bias_wide = None if bias is None else bias.to(device=x_flat.device, dtype=torch.float32)
+            return matmul_fp32_reduce(x_flat.float(), weight, bias=bias_wide).to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
@@ -1759,9 +1768,21 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         code magnitudes are bounded by 8 and 128 respectively, so inspecting
         the packed block scales detects out-of-range decoded weights without
         dequantizing a full layer.
+
+        Q2_0 uses a signed code in [-1, 2] with an FP16 scale, while Q8_K
+        uses a signed int8 code with an FP32 scale. Their bounds are 2 and
+        128 times the absolute block scale.
         """
         if not target_dtype.is_floating_point:
             return True
+        if self.gguf_tensor_qtype in ("Q2_0", "Q8_K"):
+            if self.gguf_tensor_qtype == "Q2_0":
+                d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
+                code_max = 2
+            else:
+                d = blocks[..., :4].contiguous().view(torch.float32).abs()
+                code_max = 128
+            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
         if self.gguf_tensor_qtype in ("Q4_0", "Q8_0"):
             d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
             # Signed codes reach -8 in Q4_0 and -128 in Q8_0.
@@ -1788,18 +1809,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         target_dtype = x_flat.dtype
         is_cpu = x_flat.device.type == "cpu"
         accum_dtype = torch.float32
-        # BF16 operands round the reconstructed weights before the GEMM and
-        # violate the existing 2e-3 fusion contract. Keep that path wide;
-        # FP16 retains exact source values and can use the tensor-core path.
+        # BF16 decoded weights can lose cancellation accuracy; FP16 decoded
+        # weights can overflow before a finite dot product is accumulated.
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
-        # These formats need wide reconstruction when a decoded term can leave the
-        # target range; otherwise FP16 reconstruction keeps the fast path.
-        wide_weight = (
-            self.gguf_tensor_qtype in ("Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K")
-            and not (is_cpu or target_dtype == torch.bfloat16)
-            and self._k_scale_overflows(blocks, target_dtype)
-        )
-        use_fp32_operands = is_cpu or target_dtype == torch.bfloat16 or wide_weight
+        # FP16 uses a packed bound where available. Other quantized formats
+        # reconstruct wide because their FP16 range is not established here.
+        use_fp32_operands = is_cpu or self._use_fp32_gguf_weight(target_dtype, blocks=blocks)
         weight_dtype = accum_dtype if use_fp32_operands else target_dtype
         chunk_blocks = self._fused_chunk_blocks(num_blocks, accum_dtype)
 
