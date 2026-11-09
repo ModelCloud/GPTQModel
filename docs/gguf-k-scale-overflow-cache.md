@@ -218,3 +218,6 @@ The old wide outputs were infinity; the new wide outputs were finite FP16
 Ordinary peak allocator deltas were 35,655,680 bytes for dense and 35,659,776
 bytes for chunked. The extra wide FP32 weight or chunk is temporary and is
 not retained after inference.
+
+The Q4_0/Q8_0 range guard was added in
+[PR #3672](https://github.com/ModelCloud/GPTQModel/pull/3672).
