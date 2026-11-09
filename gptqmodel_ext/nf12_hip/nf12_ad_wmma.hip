@@ -154,10 +154,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   if constexpr (kRouted) {
     int64_t rem = int64_t(blockIdx.y);
     int64_t start = 0, rows = 0;
+    int64_t lo = moe_next_offset(route.expert_offsets[0], 0, route.max_assignments);
     int32_t e = 0;
     for (; e < route.num_experts; ++e) {
-      const int64_t lo = min(route.expert_offsets[e], route.max_assignments);
-      const int64_t hi = min(route.expert_offsets[e + 1], route.max_assignments);
+      const int64_t hi = moe_next_offset(route.expert_offsets[e + 1], lo, route.max_assignments);
       const int64_t cnt = hi > lo ? hi - lo : 0;
       const int64_t tiles = (cnt + 15) / 16;
       if (rem < tiles) {
@@ -166,6 +166,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         break;
       }
       rem -= tiles;
+      lo = hi;
     }
     if (e == route.num_experts) return;
     m0 = rem * 16;

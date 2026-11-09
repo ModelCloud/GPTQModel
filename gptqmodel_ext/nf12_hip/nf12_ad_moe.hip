@@ -29,6 +29,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include <cstdint>
+#include <limits>
 
 namespace nf12_hip {
 namespace {
@@ -268,8 +269,9 @@ __global__ void moe_decode_kernel(const uint4* __restrict__ packed_in,
   const int32_t e = blockIdx.y;
   if (e >= num_experts) return;
   if (expert_offsets != nullptr) {
-    const int64_t lo = min(expert_offsets[e], max_assignments);
-    const int64_t hi = min(expert_offsets[e + 1], max_assignments);
+    int64_t lo = 0;
+    for (int32_t i = 0; i <= e; ++i) lo = moe_next_offset(expert_offsets[i], lo, max_assignments);
+    const int64_t hi = moe_next_offset(expert_offsets[e + 1], lo, max_assignments);
     if (lo >= hi) return;  // inactive expert: leave its output untouched
   }
   const int lane = threadIdx.x % kWarpSize;
@@ -321,11 +323,9 @@ __global__ void moe_grouped_operands_kernel(const __hip_bfloat16* __restrict__ x
                                                 group_ends) {
   extern __shared__ int32_t s_ends[];
   if (threadIdx.x == 0) {
-    int64_t prev = 0;
+    int64_t prev = moe_next_offset(expert_offsets[0], 0, max_assignments);
     for (int32_t e = 0; e < num_experts; ++e) {
-      int64_t hi = expert_offsets[e + 1];
-      if (hi > max_assignments) hi = max_assignments;
-      if (hi < prev) hi = prev;
+      const int64_t hi = moe_next_offset(expert_offsets[e + 1], prev, max_assignments);
       s_ends[e] = static_cast<int32_t>(hi);
       prev = hi;
     }
@@ -402,22 +402,21 @@ hipError_t nf12_ad_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_
   }
   if (num_tokens > 0x7fffffffLL / topk) return hipErrorInvalidValue;
   const int64_t num_assignments = num_tokens * topk;
-  const AlignPlan pl = align_plan(num_assignments, num_experts);
-  const size_t needed = pl.bytes;
-  if (workspace_bytes < needed || (needed > 0 && workspace == nullptr)) {
-    return hipErrorInvalidValue;
-  }
   if (num_assignments == 0) {
     // No ids: still publish zero offsets.
     if (expert_offsets_out != nullptr) {
       const size_t bytes = static_cast<size_t>(num_experts + 1) * sizeof(int64_t);
-      if (hipMemsetAsync(expert_offsets_out, 0, bytes, stream) != hipSuccess) {
-        return hipGetLastError();
-      }
+      return hipMemsetAsync(expert_offsets_out, 0, bytes, stream);
     }
     return hipSuccess;
   }
   if (topk_ids == nullptr || sorted_out == nullptr || expert_offsets_out == nullptr) {
+    return hipErrorInvalidValue;
+  }
+
+  const AlignPlan pl = align_plan(num_assignments, num_experts);
+  const size_t needed = pl.bytes;
+  if (workspace_bytes < needed || (needed > 0 && workspace == nullptr)) {
     return hipErrorInvalidValue;
   }
 
@@ -492,7 +491,7 @@ hipError_t nf12_ad_moe_decode(const uint8_t* packed, const uint4* escapes,
   }
   if (rows == 0) return hipSuccess;
   const int64_t blocks = rows / kSuperAtomRows;
-  if (blocks > 0x7fffLL) return hipErrorInvalidValue;
+  if (blocks > std::numeric_limits<int32_t>::max()) return hipErrorInvalidValue;
   if (num_experts > 0xffff) return hipErrorNotSupported;
   const dim3 grid(static_cast<unsigned>(blocks), static_cast<unsigned>(num_experts), 1);
   moe_decode_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(

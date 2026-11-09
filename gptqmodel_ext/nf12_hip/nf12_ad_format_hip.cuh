@@ -57,6 +57,12 @@ inline constexpr int kSuperAtomVecs = kSuperAtomBytes / 16;  // 96 uint4
 inline constexpr int kPlaneVecs = kPlaneBytes / 16;          // 32 uint4
 inline constexpr int kSuperAtomVecsBf16t = 2048 / 16;        // 128 uint4
 
+// CUDA's MoE schedule clamps offsets and takes their running maximum.
+__device__ __forceinline__ int64_t moe_next_offset(int64_t offset, int64_t previous,
+                                                   int64_t max_assignments) {
+  return max(previous, min(offset, max_assignments));
+}
+
 // Interleave warps along K so their row-major stores form contiguous segments.
 template <int kPerWarp>
 __device__ __forceinline__ int64_t warp_super_atom(int i) {

@@ -57,7 +57,7 @@ dimensions on every return.
 ```mermaid
 flowchart TD
     A["linear_dispatch receives x of any shape"] --> B["k = x.size(-1), m = x.numel() / k"]
-    B --> C["x2 = x.contiguous().reshape({m, k})"]
+    B --> C["x.contiguous().reshape to m by k"]
     C --> D["out_sizes = x.sizes(); out_sizes.back() = n"]
     D --> E{"m < 16 and fused small-M supported?"}
     E -- Yes --> F["nf12_ad_linear_fused on x2"]
@@ -81,8 +81,8 @@ flowchart TD
 
 Failure path: a shape the kernels cannot honour (`n % 16 != 0`, `k % 64 != 0`,
 `packed` not contiguous) still raises `TORCH_CHECK` before any launch, so the
-normalization never converts a rejection into a wrong answer. The raw C ABI
-keeps rejecting a padded `ldx` explicitly; only the torch op normalizes.
+normalization never converts a rejection into a wrong answer. The raw HIP dense
+entry points consume contiguous rows and expose no leading-dimension parameter.
 
 `tests/test_nf12_ad_codec.py` asserts the 3-D shape round-trip, the padded
 row-slice result against `F.linear`, and the `NF12ADLinear` module shape on a
@@ -116,3 +116,118 @@ flowchart TD
 | Ordinal below 64 | Cached architecture answer | Same cached answer |
 | Ordinal 64 or above | Returned false before probing, despite the cache comment promising a fresh probe | Calls `wmma_arch_ok(device)` without indexing the bounded cache |
 | Invalid device query | Returned false | Returns false |
+
+## Routing bounds and empty alignment
+
+The vendored HIP MoE consumers follow CUDA's clamped running-maximum offset
+schedule. Starting at zero, `moe_next_offset` bounds each endpoint by the
+assignment count and the previous endpoint. Negative, decreasing, and oversized
+offsets therefore cannot select guard rows or resurrect an empty expert.
+
+```mermaid
+flowchart TD
+    A["wmma_kernel, moe_decode_kernel, moe_grouped_operands_kernel"] --> B["moe_next_offset starting with previous = 0"]
+    B --> C["next = max(previous, min(offset, max_assignments))"]
+    C --> D{"Expert interval empty?"}
+    D -- Yes --> E["WMMA and decode skip expert; grouped operands publish group end"]
+    D -- No --> F["Consume bounded interval; advance previous to next"]
+    G["nf12_ad_moe_align"] --> H{"Valid dimensions and assignment count?"}
+    H -- No --> X["hipErrorInvalidValue"]
+    H -- Yes --> I{"Zero assignments?"}
+    I -- Yes --> J["hipMemsetAsync offsets when supplied; return its status"]
+    I -- No --> K{"Required pointers and workspace valid?"}
+    K -- No --> X
+    K -- Yes --> L["Count, scan, scatter on caller stream"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+`nf12_ad_moe_decode` also admits grid-X counts up to `INT32_MAX`; grid Y retains
+the 65535-expert limit. A 524288-by-64 expert needs 32768 X blocks and a 64 MiB
+BF16 output, so the former 32767-block limit rejected a small valid decode.
+
+| Mechanism | Before at `9b0ff2a52` | Current source |
+| --- | --- | --- |
+| Routed expert intervals | Upper-only clamps allowed a negative row and decreasing intervals (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:159`; `gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:268`) | Shared running maximum (`gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh:61`), consumed by WMMA, decode, and grouped operands |
+| Grouped operands | Started at zero regardless of the first offset (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:324`) | Starts from normalized offset zero (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:326`) |
+| Empty routing | Workspace rejection preceded empty handling (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:407`) | Zero assignments publish zero offsets before scratch checks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:405`) |
+| Decode launch | Rejected more than 32767 X blocks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:493`) | Uses the signed 32-bit X limit (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:494`) |
+
+## Exact-byte encoder scheduling
+
+Analysis assigns four super-atoms to each warp, and count/write use contiguous
+two-super-atom units. Smaller units expose more parallel work while preserving
+the format's flat atom/lane escape order. The CPU Torch codec remains an
+independent byte oracle, including every BF16 bit pattern.
+
+```mermaid
+flowchart TD
+    A["nf12_ad_analyze: analyze_kernel, four super-atoms per warp"] --> B["Select exponent base and escape allocation size"]
+    B --> C["nf12_ad_encode validates geometry, pointers, workspace"]
+    C -- Invalid --> X["hipErrorInvalidValue"]
+    C -- Valid --> D["count_kernel: two super-atoms per unit"]
+    D --> E["scan_kernel: prefix sums in tiles of 2048 units"]
+    E --> F["Copy total to host; synchronize caller stream"]
+    F --> G{"Escape capacity and 32-bit indices fit?"}
+    G -- No --> X
+    G -- Yes --> H["write_kernel preserves flat atom and lane order"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+The former schedule used 16 super-atoms per analysis warp and eight per
+count/write unit (`9b0ff2a52:gptqmodel_ext/nf12_hip/nf12_ad_encode.hip:55`).
+The current constants are at `gptqmodel_ext/nf12_hip/nf12_ad_encode.hip:59`;
+capacity validation still precedes writing at line 348. Additional persistent
+weight/cache storage is **zero bytes**. The encoder's transient prefix workspace
+for a 4096-by-4096 weight grows from 16400 to 65552 bytes; the histogram minimum
+is unchanged. No dense inference weight cache is introduced, and existing
+module tests check packed-only state after repeated forwards and invalidation
+after mutation/loading. Decode output in the regression is caller-owned export
+storage, not retained inference scratch.
+
+### Validation evidence
+
+Validation uses Radeon AI PRO R9700 (gfx1201), physical HIP2 only, ROCm SDK 10.1,
+HIP 7.16.26385, Torch `2.16.0.dev20261025+rocm10.1`, and Python with the GIL
+disabled. The regression waits on the captured producer stream, with both
+default and nondefault producers, before launching on a separate consumer.
+
+Four isolated baseline probes fail at `9b0ff2a52`: `[-1, 1]` overwrites a guard
+row; empty routing returns invalid value; `[3, 1, 2, 4]` activates an empty
+expert in decode; and 32768 decode blocks return invalid value. The updated
+tests require exact BF16 equality for analytic integral routing results and
+the all-ones large decode. Packed bytes, escape payloads, exponent base, and
+decoded bits match the independent Torch codec exactly for all 65536 BF16 bit
+patterns and random bit matrices with 3, 4095, and 4097 super-atoms. These sizes
+cover partial units and the 2048-unit scan boundary. No FP64 oracle or relaxed
+tolerance substitutes for these exact checks.
+
+Run the native regressions and broader codec, module, loader, and validation
+units from the repository root:
+
+```bash
+env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=2 PYTHON_GIL=0 \
+  OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MAX_JOBS=2 \
+  GPTQMODEL_NF12_AD_HIP_BUILD_ROOT=/tmp/gptqmodel-review-round2-native \
+  /opt/venvs/rocm101t/bin/python -m pytest \
+  tests/test_nf12_hip_review_contracts.py tests/test_nf12_ad_codec.py \
+  tests/test_nf12_ad_runtime_load.py tests/test_validate_nf12_ad.py -q -rs
+```
+
+The multi-device test requires two visible AMD devices and is skipped under
+this isolation. CUDA, other AMD architectures, and full-model inference were
+not revalidated by this sync.
+
+An isolated encode sample uses device-resident random BF16 weights, three
+warmups, and the median of 15 host wall-time measurements, synchronized before
+and after each call. It includes Python dispatch and allocation, excludes JIT,
+and compares the baseline with these kernels on HIP2:
+
+| Weight shape | Before, microseconds | After, microseconds |
+| --- | ---: | ---: |
+| 256 by 256 | 147.23 | 130.34 |
+| 4096 by 4096 | 311.44 | 231.16 |
+
+These two samples support the scheduling change on this device; they do not
+establish performance across models or architectures.

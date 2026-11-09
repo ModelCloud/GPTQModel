@@ -52,9 +52,12 @@ using nf12_hip::kWarpsPerBlock;
 constexpr int kHistBins = 128;  // B in [0, 120], padded
 constexpr int kNumHists = 3;    // interval starts, interval ends, sentinel collisions
 constexpr size_t kAnalyzeWorkspaceBytes = sizeof(unsigned long long) * kNumHists * kHistBins;
-constexpr int kAnalyzeSuperAtomsPerWarp = 16;
-// Fixed units make escape-index order independent of the launch grid.
-constexpr int kUnitSuperAtoms = 8;
+// Short batches expose more waves for router weights and cache-resident
+// matrices. Two-super-atom units keep neighboring warps close along K while
+// limiting the serial scan's cost on large weights. Units remain contiguous
+// in flat super-atom order, so changing their size cannot reorder escapes.
+constexpr int kAnalyzeSuperAtomsPerWarp = 4;
+constexpr int kUnitSuperAtoms = 2;
 constexpr int kScanThreads = 256;
 constexpr int kScanItemsPerThread = 8;
 constexpr int64_t kMaxGridX = 0x7fffffffLL;
@@ -68,7 +71,7 @@ int64_t num_units(int64_t num_sa) { return (num_sa + kUnitSuperAtoms - 1) / kUni
 // analyze: histogram the feasible base interval per group
 // ---------------------------------------------------------------------------
 // Per-warp histograms limit same-address atomic contention. Shared bins fit
-// 16*8*128 groups per block. Global counts need 64 bits.
+// kAnalyzeSuperAtomsPerWarp * 128 groups per warp. Global counts need 64 bits.
 __global__ void __launch_bounds__(kThreadsPerBlock)
     analyze_kernel(const __hip_bfloat16* __restrict__ w, int64_t ldw, int64_t num_sa,
                    int64_t k_blocks, unsigned long long* __restrict__ hist) {
