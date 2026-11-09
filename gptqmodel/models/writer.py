@@ -613,6 +613,14 @@ def _load_tensors_by_selectors(
     suffixes = suffixes or []
     tensor_name_set = set(tensor_names or [])
     source_file_names = _resolve_out_of_model_source_files(model_local_path, source_files)
+
+    def selected(name: str) -> bool:
+        return (
+            name in tensor_name_set
+            or any(name.startswith(prefix) for prefix in prefixes)
+            or any(name.endswith(suffix) for suffix in suffixes)
+        )
+
     for source_file_name in source_file_names:
         source_tensor_path = os.path.join(model_local_path, source_file_name)
         if not os.path.exists(source_tensor_path):
@@ -620,11 +628,7 @@ def _load_tensors_by_selectors(
         try:
             with safe_open(source_tensor_path, framework="pt", device="cpu") as f:
                 for tensor_name in f.keys():
-                    if (
-                        tensor_name in tensor_name_set
-                        or any(tensor_name.startswith(prefix) for prefix in prefixes)
-                        or any(tensor_name.endswith(suffix) for suffix in suffixes)
-                    ):
+                    if selected(tensor_name):
                         if tensor_name not in tensors:
                             tensors[tensor_name] = f.get_tensor(tensor_name)
         except Exception as exc:
@@ -635,11 +639,15 @@ def _load_tensors_by_selectors(
     # Prefixes absent from the index stay optional, but tensors the index declares
     # must not be silently dropped when their shard is missing or unreadable.
     weight_map = None if source_files else _read_safetensors_weight_map(model_local_path)
-    missing = sorted(name for name in weight_map or {} if name.startswith(tuple(prefixes)) and name not in tensors)
+    missing = sorted(
+        name
+        for name in weight_map or {}
+        if selected(name) and name not in tensors
+    )
     if missing:
         shards = sorted({weight_map[name] for name in missing})
         raise ValueError(
-            f"Model: {len(missing)} tensors with prefixes {prefixes} declared in the safetensors index of "
+            f"Model: {len(missing)} tensors declared in the safetensors index of "
             f"`{model_local_path}` are missing from or unreadable in {shards}, e.g. {missing[:3]}."
         )
     return tensors
