@@ -427,15 +427,15 @@ def test_generate_patch_keeps_single_token_decode_shape():
 
 
 @pytest.mark.parametrize(
-    "past_length,input_ids,mask_length,expected_ids,expected_positions",
+    "past_length,input_ids,mask_length,explicit_cache,expected_ids,expected_positions",
     [
-        (10, [17, 18], None, [17, 18], [10, 11]),
-        (1, [17, 18], 3, [17, 18], [1, 2]),
-        (4, [1, 2, 3, 4, 17, 18], 6, [17, 18], [4, 5]),
+        (10, [17, 18], None, False, [17, 18], [10, 11]),
+        (1, [17, 18], 3, True, [17, 18], [1, 2]),
+        (4, [1, 2, 3, 4, 17, 18], 6, False, [17, 18], [4, 5]),
     ],
 )
 def test_generate_patch_distinguishes_new_blocks_from_full_prompts(
-    past_length, input_ids, mask_length, expected_ids, expected_positions
+    past_length, input_ids, mask_length, explicit_cache, expected_ids, expected_positions
 ):
     from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
 
@@ -451,7 +451,7 @@ def test_generate_patch_distinguishes_new_blocks_from_full_prompts(
         torch.tensor([input_ids]),
         past_key_values=_Cache(),
         attention_mask=torch.ones((1, mask_length), dtype=torch.long) if mask_length else None,
-        cache_position=None,
+        cache_position=torch.arange(past_length, past_length + len(input_ids)) if explicit_cache else None,
         use_cache=True,
     )
     assert out["input_ids"].tolist() == [expected_ids]
@@ -1222,3 +1222,133 @@ def test_patch_classes_are_disjoint_and_documented():
         assert callable(fn), f"{name} is listed in UPSTREAM_ELIGIBLE_PATCHES but is missing"
         doc = fn.__doc__ or ""
         assert "upstream-eligible" in doc, f"{name} must carry the upstream marker"
+
+
+@pytest.fixture(scope="module")
+def cached_generation_model(tmp_path_factory):
+    from types import MethodType
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
+
+    ref_dir = _reference_dir()
+    if ref_dir is None:
+        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
+    model_dir = tmp_path_factory.mktemp("ripple_cached_generation")
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(11)
+        _build_tiny_fixture(ref_dir, model_dir)
+        model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True).eval()
+    # Exercise GPT-QModel's compatibility method even when the reference source
+    # declares native support and the normal patch installer stands down.
+    model.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, model)
+    return model
+
+
+def _cache_test_positions(mask):
+    return (mask.long().cumsum(-1) - 1).masked_fill(mask == 0, 0)
+
+
+@pytest.mark.parametrize("cache_type", ["dynamic", "static"])
+@pytest.mark.parametrize(
+    "past_length,new_length,full_prompt,capacity,visible_tail,explicit_cache",
+    [
+        pytest.param(4, 2, True, 10, True, False, id="review-visible-capacity"),
+        pytest.param(10, 2, False, 16, False, False, id="review-short-padded-block"),
+        pytest.param(4, 2, True, 10, False, False, id="zero-exact-capacity"),
+        pytest.param(4, 2, True, 12, False, False, id="zero-long-capacity"),
+        pytest.param(4, 2, True, 6, True, False, id="full-prompt"),
+        pytest.param(4, 4, False, 8, True, False, id="equal-length-block"),
+        pytest.param(4, 1, False, 10, False, False, id="single-token-padded"),
+        pytest.param(4, 6, False, 10, True, True, id="long-block-explicit-cache"),
+        pytest.param(4, 6, False, 16, False, True, id="long-block-padded"),
+        pytest.param(4, 2, True, 10, True, True, id="full-prompt-explicit-cache"),
+        pytest.param(0, 6, True, 10, False, False, id="prefill-padded-capacity"),
+    ],
+)
+@pytest.mark.parametrize("left_padding", [0, 2])
+@torch.inference_mode()
+def test_generate_patch_cached_logits_match_full_forward(
+    cached_generation_model, cache_type, past_length, new_length, full_prompt, capacity,
+    visible_tail, explicit_cache, left_padding,
+):
+    from transformers.cache_utils import DynamicCache, StaticCache
+
+    total = past_length + new_length
+    tokens = torch.arange(3, 3 + total).unsqueeze(0).repeat(2, 1)
+    mask = torch.ones(2, capacity, dtype=torch.long)
+    mask[0, :left_padding] = 0
+    if not visible_tail:
+        mask[:, total:] = 0
+    cache = (
+        StaticCache(config=cached_generation_model.config, max_cache_len=capacity)
+        if cache_type == "static" else DynamicCache()
+    )
+    if past_length:
+        cached_generation_model(
+            input_ids=tokens[:, :past_length],
+            attention_mask=mask[:, :past_length],
+            position_ids=_cache_test_positions(mask[:, :past_length]),
+            past_key_values=cache,
+            use_cache=True,
+        )
+    prepared = cached_generation_model.prepare_inputs_for_generation(
+        tokens if full_prompt else tokens[:, past_length:],
+        past_key_values=cache,
+        attention_mask=mask,
+        cache_position=torch.arange(past_length, total) if explicit_cache else None,
+        use_cache=True,
+    )
+    # Execute even on the buggy source to capture the cache and numerical regression.
+    prepared["logits_to_keep"] = 0
+    actual = cached_generation_model(**prepared).logits
+    expected = cached_generation_model(
+        input_ids=tokens,
+        attention_mask=mask[:, :total],
+        position_ids=_cache_test_positions(mask[:, :total]),
+        use_cache=False,
+    ).logits[:, past_length:]
+    error = (actual[:, -new_length:] - expected).abs().max().item()
+    detail = (
+        f"cache_length={int(cache.get_seq_length())}, "
+        f"positions={prepared['position_ids'].tolist()}, max_logit_error={error:.8g}"
+    )
+    assert int(cache.get_seq_length()) == total, detail
+    assert torch.equal(prepared["input_ids"], tokens[:, past_length:]), detail
+    assert torch.equal(prepared["cache_position"], torch.arange(past_length, total)), detail
+    assert torch.equal(prepared["position_ids"], _cache_test_positions(mask)[:, past_length:total]), detail
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5, msg=detail)
+
+
+@pytest.mark.parametrize("provided_positions", ["full", "capacity", "new"])
+@torch.inference_mode()
+def test_generate_patch_explicit_position_ids(cached_generation_model, provided_positions):
+    tokens = torch.arange(3, 9).unsqueeze(0)
+    cache = cached_generation_model(input_ids=tokens[:, :4], use_cache=True).past_key_values
+    # Custom caller positions must be preserved, including when already sliced.
+    position_ids = {
+        "full": torch.arange(20, 26).unsqueeze(0),
+        "capacity": torch.arange(20, 30).unsqueeze(0),
+        "new": torch.tensor([[24, 25]]),
+    }[provided_positions]
+    prepared = cached_generation_model.prepare_inputs_for_generation(
+        tokens,
+        past_key_values=cache,
+        attention_mask=torch.ones(1, 10, dtype=torch.long),
+        position_ids=position_ids,
+    )
+    assert prepared["input_ids"].tolist() == [[7, 8]]
+    assert prepared["position_ids"].tolist() == [[24, 25]]
+
+
+@torch.inference_mode()
+def test_generate_patch_left_padded_batch(cached_generation_model):
+    tokens = torch.tensor([[0, 0, 3, 4], [5, 6, 7, 8]])
+    mask = torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])
+    options = {"max_new_tokens": 3, "do_sample": False, "pad_token_id": 0, "eos_token_id": None}
+    batched = cached_generation_model.generate(tokens, attention_mask=mask, **options)
+    for row, length in enumerate([2, 4]):
+        unpadded = tokens[row:row + 1, -length:]
+        single = cached_generation_model.generate(unpadded, attention_mask=torch.ones_like(unpadded), **options)
+        assert torch.equal(batched[row, -3:], single[0, -3:])

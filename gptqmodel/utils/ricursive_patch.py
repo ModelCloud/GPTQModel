@@ -165,6 +165,15 @@ def _prepare_inputs_for_generation(
     position_ids=None,
     **kwargs,
 ):
+    """Prepare a full prompt or a new-only block for cached generation.
+
+    With a warm cache and no explicit ``cache_position``, inputs longer
+    than the cached prefix are full prompts; shorter or equal-length inputs
+    are new-only blocks. For a longer new-only block, pass
+    ``torch.arange(past_length, past_length + input_ids.shape[1])`` as
+    ``cache_position``. Attention masks may be padded to cache capacity and
+    therefore cannot identify which input layout the caller supplied.
+    """
     # transformers 5.x no longer moves remote-code inputs onto the model device for this
     # model, so a plain CPU `input_ids` reaches the embedding lookup and raises. Its own
     # generation helper does this move, so mirror it here.
@@ -185,22 +194,13 @@ def _prepare_inputs_for_generation(
     past_length = _cache_seq_length(past_key_values)
 
     if cache_position is None:
-        # A full prompt can include cached tokens, while verification may pass
-        # only a new token block. A block no longer than the cache must be new;
-        # for a longer block, a mask with exactly the cached prefix plus new
-        # tokens identifies new-only input when its final slot is populated.
-        # A longer mask, or one with unused capacity at the end, may be padded
-        # to a static cache's capacity and describes a full prompt instead.
+        # Inputs no longer than the cache are treated as new-only blocks.
+        # Longer inputs default to full prompts containing the cached prefix.
+        # Mask width/content cannot distinguish a longer new-only block from
+        # a full prompt with a capacity-sized mask (even an all-visible one).
+        # Callers supplying longer new-only blocks must pass cache_position.
         input_length = input_ids.shape[1]
-        candidate_full_prompt = past_length > 0 and input_length > past_length
-        new_block_mask = (
-            candidate_full_prompt
-            and attention_mask is not None
-            and attention_mask.dim() == 2
-            and attention_mask.shape[-1] == past_length + input_length
-            and bool(attention_mask[..., -1].any())
-        )
-        full_prompt = candidate_full_prompt and not new_block_mask
+        full_prompt = past_length > 0 and input_length > past_length
         new_len = input_length - past_length if full_prompt else input_length
         cache_position = torch.arange(past_length, past_length + new_len, device=input_ids.device)
 
@@ -221,13 +221,16 @@ def _prepare_inputs_for_generation(
     # a short row sit at higher indices, so a shared position vector shifts its RoPE
     # phases and the row decodes to garbage.
     if position_ids is not None:
-        # A caller-supplied vector still covers the pre-slice sequence.
-        if sliced:
+        # Callers may supply positions for the full prompt/capacity, or may
+        # already have selected just the positions for the current block.
+        if position_ids.shape[-1] != input_ids.shape[1]:
             position_ids = position_ids[:, cache_position]
     elif attention_mask is not None and attention_mask.dim() == 2:
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
-        position_ids = position_ids[:, -input_ids.shape[1]:]
+        # The mask may include unused cache capacity after the current block.
+        # Select its actual cache slots, not the final entries of that mask.
+        position_ids = position_ids[:, cache_position]
     else:
         position_ids = cache_position.unsqueeze(0)
 
