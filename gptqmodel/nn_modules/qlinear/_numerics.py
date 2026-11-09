@@ -32,6 +32,43 @@ def _needs_wide_autograd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tens
     )
 
 
+def autocast_active(device_type: str) -> bool:
+    """Return whether an autocast context is active for ``device_type``."""
+    try:
+        return torch.is_autocast_enabled(device_type)
+    except TypeError:  # torch < 2.4 takes no device argument (CUDA only)
+        return torch.is_autocast_enabled()
+
+
+def _can_fuse_hip_bias(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
+    """Whether ``addmm`` must replace the separate bias add on this platform.
+
+    HIP keeps the low-precision output because the wide FP32 request is
+    CUDA-only, so a separate add rounds (and can overflow) the partial sum
+    before the bias cancels it; ``addmm`` matches ``(x @ w + bias)`` in FP32 on
+    HIP bitwise. The branch is deliberately scoped to ROCm low-precision
+    activations: NVIDIA FP32 inputs never round before the add, so their
+    expression stays unchanged.
+
+    Two shapes of input keep the unfused expression:
+
+    * an active autocast context narrows ``addmm`` operands to the autocast
+      dtype (a BF16 bias becomes FP16) while the standalone addition kept its
+      range through type promotion;
+    * a bias that needs broadcasting beyond the flattened output shape cannot
+      be expressed by the 2D ``addmm`` input.
+    """
+    if bias is None or not IS_ROCM or x.device.type != "cuda":
+        return False
+    if x.dtype not in (torch.float16, torch.bfloat16) or bias.dtype != x.dtype:
+        return False
+    if bias.device != x.device or autocast_active(x.device.type):
+        return False
+    return bias.dim() == 1 or bias.shape == x.shape[:-1] + (weight.shape[-1],)
+
+
 class _CudaWideMatmul(torch.autograd.Function):
     """Differentiate a CUDA FP32-output GEMM, whose aten backward is unavailable."""
 
@@ -76,26 +113,32 @@ def matmul_fp32_reduce(
         if _needs_wide_autograd(x, weight, bias):
             return _CudaWideMatmul.apply(x, weight, bias)
         shape = x.shape[:-1] + (weight.shape[-1],)
+        if autocast_active(x.device.type):
+            # Autocast narrows the GEMM operands, so a bias fused into the
+            # epilogue is narrowed too (a BF16 bias can overflow as FP16).
+            # Keep the original expression, where the standalone addition
+            # retains the promoted range.
+            output = torch.matmul(x, weight)
+            return output + bias if bias is not None else output
         # FP32 output also keeps split reductions wide, while retaining low-precision
         # tensor-core operands. No expanded FP32 weight copy is needed.
         flat_x = x.reshape(-1, x.shape[-1])
-        if bias is not None:
-            output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
+        if bias is not None and (bias.dim() == 1 or bias.shape == shape):
+            flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
+            output = torch.addmm(flat_bias.float(), flat_x, weight, out_dtype=torch.float32)
+        elif bias is not None:
+            # A bias that broadcasts beyond the flattened output shape cannot
+            # be expressed by the 2D `addmm` input; add it after reshaping.
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32).reshape(shape)
+            return (output + bias).to(x.dtype)
         else:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
         return output.to(x.dtype).reshape(shape)
-    if (
-        bias is not None
-        and x.device.type == "cuda"
-        and bias.device == x.device
-        and bias.dtype == x.dtype
-    ):
-        # HIP keeps the low-precision output because the wide FP32 request is
-        # CUDA-only, so a separate add rounds (and can overflow) the partial
-        # sum before the bias cancels it. Fuse the bias into the GEMM epilogue
-        # instead; addmm matches `(x @ w + bias)` in FP32 on HIP bitwise.
+    if _can_fuse_hip_bias(x, weight, bias):
+        # Fuse the bias into the GEMM epilogue instead of rounding first.
         flat_x = x.reshape(-1, x.shape[-1])
-        return torch.addmm(bias, flat_x, weight).reshape(x.shape[:-1] + (weight.shape[-1],))
+        flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
+        return torch.addmm(flat_bias, flat_x, weight).reshape(x.shape[:-1] + (weight.shape[-1],))
     output = torch.matmul(x, weight)
     return output + bias if bias is not None else output
 

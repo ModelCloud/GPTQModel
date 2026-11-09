@@ -28,7 +28,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
-from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
+from ._numerics import _wants_fp32_reduce, autocast_active, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -376,11 +376,12 @@ class TorchLinear(PackableQuantLinear):
         if self._can_use_rocm_gemv(x):
             from ..triton_utils.gptq_gemv import gptq_gemv
 
+            out_dtype = self._fused_bias_out_dtype(x)
             out = gptq_gemv(
-                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
-            ).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
+                x, self.qweight, self.scales, self.qzeros, self.g_idx,
+                out_dtype=out_dtype, bits=self.bits,
+            )
+            out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -388,11 +389,12 @@ class TorchLinear(PackableQuantLinear):
         if self._can_use_rocm_gemm(x):
             from ..triton_utils.gptq_gemm import gptq_gemm
 
+            out_dtype = self._fused_bias_out_dtype(x)
             out = gptq_gemm(
-                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
-            ).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
+                x, self.qweight, self.scales, self.qzeros, self.g_idx,
+                out_dtype=out_dtype, bits=self.bits,
+            )
+            out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -414,6 +416,34 @@ class TorchLinear(PackableQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
+
+    def _fused_bias_out_dtype(self, x: torch.Tensor):
+        """Request a wide fused-kernel output when a bias must be added first.
+
+        ``gptq_gemv``/``gptq_gemm`` store into the output tensor's dtype, so a
+        bias that cancels a large partial sum has to be applied to an FP32
+        output: adding it after the FP16/BF16 store rounds (and can overflow)
+        the partial sum first.  Autocast narrows the operands and lets the
+        standalone addition promote instead, so it keeps that expression.
+        """
+        if self.bias is None or x.dtype not in (torch.float16, torch.bfloat16):
+            return None
+        if autocast_active(x.device.type):
+            return None
+        return torch.float32
+
+    def _apply_fused_bias(self, out: torch.Tensor, x: torch.Tensor, *, wide: bool) -> torch.Tensor:
+        """Add the bias to a fused-kernel output, keeping a wide partial sum."""
+        bias = self.bias
+        if bias is None:
+            return out
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        if not wide:
+            # Preserve the previous in-place `out.add_(bias)` dtype even when
+            # the stored bias has a wider dtype than the activations.
+            return (out + bias).to(out.dtype)
+        return (out + bias.float()).to(x.dtype)
 
     def _can_use_rocm_gemv(self, x: torch.Tensor) -> bool:
         return (
@@ -534,6 +564,9 @@ class TorchLinear(PackableQuantLinear):
 
         compute_stream = torch.cuda.current_stream(device=device)
         wide_reduce = _wants_fp32_reduce(x)
+        # Autocast narrows a fused `addmm` bias to the autocast dtype, so that
+        # context keeps the post-loop addition, where type promotion applies.
+        fuse_bias = not wide_reduce and not autocast_active(device.type)
         bias = self.bias
         if bias is not None and (bias.device != device or bias.dtype != x.dtype):
             bias = bias.to(device=device, dtype=x.dtype)
@@ -573,7 +606,7 @@ class TorchLinear(PackableQuantLinear):
             tile_bias = bias.narrow(0, start, width) if bias is not None else None
             if wide_reduce:
                 out_slice.copy_(matmul_fp32_reduce(x, weight_tile, bias=tile_bias))
-            elif tile_bias is not None:
+            elif fuse_bias and tile_bias is not None:
                 # Fuse the bias into the GEMM epilogue; rounding `out` before
                 # `out.add_(bias)` overflows/cancels in the activation dtype.
                 torch.addmm(tile_bias, x, weight_tile, beta=1.0, alpha=1.0, out=out_slice)
@@ -590,6 +623,9 @@ class TorchLinear(PackableQuantLinear):
 
         buffers.clear()
         out = out.reshape(out_shape)
+
+        if bias is not None and not wide_reduce and not fuse_bias:
+            out.add_(bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

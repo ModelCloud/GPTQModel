@@ -8,7 +8,11 @@ import pytest
 import torch
 from test_torch_weight_storage import state_tensors
 
-from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce, matmul_fp32_reduce
+from gptqmodel.nn_modules.qlinear._numerics import (
+    _can_fuse_hip_bias,
+    linear_fp32_reduce,
+    matmul_fp32_reduce,
+)
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -23,7 +27,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _gptq(dtype, streaming):
+def _gptq(dtype, streaming, *, fused=False):
     k = 32
     n = 192 if streaming else 32
     linear = torch.nn.Linear(k, n, bias=True)
@@ -37,6 +41,13 @@ def _gptq(dtype, streaming):
         linear, torch.full((n, 1), 2.75), torch.zeros((n, 1)),
         torch.zeros(k, dtype=torch.int32),
     )
+    if fused:
+        # The packed zero points are literally zero, which is already the v2
+        # encoding of zero point 0, so flipping the flag opens the fused-kernel
+        # gate without re-encoding any packed word. Assert the dequantized
+        # weight still matches the fixture's logical weight.
+        module.qzero_format(2)
+        assert torch.equal(module.dequantize_weight(), torch.full((n, k), 41.25))
     module._init_wf_unsqueeze_buffers()
     module = module.eval().to(device="cuda", dtype=dtype)
     if streaming:
@@ -61,6 +72,7 @@ def _awq(dtype):
 
 
 def _tritonv2(dtype):
+    pytest.importorskip("triton")
     k = n = 32
     module = TritonV2Linear(
         bits=4, group_size=32, sym=True, desc_act=False,
@@ -116,6 +128,90 @@ def test_matmul_fp32_reduce_fuses_bias_before_rounding(dtype):
 
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_matmul_fp32_reduce_keeps_bias_range_under_autocast():
+    """Autocast must keep the bias addition outside the narrowed epilogue.
+
+    BF16 is the case that regresses: autocast narrows the GEMM to FP16, so a
+    BF16 bias inside the fused ``addmm`` is cast to FP16 and overflows, while
+    the standalone addition kept it through type promotion.
+    """
+    x = torch.full((129, 32), 1024, device="cuda", dtype=torch.bfloat16)
+    weight = torch.ones((32, 32), device="cuda", dtype=torch.bfloat16)
+    bias = torch.full((32,), -65536, device="cuda", dtype=torch.bfloat16)
+    with torch.autocast("cuda"):
+        # The expression the helper replaced: the matmul narrows, the
+        # standalone addition keeps the bias range through type promotion.
+        expected = torch.matmul(x, weight) + bias
+        actual = matmul_fp32_reduce(x, weight, bias)
+
+    assert torch.isfinite(actual).all()
+    assert actual.dtype == expected.dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    oracle = (x.double() @ weight.double() + bias.double()).to(actual.dtype)
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+def test_matmul_fp32_reduce_matches_broadcast_bias_expression():
+    """A bias that needs broadcasting keeps the unfused expression."""
+    generator = torch.Generator().manual_seed(7)
+    x = torch.randint(-8, 9, (2, 3, 32), generator=generator).to(device="cuda", dtype=torch.float16) / 16
+    weight = torch.randint(-8, 9, (32, 48), generator=generator).to(device="cuda", dtype=torch.float16) / 16
+    bias = torch.randint(-8, 9, (2, 1, 48), generator=generator).to(device="cuda", dtype=torch.float16) / 16
+    expected = torch.matmul(x, weight) + bias
+
+    actual = matmul_fp32_reduce(x, weight, bias)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_hip_bias_fusion_scope():
+    """Only ROCm low-precision calls without autocast take the fused epilogue."""
+    from gptqmodel.utils.rocm import IS_ROCM
+
+    x16 = torch.zeros((4, 32), device="cuda", dtype=torch.float16)
+    weight16 = torch.zeros((32, 48), device="cuda", dtype=torch.float16)
+    bias16 = torch.zeros(48, device="cuda", dtype=torch.float16)
+
+    # FP32 never rounds before the add, on any platform.
+    assert _can_fuse_hip_bias(x16.float(), weight16.float(), bias16.float()) is False
+    assert _can_fuse_hip_bias(x16, weight16, bias16) is IS_ROCM
+    assert _can_fuse_hip_bias(x16, weight16, None) is False
+    with torch.autocast("cuda"):
+        assert _can_fuse_hip_bias(x16, weight16, bias16) is False
+
+    # Broadcasting that the flattened 2D `addmm` input cannot express.
+    x3 = torch.zeros((2, 3, 32), device="cuda", dtype=torch.float16)
+    bias3 = torch.zeros((2, 1, 48), device="cuda", dtype=torch.float16)
+    assert _can_fuse_hip_bias(x3, weight16, bias3) is False
+    # ... while a bias that already matches the output shape still fuses.
+    assert _can_fuse_hip_bias(x3, weight16, torch.zeros((2, 3, 48), device="cuda", dtype=torch.float16)) is IS_ROCM
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rows", [1, 2, 16])
+def test_rocm_fused_gptq_bias_rounds_once(dtype, rows):
+    """The fused GPTQ GEMV/GEMM epilogues must not narrow the partial sum first."""
+    module, weight, value, bias = _gptq(dtype, streaming=False, fused=True)
+    x = torch.full((rows, 32), value, device="cuda", dtype=dtype)
+    gemv = rows == 1 and module._can_use_rocm_gemv(x)
+    gemm = rows > 1 and module._can_use_rocm_gemm(x)
+    if not (gemv or gemm):
+        pytest.skip(f"fused GPTQ kernel not eligible for {dtype} M={rows} on this device")
+    assert gemv != gemm, "exactly one fused kernel handles this shape"
+
+    expected = torch.full(
+        (rows, module.out_features), 32 * value * weight + bias,
+        device="cuda", dtype=torch.float64,
+    )
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected.to(dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
