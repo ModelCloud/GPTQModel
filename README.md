@@ -1542,3 +1542,4 @@ The following reference pages document features proposed from the working fork.
 - [carry native full-MTP alignment and source loading](docs/glm-native-mtp.md)
 - [carry Flash core and MTP calibration adapters](docs/glm-flash-native-calibration.md)
 - [carry bounded native core and MTP calibration](docs/step5-native-calibration.md)
+- [carry V4.1 native source and mapped PLE replay](docs/v41-native-source.md)
