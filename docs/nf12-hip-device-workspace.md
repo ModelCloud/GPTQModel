@@ -356,6 +356,34 @@ flowchart TD
 | Native routed validation omitted buffer checks and rejected empty work (`nf12_ad_wmma.hip:766`) | Share `valid_moe_linear_buffers`, allow validated empty work (`nf12_ad_wmma.hip:768`) |
 | Decode E > 65535 returned unsupported (`nf12_ad_moe.hip:516`) | Return invalid-value, matching the CUDA codec contract |
 
+## Shared BF16T split-K dispatch
+
+`linear_wmma_impl<WeightSource>` computes one `WmmaPlan` for both NF12 and
+BF16T weights. `NF12_AD_SWITCH` dispatches the selected tile and K-split counts
+for either source, so the BF16T reference fills the same partial planes and
+uses the same reducer as NF12.
+
+```mermaid
+flowchart TD
+    A["linear_wmma_impl<WeightSource>"] --> B["wmma_plan(n, k, m)"]
+    B --> C["NF12_AD_SWITCH for NF12 or BF16T"]
+    C --> D["NF12_AD_DISPATCH: splits 1, 2, 4, or 8"]
+    D --> E["wmma_kernel with matching kSplits"]
+    E --> F{"splits == 1?"}
+    F -->|"yes"| G["write BF16 output directly"]
+    F -->|"no"| H["write unbiased FP32 partial plane"]
+    H --> I["wmma_reduce_kernel"]
+    style G fill:#efe,stroke:#282
+    style I fill:#efe,stroke:#282
+```
+
+| BF16T launcher | Before | After |
+| --- | --- | --- |
+| Tile count | always `kMaxTiles` | plan-selected tile count |
+| K splits | hardcoded `kSplits=1` | plan-selected split 1/2/4/8 |
+| Split-K output | wrote directly to `out` while host launched `grid.z=splits` | writes `partial`, then runs the shared reducer |
+| Coverage | no split-plan test | `test_bf16t_wmma_matches_nf12_split_k_plans` covers split 2/4/8 |
+
 Validation on two visible R9700s, ROCm 10.1 / HIP 7.16.26385, GIL=0:
 **717 tests passed in 19.58 s**, with no skips. Tests cover exact cancelling
 products with biases 1, 2^-25 and 2^127; all return the exact finite bias.

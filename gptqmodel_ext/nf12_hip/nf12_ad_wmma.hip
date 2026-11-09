@@ -653,16 +653,9 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
       escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),     \
       reinterpret_cast<const __hip_bfloat16*>(bias), partial, route)
 
-  if constexpr (Src == WeightSource::kBf16t) {
-    const bool pad = n_blocks * m_blocks <= 96;
-    if (pad) {
-      NF12_AD_LAUNCH(WeightSource::kBf16t, false, kMaxTiles, 1, false, true);
-    } else {
-      NF12_AD_LAUNCH(WeightSource::kBf16t, false, kMaxTiles, 1, false, false);
-    }
-  } else {
-    // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
-    // no reduce pass; every other case reduces from a partial plane.
+  // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
+  // no reduce pass; every other case reduces from a partial plane. Both weight
+  // sources share this table so the twin runs the identical plan.
 #define NF12_AD_DISPATCH(SRC, T, D, P)          \
   do {                                          \
     if (splits == 1) {                          \
@@ -730,7 +723,6 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 #undef NF12_AD_TILES_DYN
 #undef NF12_AD_TILES
 #undef NF12_AD_DISPATCH
-  }
 #undef NF12_AD_LAUNCH
 
   hipError_t status = hipGetLastError();
