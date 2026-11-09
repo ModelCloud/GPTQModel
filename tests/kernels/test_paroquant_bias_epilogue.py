@@ -9,6 +9,7 @@ import torch
 import gptqmodel.nn_modules.qlinear.paroquant_triton as paro_module
 from gptqmodel.quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
 from gptqmodel.quantization.paroquant.modules.triton.gemm import (
+    paroquant_dequantize_triton,
     paroquant_gemm_triton_decode,
     paroquant_gemm_triton_prefill,
 )
@@ -75,6 +76,48 @@ def test_fused_paroquant_bias_matches_independent_packed_code_oracle(dtype, rows
         actual = kernel(x, qweight, scales, qzeros, bias)
     weight_oracle = (codes.float() - zero_codes.float()) * scales.float()
     expected = (x.float() @ weight_oracle + bias.float()).to(dtype)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rows,operand", [
+    (1, "input_columns"), (16, "input_rows"), (16, "input_columns"),
+    (16, "qweight"), (16, "scales"), (16, "qzeros"),
+])
+def test_fused_paroquant_accepts_strided_operands(dtype, rows, operand):
+    columns = 128
+    x = torch.randint(-2, 3, (rows, columns), device="cuda").to(dtype)
+    qweight = torch.full((columns, columns // 8), 0x11111111, device="cuda", dtype=torch.int32)
+    scales = torch.ones((1, columns), device="cuda", dtype=dtype)
+    qzeros = torch.zeros((1, columns // 8), device="cuda", dtype=torch.int32)
+    bias = torch.zeros((columns,), device="cuda", dtype=dtype)
+    arguments = {"input": x, "qweight": qweight, "scales": scales, "qzeros": qzeros}
+
+    key = "input" if operand.startswith("input") else operand
+    source = arguments[key]
+    if operand == "input_rows":
+        storage = torch.empty((rows, columns + 8), device="cuda", dtype=dtype)
+        view = storage[:, :columns]
+    else:
+        storage = torch.empty((source.shape[0], source.shape[1] * 2), device="cuda", dtype=source.dtype)
+        view = storage[:, ::2]
+    storage.fill_(-1 if operand == "qzeros" else 0)
+    view.copy_(source)
+    assert not view.is_contiguous()
+    arguments[key] = view
+
+    kernel = paroquant_gemm_triton_decode if rows == 1 else paroquant_gemm_triton_prefill
+    with torch.inference_mode():
+        actual = kernel(
+            arguments["input"], arguments["qweight"], arguments["scales"], arguments["qzeros"], bias,
+        )
+        dequantized = paroquant_dequantize_triton(
+            arguments["qweight"], arguments["scales"], arguments["qzeros"],
+        )
+    # 0x11111111 is eight ones, qzeros=0, and scales=1: the logical weight is all ones.
+    expected = x.float().sum(dim=-1, keepdim=True).expand(rows, columns).to(dtype)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(dequantized, torch.ones_like(dequantized), rtol=0, atol=0)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
