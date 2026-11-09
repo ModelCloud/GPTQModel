@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from fractions import Fraction
 import json
+from fractions import Fraction
 
 import pytest
 
@@ -81,7 +81,7 @@ def test_21_bpw_358_quotas_are_exact_and_causally_distributed(tmp_path):
     totals = policy.namespace_quotas(layer_count=43, experts_per_layer=256)
     assert totals == {"w1": 619, "w3": 1032, "w2": 1651}
     assert sum(totals.values()) == 3302
-    accumulated = {projection: 0 for projection in totals}
+    accumulated = dict.fromkeys(totals, 0)
     for layer in range(43):
         quota = policy.layer_quotas(
             layer_index=layer,
@@ -108,7 +108,7 @@ def test_glm_k325_358_quotas_use_only_target_layer_range(tmp_path):
     assert totals == {"w1": 1701, "w3": 2835, "w2": 4536}
     assert sum(totals.values()) == 9072
 
-    accumulated = {projection: 0 for projection in totals}
+    accumulated = dict.fromkeys(totals, 0)
     for layer in range(3, 45):
         quota = policy.layer_quotas(
             layer_index=layer,

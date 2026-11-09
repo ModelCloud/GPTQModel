@@ -206,3 +206,230 @@ def test_cuda_reference_forward_preserves_padding_and_dtype(dtype, outputs, bias
         _check_forward(device="cuda", dtype=dtype, outputs=outputs, bias=bias, batch=batch)
     finally:
         torch.set_float32_matmul_precision(previous)
+
+
+
+def _native_exl3_available() -> bool:
+    """The native EXL3 linear declares ``SUPPORTS_DEVICES = [DEVICE.CUDA]``.
+
+    ``torch.cuda.is_available()`` is also true on ROCm, where this backend
+    raises ``NotImplementedError`` by design, so gate on the module's own
+    declared support family instead of the runtime namespace.
+    """
+    if not torch.cuda.is_available():
+        return False
+    from gptqmodel.models._const import DEVICE, normalize_device
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    try:
+        return normalize_device(torch.device("cuda", 0)) in ExllamaV3Linear.SUPPORTS_DEVICES
+    except Exception:
+        return DEVICE.CUDA in ExllamaV3Linear.SUPPORTS_DEVICES
+
+
+NATIVE_EXL3 = pytest.mark.skipif(
+    not _native_exl3_available(),
+    reason="native EXL3 linear declares CUDA-only support",
+)
+
+
+@pytest.mark.parametrize("device", [
+    pytest.param("cpu", marks=pytest.mark.cpu),
+    pytest.param("cuda", marks=pytest.mark.cuda),
+])
+def test_native_inference_created_bias_tracks_mutation_without_extension(device):
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    with torch.inference_mode():
+        module = ExllamaV3Linear.from_tensors(
+            in_features=128, out_features=576, name="kv_a",
+            tensors={
+                "trellis": torch.zeros((8, 40, 96), dtype=torch.int16, device=device),
+                "bias": torch.zeros(576, dtype=torch.float16, device=device),
+            },
+        )
+    assert module.bias.is_inference()
+    packed_trellis = module.trellis
+    with torch.inference_mode():
+        first = module._current_signature()
+    assert not module.bias.is_inference()
+    assert module.trellis is packed_trellis
+    assert module.bias.numel() * module.bias.element_size() == 1152
+    normalized_bias = module.bias
+    with torch.inference_mode():
+        assert module._current_signature() == first
+    assert module.bias is normalized_bias
+    with torch.inference_mode():
+        module.bias.add_(1)
+    assert module._current_signature() != first
+
+
+# --- The native ExllamaV3Linear path shares this logical/padded contract but
+# --- needs admitted hardware (it builds LinearEXL3 through the compiled ext).
+def _native_module(packed, outputs, device):
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    return ExllamaV3Linear(
+        in_features=128, out_features=outputs, name="kv_a",
+        tensors={k: v.to(device) for k, v in packed.items()},
+    ).to(device)
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [128, 576, 1056])
+@pytest.mark.parametrize("bias", [False, True])
+def test_native_forward_crops_to_logical_outputs(outputs, bias):
+    """The native kernel stores padded channels but must return logical outputs.
+
+    ``ExllamaV3Linear`` pads the bias and the ``LinearEXL3`` geometry to the
+    stored width, then slices the result. Nothing else in the suite exercises
+    that path: the patch touches it but only ``ExllamaV3TorchLinear`` is tested.
+    """
+    device = "cuda"
+    packed = _packed(outputs, bias=bias)
+    module = _native_module(packed, outputs, device)
+    weight = _oracle_weight(packed, device=device).float()[:, :outputs]
+    gen = torch.Generator().manual_seed(17)
+    x = (torch.randn((1, 3, 128), generator=gen) * .01).to(device=device, dtype=torch.float16)
+
+    with torch.inference_mode():
+        actual = module(x)
+    raw = x.float().reshape(-1, 128) @ weight
+    if bias:
+        raw = raw + packed["bias"].to(device).float()
+    raw = raw.reshape(1, 3, outputs)
+
+    assert actual.dtype == torch.float16 and actual.shape == (1, 3, outputs)
+    torch.testing.assert_close(actual.float(), raw, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [128, 576, 1056])
+def test_native_padded_bias_stays_live(outputs):
+    """An in-place ``bias`` write must reach the kernel output.
+
+    The padded shape makes the backend hand ``LinearEXL3`` a *widened copy* of
+    the bias. A copy is frozen at ``_ensure_inner`` time, so without an explicit
+    refresh a later ``bias.add_`` (adapters, calibration, scale folding) is
+    silently ignored for every non-128-aligned width.
+    """
+    device = "cuda"
+    packed = _packed(outputs, bias=True)
+    module = _native_module(packed, outputs, device)
+    gen = torch.Generator().manual_seed(23)
+    x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device=device, dtype=torch.float16)
+
+    with torch.inference_mode():
+        before = module(x).float().clone()
+    with torch.no_grad():
+        module.bias.add_(10.0)
+    with torch.inference_mode():
+        after = module(x).float()
+
+    # Every visible output moves by the bias delta. FP16 rounding of the
+    # pre-add accumulator allows a couple of ulps at this magnitude (10.0),
+    # but a frozen padded copy shows an exact 0.0 shift instead.
+    delta = after - before
+    torch.testing.assert_close(delta, torch.full_like(delta, 10.0), rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [128, 576])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
+    """Inference-created checkpoint buffers must run and track a later bias edit."""
+    packed = _packed(outputs, bias=True)
+    weight = _oracle_weight(packed, device="cuda").float()[:, :outputs]
+    gen = torch.Generator().manual_seed(31)
+    x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device="cuda", dtype=dtype)
+    reference = x.float().reshape(-1, 128) @ weight + packed["bias"].to("cuda").float()
+
+    with torch.inference_mode():
+        module = _native_module(packed, outputs, "cuda")
+        assert module.bias.is_inference()
+        try:
+            before = module(x)
+        except ModuleNotFoundError as exc:
+            if "ExLlamaV3 torch.ops kernels are not properly installed" not in str(exc):
+                raise
+            pytest.skip("native EXL3 torch.ops extension is unavailable")
+        assert not module.bias.is_inference()
+        initial_inner = module._inner
+        repeated = module(x)
+        assert module._inner is initial_inner
+        module.bias.add_(0.25)
+        after = module(x)
+        assert module._inner is not initial_inner
+
+    assert before.dtype == repeated.dtype == after.dtype == dtype
+    assert before.shape == repeated.shape == after.shape == (1, 2, outputs)
+    expected = reference.reshape(1, 2, outputs).to(dtype)
+    changed_expected = (reference + 0.25).reshape(1, 2, outputs).to(dtype)
+    torch.testing.assert_close(before, expected, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(repeated, expected, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(after, changed_expected, rtol=2e-3, atol=2e-3)
+    assert module._inner.trellis is module.trellis
+    stored_outputs = math.ceil(outputs / 128) * 128
+    assert all(
+        not isinstance(value, torch.Tensor) or tuple(value.shape) != (128, stored_outputs)
+        for holder in (module, module._inner) for value in vars(holder).values()
+    )
+
+
+@pytest.mark.cuda
+@NATIVE_EXL3
+@pytest.mark.parametrize("outputs", [576, 1056])
+def test_native_rejects_stored_bias_geometry(outputs):
+    """A bias already widened to the padded width is a checkpoint bug."""
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    packed = _packed(outputs, bias=False)
+    packed["bias"] = torch.zeros(math.ceil(outputs / 128) * 128, dtype=torch.float16)
+    module = ExllamaV3Linear(
+        in_features=128, out_features=outputs, name="kv_a",
+        tensors={k: v.to("cuda") for k, v in packed.items()},
+    ).to("cuda")
+    with pytest.raises(ValueError, match="logical bias geometry"):
+        module._ensure_inner()
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("bits", [2, 4, 6, 8, 10, 12, 16])
+def test_stored_features_accepts_every_supported_bit_width(bits):
+    """Packing width is ``bits`` 16-bit words, so it reaches 256 at 16 bits.
+
+    The first cut of this layer capped the trellis width at 128 (8 bits) and so
+    rejected every valid 10/12/16-bit checkpoint with "invalid trellis geometry".
+    """
+    stored_outputs = 256
+    trellis = torch.randint(-32768, 32767, (8, stored_outputs // 16, bits * 16),
+                            dtype=torch.int16, generator=torch.Generator().manual_seed(bits))
+    module = ExllamaV3TorchLinear.from_tensors(
+        in_features=128, out_features=stored_outputs, name="bits",
+        tensors={"trellis": trellis,
+                 "suh": torch.rand(128).half() * .1,
+                 "svh": torch.rand(stored_outputs).half() * .1},
+    )
+    assert module._stored_features() == (128, stored_outputs)
+    assert module._bits_per_weight() == bits
+    assert module._decode_inner_weight().shape == (128, stored_outputs)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("words", [0, 8, 17, 24])
+def test_stored_features_rejects_non_word_aligned_packing(words):
+    """A width that is not a positive multiple of 16 cannot encode symbols."""
+    trellis = torch.zeros(8, 16, words, dtype=torch.int16)
+    module = ExllamaV3TorchLinear.from_tensors(
+        in_features=128, out_features=256, name="bad",
+        tensors={"trellis": trellis,
+                 "suh": torch.rand(128).half() * .1,
+                 "svh": torch.rand(256).half() * .1},
+    )
+    with pytest.raises(ValueError, match="trellis geometry"):
+        module._stored_features()

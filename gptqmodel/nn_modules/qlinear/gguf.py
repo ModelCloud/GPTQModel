@@ -35,6 +35,7 @@ from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from ._numerics import matmul_fp32_reduce
+from ._runtime_cache import tensor_cache_key
 
 
 try:
@@ -1170,6 +1171,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
         self.gguf_fused_chunk_bytes = self.GGUF_FUSED_CHUNK_BYTES
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
+        self._k_scale_overflow_cache_source_key = None
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
@@ -1216,6 +1218,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
     def clear_weight_cache(self) -> None:
         self._k_scale_overflow_cache = {}
+        self._k_scale_overflow_cache_source_key = None
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1612,6 +1615,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.gguf_tensor_qtype in _GGUF_QUANT_QTYPES
             and self.adapter is None
             and not self.training
+            and not (torch.is_grad_enabled() and x_flat.requires_grad)
             and max_rows > 0
             and (self.in_features * self.out_features) >= min_matrix_elements
             and x_flat.shape[0] <= max_rows
@@ -1677,9 +1681,34 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self._autotune_result = bool(self._gguf_fused_autotune_cache[key])
         return self._autotune_result
 
-    def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _use_fp32_gguf_weight(
+        self,
+        activation_dtype: torch.dtype,
+        *,
+        blocks: torch.Tensor | None = None,
+        device: torch.device | None = None,
+    ) -> bool:
+        if activation_dtype == torch.bfloat16:
+            return True
+        if activation_dtype != torch.float16 or self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+            return False
+        if self.gguf_tensor_qtype in ("Q2_0", "Q4_0", "Q8_0", "Q8_K", "Q4_K", "Q5_K", "Q6_K"):
+            return self._k_scale_overflows(blocks, activation_dtype, device=device)
+        # Other GGUF formats have more complex scale/minimum or codebook math.
+        # Reconstruct them wide rather than rounding an out-of-range weight.
+        return True
+
+    def _forward_dequant_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if self._use_fp32_gguf_weight(x_flat.dtype, device=x_flat.device):
+            # Keep the temporary dense fallback wide until the output
+            # (including bias) is rounded once.
+            weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+            bias_wide = None if bias is None else bias.to(device=x_flat.device, dtype=torch.float32)
+            return matmul_fp32_reduce(x_flat.float(), weight, bias=bias_wide).to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return matmul_fp32_reduce(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
     def _fused_chunk_blocks(self, num_blocks: int, compute_dtype: torch.dtype) -> int:
         if self.gguf_fused_chunk_blocks > 0:
@@ -1692,18 +1721,36 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         budget_blocks = self.gguf_fused_chunk_bytes // max(1, bytes_per_block)
         return min(num_blocks, max(1, budget_blocks))
 
-    def _k_scale_overflows(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        # `_version` advances on in-place writes, so an overwritten weight
-        # invalidates the cached answer even when the storage address is reused.
-        key = (blocks.data_ptr(), blocks._version, blocks.shape, target_dtype)
+    def _k_scale_overflows(
+        self,
+        blocks: torch.Tensor | None,
+        target_dtype: torch.dtype,
+        *,
+        device: torch.device | None = None,
+    ) -> bool:
+        # Cache by the packed source, not by this temporary blocks view. The
+        # shared key tracks normal in-place writes and supports inference
+        # tensors, which have no version counter and require an explicit clear.
+        source_key = tensor_cache_key(self.qweight)
+        if source_key != self._k_scale_overflow_cache_source_key:
+            self._k_scale_overflow_cache.clear()
+            self._k_scale_overflow_cache_source_key = source_key
+        shape = (
+            tuple(blocks.shape)
+            if blocks is not None
+            else (self.qweight.shape[0], self.qweight.shape[1] // self.gguf_type_size, self.gguf_type_size)
+        )
+        key = (shape, target_dtype)
         cached = self._k_scale_overflow_cache.get(key)
         if cached is None:
+            if blocks is None:
+                blocks, _, _ = self._reshape_blocks(device=device)
             cached = self._compute_k_scale_overflow(blocks, target_dtype)
             self._k_scale_overflow_cache[key] = cached
         return cached
 
     def _compute_k_scale_overflow(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> bool:
-        """True when a Q4_K/Q5_K term can leave `target_dtype` range.
+        """True when a guarded GGUF decoded term can leave the target range.
 
         Q4_K/Q5_K reconstruct `d * scale * code - d_min * min`. Both terms
         peak at `d_max * 63 * code_max`, with `code_max` 15 for Q4_K and 31
@@ -1712,9 +1759,39 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         lets an out-of-range weight saturate to inf on the narrow path. Only
         the per-block `d`/`d_min` columns and two extremes are inspected, so
         the check stays O(num_blocks) rather than O(weights).
+
+        Q6_K uses signed codes in [-32, 31]. Its per-block bound multiplies
+        |d| by the largest absolute signed subscale and 32, allowing the
+        chunked and dense CUDA paths to keep finite dots for wide weights.
+
+        Q4_0 and Q8_0 only multiply their FP16 scale by a signed code. Their
+        code magnitudes are bounded by 8 and 128 respectively, so inspecting
+        the packed block scales detects out-of-range decoded weights without
+        dequantizing a full layer.
+
+        Q2_0 uses a signed code in [-1, 2] with an FP16 scale, while Q8_K
+        uses a signed int8 code with an FP32 scale. Their bounds are 2 and
+        128 times the absolute block scale.
         """
         if not target_dtype.is_floating_point:
             return True
+        if self.gguf_tensor_qtype in ("Q2_0", "Q8_K"):
+            if self.gguf_tensor_qtype == "Q2_0":
+                d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
+                code_max = 2
+            else:
+                d = blocks[..., :4].contiguous().view(torch.float32).abs()
+                code_max = 128
+            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
+        if self.gguf_tensor_qtype in ("Q4_0", "Q8_0"):
+            d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
+            # Signed codes reach -8 in Q4_0 and -128 in Q8_0.
+            code_max = 8 if self.gguf_tensor_qtype == "Q4_0" else 128
+            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
+        if self.gguf_tensor_qtype == "Q6_K":
+            d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).float().abs()
+            subscale = blocks[..., 192:208].contiguous().view(torch.int8).float().abs().amax(dim=-1)
+            return bool(((d * subscale) * 32 > torch.finfo(target_dtype).max).any())
         code_max = 31.0 if self.gguf_tensor_qtype == "Q5_K" else 15.0
         saturation = code_max * 63.0
         for column in (slice(0, 2), slice(2, 4)):
@@ -1732,19 +1809,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         target_dtype = x_flat.dtype
         is_cpu = x_flat.device.type == "cpu"
         accum_dtype = torch.float32
-        # BF16 operands round the reconstructed weights before the GEMM and
-        # violate the existing 2e-3 fusion contract. Keep that path wide;
-        # FP16 retains exact source values and can use the tensor-core path.
+        # BF16 decoded weights can lose cancellation accuracy; FP16 decoded
+        # weights can overflow before a finite dot product is accumulated.
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
-        # Q4_K/Q5_K need a wide scale product only when that product can leave
-        # the target range; otherwise FP16 reconstruction is exact enough and
-        # is much cheaper than building FP32 chunks.
-        k_wide = (
-            self.gguf_tensor_qtype in ("Q4_K", "Q5_K")
-            and not (is_cpu or target_dtype == torch.bfloat16)
-            and self._k_scale_overflows(blocks, target_dtype)
-        )
-        use_fp32_operands = is_cpu or target_dtype == torch.bfloat16 or k_wide
+        # FP16 uses a packed bound where available. Other quantized formats
+        # reconstruct wide because their FP16 range is not established here.
+        use_fp32_operands = is_cpu or self._use_fp32_gguf_weight(target_dtype, blocks=blocks)
         weight_dtype = accum_dtype if use_fp32_operands else target_dtype
         chunk_blocks = self._fused_chunk_blocks(num_blocks, accum_dtype)
 
@@ -1828,15 +1898,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
         if self._should_use_fused_k_forward(x_flat):
             output = self._forward_fused_k(x_flat, bias=self.bias)
-            bias = None
         else:
-            output = self._forward_dequant_matmul(x_flat)
             bias = self.bias
-
-        if bias is not None:
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+            if bias is not None and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+                bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+            output = self._forward_dequant_matmul(x_flat, bias=bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

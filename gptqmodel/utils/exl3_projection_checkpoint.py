@@ -69,6 +69,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _request_sha256(request: dict[str, Any]) -> str:
+    """Validate one request body against its declared content digest."""
+
+    if not isinstance(request, dict):
+        raise ValueError("EXL3 checkpoint request must be a mapping")
+    digest = request.get("request_sha256")
+    body = {
+        key: value for key, value in request.items() if key != "request_sha256"
+    }
+    if (
+        not isinstance(digest, str)
+        or sha256_bytes(canonical_json_bytes(body)) != digest
+    ):
+        raise ValueError("invalid EXL3 module checkpoint request")
+    return digest
+
+
 def tensor_identity(tensor: torch.Tensor) -> dict[str, Any]:
     """Hash logical tensor bytes together with their exact shape and dtype."""
 
@@ -236,17 +253,9 @@ class EXL3ProjectionCheckpointStore:
         run-scoped, shared store.
         """
 
+        request_sha256 = _request_sha256(request)
         module = request.get("module")
-        request_sha256 = request.get("request_sha256")
-        request_body = {
-            key: value for key, value in request.items() if key != "request_sha256"
-        }
-        if (
-            not isinstance(module, str)
-            or not module
-            or not isinstance(request_sha256, str)
-            or sha256_bytes(canonical_json_bytes(request_body)) != request_sha256
-        ):
+        if not isinstance(module, str) or not module:
             raise ValueError("invalid EXL3 module checkpoint request")
         self._paths(request_sha256)
 
@@ -395,6 +404,12 @@ class EXL3ProjectionCheckpointStore:
                         raise ValueError("EXL3 checkpoint contains a duplicate file")
                     target[request_sha256] = path
 
+        # The tensor payload is published before its manifest, so an
+        # interrupted commit can leave a tensor without a manifest. That is an
+        # uncommitted partial write, not a committed result: ignore it here and
+        # let prune reclaim it. A manifest without a tensor is still corrupt.
+        for request_sha256 in set(seen_tensors) - set(seen_manifests):
+            del seen_tensors[request_sha256]
         if set(seen_manifests) != set(seen_tensors):
             raise ValueError("EXL3 checkpoint contains an incomplete committed pair")
 
@@ -528,8 +543,8 @@ class EXL3ProjectionCheckpointStore:
         self,
         request: dict[str, Any],
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]] | None:
-        request_sha256 = request.get("request_sha256")
-        loaded = self.load_committed(str(request_sha256))
+        request_sha256 = _request_sha256(request)
+        loaded = self.load_committed(request_sha256)
         if loaded is None:
             return None
         stored_request, tensors, result = loaded
@@ -543,14 +558,18 @@ class EXL3ProjectionCheckpointStore:
         tensors: dict[str, torch.Tensor],
         result: dict[str, Any],
     ) -> dict[str, Any]:
-        request_sha256 = request.get("request_sha256")
-        manifest_path, tensor_path = self._paths(str(request_sha256))
+        request_sha256 = _request_sha256(request)
+        manifest_path, tensor_path = self._paths(request_sha256)
         existing = self.load(request)
         if existing is not None:
             existing_tensors, existing_result = existing
-            if existing_result != result or any(
-                not torch.equal(existing_tensors[name], tensor.detach().cpu())
-                for name, tensor in tensors.items()
+            if (
+                existing_result != result
+                or set(existing_tensors) != set(tensors)
+                or any(
+                    not torch.equal(existing_tensors[name], tensor.detach().cpu())
+                    for name, tensor in tensors.items()
+                )
             ):
                 raise ValueError("EXL3 projection checkpoint collision")
             return existing_result

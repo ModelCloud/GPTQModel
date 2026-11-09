@@ -24,6 +24,8 @@ def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
 
 
 def dynamic_quant(x):
+    # The Triton kernel indexes each activation row with a dense K stride.
+    x = x.contiguous()
     codes = torch.empty_like(x, dtype=torch.int8)
     scales = torch.empty((*x.shape[:-1], 1), device=x.device, dtype=torch.float32)
     rows = x.numel() // x.shape[-1]

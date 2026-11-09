@@ -32,8 +32,8 @@ class PinnedHostPool:
 
 
 pytestmark = pytest.mark.skipif(
-    (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-    reason="CUDA device 6 is required for this test",
+    not torch.cuda.is_available(),
+    reason="CUDA is required for activation transfer tests",
 )
 
 
@@ -61,6 +61,55 @@ class ForwardBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.norm(self.emitter(x))
+
+
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_capture_keeps_device_storage_until_side_stream_copy_finishes(noncontiguous):
+    """The allocator must not recycle a forward activation during an async copy."""
+    if not hasattr(torch.cuda, "_sleep"):
+        pytest.skip("CUDA stream delay primitive is unavailable")
+
+    device = torch.device("cuda:0")
+    copy_stream = torch.cuda.Stream(device=device)
+    buffer = CudaEventActivationBuffer(device=device, stream=copy_stream)
+    activation = torch.full((1024, 2048 if noncontiguous else 1024), 3.0, device=device)
+    if noncontiguous:
+        activation = activation[:, ::2]
+
+    # Hold the copy stream while the producer releases and replaces its tensor.
+    with torch.cuda.stream(copy_stream):
+        torch.cuda._sleep(100_000_000)
+    packet = buffer.capture_async(activation, enqueue=False)
+    del activation
+    replacement = torch.empty((1024, 1024), device=device)
+    replacement.fill_(9.0)
+    torch.cuda.current_stream(device).synchronize()
+    packet.event.synchronize()
+
+    assert torch.all(packet.host_tensor == 3.0)
+
+
+def test_recycle_waits_for_pending_copy_before_reclaiming_host_storage():
+    """A recycled pinned buffer must be ready before the pool can hand it out."""
+    if not hasattr(torch.cuda, "_sleep"):
+        pytest.skip("CUDA stream delay primitive is unavailable")
+
+    device = torch.device("cuda:0")
+    copy_stream = torch.cuda.Stream(device=device)
+    observed = []
+    buffer = CudaEventActivationBuffer(
+        device=device, stream=copy_stream,
+        host_reclaimer=lambda _: observed.append(packet.event.query()),
+    )
+    activation = torch.full((1024, 1024), 5.0, device=device)
+    with torch.cuda.stream(copy_stream):
+        torch.cuda._sleep(100_000_000)
+    packet = buffer.capture_async(activation, enqueue=False)
+
+    buffer.recycle(packet)
+
+    assert observed == [True]
+    assert torch.all(packet.host_tensor == 5.0)
 
 
 def _run_variant(
@@ -141,6 +190,7 @@ def _run_variant(
     return forward_latencies, drain_latencies, captured_outputs
 
 
+@pytest.mark.skipif(torch.cuda.device_count() <= 6, reason="CUDA device 6 is required for this benchmark")
 def test_cuda_event_stream_activation_buffer_benchmarks():
     """
     Benchmarks three capture strategies that mirror GPTQ forward hooks:

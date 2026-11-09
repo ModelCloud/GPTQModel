@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gc
 import json
+import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -177,3 +179,44 @@ def test_disk_backed_layer_outputs_retry_post_commit_finalizer(tmp_path):
     assert calls == [sequence.manifest["manifest_sha256"]] * 2
     assert resumed.finalize() is sequence
     assert len(calls) == 2
+
+
+def test_disk_backed_layer_outputs_resume_after_finalize_rename_crash(tmp_path, monkeypatch):
+    root = tmp_path / "activations"
+    provenance = {"plan": "rename-crash"}
+    writer = DiskBackedLayerOutputWriter(
+        root,
+        layer_index=0,
+        expected_batches=2,
+        provenance=provenance,
+        shard_batches=2,
+    )
+    writer.put(0, [torch.zeros(1, 2)])
+    writer.put(1, [torch.ones(1, 2)])
+
+    real_replace = os.replace
+
+    def crash(src, dst):
+        if Path(dst) == writer.destination:
+            raise OSError("injected rename crash")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("gptqmodel.looper.input_cache.os.replace", crash)
+    with pytest.raises(OSError, match="injected rename crash"):
+        writer.finalize()
+    assert not writer.destination.exists()
+
+    monkeypatch.setattr("gptqmodel.looper.input_cache.os.replace", real_replace)
+    resumed = DiskBackedLayerOutputWriter(
+        root,
+        layer_index=0,
+        expected_batches=2,
+        provenance=provenance,
+        shard_batches=2,
+    )
+    # The completed shards survive the failed rename and need no rewrite.
+    assert resumed.committed_indices == frozenset({0, 1})
+    sequence = resumed.finalize()
+    assert torch.equal(sequence[0][0], torch.zeros(1, 2))
+    assert torch.equal(sequence[1][0], torch.ones(1, 2))
+    assert not (writer.destination / "progress.json").exists()

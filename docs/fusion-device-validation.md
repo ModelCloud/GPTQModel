@@ -101,9 +101,24 @@ streams remain ineligible. Those limits are not skipped positive qualifications.
 All **12** AUTO cases pass: GPTQ/AWQ × FP16/BF16 × CPU/CUDA/ROCm. The prompt
 is “The capital of France is”; checks compare prefill plus three cached decode
 steps and four greedy new tokens at the same dtype in both modes. All cases
-retain zero additional packed-weight bytes, preserve top-1 IDs, and generate
-identical greedy token IDs. These are execution regressions, not dataset
-accuracy or perplexity measurements.
+retain zero additional packed-weight bytes and stay inside a dtype-derived ULP
+envelope of the unfused logits (8 ULP of the peak magnitude). Greedy output is
+required to diverge only where the unfused top-2 margin is inside that same
+envelope. These are execution regressions, not dataset accuracy or perplexity
+measurements.
+
+Identical greedy IDs are **not** asserted, and should not be: fusion emits one
+wider GEMM per group, so a backend may legitimately choose a different reduction
+tree (split-K/slice count, tile shape) for the new N. Bit-identical output only
+ever held for profiles whose widest fused N happened to keep the unfused tile
+configuration. On a Qwen2.5-0.5B GPTQ w4a16 g128 sm_120 profile, fusing qkv to
+N=1152 is bit-identical to 896+128+128, while fusing gate/up to N=9728 changes
+split-K from 2 to 4 slices and drifts 2.1 ULP (bf16) / 2.8 ULP (fp16) — about
+1-6% of the error the checkpoint already carries against its fp32 base model.
+The same 0.5B checkpoint's *unfused* Marlin kernel disagrees with the
+independent `TorchLinear` kernel on 6/10 prompts, i.e. as often as it disagrees
+with itself fused, so exact greedy equality measures a reduction order rather
+than correctness.
 
 | Family | Method | Dtype | Exact AUTO kernel | Groups | Max logit difference | Relative L2 | Baseline repeat max | Unfuse max |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -121,8 +136,11 @@ accuracy or perplexity measurements.
 | rocm | GPTQ | float16 | `TorchLinear` | 32 | 0 | 0 | 0 | 0 |
 
 BF16 Marlin accumulates more whole-model logit drift than FP16 in this
-fixture; top-1 and generated IDs still agree. Projection oracle tolerances
-remain separate from compounded full-model differences. ROCm AWQ Triton
+fixture; both stay inside the ULP envelope, and any greedy divergence is
+confined to sub-envelope margins. The `0` entries above are single-shape
+reductions on those devices and are genuinely bit-exact, not suppressed
+tolerances. Projection oracle tolerances remain separate from compounded
+full-model differences. ROCm AWQ Triton
 split-K atomic reductions also vary between repeated unfused calls. The
 table reports that measured baseline variation separately; exact packed-byte
 restoration is checked independently, and restored logits must stay within
@@ -203,8 +221,8 @@ topology cases and 464 native-parent oracle cases. Skips are retained with their
 pytest reasons; an inactive vendor runtime is not counted as native validation.
 Renamed runtime-parent/weight regressions cover GPTQ and AWQ, including a
 side-effecting preamble and hooked fallback. Llama checkpoint tests verify
-Marlin selection, identical greedy IDs, zero extra packed-weight storage and
-exact save/reload behavior. Ruff, compileall and diff-whitespace checks pass.
+Marlin selection, the ULP/tie-break envelope above, zero extra packed-weight
+storage and exact save/reload behavior. Ruff, compileall and diff-whitespace checks pass.
 
 `plan = model.fuse()` applies fusion and returns the `FusionPlanner` directly.
 Inspect it with `plan.print()`, `plan.render()` and `plan.to_dict()`;

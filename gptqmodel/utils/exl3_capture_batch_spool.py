@@ -8,17 +8,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import tempfile
 import threading
+from pathlib import Path
 from typing import Any
 
 import torch
+import xxhash
 from safetensors import safe_open
 from safetensors.torch import save as serialize_safetensors
-import xxhash
 
 
 CAPTURE_BATCH_SPOOL_ENV = "GPTQMODEL_EXL3_CAPTURE_BATCH_SPOOL"
@@ -360,8 +360,13 @@ class EXL3CaptureBatchSpool:
             except BaseException:
                 if temporary.exists():
                     temporary.unlink()
-                if destination.exists() and batch_index not in self._records:
-                    destination.unlink()
+                if batch_index not in self._records:
+                    # A failed checkpoint leaves the batch uncommitted. Drop
+                    # the pending entry too, so a retry rewrites the payload
+                    # instead of returning a record whose file was removed.
+                    self._pending_records.pop(batch_index, None)
+                    if destination.exists():
+                        destination.unlink()
                 raise
 
     def checkpoint(self) -> None:

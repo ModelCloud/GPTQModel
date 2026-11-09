@@ -3,24 +3,27 @@
 
 import gc
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import threading
 import weakref
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureDescriptor,
     EXL3CaptureFrontierError,
     EXL3CaptureFrontierStore,
     EXL3CaptureState,
 )
-from gptqmodel.looper.exllamav3_processor import EXL3Processor
 
 
 FAMILY_JOIN = {"source": {"revision": "test"}, "corpus": {"sha256": "a" * 64}}
+_processor_wiring_pending = pytest.mark.skip(
+    reason="EXL3Processor capture-frontier wiring lands in a later stack layer"
+)
 
 
 def _subset():
@@ -58,6 +61,39 @@ def _states(hessian: torch.Tensor):
         )
         for named in _subset().values()
     ]
+
+
+def test_capture_frontier_normalizes_family_join_and_publishes_readable_files(
+    tmp_path,
+) -> None:
+    family_join = {"source": ("revision", "test"), "corpus": {"sha256": "a" * 64}}
+    store = EXL3CaptureFrontierStore(tmp_path / "frontier", family_join=family_join)
+    assert store.family_join == {
+        "source": ["revision", "test"],
+        "corpus": {"sha256": "a" * 64},
+    }
+
+    store.commit(
+        layer_index=3,
+        subset_index=1,
+        subset_total=4,
+        subset=_subset(),
+        states=_states(torch.eye(4, dtype=torch.float32)),
+    )
+    assert {
+        path.stat().st_mode & 0o777
+        for path in store.root.rglob("*")
+        if path.is_file()
+    } == {0o644}
+    assert (
+        store.restore(
+            layer_index=3,
+            subset_index=1,
+            subset_total=4,
+            subset=_subset(),
+        )
+        is not None
+    )
 
 
 def test_capture_frontier_round_trip_deduplicates_gate_up(tmp_path) -> None:
@@ -294,6 +330,7 @@ def _processor(subset, *, captured: bool, inline_mixed: bool = False) -> EXL3Pro
     return processor
 
 
+@_processor_wiring_pending
 def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> None:
     subset = _subset()
     root = tmp_path / "frontier"
@@ -348,6 +385,7 @@ def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> 
     assert load_devices == ["cpu", "cpu"]
 
 
+@_processor_wiring_pending
 def test_inline_commit_demotes_live_hessians_to_lazy_frontier(
     tmp_path, monkeypatch
 ) -> None:

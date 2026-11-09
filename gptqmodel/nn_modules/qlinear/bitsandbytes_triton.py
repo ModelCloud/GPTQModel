@@ -148,7 +148,20 @@ def _bnb_4bit_gemm_kernel(
         )
         hi = ((packed >> 4) & 0xF).to(tl.int32)
         lo = (packed & 0xF).to(tl.int32)
-        codes = tl.interleave(hi, lo)
+        if K % 2:
+            # For odd K, alternate rows begin in the low nibble of a byte.
+            # Their next code is the high nibble of the following byte.
+            odd_row = ((cols * K) & 1) != 0
+            next_packed = tl.load(
+                q_ptr + (cols[:, None] * K + k0) // 2 + half[None, :] + 1,
+                mask=nmask[:, None] & odd_row[:, None] & ((k0 + 2 * half + 1)[None, :] < K),
+                other=0,
+            )
+            first = tl.where(odd_row[:, None], lo, hi)
+            second = tl.where(odd_row[:, None], (next_packed >> 4).to(tl.int32), lo)
+            codes = tl.interleave(first, second)
+        else:
+            codes = tl.interleave(hi, lo)
         valid = nmask[:, None] & kvalid[None, :]
         am = tl.load(
             am_ptr + (cols[:, None] * K + ks[None, :]) // BS, mask=valid, other=0.0,
@@ -189,7 +202,18 @@ def _bnb_4bit_dequant_kernel(
     )
     hi = ((packed >> 4) & 0xF).to(tl.int32)
     lo = (packed & 0xF).to(tl.int32)
-    codes = tl.interleave(hi, lo)
+    if K % 2:
+        odd_row = ((cols * K) & 1) != 0
+        next_packed = tl.load(
+            q_ptr + (cols[:, None] * K + pid_k * BK) // 2 + half[None, :] + 1,
+            mask=(cols < N)[:, None] & odd_row[:, None] & ((pid_k * BK + 2 * half + 1)[None, :] < K),
+            other=0,
+        )
+        first = tl.where(odd_row[:, None], lo, hi)
+        second = tl.where(odd_row[:, None], (next_packed >> 4).to(tl.int32), lo)
+        codes = tl.interleave(first, second)
+    else:
+        codes = tl.interleave(hi, lo)
     am = tl.load(
         am_ptr + (cols[:, None] * K + ks[None, :]) // BS, mask=valid, other=0.0,
     ).to(tl.float32)
@@ -208,7 +232,7 @@ def _absmax_fp32(quant_state) -> torch.Tensor:
 
     absmax = quant_state.absmax
     if absmax.dtype != torch.uint8:
-        return absmax.reshape(-1).float()
+        return absmax.reshape(-1).float().contiguous()
 
     state2 = getattr(quant_state, "state2", None)
     if state2 is None:
@@ -226,7 +250,7 @@ def _codebook(quant_state, device) -> torch.Tensor:
         import bitsandbytes as bnb
 
         code = bnb.functional.get_4bit_type(quant_state.quant_type, device="cpu")
-    return code.to(device=device, dtype=torch.float32).reshape(-1)
+    return code.to(device=device, dtype=torch.float32).reshape(-1).contiguous()
 
 
 def dequantize_4bit(qweight: torch.Tensor, quant_state, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -238,7 +262,7 @@ def dequantize_4bit(qweight: torch.Tensor, quant_state, out_dtype: Optional[torc
     bk = min(128, max(32, 1 << (in_features - 1).bit_length()))
     grid = (triton.cdiv(out_features, 16), triton.cdiv(in_features, bk))
     _bnb_4bit_dequant_kernel[grid](
-        qweight.reshape(-1), _absmax_fp32(quant_state), _codebook(quant_state, qweight.device), out,
+        qweight.reshape(-1).contiguous(), _absmax_fp32(quant_state), _codebook(quant_state, qweight.device), out,
         in_features, out_features, int(quant_state.blocksize), 16, bk,
         num_warps=4,
     )
@@ -256,13 +280,14 @@ def matmul_4bit(
 
     out_features, in_features = quant_state.shape
     out_dtype = out_dtype or x.dtype
-    x2 = x.reshape(-1, in_features)
+    # The GEMM kernel addresses x2 with a dense row-major stride.
+    x2 = x.reshape(-1, in_features).contiguous()
     out = torch.empty((x2.shape[0], out_features), device=x.device, dtype=out_dtype)
     cfg = gemm_launch(x.device)
     grid = (triton.cdiv(x2.shape[0], cfg.block_m), triton.cdiv(out_features, cfg.block_n))
     _bnb_4bit_gemm_kernel[grid](
-        x2, qweight.reshape(-1), _absmax_fp32(quant_state), _codebook(quant_state, x.device),
-        bias if bias is not None else x, out, x2.shape[0],
+        x2, qweight.reshape(-1).contiguous(), _absmax_fp32(quant_state), _codebook(quant_state, x.device),
+        bias.contiguous() if bias is not None else x, out, x2.shape[0],
         in_features, out_features, int(quant_state.blocksize),
         cfg.block_m, cfg.block_n, cfg.block_k, bias is not None,
         num_warps=cfg.num_warps, num_stages=cfg.num_stages,

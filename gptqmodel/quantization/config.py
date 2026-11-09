@@ -127,6 +127,9 @@ class FORMAT(str, Enum):
     QQQ = "qqq"
     EXL3 = "exl3"
     VPTQ = "vptq"
+    # Public name is `nf12`; the internal extension/loader symbols keep the
+    # `nf12_ad` suffix so they cannot collide with the upstream `nf12` package.
+    NF12_AD = "nf12"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -148,6 +151,8 @@ class METHOD(str, Enum):
     EXL3 = "exl3"
     PARO = "paroquant"
     VPTQ = "vptq"
+    # Public name is `nf12`; see the FORMAT note above.
+    NF12_AD = "nf12"
 
 
 # Integer bit widths each method's packer and kernels can actually realize.
@@ -175,6 +180,9 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # VPTQ's nominal bpw label is derived from codebook sizes and clamped to
     # 1-8; the vector codebooks can realize any integer width in that range.
     METHOD.VPTQ: (1, 2, 3, 4, 5, 6, 7, 8),
+    # NF12-AD is a lossless 12-bit encoding of BF16. The width is fixed by the
+    # format, so 12 is the only valid request.
+    METHOD.NF12_AD: (12,),
 }
 
 
@@ -878,7 +886,10 @@ def _normalize_quant_bits(
         format_value = _normalize_format(format_value)
 
     if valid_bit_widths is None:
-        valid_bit_widths = tuple(range(1, 9))
+        # 12 is NF12-AD's lossless width. `quant_bits_width` reaches this helper
+        # with no format or method hint, so the generic table has to admit it;
+        # format- and method-specific callers pass their own table instead.
+        valid_bit_widths = (*range(1, 9), 12)
     valid_bit_widths = tuple(int(width) for width in valid_bit_widths)
 
     if isinstance(bits, bool):
@@ -968,6 +979,8 @@ def resolve_quant_format(
         return FORMAT.EXL3
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
+    if method == METHOD.NF12_AD:
+        return FORMAT.NF12_AD
 
     if isinstance(format_value, FORMAT):
         return format_value
@@ -2220,6 +2233,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.VPTQ: {
         FORMAT.VPTQ,
     },
+    METHOD.NF12_AD: {
+        FORMAT.NF12_AD,
+    },
 }
 
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -2271,6 +2287,9 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.VPTQ,
 )
+NF12_AD_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.NF12_AD,
+)
 
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
@@ -2288,6 +2307,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
+    FORMAT.NF12_AD: METHOD.NF12_AD,
 }
 
 # inference only methods should go here
@@ -3739,6 +3759,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.VPTQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.VPTQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.VPTQ
+    elif target_cls is NF12ADConfig:
+        expected_method = METHOD.NF12_AD
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.NF12_AD:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.NF12_AD}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.NF12_AD
     else:
         expected_method = METHOD.GPTQ
 
@@ -5615,6 +5648,87 @@ class FP8Config(PreProcessorConfig):
     def uses_weight_only_lifecycle(self) -> bool:
         return not self.gsq_calibration
 
+
+@dataclass
+class NF12ADConfig(PreProcessorConfig):
+    """Configuration for NF12-AD (NyoomFloat12, AlpinDale modified layout).
+
+    NF12 is a lossless 12-bit encoding of BF16 weights from Together AI's
+    NyoomFloat12 paper, implemented by AlpinDale at
+    https://github.com/dphnAI/nf12. The ``ad`` suffix denotes the tiled
+    bit/memory layout implemented by that library, which is not byte
+    compatible with the paper's layout.
+
+    Quantization casts weights to BF16 (the only lossy step) and then encodes
+    them exactly. Inference stores only the packed bytes and escape table.
+    """
+
+    bits: int = field(default=12, metadata={"choices": [12]})
+    method: METHOD = field(default=METHOD.NF12_AD)
+    format: FORMAT = field(default=FORMAT.NF12_AD)
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    # Force one exponent base for every module (0..120). None searches for the
+    # base with the fewest escaped groups, as the format specifies.
+    exp_base: Optional[int] = field(default=None)
+
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        return FORMAT.NF12_AD
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.NF12_AD,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return NF12_AD_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        if not isinstance(layer_dict, dict):
+            return
+        if "bits" in layer_dict and int(layer_dict["bits"]) != 12:
+            raise ValueError(f"NF12ADConfig: layer `{layer_name}` only supports 12-bit weights.")
+        if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
+            raise ValueError("NF12ADConfig: `group_size` is not used; keep it at `-1`.")
+        if "exp_base" in layer_dict:
+            raise ValueError(
+                "NF12ADConfig: per-layer `exp_base` is not supported; set it globally."
+            )
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {"exp_base": self.exp_base}
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["exp_base"] = self.exp_base
+        # NF12 is lossless, so symmetry is not a user-tunable choice.
+        out["sym"] = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.method != METHOD.NF12_AD:
+            raise ValueError("NF12ADConfig: `method` must be `nf12`.")
+        self.format = FORMAT.NF12_AD
+        self.group_size = -1
+        self.desc_act = False
+        self.sym = True
+        if self.exp_base is not None:
+            if not isinstance(self.exp_base, int) or not 0 <= self.exp_base <= 120:
+                raise ValueError("NF12ADConfig: `exp_base` must be None or an integer in [0, 120].")
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+
 @dataclass
 class BitsAndBytesConfig(PreProcessorConfig):
     bits: int = field(default=4, metadata={"choices": [4, 8]})
@@ -6279,6 +6393,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig
+    if method == METHOD.NF12_AD or format_value == FORMAT.NF12_AD:
+        return NF12ADConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQConfig
     if method == METHOD.AWQ:
@@ -6301,6 +6417,7 @@ def _known_quantize_config_field_names() -> set[str]:
         ParoConfig,
         QQQConfig,
         VPTQConfig,
+        NF12ADConfig,
         FP8Config,
         BitsAndBytesConfig,
         EXL3Config,

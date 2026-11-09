@@ -1172,10 +1172,37 @@ class LazyTurtle:
                 "_non_persistent_buffers_set",
                 set(),
             )
+            # Non-persistent buffers are absent from the checkpoint, so the
+            # recursive path rebuilds them from a constructor template whenever
+            # they are meta or not on the requested device. Match that here
+            # instead of only rebuilding meta tensors.
+            restore_device = device
+            if restore_device is None:
+                # A materialized direct parameter anchors this module's
+                # execution device before any init-only buffer does.
+                resolved = next(
+                    (
+                        param.device
+                        for param in target_submodule.parameters(recurse=False)
+                        if not _is_meta_tensor(param)
+                    ),
+                    None,
+                )
+                if resolved is None:
+                    resolved = next(
+                        (
+                            buffer.device
+                            for buffer in direct_buffers.values()
+                            if not _is_meta_tensor(buffer)
+                        ),
+                        None,
+                    )
+                restore_device = resolved if resolved is not None else torch.device("cpu")
             missing_nonpersistent_buffers = [
                 (name, name)
                 for name, buffer in direct_buffers.items()
-                if name in nonpersistent and _is_meta_tensor(buffer)
+                if name in nonpersistent
+                and (_is_meta_tensor(buffer) or buffer.device != restore_device)
             ]
             if missing_nonpersistent_buffers:
                 self._restore_missing_nonpersistent_buffers(
@@ -1183,7 +1210,7 @@ class LazyTurtle:
                     target_submodule=target_submodule,
                     t_bufs=direct_buffers,
                     missing_nonpersistent_buffers=missing_nonpersistent_buffers,
-                    device=device,
+                    device=restore_device,
                 )
             return target_submodule
 
