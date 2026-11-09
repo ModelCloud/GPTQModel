@@ -246,4 +246,5 @@ gptqmodel_ext/exllamav2/hip/
 !gptqmodel_ext/nf12_hip/nf12_ad_moe.hip
 !gptqmodel_ext/nf12_hip/nf12_ad_pack_bf16t.hip
 !gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh
+!gptqmodel_ext/nf12_hip/nf12_ad_validation.cuh
 !gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp

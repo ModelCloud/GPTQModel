@@ -32,7 +32,77 @@ def native():
     lib.nf12_ad_moe_decode.restype = C.c_int
     lib.nf12_ad_moe_grouped_operands.argtypes = [p, i, p, i, p, i, i, i, p, i, p, p]
     lib.nf12_ad_moe_grouped_operands.restype = C.c_int
+    lib.nf12_ad_moe_silu_mul.argtypes = [p, i, i, i, p, i, p]
+    lib.nf12_ad_moe_silu_mul.restype = C.c_int
+    lib.nf12_ad_moe_combine.argtypes = [p, i, i, i, i, p, i, p]
+    lib.nf12_ad_moe_combine.restype = C.c_int
     return hip, lib
+
+
+@pytest.mark.parametrize("row0,rows,ldo", [
+    (16, 16, 64), (0, 32, 64), (32, 0, 64),
+    (0, 16, 0), (0, 16, 56), (0, 16, 65),
+    (2**63 - 16, 16, 64), (0, 2**63 - 16, 64),
+])
+def test_native_decode_rejects_invalid_slice_or_stride(native, row0, rows, ldo):
+    hip, lib = native
+    # The second encoded matrix is a readable canary, outside the declared N.
+    w = torch.cat([torch.ones(16, 64), torch.full((16, 64), 2.)]).bfloat16().cuda()
+    packed, escapes, exp_base = hip.encode(w)
+    ends = torch.tensor([0, escapes.shape[0]], device="cuda", dtype=torch.int64)
+    base = torch.tensor([exp_base], device="cuda", dtype=torch.uint8)
+    out = torch.full((34, 80), -7., device="cuda", dtype=torch.bfloat16)
+    assert lib.nf12_ad_moe_decode(
+        packed.data_ptr(), escapes.data_ptr(), ends.data_ptr(), base.data_ptr(),
+        1, 16, 64, None, 0, row0, rows, out[1:].data_ptr(), ldo,
+        torch.cuda.current_stream().cuda_stream,
+    ) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
+
+
+@pytest.mark.parametrize("op", ["silu_mul", "combine"])
+@pytest.mark.parametrize("bad", ["input_stride", "output_stride", "stride_alignment",
+                                "pointer_alignment", "row_overflow", "stride_overflow"])
+def test_native_elementwise_rejects_invalid_buffers(native, op, bad):
+    _, lib = native
+    x = torch.ones((4, 32), device="cuda", dtype=torch.bfloat16)
+    out = torch.full((4, 32), -7., device="cuda", dtype=torch.bfloat16)
+    ldi, ldo, rows, offset = 32, 32, 2, 0
+    if bad == "input_stride":
+        ldi = 0
+    elif bad == "output_stride":
+        ldo = 0
+    elif bad == "stride_alignment":
+        ldo = 9
+    elif bad == "pointer_alignment":
+        offset = 2
+    elif bad == "row_overflow":
+        rows = 2**62
+    else:
+        ldi = 2**62
+    shape = (rows, 8) if op == "silu_mul" else (rows, 2, 8)
+    args = (x.data_ptr(), ldi, *shape, out.data_ptr() + offset, ldo,
+            torch.cuda.current_stream().cuda_stream)
+    assert getattr(lib, "nf12_ad_moe_" + op)(*args) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
+
+
+@pytest.mark.parametrize("ldx,ldo,count", [(0, 8, 4), (8, 0, 4), (8, 8, -1), (2**62, 8, 4)])
+def test_native_grouped_rejects_invalid_buffers(native, ldx, ldo, count):
+    _, lib = native
+    x = torch.ones((4, 8), device="cuda", dtype=torch.bfloat16)
+    out = torch.full_like(x, -7.)
+    gather = torch.arange(4, device="cuda", dtype=torch.int32)
+    offsets = torch.tensor([0, 2, 4], device="cuda", dtype=torch.int64)
+    ends = torch.full((2,), -7, device="cuda", dtype=torch.int32)
+    assert lib.nf12_ad_moe_grouped_operands(
+        x.data_ptr(), ldx, gather.data_ptr(), 1, offsets.data_ptr(), count, 2, 8,
+        out.data_ptr(), ldo, ends.data_ptr(), torch.cuda.current_stream().cuda_stream,
+    ) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all()) and bool((ends == -7).all())
 
 
 @pytest.fixture(params=[False, True], ids=["default-producer", "nondefault-producer"])

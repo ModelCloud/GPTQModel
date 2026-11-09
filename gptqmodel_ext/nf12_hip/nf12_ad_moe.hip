@@ -25,6 +25,7 @@
 // per-expert counts are device-side and the host only supplies bounds.
 // ---------------------------------------------------------------------------
 #include "nf12_ad_format_hip.cuh"
+#include "nf12_ad_validation.cuh"
 
 #include <hip/hip_runtime_api.h>
 
@@ -457,6 +458,12 @@ hipError_t nf12_ad_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_toke
     return hipErrorInvalidValue;
   }
   if (num_tokens == 0) return hipSuccess;
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  if (!nf12_ad::validation::valid_bf16_matrix(y_bf16, n, ldy) ||
+      !nf12_ad::validation::valid_bf16_matrix(out_bf16, n, ldo) ||
+      num_tokens > kMax / 2 / topk / ldy || num_tokens > kMax / 2 / ldo) {
+    return hipErrorInvalidValue;
+  }
   const int64_t vecs = num_tokens * (n / 8);
   const int64_t blocks = (vecs + kElemThreads - 1) / kElemThreads;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
@@ -468,8 +475,14 @@ hipError_t nf12_ad_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_toke
 
 hipError_t nf12_ad_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, int64_t inter,
                                  void* out_bf16, int64_t ldo, hipStream_t stream) {
-  if (rows < 0 || inter <= 0 || inter % 8 != 0) return hipErrorInvalidValue;
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  if (rows < 0 || inter <= 0 || inter % 8 != 0 || inter > kMax / 2) return hipErrorInvalidValue;
   if (rows == 0) return hipSuccess;
+  if (!nf12_ad::validation::valid_bf16_matrix(h_bf16, 2 * inter, ldh) ||
+      !nf12_ad::validation::valid_bf16_matrix(out_bf16, inter, ldo) ||
+      rows > kMax / 2 / ldh || rows > kMax / 2 / ldo) {
+    return hipErrorInvalidValue;
+  }
   const int64_t vecs = rows * (inter / 8);
   const int64_t blocks = (vecs + kElemThreads - 1) / kElemThreads;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
@@ -485,11 +498,19 @@ hipError_t nf12_ad_moe_decode(const uint8_t* packed, const uint4* escapes,
                                const int64_t* expert_offsets,
                                int64_t max_assignments, int64_t row0, int64_t rows, void* out,
                                int64_t ldo, hipStream_t stream) {
-  if (num_experts < 1 || k <= 0 || k % kSuperAtomCols != 0 || row0 < 0 || rows < 0 ||
-      row0 % kSuperAtomRows != 0 || rows % kSuperAtomRows != 0) {
+  using namespace nf12_ad::validation;
+  if (!valid_moe_shape(num_experts, n, k) || packed == nullptr || !aligned16(packed) ||
+      !aligned16(escapes) || escape_offsets == nullptr || !aligned(escape_offsets, 8) ||
+      exp_base == nullptr || !aligned(expert_offsets, 8) || max_assignments < 0 ||
+      max_assignments > std::numeric_limits<int32_t>::max() || row0 < 0 || rows < 0 ||
+      row0 % kSuperAtomRows != 0 || rows % kSuperAtomRows != 0 || rows > n - row0) {
     return hipErrorInvalidValue;
   }
   if (rows == 0) return hipSuccess;
+  if (!valid_bf16_matrix(out, k, ldo) ||
+      num_experts > std::numeric_limits<int64_t>::max() / 2 / rows / ldo) {
+    return hipErrorInvalidValue;
+  }
   const int64_t blocks = rows / kSuperAtomRows;
   if (blocks > std::numeric_limits<int32_t>::max()) return hipErrorInvalidValue;
   if (num_experts > 0xffff) return hipErrorNotSupported;
@@ -505,13 +526,23 @@ hipError_t nf12_ad_moe_grouped_operands(const void* x_bf16, int64_t ldx, const i
                                          int64_t max_assignments, int64_t num_experts, int64_t k,
                                          void* x_out_bf16, int64_t ldo, int32_t* group_ends,
                                          hipStream_t stream) {
-  if (num_experts < 1 || num_experts > 0x7fffffffLL || k <= 0 || k % 8 != 0 || gather_div < 1) {
+  using namespace nf12_ad::validation;
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  if (num_experts < 1 || num_experts > 0x7fffffffLL || k <= 0 || k % 8 != 0 || gather_div < 1 ||
+      max_assignments < 0 || max_assignments > std::numeric_limits<int32_t>::max() ||
+      expert_offsets == nullptr || !aligned(expert_offsets, 8) || group_ends == nullptr ||
+      !aligned(group_ends, 4) || !aligned(gather, 4)) {
     return hipErrorInvalidValue;
   }
+  if (gather != nullptr && (!valid_bf16_matrix(x_bf16, k, ldx) ||
+      !valid_bf16_matrix(x_out_bf16, k, ldo) ||
+      ldx > kMax / 2 / std::numeric_limits<int32_t>::max() ||
+      ldo > kMax / 2 / std::numeric_limits<int32_t>::max())) return hipErrorInvalidValue;
   const size_t smem = static_cast<size_t>(num_experts) * sizeof(int32_t);
   if (smem > 48u * 1024u) return hipErrorNotSupported;
   // `total` is device-side, so size the grid from the host-known bound.
-  int64_t blocks = (max_assignments * (k / 8) + kElemThreads - 1) / kElemThreads;
+  int64_t blocks = gather == nullptr ? 1 :
+      (max_assignments * (k / 8) + kElemThreads - 1) / kElemThreads;
   if (blocks < 1) blocks = 1;
   if (blocks > 4096) blocks = 4096;
   moe_grouped_operands_kernel<<<static_cast<unsigned>(blocks), kElemThreads,

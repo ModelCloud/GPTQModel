@@ -49,6 +49,7 @@ _SOURCE_FILES = (
     "nf12_ad_moe.hip",
     "nf12_ad_pack_bf16t.hip",
     "nf12_ad_format_hip.cuh",
+    "nf12_ad_validation.cuh",
 )
 
 
