@@ -281,8 +281,14 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             if x.device.type == "cuda"
             else nullcontext()
         )
+        # Evaluation mode does not disable autograd in PyTorch. Preserve the
+        # graph for differentiable inputs/biases, and avoid handing an inference
+        # tensor to an adapter that updates the output in place.
+        needs_grad = torch.is_grad_enabled() and (
+            x.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        )
         with device_context:
-            with nullcontext() if self.training else torch.inference_mode():
+            with nullcontext() if self.training or needs_grad or self.adapter else torch.inference_mode():
                 out = AwqGemmTritonFn.apply(
                     x,
                     self.qweight,
@@ -306,7 +312,9 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             out = out.to(dtype=input_dtype)
 
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+            # LoRA updates the output in place. A custom-Function result can
+            # be a view, which autograd forbids modifying in place.
+            out = self.adapter.apply(x=x, out=out.clone())
 
         return out.reshape(out_shape)
 
