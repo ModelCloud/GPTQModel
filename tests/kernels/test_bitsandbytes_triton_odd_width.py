@@ -68,3 +68,34 @@ def test_dequant_and_fused_matmul_follow_global_nibble_parity(
     assert actual.dtype == dtype
     assert torch.equal(actual, repeated)
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
+@requires_gpu
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("layout", ["padded_rows", "column_stride"])
+def test_fused_matmul_accepts_strided_activation_views(dtype, layout):
+    rows, in_features, out_features = 16, 128, 64
+    generator = torch.Generator(device="cuda").manual_seed(472)
+    codes = torch.randint(16, (out_features * in_features,), device="cuda", generator=generator, dtype=torch.uint8)
+    packed = (codes[0::2] << 4) | codes[1::2]
+    codebook = torch.arange(16, device="cuda", dtype=torch.float32) - 8
+    quant_state = SimpleNamespace(
+        shape=(out_features, in_features),
+        dtype=dtype,
+        absmax=torch.ones(out_features * in_features // 64, device="cuda"),
+        code=codebook,
+        blocksize=64,
+    )
+    storage_width = in_features + 8 if layout == "padded_rows" else in_features * 2
+    storage = torch.randint(0, 3, (rows, storage_width), device="cuda", generator=generator).to(dtype) - 1
+    x = storage[:, :in_features] if layout == "padded_rows" else storage[:, ::2]
+    assert not x.is_contiguous()
+    bias = (torch.arange(out_features, device="cuda") % 3 - 1).to(dtype)
+
+    dense = codebook[codes.long()].reshape(out_features, in_features)
+    reference = (x.double() @ dense.T.double() + bias.double()).to(dtype)
+    actual = bt.matmul_4bit(x, packed, quant_state, bias=bias, out_dtype=dtype)
+    torch.cuda.synchronize()
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
