@@ -4,6 +4,12 @@ Decode, encode and fused matrix-core kernels plus Torch bindings that run the
 **NF12-AD** (`nf12_ad`) quantization format on AMD RDNA4 GPUs — `gfx1200` /
 `gfx1201` / `gfx1250` (Radeon AI PRO R9700, RX 9000 series).
 
+Validated on **ROCm SDK 10.1.0 / HIP 7.16.26385** with
+**PyTorch 2.16.0.dev20261025+rocm10.1**, free-threaded Python 3.14 and
+Radeon AI PRO R9700 (`gfx1201`). `hipconfig --version` reports
+`7.16.26385-0000000`; `torch.version.hip` reports `7.16.26385`.
+The HIP component version is distinct from the ROCm release.
+
 ## Attribution
 
 * **Format and reference codec:** *"NyoomFloat12: Accelerating LLM Inference

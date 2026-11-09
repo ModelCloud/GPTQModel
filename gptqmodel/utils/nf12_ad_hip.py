@@ -13,6 +13,9 @@ builds the HIP port in ``gptqmodel_ext/nf12_hip``, which decodes the identical
 NF12-AD byte stream to exact BF16 and hands it to rocBLAS through
 ``torch.matmul`` (SPEC.md section 6.5, the decode-then-GEMM route).
 
+Validated on ROCm SDK 10.1.0 / HIP 7.16.26385 (R9700, gfx1201); see the
+vendored HIP README for the accompanying PyTorch build.
+
 Nothing is shipped precompiled: the extension is always built from the sources
 in ``gptqmodel_ext/nf12_hip`` for the visible gfx target.
 """

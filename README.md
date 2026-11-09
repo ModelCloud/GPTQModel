@@ -879,7 +879,9 @@ NF12 stores BF16 weights in Together AI's lossless 12-bit NF12 format,
 using AlpinDale's tiled layout and CUDA kernels ([dphnAI/nf12](https://github.com/dphnAI/nf12)).
 It is weight-only, needs no calibration data, and decodes back to the exact
 BF16 matrix. The modules must satisfy `in_features % 64 == 0` and
-`out_features % 16 == 0`.
+`out_features % 16 == 0`. The native RDNA4 path was validated on
+ROCm 10.1.0 / HIP 7.16.26385 with Radeon AI PRO R9700 (`gfx1201`); see
+the [NF12 HIP toolchain notes](gptqmodel_ext/nf12_hip/README.md).
 
 ```py
 import torch
