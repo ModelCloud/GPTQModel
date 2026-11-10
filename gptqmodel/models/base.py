@@ -1233,28 +1233,36 @@ class BaseQModel(nn.Module):
         return layer_modules
 
     @classmethod
-    def _expert_count_config(cls, model_config):
+    def _expert_count_config(cls, model_config, field_name: Optional[str] = None):
         """Return the config object that owns the routed-expert cardinality.
 
         Multimodal and remote-code configs nest the language config, and DBRX
         nests its MoE fields under ``ffn_config``. Precedence is preserved for
         existing definitions: ``text_config``, then ``thinker_config``, then
         ``ffn_config``, then the top-level config.
+
+        When ``field_name`` is given, ``ffn_config`` is only selected if it
+        actually declares that field. An unrelated ``ffn_config`` on some other
+        architecture must not shadow a cardinality kept on the top-level config;
+        without this check the added branch would newly raise for such a config.
         """
         if hasattr(model_config, "text_config"):
             return model_config.text_config
         if hasattr(model_config, "thinker_config"):
             return model_config.thinker_config.text_config
         ffn_config = getattr(model_config, "ffn_config", None)
-        if ffn_config is not None:
+        if ffn_config is not None and (
+            field_name is None or getattr(ffn_config, field_name, None) is not None
+        ):
             return ffn_config
         return model_config
 
     @classmethod
     def get_num_experts(cls, model_config):
         """Return the model-wide fallback expert count."""
-        config = cls._expert_count_config(model_config)
-        return getattr(config, cls.dynamic_expert_index)
+        field_name = cls.dynamic_expert_index
+        config = cls._expert_count_config(model_config, field_name)
+        return getattr(config, field_name)
 
     @classmethod
     def get_num_experts_for_module(cls, model_config, module_name: str) -> Optional[int]:
@@ -1283,7 +1291,7 @@ class BaseQModel(nn.Module):
         if not field_name:
             return None
 
-        config = cls._expert_count_config(model_config)
+        config = cls._expert_count_config(model_config, field_name)
         value = getattr(config, field_name, None)
         if value is None and matched is not None:
             # Mapped fields are optional on dense/checkpoint compatibility

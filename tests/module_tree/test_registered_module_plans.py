@@ -175,6 +175,35 @@ def test_dbrx_converted_nested_ffn_config_expert_count():
         assert tagged in declared, tagged
 
 
+def test_ffn_config_does_not_shadow_a_top_level_expert_count():
+    """An unrelated ``ffn_config`` must not hide a top-level cardinality.
+
+    ``_expert_count_config`` gained an ``ffn_config`` branch for DBRX. Selecting
+    that branch unconditionally would make every definition that keeps its
+    expert count on the top-level config raise ``AttributeError`` as soon as a
+    config also carried an ``ffn_config`` object without that field. Only a
+    config that actually declares the requested field may claim ownership.
+    """
+
+    definition = MODEL_MAP["qwen3_moe"]
+    field = definition.dynamic_expert_index
+
+    # Unrelated FFN sub-config; the count stays on the top-level config.
+    top_level = SimpleNamespace(ffn_config=SimpleNamespace(hidden_size=16), **{field: 8})
+    assert definition._expert_count_config(top_level, field) is top_level
+    assert definition.get_num_experts(top_level) == 8
+
+    # FFN sub-config that owns the field is still preferred.
+    nested = SimpleNamespace(ffn_config=SimpleNamespace(**{field: 8}))
+    assert definition._expert_count_config(nested, field) is nested.ffn_config
+    assert definition.get_num_experts(nested) == 8
+
+    # When both declare it, the FFN owner keeps winning for DBRX-compatible
+    # remote-code configs (this is the documented precedence).
+    both = SimpleNamespace(ffn_config=SimpleNamespace(**{field: 8}), **{field: 4})
+    assert definition.get_num_experts(both) == 8
+
+
 @pytest.mark.parametrize("model_type", sorted(MODEL_MAP))
 def test_every_expert_placeholder_expands_to_concrete_names(model_type):
     """Routed-expert placeholders must expand before quantization sees them.
