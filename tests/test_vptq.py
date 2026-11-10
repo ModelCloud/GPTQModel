@@ -2356,9 +2356,17 @@ def test_tiny_gpt2_vptq_conv1d_quantize_save_reload(tmp_path: Path):
 
     prompt = "tiny vptq calibration sample"
     inputs = tokenizer(prompt, return_tensors="pt")
+    wide_bias_name = "model.transformer.h.0.attn.c_attn"
+    wide_bias_module = dict(model.named_modules())[wide_bias_name]
+    assert wide_bias_module.bias is not None
+    wide_bias_module.bias.data[0] = -65537.0
     model.save(quantized_dir)
 
-    reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=torch.bfloat16)
+    for load_dtype in (torch.float16, torch.bfloat16):
+        reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=load_dtype)
+        restored_bias = dict(reloaded.named_modules())[wide_bias_name].bias
+        assert restored_bias.dtype is torch.float32
+        assert restored_bias[0].item() == -65537.0
     reloaded_modules = dict(reloaded.named_modules())
     for name, (in_features, out_features) in expected_modules.items():
         restored = reloaded_modules[name]
@@ -2600,6 +2608,55 @@ def _checkpoint_bias_module(dtype):
     source = torch.randn(64, generator=generator, dtype=torch.bfloat16) * 0.02
     module.bias.data.copy_(source.to(module.bias.dtype))
     return module
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_bias_epilogue_captures_and_replays_live_values(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA graph capture requires a GPU")
+
+    module = _checkpoint_bias_module(dtype).to("cuda:0")
+    x = torch.full((1, 64), 4096.0, dtype=dtype, device="cuda:0")
+    module.bias.data.fill_(0.5)
+
+    with torch.inference_mode():
+        module(x)  # Warm up kernels before graph capture.
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = module(x)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        for value in (0.5, -65537.0):
+            module.bias.data.fill_(value)
+            graph.replay()
+            torch.cuda.synchronize()
+            oracle = (
+                x.double() @ module.dequantize().double().t() + module.bias.double()
+            ).to(dtype)
+            torch.testing.assert_close(captured, oracle, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_bias_epilogue_compiles_fullgraph_with_live_values(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA compilation requires a GPU")
+
+    module = _checkpoint_bias_module(dtype).to("cuda:0")
+    x = torch.full((1, 64), 4096.0, dtype=dtype, device="cuda:0")
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+
+    for value in (0.5, -65537.0):
+        module.bias.data.fill_(value)
+        with torch.inference_mode():
+            actual = compiled(x)
+        oracle = (
+            x.double() @ module.dequantize().double().t() + module.bias.double()
+        ).to(dtype)
+        torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

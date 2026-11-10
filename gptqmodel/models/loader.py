@@ -46,6 +46,7 @@ from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
+from ..nn_modules.qlinear.vptq_torch import VPTQLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import (
     FORMAT,
@@ -2363,9 +2364,10 @@ def ModelLoader(cls):
                 if getattr(module, "bias", None) is not None and (
                     getattr(module, "weight_scale_inv", None) is not None
                     or hasattr(module, "gguf_tensor_qtype")
+                    or isinstance(module, VPTQLinear)
                 ):
                     keep_in_fp32_modules.append(f"{prefix}bias")
-                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear)):
+                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear, VPTQLinear)):
                         fp32_bf16_buffer_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,

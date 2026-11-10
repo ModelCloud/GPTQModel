@@ -67,6 +67,7 @@ on this branch; the "Before" column quotes what that location did on `main`.
 | VPTQ CUDA fused path, `nn_modules/qlinear/vptq_cuda.py:119-127` | Sent a wide bias to a kernel that requires the output dtype | The fused kernel is used unless a stored value is not representable in the activation dtype |
 | VPTQ bias buffer, `nn_modules/qlinear/vptq_torch.py:264-276` | Allocated at `codebook_dtype` | Allocated FP32 so the checkpoint range survives |
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:463-474` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
+| VPTQ checkpoint reload, `models/loader.py` | Requested FP16/BF16 dtype could narrow the saved FP32 bias | Keep the bias FP32 during load and restore it from the checkpoint if Accelerate narrows BF16 buffers |
 | FP4 checkpoint decoder, `models/base.py:3795-3802` | Bias narrowed to `target_dtype` when the wrapper is built | Bias kept at its stored width, so the forward can still go wide |
 
 ## Dtype promotion contract
@@ -87,6 +88,7 @@ contains the other: BF16 has the exponent range and FP16 has the mantissa.
 | Wide buffer with representable values | `bias_narrows_losslessly` proves the exact cast and the cheap narrow epilogue runs; no FP32 weight operand copy |
 | In-place bias write (`.data.copy_`, `.data.fill_`) | The representability check is recomputed per call; version counters do not see `.data` writes, so a cached answer would go stale |
 | VPTQ CUDA representability gate | Recomputed per forward; it compares live device values, so `.data` writes are always honoured |
+| CUDA graph capture or `torch.compile` | The value check would synchronize or create a data-dependent graph break; use the wide epilogue, which reads the live bias on every replay |
 | Autocast active | The wide helper disables autocast for its own GEMM so the product is not re-narrowed |
 | Bias needs broadcasting beyond the flattened output | `_fuse_bias_epilogue` declines; `linear_wide_bias` reshapes before adding, so type promotion and the broadcast shape are preserved |
 | Bias cannot be stored exactly in the FP32 buffer | `load_quant_result` raises instead of rounding silently |

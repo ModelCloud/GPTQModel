@@ -217,6 +217,14 @@ def bias_narrows_losslessly(bias: torch.Tensor, dtype: torch.dtype) -> bool:
 
     if bias.dtype == dtype:
         return True
+    # A device equality check synchronizes and cannot run in a CUDA graph;
+    # Dynamo also cannot trace its data-dependent Python boolean. Choose the
+    # safe wide epilogue in either mode. The graph still reads the live bias
+    # tensor on every replay, including writes made through `.data`.
+    if torch.compiler.is_compiling():
+        return False
+    if bias.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        return False
     return torch.equal(bias.to(dtype=dtype).to(torch.float64), bias.to(torch.float64))
 
 
