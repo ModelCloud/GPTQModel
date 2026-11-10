@@ -14,6 +14,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
 from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
+from ._runtime_cache import tensor_cache_key
 from .vptq_torch import VPTQLinear
 
 
@@ -75,6 +76,31 @@ class VPTQCudaLinear(VPTQLinear):
         del backend, mode, fullgraph
         self.optimized = True
 
+    def clear_weight_cache(self) -> None:
+        """Drop the cached fused-bias gate (called on load and device moves)."""
+        self._bias_narrow_key = None
+        self._bias_narrow_value = None
+
+    def _bias_narrows_losslessly(self, bias: torch.Tensor, dtype: torch.dtype) -> bool:
+        """Cached :func:`bias_narrows_losslessly` for the fused-kernel gate.
+
+        The comparison is exact, so it reads device memory and synchronises the
+        host. On the single-row decode path that sync costs more than the fused
+        kernel it guards, while the answer only changes when the bias buffer is
+        replaced or written. Cache it under ``tensor_cache_key``; the base class
+        clears the cache on state-dict load and device/dtype moves, and
+        ``load_quant_result`` clears it after packing (``.data.copy_`` does not
+        bump the version counter).
+        """
+
+        key = (tensor_cache_key(bias), dtype)
+        if getattr(self, "_bias_narrow_key", None) == key:
+            return self._bias_narrow_value
+        value = bias_narrows_losslessly(bias, dtype)
+        self._bias_narrow_key = key
+        self._bias_narrow_value = value
+        return value
+
     @torch.no_grad()
     def _dequantize_cuda(self) -> torch.Tensor:
         """Reconstruct weights with the native CUDA kernel for GEMM."""
@@ -121,7 +147,7 @@ class VPTQCudaLinear(VPTQLinear):
         # epilogue. An exactly representable one may still take the fused kernel:
         # it adds the bias after its own FP32 (BF16: FP64) accumulation, so only
         # the storage dtype changes, never the arithmetic.
-        wide_bias = linear_needs_wide_bias(x, bias) and not bias_narrows_losslessly(
+        wide_bias = linear_needs_wide_bias(x, bias) and not self._bias_narrows_losslessly(
             bias, x.dtype
         )
         if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows and not wide_bias:

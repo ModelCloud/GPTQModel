@@ -6,7 +6,7 @@ import weakref
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce
+from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce, linear_wide_bias
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from tests.test_torch_weight_storage import state_tensors
 
@@ -143,6 +143,33 @@ def test_linear_fp32_reduce_wide_bias_layouts(dtype, layout):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_linear_wide_bias_preserves_broadcast_bias_shape(dtype):
+    """A wide bias that only broadcasts after the output reshape must still apply.
+
+    The wide epilogue flattens the activation for its 2-D GEMM. A per-batch bias
+    such as (2, 1, 48) does not broadcast against the flattened (6, 48) product,
+    so the bias has to be added after the output is reshaped back.
+    """
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if dtype is torch.bfloat16 and device == "cuda" and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 arithmetic unavailable on this device")
+    generator = torch.Generator(device=device).manual_seed(11)
+    x = (torch.rand((2, 3, 32), generator=generator, device=device) - 0.5).to(dtype)
+    weight = ((torch.rand((48, 32), generator=generator, device=device) - 0.5) / 8).to(dtype)
+    # FP32 keeps the stored width; the narrow bias fails to broadcast against the
+    # flattened (6, 48) product and used to raise a shape error.
+    bias = (torch.rand((2, 1, 48), generator=generator, device=device) - 0.5)
+    oracle = (x.double() @ weight.double().t() + bias.double()).to(dtype)
+
+    for actual in (linear_wide_bias(x, weight, bias), linear_fp32_reduce(x, weight, bias)):
+        assert actual.shape == (2, 3, 48)
+        assert actual.dtype is dtype
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_vptq_wide_bias_cancels_without_dense_cache(dtype):
     """VPTQ must add its wide bias after a wide reduction and retain no dense weight."""
 
@@ -190,6 +217,63 @@ def test_vptq_wide_bias_cancels_without_dense_cache(dtype):
     # Only the packed checkpoint buffers may persist after forward.
     assert references and all(reference() is None for reference in references)
     assert {tensor.untyped_storage().data_ptr() for tensor in state_tensors(module)} <= allowed
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_cuda_fused_bias_gate_cache_invalidates(dtype):
+    """The cached representability gate must follow the live bias values.
+
+    The gate reads device memory, so caching it removes a per-forward host sync.
+    A stale entry would keep an inexact bias on the fused kernel after the buffer
+    is repacked, so an in-place ``copy_`` must invalidate it and
+    ``clear_weight_cache`` must drop it unconditionally.
+    """
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("VPTQ_CUDA is CUDA-only")
+
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+
+    module = (
+        VPTQCudaLinear(
+            bits=1,
+            in_features=_CANCELLATION_ROWS,
+            out_features=1,
+            bias=True,
+            vector_lens=[-1, 4],
+            num_centroids=[-1, 16],
+            num_res_centroids=[-1, -1],
+            group_size=_CANCELLATION_ROWS,
+            group_num=-1,
+            enable_norm=False,
+            enable_perm=False,
+            dtype=dtype,
+        )
+        .eval()
+        .to("cuda")
+    )
+    module.indices.zero_()
+    module.centroids.weight.data.fill_(1.0)
+    module.bias.copy_(torch.tensor([0.5], device="cuda", dtype=torch.float32))
+    assert module._bias_narrows_losslessly(module.bias, dtype) is True
+    key = module._bias_narrow_key
+    assert module._bias_narrows_losslessly(module.bias, dtype) is True
+    # A repeat call reuses the cached answer.
+    assert module._bias_narrow_key == key
+
+    # A value neither FP16 nor BF16 can hold must flip the answer: ``copy_``
+    # bumps the version counter, so the key changes and the gate recomputes.
+    # ``-65536`` is exact in BF16, so go one unit below it.
+    inexact = float(_CANCELLATION_BIAS) - 1.0
+    module.bias.copy_(torch.tensor([inexact], device="cuda", dtype=torch.float32))
+    assert module._bias_narrows_losslessly(module.bias, dtype) is False
+
+    # ``load_quant_result`` repacks through ``.data.copy_``, which does not bump
+    # the version counter, so it clears the cache explicitly instead.
+    module.bias.data.copy_(torch.tensor([0.5], device="cuda", dtype=torch.float32))
+    module.clear_weight_cache()
+    assert getattr(module, "_bias_narrow_key", None) is None
+    assert module._bias_narrows_losslessly(module.bias, dtype) is True
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

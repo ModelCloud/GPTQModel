@@ -453,6 +453,11 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 )
             self.bias.data.copy_(stored)
 
+        # ``.data.copy_`` does not bump the version counter of an inference
+        # tensor, so any derived key over these buffers must be dropped here
+        # rather than rely on the cache key alone.
+        self._clear_runtime_weight_cache()
+
     # ------------------------------------------------------------------
     # runtime
     # ------------------------------------------------------------------

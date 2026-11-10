@@ -57,7 +57,8 @@ FP32-output CUDA ops have no autograd derivative.
 | FP4 accelerator forward, `nn_modules/qlinear/fp4.py:79-83` | `bias.to(dtype=x.dtype)` before the torchao wrapper | Dequantize for the call and use `linear_wide_bias` |
 | VPTQ Torch forward, `nn_modules/qlinear/vptq_torch.py:536-539` | `bias.to(dtype=x.dtype)` before `linear_fp32_reduce` | Bias passed at its stored width |
 | VPTQ CUDA dense path, `nn_modules/qlinear/vptq_cuda.py:150-152` | `bias.to(dtype=x.dtype)` before the GEMM | Bias passed at its stored width |
-| VPTQ CUDA fused path, `nn_modules/qlinear/vptq_cuda.py:117-120` | Sent a wide bias to a kernel that requires the output dtype | The fused kernel is used unless the bias has a value FP16/BF16 cannot hold |
+| VPTQ CUDA fused path, `nn_modules/qlinear/vptq_cuda.py:147-152` | Sent a wide bias to a kernel that requires the output dtype | The fused kernel is used unless the bias has a value FP16/BF16 cannot hold |
+| VPTQ CUDA fused gate, `nn_modules/qlinear/vptq_cuda.py:84-102` | Recomputed the exact representability comparison every forward | Cached under `tensor_cache_key`; the exact comparison reads device memory and synchronises |
 | VPTQ bias buffer, `nn_modules/qlinear/vptq_torch.py:264-267` | Allocated at `codebook_dtype` | Allocated FP32 so the checkpoint range survives |
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:433-438` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
 | FP4 checkpoint decoder, `models/base.py:3795` | Bias narrowed to `target_dtype` when the wrapper is built | Bias kept at its stored width, so the forward can still go wide |
@@ -77,6 +78,7 @@ contains the other: BF16 has the exponent range and FP16 has the mantissa.
 | --- | --- |
 | Stored bias wider than the activation | `linear_needs_wide_bias` is true; the wide epilogue runs |
 | VPTQ CUDA fused kernel with a wide bias | Skipped only when a stored value is not representable in FP16/BF16; representable buffers are narrowed losslessly for the kernel |
+| VPTQ CUDA representability gate | Cached by `tensor_cache_key`; `copy_` invalidates through the version counter, and `load_quant_result` / `clear_weight_cache` drop it explicitly because `.data.copy_` does not bump an inference tensor's version |
 | Autocast active | The wide helper disables autocast for its own GEMM so the product is not re-narrowed |
 | Bias needs broadcasting beyond the flattened output | `_fuse_bias_epilogue` declines; `linear_wide_bias` reshapes before adding, so type promotion and the broadcast shape are preserved |
 | Bias cannot be stored exactly in the FP32 buffer | `load_quant_result` raises instead of rounding silently |
@@ -87,7 +89,16 @@ contains the other: BF16 has the exponent range and FP16 has the mantissa.
 The regression constructs a unit weight, sixteen 4096 FP16 activations, and an
 FP32 `-65536` bias. The independent FP64 oracle is zero; the pre-fix FP4 and
 VPTQ CPU forwards returned `-inf`. After the fix both CPython and accelerator
-paths return zero for FP16 and BF16, and the VPTQ CUDA fused kernel is proven
-unused for the wide-bias case. Tests live in
-`tests/kernels/test_fp4_cpu.py`, `tests/kernels/test_linear_fp32_reduce.py`,
-and `tests/test_vptq.py`.
+paths return zero for FP16 and BF16, and a bias one unit below the cancelling
+value (which neither dtype can hold) is proven to leave the VPTQ CUDA fused
+kernel. Tests live in `tests/kernels/test_fp4_cpu.py`,
+`tests/kernels/test_linear_fp32_reduce.py`, and `tests/test_vptq.py`.
+
+A 4096x4096 FP16 layer with a representable FP32 bias was measured with
+resident inputs and CUDA synchronization. The cached gate keeps the native fused
+kernel at `0.032 ms` for one row and `0.097 ms` for four, against `0.073 ms`
+and `0.139 ms` when the exact comparison runs on every forward. Without the
+gate at all the fused kernel costs `0.021 ms` (one row), which is the floor the
+cache restores. The CPU wide path still costs a transient 64 MiB FP32 weight
+copy: at 16 threads, one 4096x4096 FP16 decode took `11.7 ms` wide against
+`0.16 ms` narrow, so that path is for correctness, not decode throughput.

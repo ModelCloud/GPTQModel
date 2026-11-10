@@ -234,7 +234,6 @@ def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
     )
 
 
-
 def promote_bias(x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
     """Promote a narrower stored bias to the activation dtype, never narrow one.
 
