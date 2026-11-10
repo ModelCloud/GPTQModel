@@ -48,7 +48,7 @@ already applies the adapter exactly once.
 | --- | --- | --- |
 | Bias cast | `gptqmodel/nn_modules/qlinear/nf12_ad.py:377-378` (pre-#3735) converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
 | Native eligibility | `_native_forward` received the narrowed bias | It declines a mismatched bias dtype, then uses fallback |
-| Fallback precision | FP32 product could add a bias already narrowed to FP16 | The wide product adds the bias widened to the scratch dtype before output rounding |
+| Fallback operands | The wide branch cast `x` with `.float()`, so a float64 activation re-entered the GEMM as float32 | The wide product multiplies `x` in the scratch dtype and adds the bias in that same dtype before one output rounding |
 | Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the wide decode and product |
 | Wide scratch dtype | FP32 only | Follows the activation: `float64` keeps a float64 decode and GEMM on an accelerator, every other wide case uses FP32, and CPU stays FP32 by design |
 | Wide GEMM under autocast | Not applicable: the wide branch did not exist on accelerators | The FP32 product runs under `torch.autocast(..., enabled=False)` so autocast cannot narrow it back to FP16 |
@@ -69,17 +69,23 @@ autocast never narrows it.
 
 `_weight_dtype_is_lossless()` admits `float64` as well. It is outside
 `SUPPORTS_DTYPES`, but a caller that already holds float64 activations must not
-have the decoded weight narrowed to float32 on an accelerator. The wide scratch
-dtype therefore follows the activation: `float64` decodes and multiplies in
-float64, and every other wide case uses FP32. CPU keeps its FP32 decode for
-every activation dtype, which is the documented existing behavior; a CPU
-float64 caller is still within `2e-3` of the float64 oracle, not bitwise exact.
-On an accelerator, `float64` with no bias is bitwise equal to the float64
-oracle; a mixed-dtype bias widens to float64 and introduces one rounding (the
-bias is stored in the checkpoint dtype), measured at `1.96e-7` relative in the
-regression. With no fix an FP32 epilogue error reached `3.8e-3` pointwise
-relative on a random `512x512` matrix, because it rounds after each partial
-sum.
+have the decoded weight, or the GEMM operands, narrowed to float32 on an
+accelerator. The wide scratch dtype therefore follows the activation:
+`float64` decodes and multiplies in float64, and every other wide case uses
+FP32. CPU keeps its FP32 decode for every activation dtype, which is the
+documented existing behavior; a CPU float64 caller is still within `2e-3` of
+the float64 oracle, not bitwise exact.
+
+The operands were the actual defect, not the bias add: the former branch cast
+`x` with `.float()`, so a float64 activation re-entered the GEMM as float32.
+`bias.float()` is lossless for the FP16/BF16/FP32 checkpoint bias, which is why
+widening the bias alone changes nothing measurable. The bias is still sent to
+the scratch dtype so a float64 bias is not narrowed by the epilogue, matching
+the operand dtype. On an accelerator the fixed float64 path is bitwise equal to
+the float64 oracle across twelve seeds with no bias and with a stored BF16
+bias; the unfixed `x.float()` path was not bitwise for any of six seeds with a
+mixed bias, at up to `1.4e-4` pointwise relative on a `256x256` matrix. No bias
+was needed for the error: the cast alone rounds every partial sum.
 
 The meta and zero-row branches return `self.empty_linear_output(x)` directly.
 That helper already applies the adapter exactly once; applying it again in the

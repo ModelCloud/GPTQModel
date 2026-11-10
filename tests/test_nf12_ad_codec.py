@@ -567,10 +567,12 @@ def test_linear_fallback_keeps_float64_activation_precision(device, monkeypatch)
 def test_linear_fallback_keeps_float64_multiply_wide_for_mixed_bias(device, monkeypatch):
     """A float64 activation stays float64 in the wide GEMM, including the bias.
 
-    The bias is widened to the scratch dtype instead of being forced to FP32,
-    so the product is computed in float64 and rounded once. The packed output
-    therefore matches the float64 oracle as closely as the BF16 checkpoint
-    allows, rather than carrying an FP32 epilogue error.
+    The wide branch used to cast ``x`` with ``.float()`` before the product, so
+    a float64 activation silently re-entered the GEMM as float32 and rounded
+    every partial sum. The bias is also sent to the scratch dtype rather than
+    ``.float()``, so a float64 bias is not narrowed by the epilogue. Bitwise
+    equality with the float64 oracle is the contract on an accelerator; CPU
+    keeps its documented FP32 decode.
     """
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
     from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
