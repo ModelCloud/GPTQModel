@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from ...models._const import DEVICE
 from ...quantization.dtype import dequantize_f4_e2m1
+from ._numerics import linear_needs_wide_bias, linear_wide_bias, promote_bias
 
 
 try:
@@ -70,14 +71,25 @@ class TorchFP4Linear(nn.Module):
             axis=None,
             target_dtype=x.dtype,
         )
-        return F.linear(x, weight, bias)
+        if linear_needs_wide_bias(x, bias):
+            return linear_wide_bias(x, weight, bias)
+        return F.linear(x, weight, promote_bias(x, bias))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Dispatch one dense linear projection through the NVFP4 tensor wrapper."""
 
         bias = self.bias
-        if isinstance(bias, torch.Tensor) and bias.dtype != x.dtype:
-            bias = bias.to(dtype=x.dtype)
         if x.device.type == "cpu" and self.weight.device.type == "cpu":
             return self._cpu_forward(x, bias)
-        return F.linear(x, self._native_weight(), bias)
+        if isinstance(bias, torch.Tensor) and linear_needs_wide_bias(x, bias):
+            # The activation dtype cannot represent the stored bias, and the
+            # torchao wrapper would narrow it before the reduction. Decode the
+            # packed buffers only for this call and keep the epilogue wide.
+            weight = dequantize_f4_e2m1(
+                self.weight,
+                scale=self.weight_scale,
+                axis=None,
+                target_dtype=x.dtype,
+            )
+            return linear_wide_bias(x, weight, bias)
+        return F.linear(x, self._native_weight(), promote_bias(x, bias))

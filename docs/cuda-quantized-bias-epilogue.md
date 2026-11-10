@@ -46,6 +46,18 @@ An empty FP8 activation uses the dense fallback without calling `_scaled_mm`.
 It does not set `_scaled_mm_hard_disabled`, so a later nonempty activation can
 still use the native path.
 
+## Wide stored bias
+
+The portable GPTQ, Torch AWQ, FP8, GGUF, NF12, and VPTQ backends accept a
+checkpoint bias stored in FP32. When the activation is FP16 or BF16,
+`linear_needs_wide_bias` and `linear_fp32_reduce` add that bias after a wide
+reduction and round once, so a bias outside the activation dtype's finite range
+is never narrowed first. `linear_wide_bias` performs the reduction; it asks
+`torch.mm` for an FP32 output on CUDA to keep low-precision tensor-core
+operands, and falls back to FP32 operands on CPU, HIP, or when autograd is
+active. See the [low-precision bias epilogue
+reference](low-precision-bias-epilogue.md).
+
 ## Gradient flow
 
 PyTorch's FP32-output CUDA `mm` and `addmm` operations do not provide an

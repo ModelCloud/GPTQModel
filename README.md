@@ -102,6 +102,9 @@ rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
 portable backends.
 The [GPTQ Torch CPU bias epilogue](docs/gptq-torch-cpu-bias-epilogue.md)
 documents fused low-precision bias addition and FP32 checkpoint bias handling.
+The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
+reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
+failure paths in one place.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.

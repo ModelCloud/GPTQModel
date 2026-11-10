@@ -143,7 +143,129 @@ def matmul_fp32_reduce(
     return output + bias if bias is not None else output
 
 
+def linear_wide_bias(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Multiply, add the stored bias in FP32, and round once to the output dtype.
+
+    Callers select this path when the bias must not be narrowed to the
+    activation dtype first. Two cases need it:
+
+    * the stored bias is wider than the activation dtype, so casting it can
+      overflow (an FP32 ``-65536`` bias is ``-inf`` as FP16) or lose the exact
+      value that cancels the reduction;
+    * the partial sum is outside the activation dtype's finite range and only
+      the bias brings it back, which a reduced-precision product cannot
+      represent.
+
+    The weight is already at its reconstructed precision when this runs, and
+    the wider operands exist only for this call; nothing is cached.
+    """
+
+    shape = x.shape[:-1] + (weight.shape[0],)
+    flat_x = x.reshape(-1, x.shape[-1])
+    if bias is not None and bias.device != x.device:
+        bias = bias.to(device=x.device)
+    weight_t = weight.t()
+    wide_autograd = _needs_wide_autograd(x, weight, bias)
+
+    def reduce() -> torch.Tensor:
+        if x.device.type == "cuda" and not wide_autograd:
+            # FP32 output keeps the low-precision operands (no expanded FP32
+            # weight copy) and keeps split reductions wide.
+            output = torch.mm(flat_x, weight_t, out_dtype=torch.float32)
+        else:
+            output = torch.mm(flat_x.float(), weight_t.float())
+        if bias is not None:
+            output = output + bias.float()
+        return output.to(x.dtype).reshape(shape)
+
+    if not autocast_active(x.device.type):
+        return reduce()
+    # Autocast narrows the GEMM operands, which would round the product before
+    # the bias cancels it.
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        return reduce()
+
+
+# Relative width of the floating dtypes a checkpoint may store a bias in. A
+# promotion is only allowed when it is lossless for every value of the source
+# dtype; FP16 and BF16 are deliberately equal because neither contains the
+# other (BF16 has the range, FP16 the mantissa).
+_FLOAT_WIDTH = {torch.float16: 0, torch.bfloat16: 0, torch.float32: 1, torch.float64: 2}
+
+
+def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
+    """Whether the stored bias must stay wide through the reduction epilogue."""
+
+    return (
+        bias is not None
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and bias.dtype != x.dtype
+        # A narrower bias can be widened losslessly inside the GEMM; only a
+        # wider (or incomparable) one must stay out of the low-precision
+        # operands.
+        and _FLOAT_WIDTH.get(bias.dtype, 3) >= _FLOAT_WIDTH.get(x.dtype, 3)
+    )
+
+
+def promote_bias(x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
+    """Promote a narrower stored bias to the activation dtype, never narrow one.
+
+    ``F.linear`` requires the bias and the operands to share a dtype. A bias
+    stored in a dtype narrower than the activation (for example an FP16 buffer
+    with an FP32 activation) is widened losslessly, which is safe. A bias in a
+    wider or incomparable dtype is returned unchanged so the caller can add it
+    after the reduction instead of rounding its value first.
+    """
+
+    if bias is None or bias.dtype == x.dtype:
+        return bias
+    if _FLOAT_WIDTH.get(bias.dtype, 3) < _FLOAT_WIDTH.get(x.dtype, 3):
+        return bias.to(dtype=x.dtype)
+    return bias
+
+
+def _fuse_bias_epilogue(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
+    """Whether a low-precision separate bias add must move into the GEMM.
+
+    On CPU and HIP, ``F.linear`` may use matmul plus add for non-contiguous
+    batched inputs, so a product outside the activation dtype's finite range
+    becomes ``inf`` before a cancelling bias is added. A fused ``addmm`` keeps
+    the reduction and the bias in one epilogue without an FP32 output
+    allocation or an expanded weight copy. Only a 1-D bias, or one already
+    matching the output shape, can be expressed by the flattened 2-D input; an
+    active autocast context narrows the operands and keeps the original
+    expression, where type promotion applies.
+    """
+
+    if bias is None or bias.dtype != x.dtype or weight.dtype != x.dtype:
+        return False
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if x.device.type != "cpu" and not (IS_ROCM and x.device.type == "cuda"):
+        return False
+    if bias.device != x.device or autocast_active(x.device.type):
+        return False
+    return bias.dim() == 1 or bias.shape == x.shape[:-1] + (weight.shape[0],)
+
+
+def _fused_addmm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    shape = x.shape[:-1] + (weight.shape[0],)
+    flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[0])
+    return torch.addmm(flat_bias, x.reshape(-1, x.shape[-1]), weight.t()).reshape(shape)
+
+
 def linear_fp32_reduce(x, weight, bias=None):
+    if linear_needs_wide_bias(x, bias):
+        # A bias that cannot be represented in the activation dtype must be
+        # added after the product in FP32, never narrowed first.
+        return linear_wide_bias(x, weight, bias)
+    bias = promote_bias(x, bias)
     if _wants_fp32_reduce(x):
         if _needs_wide_autograd(x, weight, bias):
             return _CudaWideMatmul.apply(x, weight.t(), bias)
@@ -152,17 +274,8 @@ def linear_fp32_reduce(x, weight, bias=None):
         if bias is not None:
             output = output + bias.float()
         return output.to(x.dtype).reshape(shape)
-    if (
-        IS_ROCM
-        and x.device.type == "cuda"
-        and x.dtype in (torch.float16, torch.bfloat16)
-        and bias is not None
-        and x.ndim > 2
-    ):
-        # F.linear can use matmul + add for non-contiguous batched inputs,
-        # rounding (or overflowing) before bias cancels the partial result.
-        # A 2D input selects the fused addmm epilogue without an FP32 output
-        # allocation or an expanded weight copy.
-        shape = x.shape[:-1] + (weight.shape[0],)
-        return torch.nn.functional.linear(x.flatten(0, -2), weight, bias).reshape(shape)
+    if _fuse_bias_epilogue(x, weight, bias):
+        # CPU/HIP may round or overflow the product before a separate bias
+        # addition; keep both in a single epilogue.
+        return _fused_addmm(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)

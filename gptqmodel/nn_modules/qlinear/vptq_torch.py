@@ -263,8 +263,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 )
             if bias:
                 # `bias` may already exist as a plain attribute from `__init__`.
+                # Preserve the FP32 source range: the forward path decides
+                # which precision the epilogue needs, and narrowing here would
+                # be irreversible for an FP32 checkpoint bias.
                 self.__dict__.pop("bias", None)
-                self.register_buffer("bias", torch.zeros(self.out_features, dtype=dtype, device=device))
+                self.register_buffer(
+                    "bias",
+                    torch.zeros(self.out_features, dtype=torch.float32, device=device),
+                )
             else:
                 self.bias = None
 
@@ -435,7 +441,17 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 raise ValueError(
                     f"VPTQLinear `{self.name}`: received a bias but the module was built without one."
                 )
-            self.bias.data.copy_(bias.detach().to(device=device, dtype=self.bias.dtype))
+            # The buffer is FP32, so every supported checkpoint width survives
+            # the copy. Reject only values that FP32 cannot represent exactly
+            # instead of silently rounding them.
+            source = bias.detach().to(device=device)
+            stored = source.to(dtype=self.bias.dtype)
+            if not torch.equal(stored.to(torch.float64), source.to(torch.float64)):
+                raise ValueError(
+                    f"VPTQLinear `{self.name}`: bias values cannot be stored exactly "
+                    f"as {self.bias.dtype}."
+                )
+            self.bias.data.copy_(stored)
 
     # ------------------------------------------------------------------
     # runtime
@@ -534,8 +550,6 @@ class VPTQLinear(WeightOnlyQuantLinear):
             return out
 
         weight = self.dequantize().to(dtype=x.dtype, device=x.device)
-        if bias is not None and bias.dtype != x.dtype:
-            bias = bias.to(dtype=x.dtype)
         out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)

@@ -13,7 +13,7 @@ from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
-from ._numerics import linear_fp32_reduce
+from ._numerics import linear_fp32_reduce, linear_needs_wide_bias
 from .vptq_torch import VPTQLinear
 
 
@@ -117,7 +117,8 @@ class VPTQCudaLinear(VPTQLinear):
             raise RuntimeError("VPTQ_CUDA requires VPTQ buffers and activations on the same CUDA device.")
 
         fused_max_rows = _vptq_cuda_fused_max_rows(self)
-        if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows:
+        wide_bias = linear_needs_wide_bias(x, bias)
+        if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows and not wide_bias:
             from ...utils.vptq_cuda import vptq_cuda_linear
 
             out = vptq_cuda_linear(
@@ -147,8 +148,6 @@ class VPTQCudaLinear(VPTQLinear):
             # The fused GEMV repeats weight reconstruction across activation
             # rows. For larger M, reconstruct once and let cuBLAS reuse weight.
             weight = self._dequantize_cuda().to(dtype=x.dtype)
-            if bias is not None and bias.dtype != x.dtype:
-                bias = bias.to(dtype=x.dtype)
             out = linear_fp32_reduce(x, weight, bias)
 
         if self.adapter is not None:

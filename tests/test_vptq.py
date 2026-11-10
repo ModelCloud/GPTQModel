@@ -2469,3 +2469,47 @@ def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
         atol=1e-4,
         rtol=1e-4,
     )
+
+
+def test_vptq_pack_preserves_fp32_bias_range():
+    """A loaded FP32 bias must survive packing and cancel a wide FP16 dot.
+
+    The quantizer path copies the source layer's bias into the module's buffer.
+    Narrowing that buffer to the codebook dtype would turn an FP32 ``-65536``
+    bias into FP16 ``-inf`` before forward dispatch even runs.
+    """
+
+    weight = torch.ones((1, 16), dtype=torch.float32)
+    hessian = torch.eye(16, dtype=torch.float32)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=4,
+    )
+    source = torch.nn.Linear(16, 1, bias=True, dtype=torch.float32)
+    source.weight.data.copy_(weight)
+    source.bias.data.fill_(-65536.0)
+    quantizer = VPTQ(module=source, qcfg=qcfg)
+    quantizer.fallback = None
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    for dtype in (torch.float16, torch.bfloat16):
+        module = build_module(qcfg, 16, 1, dtype=dtype, bias=True)
+        module.pack(linear=source, vptq_result=result)
+
+        assert module.bias.dtype is torch.float32
+        assert float(module.bias.item()) == -65536.0
+
+        # The encoded weight is one E2M1-style code with a unit scale, so
+        # sixteen FP16 4096 activations exceed the FP16 finite range.
+        x = torch.full((1, 16), 4096.0, dtype=dtype)
+        with torch.inference_mode():
+            actual = module(x)
+
+        oracle = (x.double() @ module.dequantize().double().t() + module.bias.double()).to(dtype)
+        assert actual.dtype is dtype
+        torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+        if dtype is torch.float16:
+            # The narrowed expression used to return -inf for this input.
+            assert torch.isfinite(actual).all()
