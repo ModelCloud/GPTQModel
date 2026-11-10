@@ -65,6 +65,12 @@ prefix, so input slicing uses the unprocessed suffix instead of applying an
 absolute cache index to a shorter buffer. Embeddings-only prefill takes its
 length from the embeddings, and later decode steps switch to token IDs.
 
+The default cache is version-aware. Transformers 5 builds the configured hybrid
+cache, so sliding layers keep only their window. Transformers 4 keeps a plain
+full-attention `DynamicCache`: its configured `DynamicSlidingWindowLayer` cannot
+be cropped after passing the window, which breaks assisted decoding and any
+cache rollback.
+
 A short 2D mask assumes its omitted prefix was visible. Callers with padding in
 the cached prefix must provide the full mask to retain that information. Caller
 4D masks retain their boolean visibility or additive bias; local attention also
@@ -78,7 +84,7 @@ flowchart TD
     B -->|Yes| C{"Caller supplied a KV cache?"}
     C -->|Yes| X["ValueError: supplied cache cannot be replayed safely"]
     C -->|No| D["Disable cache and checkpoint decoder calls, including value_residual input"]
-    B -->|No| E["Create configured DynamicCache when requested and absent"]
+    B -->|No| E["Create default DynamicCache (hybrid on Transformers 5, full on 4)"]
     D --> F["RicursiveAttention.forward"]
     E --> F
     F --> G["Update cache; trim unwritten capacity before repeat_kv"]
@@ -148,7 +154,7 @@ compatibility references are `gptqmodel/utils/ricursive_patch.py` at `4e174cb53`
 | Native line 703: 4D masks are expanded like 2D masks. | Preserve supplied 4D masks. |
 | Native line 541: checkpointing is advertised but no decoder recomputation is implemented. | Checkpoint decoder calls and preserve value-residual gradients. |
 | Native line 841: cross-entropy reduces in activation dtype. | Reduce loss in FP32. |
-| Native line 595: every cache layer grows without a sliding limit. | Build a cache from the layer configuration on supported Transformers versions. |
+| Native line 595: every cache layer grows without a sliding limit. | Build a hybrid cache from the layer configuration on Transformers 5; keep a crop-compatible full cache on Transformers 4. |
 | Native line 330: full static capacity is expanded before trimming. | Trim unwritten cache slots before head expansion. |
 | Compatibility line 790: a class flag skips head setup on later instances. | Local forward state slices the current instance's head input without hooks. |
 | Compatibility line 818: only dictionary logits are trimmed. | Preserve the requested shape for tuple outputs too. |

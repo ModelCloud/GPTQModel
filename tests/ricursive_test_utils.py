@@ -17,7 +17,7 @@ from huggingface_hub import snapshot_download
 
 
 # Pin to the native source reviewed alongside these tests; no model weights.
-RIPPLE_REVISION = "fe7117095c985351aa06fcf906a7da830b06b441"
+RIPPLE_REVISION = "2f007aabfcedd0f8763d86d08f9aa0afbc344cea"
 
 
 @lru_cache(maxsize=1)
