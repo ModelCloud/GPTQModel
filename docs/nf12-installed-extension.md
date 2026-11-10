@@ -34,6 +34,10 @@ dense weight between calls. `NF12Weight.narrow_rows`
 views a 16-row-aligned packed range and shares the original escape table.
 `linear_bf16_fp32` uses packed BF16 Tensor Core tiles with FP32 output for
 short-K multirow heads; its other shapes use the FP32 packed dispatch.
+On SM80, BF16 prefill projections with `N` of 384 or 512, `K` of 5120,
+and `128 <= M < 1024` decode once into a call-local BF16 buffer and use
+cuBLAS. The previous fused large-M route decoded the same weights for each
+input tile. The decoded buffer is released when the call returns.
 
 ```mermaid
 flowchart LR
@@ -41,6 +45,7 @@ flowchart LR
     B --> C["NF12Weight packed plus escapes"]
     C --> D{"Activation and operation"}
     D -- "BF16 linear" --> E["Native nf12.linear"]
+    E -- "SM80 medium-width prefill" --> P["Call-local BF16 decode plus GEMM"]
     D -- "Integer IDs" --> F["Native nf12.embedding"]
     D -- "FP32 small-row projection" --> G["linear_fp32 packed Triton"]
     D -- "FP32 prefill projection" --> L["Temporary decode plus cuBLAS"]
@@ -74,3 +79,17 @@ embedding, FP32 projection, selected rows, and MoE. FP32 scores may differ in
 the last bits from cuBLAS because reduction order changes. Serving applications
 must qualify routing and token decisions at model level before enabling the new
 dispatch.
+
+The paired CUDA graph benchmark in `scripts/bench_nf12_lite_bf16.py` compares
+the BF16 NF12 path with `torch.nn.functional.linear` on the same BF16 inputs and
+original dense BF16 weights. It encodes before timing and replays 32 calls per
+graph in ABBA order. On this host's NVIDIA PG506-230 (SM80), PyTorch
+2.15.0+cu132, and GIL disabled, only 3 of 14 Lite-sized probes cleared the
+requested 1.15× gate. The indexer key, Markov, and vocabulary decode shapes
+passed at 1.616×, 1.191×, and 1.390×. The indexer score and ratio-one
+compressor decode shapes reached 1.087× and 0.995×. The optimized compressor
+prefill shape `(N,K,M)=(512,5120,512)` improved from 0.388× to 0.792×, but
+still missed the gate. Gate-shaped BF16 probes are diagnostics only: Lite's
+actual MoE gates use FP32 activations and scores. A BF16 gate cannot replace
+that path without separate model-level decision qualification. The benchmark
+supports `--strict` to return nonzero when any shape misses the speed target.

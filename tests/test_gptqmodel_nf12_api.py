@@ -69,15 +69,16 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
-def test_native_linear_large_m_fallback_matches_dense_torch():
+@pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])
+def test_native_linear_large_m_fallback_matches_dense_torch(n, m):
     device = _cuda()
     generator = torch.Generator(device=device).manual_seed(304)
-    weight = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
-    x = (torch.randn((512, 5120), generator=generator, device=device) * 0.05).bfloat16()
+    weight = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    x = (torch.randn((m, 5120), generator=generator, device=device) * 0.05).bfloat16()
     packed = nf12.encode(weight)
     actual = nf12.linear(x, packed)
-    oracle = F.linear(x.float(), weight.float())
-    torch.testing.assert_close(actual.float(), oracle, rtol=2e-3, atol=2e-3)
+    oracle = F.linear(x, weight)
+    assert torch.equal(actual, oracle)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
