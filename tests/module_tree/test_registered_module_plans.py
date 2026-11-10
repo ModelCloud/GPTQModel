@@ -261,3 +261,67 @@ def test_every_expert_placeholder_expands_to_concrete_names(model_type):
         f"{model_type}: expert placeholder survived expansion even though "
         f"{field} is declared: {leftovers[:5]}"
     )
+
+
+@pytest.mark.parametrize("model_type", ["ernie4_5_vl_moe", "ernie4_5_moe_vl"])
+def test_non_scalar_expert_count_fails_closed_instead_of_raising(model_type):
+    """A per-modality expert list must not crash placeholder expansion.
+
+    The published ERNIE 4.5 VL checkpoints (``baidu/ERNIE-4.5-VL-28B-A3B``,
+    ``...-28B-A3B-PT``, ``...-424B-A47B-PT``) ship a *flat* remote-code config
+    with ``model_type = "ernie4_5_moe_vl"`` and a per-modality
+    ``moe_num_experts = [64, 64]``. ``Ernie4_5_VLMoeQModel`` owns both routed
+    families and its ``dynamic_expert_index`` is ``moe_num_experts``.
+
+    That value cannot size ``range()``. Before this guard the expansion raised a
+    bare ``TypeError: 'list' object cannot be interpreted as an integer`` from
+    ``build_moe_modules_if_need``, so the published checkpoint failed to
+    quantize at all. The contract here: a non-scalar count is reported as
+    unresolved, the placeholder is preserved, and the consumer records the miss
+    (which is what ``layer_modules_strict = False`` does) instead of raising.
+    """
+
+    definition = MODEL_MAP[model_type]
+    field = definition.dynamic_expert_index
+    assert field == "moe_num_experts"
+
+    config = SimpleNamespace(model_type=model_type, **{field: [64, 64]})
+
+    assert definition.get_num_experts(config) is None
+    assert (
+        definition.get_num_experts_for_module(
+            config, f"mlp.text_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"
+        )
+        is None
+    )
+
+    blocks = definition.simple_layer_modules(
+        model_config=config, quantize_config=SimpleNamespace(dynamic=None)
+    )
+    entries = [entry for block in blocks for entry in block]
+
+    # The expansion must return, and every routed-expert spec must survive as a
+    # literal placeholder so the miss is explicit rather than a wrong count.
+    leftovers = [entry for entry in entries if EXPERT_INDEX_PLACEHOLDER in entry]
+    assert leftovers, "a non-scalar count must not silently produce concrete names"
+    assert all(".experts." in entry for entry in leftovers), leftovers
+
+    # Scalar configs still expand: the guard narrows only the non-scalar case.
+    scalar = SimpleNamespace(model_type=model_type, **{field: 8})
+    scalar_entries = [
+        entry
+        for block in definition.simple_layer_modules(
+            model_config=scalar, quantize_config=SimpleNamespace(dynamic=None)
+        )
+        for entry in block
+    ]
+    assert not [entry for entry in scalar_entries if EXPERT_INDEX_PLACEHOLDER in entry]
+    assert len([entry for entry in scalar_entries if ".text_moe.experts." in entry]) == 24
+
+
+def test_missing_expert_field_still_raises():
+    """A definition/config mismatch keeps raising instead of degrading silently."""
+
+    definition = MODEL_MAP["qwen3_moe"]
+    with pytest.raises(AttributeError):
+        definition.get_num_experts(SimpleNamespace())

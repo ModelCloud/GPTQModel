@@ -1145,10 +1145,25 @@ class BaseQModel(nn.Module):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             num_experts = cls.get_num_experts(model_config)
+            warned_unresolved = False
 
-            def expert_count(module_name: str) -> int:
+            def expert_count(module_name: str) -> Optional[int]:
                 count = cls.get_num_experts_for_module(model_config, module_name)
                 return num_experts if count is None else count
+
+            def _warn_unresolved() -> None:
+                nonlocal warned_unresolved
+                if warned_unresolved:
+                    return
+                warned_unresolved = True
+                log.warning(
+                    "MoE: `%s` on `%s` is not a scalar expert count; routed-expert "
+                    "specs keep `%s` and are recorded as misses instead of being "
+                    "expanded.",
+                    cls.dynamic_expert_index,
+                    type(model_config).__name__,
+                    EXPERT_INDEX_PLACEHOLDER,
+                )
 
             moe_simple = []
             capture_only_modules = None
@@ -1200,13 +1215,24 @@ class BaseQModel(nn.Module):
                         # count instead of expanding every placeholder with
                         # the global MoE count.
                         segment_counts = {expert_count(n) for n in segment_names}
+                        if segment_counts == {None}:
+                            # No scalar cardinality: keep the placeholders so the
+                            # consumer reports a miss rather than raising here.
+                            _warn_unresolved()
+                            moe_simple[-1].extend(segment_names)
+                            continue
                         if len(segment_counts) == 1:
                             for index in range(segment_counts.pop()):
                                 for n in segment_names:
                                     moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                         else:
                             for n in segment_names:
-                                for index in range(expert_count(n)):
+                                count = expert_count(n)
+                                if count is None:
+                                    _warn_unresolved()
+                                    moe_simple[-1].append(n)
+                                    continue
+                                for index in range(count):
                                     moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
@@ -1225,7 +1251,16 @@ class BaseQModel(nn.Module):
                         if EXPERT_INDEX_PLACEHOLDER not in n:
                             moe_simple[-1].append(n)
                             continue
-                        for index in range(expert_count(n)):
+                        count = expert_count(n)
+                        if count is None:
+                            # Keep the placeholder when the config does not
+                            # expose a scalar cardinality (for example a
+                            # per-modality list).  `range()` on that value
+                            # would otherwise raise a bare `TypeError`.
+                            _warn_unresolved()
+                            moe_simple[-1].append(n)
+                            continue
+                        for index in range(count):
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
 
             return moe_simple
@@ -1258,11 +1293,36 @@ class BaseQModel(nn.Module):
         return model_config
 
     @classmethod
-    def get_num_experts(cls, model_config):
-        """Return the model-wide fallback expert count."""
+    def _coerce_expert_count(cls, value) -> Optional[int]:
+        """Return ``value`` as a non-negative int, or None when it is not a scalar.
+
+        Some remote-code configs publish a per-modality list (for example
+        ``moe_num_experts = [64, 64]``) instead of one routed-expert
+        cardinality.  Such a value cannot size a placeholder expansion, so it
+        is reported as unresolved rather than being silently truncated to the
+        first family or crashing downstream in ``range()``.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (list, tuple, dict, set, frozenset)):
+            return None
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def get_num_experts(cls, model_config) -> Optional[int]:
+        """Return the model-wide fallback expert count.
+
+        A missing field keeps raising ``AttributeError`` (unchanged contract: the
+        definition and the config disagree). A field that exists but is not a
+        scalar returns None, which callers must treat as "cannot expand" and
+        record as a miss instead of assuming a count.
+        """
         field_name = cls.dynamic_expert_index
         config = cls._expert_count_config(model_config, field_name)
-        return getattr(config, field_name)
+        return cls._coerce_expert_count(getattr(config, field_name))
 
     @classmethod
     def get_num_experts_for_module(cls, model_config, module_name: str) -> Optional[int]:
@@ -1297,12 +1357,7 @@ class BaseQModel(nn.Module):
             # Mapped fields are optional on dense/checkpoint compatibility
             # configs; preserve the legacy fallback in that case.
             value = getattr(config, cls.dynamic_expert_index, None) if cls.dynamic_expert_index else None
-        if value is None:
-            return None
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return None
+        return cls._coerce_expert_count(value)
 
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):

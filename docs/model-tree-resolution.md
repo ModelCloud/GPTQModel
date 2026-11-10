@@ -263,17 +263,41 @@ flowchart TD
     USE2 --> N
     USE3 --> N
     USE4 --> N
-    N --> EXP["expand # to 0..N-1"]
+    N --> S{"scalar value?"}
+    S -->|"yes"| EXP["expand # to 0..N-1"]
+    S -->|"no, e.g. [64, 64]"| NONSCALAR["_coerce_expert_count returns None"]
+    NONSCALAR --> KEEP["keep literal placeholder<br/>warn once per definition"]
+    KEEP --> MISS
     RAW --> MISS["create_named_modules: record_miss<br/>no exception when strict is False"]
     EXP --> HIT["concrete names resolve"]
     style RAW fill:#ffa39e,stroke:#a8071a
     style MISS fill:#ffa39e,stroke:#a8071a
+    style NONSCALAR fill:#ffe7ba,stroke:#ad6800
+    style KEEP fill:#ffe7ba,stroke:#ad6800
     style HIT fill:#d9f7be,stroke:#237804
 ```
 
 The `ffn_config` branch requires the sub-config to *declare* the field. Selecting
 it merely because the attribute exists would shadow a cardinality kept on the
 top-level config and raise `AttributeError` for unrelated `ffn_config` objects.
+
+#### Non-scalar cardinality is unresolved, not a crash
+
+`get_num_experts()` returns a non-negative int only when the owning field is a
+scalar. A per-modality list — the published ERNIE 4.5 VL checkpoints ship a flat
+remote-code config with `moe_num_experts = [64, 64]` — cannot size
+`range()`. `_coerce_expert_count()` returns `None` for that value and
+`build_moe_modules_if_need()` keeps the placeholder, warns once, and lets
+`create_named_modules()` record the miss. Before this guard the same input raised
+`TypeError: 'list' object cannot be interpreted as an integer` from the expansion
+loop, so the checkpoint failed to quantize at all. A *missing* field still raises
+`AttributeError`, because that means the definition and the config disagree.
+
+| Situation | Before | After | Evidence |
+| --- | --- | --- | --- |
+| Field holds `[64, 64]` | `TypeError` from `range()` | `None` → placeholder kept → miss | `gptqmodel/models/base.py` `_coerce_expert_count`, `build_moe_modules_if_need` |
+| Field missing entirely | `AttributeError` | `AttributeError` (unchanged) | `get_num_experts` |
+| Field holds `64` | expands | expands | `build_moe_modules_if_need` |
 
 #### Before and after
 
@@ -286,6 +310,7 @@ top-level config and raise `AttributeError` for unrelated `ffn_config` objects.
 | DBRX `dynamic_expert_index` | unset | `"moe_num_experts"` | `dbrx_converted.py:15` |
 | DBRX undeclared owners | `norm_1`, `norm_2`, `router.layer` | explicit `:!` each | `dbrx_converted.py:25,27,31` |
 | Silent-miss path | placeholder reaches `create_named_modules` and is only recorded | concrete names, no expert miss | `gptqmodel/looper/module_looper.py:2063-2066` |
+| Non-scalar expert count | `TypeError` in `range()` | unresolved → placeholder kept, warned, recorded as miss | `gptqmodel/models/base.py` `_coerce_expert_count` |
 
 The failure path matters more than the happy path: a surviving placeholder is not
 an error. `create_named_modules` records a miss and raises only when
