@@ -87,9 +87,22 @@ graph in ABBA order. On this host's NVIDIA PG506-230 (SM80), PyTorch
 2.15.0+cu132, and GIL disabled, only 3 of 14 Lite-sized probes cleared the
 requested 1.15× gate. The indexer key, Markov, and vocabulary decode shapes
 passed at 1.616×, 1.191×, and 1.390×. The indexer score and ratio-one
-compressor decode shapes reached 1.087× and 0.995×. The optimized compressor
-prefill shape `(N,K,M)=(512,5120,512)` improved from 0.388× to 0.792×, but
+compressor decode shapes reached 1.087× and 1.044× after the SM80 compressor
+tuning. The optimized compressor prefill shape `(N,K,M)=(512,5120,512)`
+improved from 0.388× to 0.815×, but
 still missed the gate. Gate-shaped BF16 probes are diagnostics only: Lite's
 actual MoE gates use FP32 activations and scores. A BF16 gate cannot replace
 that path without separate model-level decision qualification. The benchmark
 supports `--strict` to return nonzero when any shape misses the speed target.
+
+For the 124-SM PG506-230, the six-row 512×5120 compressor decode uses five
+CTA K ranks and eight in-CTA K parts. A one-super-atom-per-warp decoder serves
+the same SM80 weight shape for call-local prefill. The direct decoder A/B graph
+comparison was 31.056 µs (two atoms) versus 30.320 µs (one atom) for the
+whole prefill projection. The new synthetic paired run measured 8.336/8.704
+µs NF12/dense at M=6 and 29.856/24.320 µs at M=512; clocks and neighboring
+load differed from the prior run, so compare within each pair. The real
+`layers.20.attn.compressor.wkv.weight` has 412 escape groups and measured
+1.034× at M=6 and 0.812× at M=512. Its prefill output was bitwise equal to
+dense BF16; its six-row output passed the dense and sampled FP64 tolerances.
+Neither path meets the 1.15× speed target.

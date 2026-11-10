@@ -82,6 +82,21 @@ def test_native_linear_large_m_fallback_matches_dense_torch(n, m):
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
+def test_native_compressor_decode_matches_dense_and_sampled_fp64():
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(2512)
+    weight = (torch.randn((512, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    x = (torch.randn((6, 5120), generator=generator, device=device) * 0.05).bfloat16()
+    packed = nf12.encode(weight)
+    actual = nf12.linear(x, packed)
+    dense = F.linear(x, weight)
+    torch.testing.assert_close(actual, dense, rtol=2e-3, atol=2e-3)
+    sample = torch.tensor([0, 7, 128, 255, 511], device=device)
+    fp64 = F.linear(x.double(), weight.index_select(0, sample).double())
+    torch.testing.assert_close(actual.index_select(1, sample).float(), fp64.float(),
+                               rtol=2e-3, atol=2e-3)
+
+
 def test_native_full_vocabulary_head_matches_dense_torch():
     device = _cuda()
     if torch.cuda.mem_get_info(device)[0] < 4_000_000_000:
