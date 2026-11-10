@@ -239,5 +239,8 @@ PyTorch 2.15.0, CPU, and two NVIDIA RTX 4090 devices:
   training, and AMD ROCm hardware were not exercised.
 
 The code-only fixture is pinned to native commit
-`fe7117095c985351aa06fcf906a7da830b06b441` from HF #11. Historical compatibility
-coverage also loads `da94cc013a8fda04a502f0a185083c7099ea06c1` directly.
+`2f007aabfcedd0f8763d86d08f9aa0afbc344cea` from HF #11, which keeps the
+Transformers 4 default cache crop-compatible. The rollback regression is in
+[GPT-QModel #3752](https://github.com/ModelCloud/GPTQModel/pull/3752).
+Historical compatibility coverage also loads
+`da94cc013a8fda04a502f0a185083c7099ea06c1` directly.
