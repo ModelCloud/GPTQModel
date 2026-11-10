@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.tt_xla import TTXLALinear
+from gptqmodel.nn_modules.qlinear.tt_xla import XLALinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -181,22 +181,22 @@ def test_layout_rejects_contract_violations():
 
 def test_tt_dispatch_is_explicit_and_fail_closed(monkeypatch):
     assert importer.get_kernel_for_backend(
-        BACKEND.GPTQ_TTXLA, fmt=FORMAT.GPTQ, quant_method=METHOD.GPTQ
-    ) is TTXLALinear
+        BACKEND.GPTQ_TT_XLA, fmt=FORMAT.GPTQ, quant_method=METHOD.GPTQ
+    ) is XLALinear
 
     class _Runtime:
         @staticmethod
         def addressable_device_count():
             return 4
 
-    tt_xla_module = importlib.import_module(TTXLALinear.__module__)
+    tt_xla_module = importlib.import_module(XLALinear.__module__)
     monkeypatch.setattr(
         tt_xla_module,
         "require_xla_runtime",
         lambda: type("TorchXLA", (), {"runtime": _Runtime})(),
     )
-    assert TTXLALinear.validate_once() == (True, None)
-    ok, error = TTXLALinear._validate(
+    assert XLALinear.validate_once() == (True, None)
+    ok, error = XLALinear._validate(
         bits=4, group_size=128, desc_act=False, sym=True,
         in_features=256, out_features=128, pack_dtype=torch.int32,
         dtype=torch.bfloat16, device=DEVICE.XLA,
@@ -216,7 +216,7 @@ def test_tt_dispatch_is_explicit_and_fail_closed(monkeypatch):
             "dtype": torch.bfloat16, "device": DEVICE.XLA,
         }
         args.update(kwargs)
-        ok, _ = TTXLALinear._validate(**args)
+        ok, _ = XLALinear._validate(**args)
         assert not ok, kwargs
     torch_kernel = importer.get_kernel_for_backend(
         BACKEND.GPTQ_TORCH, fmt=FORMAT.GPTQ, quant_method=METHOD.GPTQ
@@ -265,7 +265,7 @@ def test_explicit_device_discovery_returns_all_xla_cards(monkeypatch):
 
 def test_ttxla_persistent_layout_and_invalidation(monkeypatch):
     fixture = _fixture(qzero_format=2)
-    module = TTXLALinear(
+    module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=256, out_features=128, bias=False,
         pack_dtype=torch.int32, format=fixture["format"],
@@ -290,7 +290,7 @@ def test_ttxla_persistent_layout_and_invalidation(monkeypatch):
 
 def test_tt_layout_tracks_device_moves_and_weight_updates():
     fixture = _fixture(qzero_format=2)
-    module = TTXLALinear(
+    module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=256, out_features=128, bias=False,
         pack_dtype=torch.int32, format=fixture["format"],
@@ -313,7 +313,7 @@ def test_tt_layout_tracks_device_moves_and_weight_updates():
 
 def test_ttxla_forward_rejects_cpu_activation_fail_closed():
     fixture = _fixture(qzero_format=2)
-    module = TTXLALinear(
+    module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=256, out_features=128, bias=False,
         pack_dtype=torch.int32, format=fixture["format"],
@@ -362,7 +362,7 @@ def test_actual_ttxla_forward_on_all_four_cards():
 
     for ordinal in range(4):
         device = torch.device(f"xla:{ordinal}")
-        module = TTXLALinear(
+        module = XLALinear(
             bits=4, group_size=128, sym=True, desc_act=False,
             in_features=256, out_features=128, bias=True,
             pack_dtype=torch.int32, format=fixture["format"],
@@ -410,7 +410,7 @@ def test_actual_ttxla_forward_on_all_four_cards():
 
 def test_forward_never_retains_expanded_weights(monkeypatch):
     fixture = _fixture(qzero_format=2)
-    module = TTXLALinear(
+    module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=256, out_features=128, bias=False,
         pack_dtype=torch.int32, format=fixture["format"],

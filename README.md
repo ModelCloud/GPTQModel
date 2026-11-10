@@ -235,7 +235,7 @@ derived cache invalidation follow the
 contract.
 
 Tenstorrent Blackhole cards use an explicit `DEVICE.XLA` family and a packed
-4-bit `TTXLALinear` through Torch/XLA and the TT PJRT plugin. The
+4-bit `XLALinear` through Torch/XLA and the TT PJRT plugin. The
 [Tenstorrent XLA execution flow](docs/tenstorrent.md) documents the exact
 runtime pins, packed checkpoint conversion, supported failure contract, and the
 complete conversion policy for every registered GPTQ linear kernel. The

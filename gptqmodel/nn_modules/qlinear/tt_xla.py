@@ -30,7 +30,7 @@ from ._runtime_cache import tensor_cache_key
 log = setup_logger()
 
 
-class TTXLALinear(GPTQQuantLinear):
+class XLALinear(GPTQQuantLinear):
     """Exact packed GPTQ inference through TT's Torch/XLA PJRT plugin.
 
     The checkpoint remains in GPTQ words, then is repacked once after placement
@@ -38,7 +38,7 @@ class TTXLALinear(GPTQQuantLinear):
     BF16 for matmul; it never persists dense or expanded-code weights.
     """
 
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TTXLA]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TT_XLA]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
     SUPPORTS_BITS = [4]
@@ -76,7 +76,7 @@ class TTXLALinear(GPTQQuantLinear):
         **kwargs,
     ):
         if adapter is not None:
-            raise NotImplementedError("TTXLALinear does not support adapters yet.")
+            raise NotImplementedError("XLALinear does not support adapters yet.")
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -86,7 +86,7 @@ class TTXLALinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_TTXLA),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TT_XLA),
             adapter=None,
             register_buffers=register_buffers,
             format=format,
@@ -100,7 +100,7 @@ class TTXLALinear(GPTQQuantLinear):
         super().validate_device(device)
         target = device if isinstance(device, torch.device) else torch.device(device)
         if target.type != "xla":
-            raise NotImplementedError(f"TTXLALinear requires a Torch/XLA target, got {device!r}.")
+            raise NotImplementedError(f"XLALinear requires a Torch/XLA target, got {device!r}.")
 
     @classmethod
     def validate_once(cls):
@@ -109,7 +109,7 @@ class TTXLALinear(GPTQQuantLinear):
             count = int(runtime.runtime.addressable_device_count())
         except Exception as exc:
             error = RuntimeError(
-                "TTXLALinear requires an initialized Tenstorrent PJRT runtime."
+                "XLALinear requires an initialized Tenstorrent PJRT runtime."
             )
             error.__cause__ = exc
             return False, error
@@ -174,7 +174,7 @@ class TTXLALinear(GPTQQuantLinear):
 
     def dequantize_weight(self, num_itr: int = 1):
         if num_itr != 1:
-            raise NotImplementedError("TTXLALinear supports only the single-group iteration layout.")
+            raise NotImplementedError("XLALinear supports only the single-group iteration layout.")
         layout = self._build_tt_layout()
         codes = unpack_tt_byte_planes_bf16(layout.weight_bytes)[:, : self.in_features]
         zero_codes = unpack_tt_byte_planes_bf16(layout.zero_bytes)[:, : self.out_features]
@@ -188,14 +188,14 @@ class TTXLALinear(GPTQQuantLinear):
 
     def forward(self, x: torch.Tensor):
         if x.device.type != "xla":
-            raise RuntimeError(f"TTXLALinear requires an XLA activation tensor, got {x.device}.")
+            raise RuntimeError(f"XLALinear requires an XLA activation tensor, got {x.device}.")
         if x.dtype != torch.bfloat16:
-            raise NotImplementedError(f"TTXLALinear requires BF16 activations, got {x.dtype}.")
+            raise NotImplementedError(f"XLALinear requires BF16 activations, got {x.dtype}.")
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}.")
 
         if self.training:
-            raise NotImplementedError("TTXLALinear is inference-only.")
+            raise NotImplementedError("XLALinear is inference-only.")
 
         out_shape = x.shape[:-1] + (self.out_features,)
         flat = x.reshape(-1, self.in_features)
@@ -217,4 +217,4 @@ class TTXLALinear(GPTQQuantLinear):
         return output
 
 
-__all__ = ["TTXLALinear"]
+__all__ = ["XLALinear"]

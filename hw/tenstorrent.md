@@ -4,7 +4,7 @@ This page records the validated GPT-QModel Tenstorrent path and the hardware
 environment used to qualify it. The short version is: a standard CPU PyTorch
 build talks through Torch/XLA and Tenstorrent's PJRT plugin to the bundled
 TTNN/TT-Metal runtime. GPT-QModel adds an explicit `DEVICE.XLA` family and a
-packed 4-bit `TTXLALinear`; it does not use a Tenstorrent-specific PyTorch
+packed 4-bit `XLALinear`; it does not use a Tenstorrent-specific PyTorch
 build.
 
 The canonical implementation reference is
@@ -54,7 +54,7 @@ TT-Metal requires the matching SFPI version. For this build that is `7.69.0`.
 
 ## Verification
 
-The opt-in hardware test executes the real `TTXLALinear` on each card and
+The opt-in hardware test executes the real `XLALinear` on each card and
 compares it with an independent CPU unpack/dequantize oracle:
 
 ```bash
@@ -79,7 +79,7 @@ an unqualified fallback.
 maintenance toolchain, not the inference loop. The p300c bundle format is
 `p300c.fwbundle`; changing firmware requires an explicit maintenance decision,
 verified power state, and recovery plan. It is unrelated to installing or
-upgrading `TTXLALinear`.
+upgrading `XLALinear`.
 
 Package pins and the exact installation procedure live in the
 [canonical runtime guide](../docs/tenstorrent.md#install-and-versions).

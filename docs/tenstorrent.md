@@ -24,7 +24,7 @@ flowchart LR
     A["Python + Transformers"] --> B["GPTQModel.load"]
     B --> C["device=AUTO or xla:N"]
     C --> D["select_quant_linear"]
-    D --> E["TTXLALinear"]
+    D --> E["XLALinear"]
     E --> F["Torch/XLA StableHLO"]
     F --> G["PJRT TT plugin"]
     G --> H["TT-MLIR lowering"]
@@ -35,8 +35,8 @@ flowchart LR
     K["Explicit gptq_torch<br/>or unsupported contract"]:::fail --> L["raise before forward"]:::fail
 ```
 
-`AUTO` considers `TTXLALinear` only when the selector family is `DEVICE.XLA`.
-An explicit `BACKEND.GPTQ_TTXLA` selects the same class and still validates the
+`AUTO` considers `XLALinear` only when the selector family is `DEVICE.XLA`.
+An explicit `BACKEND.GPTQ_TT_XLA` selects the same class and still validates the
 device, format, dtype, layout, and shape contract. Lazy device probing means a
 library import alone does not deliberately start PJRT or claim cards.
 
@@ -90,7 +90,7 @@ The current implementation removes that silent path.
 | No XLA family existed | `DEVICE.XLA` is explicit and maps to `xla:N` | `gptqmodel/models/_const.py:56`, `_const.py:74` |
 | Device discovery did not distinguish runtime probes from imports | Runtime discovery returns XLA cards; module initialization uses a probe-free selector | `gptqmodel/utils/torch.py:604`, `torch.py:625` |
 | `ALL_DEVICES` captured at import time | `all_torch_devices()` performs discovery only on request | `gptqmodel/utils/torch.py:673` |
-| No TT kernel backend | `BACKEND.GPTQ_TTXLA` maps only to `TTXLALinear` | `gptqmodel/utils/backend.py:26`, `gptqmodel/nn_modules/qlinear/tt_xla.py:41` |
+| No TT kernel backend | `BACKEND.GPTQ_TT_XLA` maps only to `XLALinear` | `gptqmodel/utils/backend.py:26`, `gptqmodel/nn_modules/qlinear/tt_xla.py:41` |
 
 `torch_xla` itself initializes PJRT on import, and an installed `accelerate`
 imports it by default during GPT-QModel startup. GPT-QModel does not cache an
@@ -102,7 +102,7 @@ explicit XLA operation needs `require_xla_runtime()`.
 
 ## GPTQ kernel conversion matrix
 
-Only `TTXLALinear` is admitted on XLA. Every other GPTQ-capable kernel keeps its
+Only `XLALinear` is admitted on XLA. Every other GPTQ-capable kernel keeps its
 declared native family and fails closed on XLA. This table is the complete
 registered GPTQ conversion inventory.
 
@@ -115,7 +115,7 @@ registered GPTQ conversion inventory.
 | `MarlinLinear` | GPTQ, GPTQ_V2, Marlin | CUDA; reject XLA |
 | `MlxQuantLinear` | GPTQ, GPTQ_V2, GPTQ_P | MPS; reject XLA |
 | `SwordfishLinear` | GPTQ | CUDA; reject XLA |
-| `TTXLALinear` | GPTQ, GPTQ_V2 | XLA/Tenstorrent; admitted |
+| `XLALinear` | GPTQ, GPTQ_V2 | XLA/Tenstorrent; admitted |
 | `TorchAtenLinear` | GPTQ, GPTQ_V2 | CPU; reject XLA |
 | `TorchCpuAvx512Linear` | GPTQ, GPTQ_V2 | CPU; reject XLA |
 | `TorchFusedLinear` | GPTQ, GPTQ_V2 | CPU, XPU; reject XLA |
@@ -134,7 +134,7 @@ layout and arithmetic contract would yield plausible but incorrect output.
 ```mermaid
 stateDiagram-v2
     [*] --> Requested
-    Requested --> ExplicitTT: backend GPTQ_TTXLA
+    Requested --> ExplicitTT: backend GPTQ_TT_XLA
     Requested --> Auto: backend AUTO
     Auto --> ExplicitTT: device family XLA
     Auto --> OtherKernel: non-XLA family
@@ -153,13 +153,13 @@ stateDiagram-v2
 | Situation | Behavior |
 | --- | --- |
 | Explicit `gptq_torch` on XLA | `NotImplementedError` with native-kernel guidance |
-| AUTO on XLA with supported GPTQ | Selects `TTXLALinear` |
+| AUTO on XLA with supported GPTQ | Selects `XLALinear` |
 | Other GPTQ-capable kernel requested on XLA | Kernel family validation rejects it |
 | FP16 activation or transfer | Rejected; Tenstorrent rounds FP16 to BF16 on transfer |
 | Bits other than 4; planar layout; asymmetric zeros; non-int32 words | Rejected before layout construction |
 | In/out features not divisible by 8 | Rejected by validation |
 | No addressable PJRT devices | `validate_once()` rejects kernel initialization |
-| CPU activation sent to `TTXLALinear.forward()` | `RuntimeError` before any device operation |
+| CPU activation sent to `XLALinear.forward()` | `RuntimeError` before any device operation |
 | Training or adapters | Not supported |
 | Host readback | Call `torch_xla.sync(wait=True)` before observing results |
 
@@ -246,10 +246,10 @@ outside this change.
 
 This change implements the following:
 
-- Explicit `DEVICE.XLA` and `BACKEND.GPTQ_TTXLA` routing.
+- Explicit `DEVICE.XLA` and `BACKEND.GPTQ_TT_XLA` routing.
 - Exact packed 4-bit GPTQ and GPTQ-v2 checkpoint conversion.
 - Lazy runtime probing and fail-closed non-TT kernel dispatch.
-- Real four-card `TTXLALinear` numerical validation.
+- Real four-card `XLALinear` numerical validation.
 
 The following remain future work and are not claimed here:
 

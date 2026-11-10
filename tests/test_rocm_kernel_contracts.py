@@ -44,7 +44,7 @@ OTHER_KERNELS = set("""
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear
     ParoMlxQuantLinear QQQMlxQuantLinear GGUFMlxQuantLinear FP8MlxQuantLinear
     BitsAndBytesMlxQuantLinear
-    TTXLALinear
+    XLALinear
 """.split())
 KERNELS = sorted([*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings], key=lambda c: c.__name__)
 
