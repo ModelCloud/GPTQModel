@@ -563,28 +563,96 @@ def test_linear_fallback_keeps_float64_activation_precision(device, monkeypatch)
         assert torch.equal(actual, oracle)
 
 
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
+def test_linear_fallback_keeps_float64_multiply_wide_for_mixed_bias(device, monkeypatch):
+    """A float64 activation stays float64 in the wide GEMM, including the bias.
+
+    The bias is widened to the scratch dtype instead of being forced to FP32,
+    so the product is computed in float64 and rounded once. The packed output
+    therefore matches the float64 oracle as closely as the BF16 checkpoint
+    allows, rather than carrying an FP32 epilogue error.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    torch.manual_seed(1)
+    weight = (torch.randn((256, 256), dtype=torch.float32) * 1e-3).to(torch.bfloat16)
+    bias = torch.randn(256, dtype=torch.bfloat16) * 1e-3
+    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=True)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.randn((4, 256), dtype=torch.float64, device=device) * 1e-3
+    oracle = x @ weight.double().to(device).t() + bias.double().to(device)
+
+    with torch.inference_mode():
+        actual = linear(x)
+
+    assert actual.dtype == torch.float64
+    # Bitwise for the accelerator; CPU keeps its documented FP32 decode.
+    if device == "cpu":
+        torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=1e-9)
+    else:
+        assert torch.equal(actual, oracle)
+        assert "weight" not in linear.state_dict()
+
+
 def test_forward_on_meta_applies_the_adapter_exactly_once():
-    """`empty_linear_output` applies the adapter itself; do not apply it again."""
+    """`empty_linear_output` applies the adapter itself; do not apply it again.
+
+    The meta and zero-row branches are separate; the zero-row case runs on a
+    real device so it cannot be satisfied by the meta branch alone.
+    """
 
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
 
     calls = []
 
     class CountingAdapter:
         def apply(self, x, out):
-            calls.append(out.shape)
+            calls.append((out.shape, out.device.type))
             return out
 
     with torch.device("meta"):
-        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
-    linear.adapter = CountingAdapter()
+        meta_linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+    meta_linear.adapter = CountingAdapter()
 
-    linear(torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta"))
+    meta_linear(torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta"))
     assert len(calls) == 1, calls
 
     calls.clear()
-    linear(torch.zeros((0, 64), dtype=torch.bfloat16, device="meta"))
+    linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+    linear.load_quant_result(quantize_nf12_ad_weight(torch.zeros((16, 64), dtype=torch.bfloat16)))
+    linear.adapter = CountingAdapter()
+
+    out = linear(torch.zeros((0, 64), dtype=torch.bfloat16))
+    assert out.shape == (0, 16)
     assert len(calls) == 1, calls
+
+
+def test_forward_on_meta_with_online_rotation_returns_metadata_output():
+    """A rotation-enabled meta shell must answer forward from metadata.
+
+    The online Hadamard arm runs before the fallback, and its native operator
+    has no meta kernel. Answering the meta case first keeps a rotation-enabled
+    lazy-load shell from raising where a plain one already worked.
+    """
+
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    with torch.device("meta"):
+        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+    linear.online_full_had = True
+    x = torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta")
+
+    out = linear(x)
+
+    assert out.shape == (2, 3, 16)
+    assert out.device.type == "meta"
+    assert out.dtype == torch.bfloat16
+    assert "weight" not in linear.state_dict()
 
 
 @pytest.mark.parametrize(

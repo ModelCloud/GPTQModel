@@ -18,33 +18,45 @@ final result is lost.
 
 ```mermaid
 flowchart TD
-    A["NF12ADLinear.forward"] --> B{"Input BF16 and bias dtype matches or absent?"}
+    A["NF12ADLinear.forward"] --> M{"Input device is meta?"}
+    M -- Yes --> M1["empty_linear_output metadata result"]
+    M -- No --> R["Apply online Hadamard rotation if enabled"]
+    R --> Z{"Zero logical rows?"}
+    Z -- Yes --> Z1["empty_linear_output empty result"]
+    Z -- No --> B{"Input BF16 and bias dtype matches or absent?"}
     B -- Yes --> C["_native_forward attempts HIP or CUDA kernel"]
     B -- No --> D["Use decoded fallback"]
     C --> E{"Native result available?"}
     E -- Yes --> F["Return native output"]
     E -- No --> D
-    D --> G{"CPU, dtype not lossless for BF16, or bias dtype differs?"}
-    G -- Yes --> H["dequantize_weight to FP32"]
-    H --> I["FP32 mm with autocast disabled plus bias.float"]
+    D --> G{"CPU, dtype not lossless for BF16, autocast narrows, or bias dtype differs?"}
+    G -- Yes --> H["dequantize_weight to the wide scratch dtype"]
+    H --> I["wide mm with autocast disabled plus widened bias"]
     I --> J["Round once to input dtype"]
     G -- No --> K["linear_fp32_reduce with matching dtype"]
-    classDef fallback fill:#fdd,stroke:#c33
-    class D fallback
+    classDef fail fill:#fdd,stroke:#c33
+    class D,H,I fail
 ```
+
+The meta branch answers before the online Hadamard transform. That transform
+preserves shape, dtype, and device, but its native operator has no meta kernel,
+so a rotation-enabled lazy-load shell would still raise if the rotation ran
+first. Both empty paths call `empty_linear_output()` directly; that helper
+already applies the adapter exactly once.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Bias cast | `gptqmodel/nn_modules/qlinear/nf12_ad.py:377-378` (pre-#3735) converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
 | Native eligibility | `_native_forward` received the narrowed bias | It declines a mismatched bias dtype, then uses fallback |
-| Fallback precision | FP32 product could add a bias already narrowed to FP16 | FP32 product adds `bias.float()` before output rounding |
-| Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the FP32 decode and product |
+| Fallback precision | FP32 product could add a bias already narrowed to FP16 | The wide product adds the bias widened to the scratch dtype before output rounding |
+| Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the wide decode and product |
+| Wide scratch dtype | FP32 only | Follows the activation: `float64` keeps a float64 decode and GEMM on an accelerator, every other wide case uses FP32, and CPU stays FP32 by design |
 | Wide GEMM under autocast | Not applicable: the wide branch did not exist on accelerators | The FP32 product runs under `torch.autocast(..., enabled=False)` so autocast cannot narrow it back to FP16 |
 | Narrow branch under autocast | An FP16 autocast context narrowed BF16/FP32 activations too, because autocast rewrites GEMM operands; CUDA hid this only through its FP32 `out_dtype` request, while HIP returned `inf` | `_autocast_narrows_weight_range()` widens whenever the active autocast dtype cannot hold every BF16 weight |
 
-The autocast guard is keyed on `autocast_active()`, not on the device type:
-CPU autocast narrows an FP32 `mm` to the autocast dtype just like the CUDA
-path, so a CUDA-only guard would leave the CPU fallback vulnerable.
+The autocast guard is keyed on the device's autocast state, not on the device
+type: CPU autocast narrows an FP32 `mm` to the autocast dtype just like the
+CUDA path, so a CUDA-only guard would leave the CPU fallback vulnerable.
 
 The context dtype, not the activation dtype, decides correctness. A `bfloat16`
 or `float32` activation is lossless on its own, but an FP16 autocast context
@@ -57,11 +69,23 @@ autocast never narrows it.
 
 `_weight_dtype_is_lossless()` admits `float64` as well. It is outside
 `SUPPORTS_DTYPES`, but a caller that already holds float64 activations must not
-have the decoded weight or the product silently narrowed to float32.
+have the decoded weight narrowed to float32 on an accelerator. The wide scratch
+dtype therefore follows the activation: `float64` decodes and multiplies in
+float64, and every other wide case uses FP32. CPU keeps its FP32 decode for
+every activation dtype, which is the documented existing behavior; a CPU
+float64 caller is still within `2e-3` of the float64 oracle, not bitwise exact.
+On an accelerator, `float64` with no bias is bitwise equal to the float64
+oracle; a mixed-dtype bias widens to float64 and introduces one rounding (the
+bias is stored in the checkpoint dtype), measured at `1.96e-7` relative in the
+regression. With no fix an FP32 epilogue error reached `3.8e-3` pointwise
+relative on a random `512x512` matrix, because it rounds after each partial
+sum.
 
 The meta and zero-row branches return `self.empty_linear_output(x)` directly.
 That helper already applies the adapter exactly once; applying it again in the
-caller doubled the adapter contribution on both paths.
+caller doubled the adapter contribution on both paths. The meta check runs
+before the online rotation, and the zero-row branch runs on the real device
+after it, so each path is covered by its own test.
 
 Measured on the decoded fallback with a BF16 weight `65536` and an FP16
 activation `2**-16`: CPU returned `1` before and after; the accelerator fallback
@@ -71,10 +95,12 @@ accumulation, and a BF16 activation whose bias cancels an out-of-FP16 sum.
 
 The regressions `test_linear_fallback_preserves_bf16_weight_range`,
 `test_linear_fallback_rounds_only_the_final_bf16_output`,
-`test_linear_fallback_preserves_bf16_range_under_autocast`, and
-`test_linear_fallback_preserves_bf16_range_for_lossless_activation_under_autocast`
-compare the packed forward result to an independent FP64 Torch reference on CPU
-and on the available accelerator. No dense weight is retained after forward.
+`test_linear_fallback_preserves_bf16_range_under_autocast`,
+`test_linear_fallback_preserves_bf16_range_for_lossless_activation_under_autocast`,
+`test_linear_fallback_keeps_float64_activation_precision`, and
+`test_linear_fallback_keeps_float64_multiply_wide_for_mixed_bias` compare the
+packed forward result to an independent FP64 Torch reference on CPU and on the
+available accelerator. No dense weight is retained after forward.
 
 ## Metadata-only inputs
 
@@ -82,5 +108,6 @@ A meta module answers `forward` from its metadata alone. Lazy-load and offload
 shells construct quant-linear layers on the meta device, so the packed buffers
 hold no values; decoding them or reading `exp_base` would raise
 `Tensor.item() cannot be called on meta tensors`. `forward` returns the
-shape/dtype-correct empty output from `empty_linear_output()` before the decode
-path, matching the zero-row contract and the other quant-linear layers.
+shape/dtype-correct empty output from `empty_linear_output()` before the online
+rotation and before the decode path, matching the zero-row contract and the
+other quant-linear layers.

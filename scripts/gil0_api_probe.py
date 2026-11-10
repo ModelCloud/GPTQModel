@@ -172,28 +172,62 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     def cuda_autocast_disable() -> bool:
         x = torch.full((1, 32), 1000.0, device="cuda")
         weight = torch.full((32, 1), 3.125, device="cuda")
+        before_dtype = torch.get_autocast_dtype("cuda")
         # BF16 keeps 100000 finite; FP16 would overflow it to `inf` and hide
         # the FP32 reduction this probe compares against.
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             outer = torch.is_autocast_enabled("cuda")
+            outer_dtype = torch.get_autocast_dtype("cuda")
             narrowed = torch.mm(x, weight)
             with torch.autocast(device_type="cuda", enabled=False):
                 inner = torch.is_autocast_enabled("cuda")
+                # A disabled context keeps the enclosing dtype; only the
+                # enabled flag changes.
+                inner_dtype = torch.get_autocast_dtype("cuda")
                 wide = torch.mm(x, weight)
             resumed_enabled = torch.is_autocast_enabled("cuda")
+            resumed_dtype = torch.get_autocast_dtype("cuda")
             resumed = torch.mm(x, weight)
         correct = (
             outer
             and not inner
             and resumed_enabled
             and not torch.is_autocast_enabled("cuda")
+            and before_dtype == torch.float16
+            and outer_dtype == resumed_dtype == inner_dtype == torch.bfloat16
+            and torch.get_autocast_dtype("cuda") is before_dtype
             and narrowed.dtype == resumed.dtype == torch.bfloat16
             and wide.dtype == torch.float32
             and narrowed.item() == resumed.item() == 99840.0
             and wide.item() == 100000.0
         )
         if not correct:
-            raise AssertionError("CUDA autocast state or FP32 reduction changed across a nested context")
+            raise AssertionError(
+                "CUDA autocast state, context dtype, or FP32 reduction changed across a nested context"
+            )
+        return True
+
+    def cuda_autocast_dtype() -> bool:
+        # `torch.get_autocast_dtype` is read on the NF12-AD fallback path to
+        # decide whether an active context narrows BF16 weights. The disabled
+        # context keeps the enclosing dtype; only the enabled flag changes.
+        before_enabled = torch.is_autocast_enabled("cuda")
+        before_dtype = torch.get_autocast_dtype("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outer_dtype = torch.get_autocast_dtype("cuda")
+            with torch.autocast(device_type="cuda", enabled=False):
+                disabled_enabled = torch.is_autocast_enabled("cuda")
+                disabled_dtype = torch.get_autocast_dtype("cuda")
+            resumed_dtype = torch.get_autocast_dtype("cuda")
+        correct = (
+            not before_enabled
+            and before_dtype == torch.float16
+            and outer_dtype == disabled_dtype == resumed_dtype == torch.bfloat16
+            and not disabled_enabled
+            and torch.get_autocast_dtype("cuda") is before_dtype
+        )
+        if not correct:
+            raise AssertionError("torch.get_autocast_dtype is not thread-local across nested contexts")
         return True
 
     def set_device_isolation(index: int = 0) -> bool:
@@ -284,6 +318,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.no_grad": lambda: _no_grad_result(torch, torch.no_grad),
         "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
         "torch.is_autocast_enabled + torch.autocast (CUDA)": cuda_autocast_disable,
+        "torch.get_autocast_dtype + torch.autocast (CUDA)": cuda_autocast_dtype,
     }
     return probes
 

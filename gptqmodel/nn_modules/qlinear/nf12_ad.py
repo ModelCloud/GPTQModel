@@ -45,10 +45,26 @@ def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
 
     ``float64`` is included even though :attr:`SUPPORTS_DTYPES` does not list it:
     a caller that already holds float64 activations must not have the decoded
-    weight (or the product) silently narrowed to float32.
+    weight narrowed to float32 on an accelerator. CPU keeps its FP32 decode by
+    design (see `forward` and `test_linear_fallback_keeps_float64_activation_precision`).
     """
 
     return activation_dtype in (torch.bfloat16, torch.float32, torch.float64)
+
+
+def _autocast_enabled(device_type: str) -> bool:
+    """Whether autocast is active, tolerating backends without autocast support.
+
+    ``torch.is_autocast_enabled`` raises for a device type that the installed
+    build does not know (for example ``npu`` on a stock Torch). Such a backend
+    cannot hold an ambient autocast context, so report ``False`` rather than
+    failing the fallback for a module that declares every device family.
+    """
+
+    try:
+        return autocast_active(device_type)
+    except (RuntimeError, TypeError):
+        return False
 
 
 def _autocast_narrows_weight_range(
@@ -63,13 +79,13 @@ def _autocast_narrows_weight_range(
     ``float64`` is exempt because autocast never narrows it.
     """
 
-    if activation_dtype is torch.float64 or not autocast_active(device_type):
+    if activation_dtype is torch.float64 or not _autocast_enabled(device_type):
         return False
     try:
         autocast_dtype = torch.get_autocast_dtype(device_type)
     except (AttributeError, TypeError, RuntimeError):
-        # No queryable autocast dtype: assume it narrows, which only widens the
-        # GEMM this predicate protects.
+        # Autocast is active but its dtype cannot be queried: assume it narrows,
+        # which only widens the GEMM this predicate protects.
         return True
     return not _weight_dtype_is_lossless(autocast_dtype)
 
@@ -403,18 +419,20 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             return None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.online_full_had or self.online_partial_had:
-            x = self._apply_rotation_to_input(x)
-
         bias = getattr(self, "bias", None)
         if x.device.type == "meta":
             # Metadata-only modules (lazy load, offload shells) have packed
             # buffers with no values. There is nothing to decode or multiply,
             # and materializing `exp_base` or a decoded matrix would raise on
-            # a meta tensor. Return the shape/dtype-correct empty output, the
-            # same contract as the zero-row path and other quant-linear layers.
+            # a meta tensor. Answer before the online rotation as well: it
+            # preserves shape/dtype/device but its native Hadamard op has no
+            # meta kernel, so a rotation-enabled shell would still raise.
             # `empty_linear_output` already applies the adapter, exactly once.
             return self.empty_linear_output(x)
+
+        if self.online_full_had or self.online_partial_had:
+            x = self._apply_rotation_to_input(x)
+
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
@@ -427,18 +445,28 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             # into `inf`, and flushes values below the FP16 subnormal range to
             # zero. Multiply wide whenever the activation dtype cannot hold
             # every BF16 weight exactly, and round only the final output.
-            compute_dtype = (
-                torch.float32
-                if (
-                    x.device.type == "cpu"
-                    or not _weight_dtype_is_lossless(x.dtype)
-                    or _autocast_narrows_weight_range(x.dtype, x.device.type)
-                    or (bias is not None and bias.dtype != x.dtype)
-                )
-                else x.dtype
+            #
+            # The wide scratch dtype follows the activation: float64 (outside
+            # SUPPORTS_DTYPES but accepted) must not be narrowed to float32,
+            # while every other wide case uses FP32. CPU keeps its established
+            # FP32 decode for every activation dtype (`test_linear_fallback_
+            # keeps_float64_activation_precision` pins that contract), so only
+            # an accelerator promotes float64. A mismatched bias dtype already
+            # forces the wide branch.
+            wide_dtype = (
+                torch.float64
+                if x.dtype is torch.float64 and x.device.type != "cpu"
+                else torch.float32
             )
+            wide = (
+                x.device.type == "cpu"
+                or not _weight_dtype_is_lossless(x.dtype)
+                or _autocast_narrows_weight_range(x.dtype, x.device.type)
+                or (bias is not None and bias.dtype != x.dtype)
+            )
+            compute_dtype = wide_dtype if wide else x.dtype
             weight = self.dequantize_weight(device=x.device, dtype=compute_dtype)
-            if compute_dtype == torch.float32:
+            if wide:
                 out_shape = x.shape[:-1] + (self.out_features,)
                 # Autocast would narrow this wide GEMM back to the autocast
                 # dtype and lose the weight range this branch exists to
@@ -447,16 +475,16 @@ class NF12ADLinear(WeightOnlyQuantLinear):
                 # accelerators.
                 autocast = (
                     torch.autocast(device_type=x.device.type, enabled=False)
-                    if autocast_active(x.device.type)
+                    if _autocast_enabled(x.device.type)
                     else nullcontext()
                 )
                 with autocast:
                     out = torch.mm(
-                        x.reshape(-1, x.shape[-1]).float(),
+                        x.reshape(-1, x.shape[-1]).to(compute_dtype),
                         weight.t(),
                     )
                     if bias is not None:
-                        out = out + bias.float()
+                        out = out + bias.to(compute_dtype)
                 out = out.to(x.dtype).reshape(out_shape)
             else:
                 out = linear_fp32_reduce(x, weight, bias)
