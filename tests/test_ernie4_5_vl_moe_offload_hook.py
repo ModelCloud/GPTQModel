@@ -717,6 +717,156 @@ def test_capture_removes_hook_when_hook_start_raises(monkeypatch):
     assert len(model.hooked_layer._forward_pre_hooks) == 0
 
 
+def test_capture_runs_cleanup_when_progress_bar_close_raises(monkeypatch):
+    """A failing progress-bar close must not skip the capture cleanup.
+
+    Closing the bar is cosmetic; releasing the generate-hook state and detaching
+    the pre-hook are not. When the two were sequential statements in the same
+    `finally`, a raising `close()` escaped before either obligation ran, leaving
+    the model mutated and the pre-hook live for the rest of the quantization run.
+    """
+
+    import types
+
+    from gptqmodel.looper import stage_inputs_capture as capture_mod
+    from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
+    from gptqmodel.models.base import BaseQModel
+
+    events = []
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hooked_layer = nn.Linear(4, 4)
+            self.hooked_layer.full_name = "test_layer"
+            self.config = types.SimpleNamespace(model_type="test")
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            return None
+
+    model = _Model()
+
+    class _FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
+        run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
+
+        def __init__(self):
+            self.quantize_config = types.SimpleNamespace(
+                device=torch.device("cpu"),
+                calibration_data_device=torch.device("cpu"),
+                compute_device_filter=None,
+            )
+            self.model = model
+            self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
+            self.ATTENTION_MASKS_DTYPE = torch.long
+            self.INPUT_EMBEDDING_EXTRA_ARGS = None
+            self.quant_region_timer = None
+
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del device, kwargs
+            return target_submodule
+
+        def get_base_modules(self, model):
+            del model
+            return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            del model
+            return []
+
+        def pre_quantize_generate_hook_start(self):
+            events.append("hook_start")
+
+        def pre_quantize_generate_hook_end(self):
+            events.append("hook_end")
+
+    class _Looper:
+        def __init__(self, gptq_model):
+            self.gptq_model = gptq_model
+
+        def _batch_row_count(self, batch_inputs):
+            del batch_inputs
+            return 1
+
+    class _NullCM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(capture_mod, "DEVICE_THREAD_POOL", types.SimpleNamespace(read_lock=lambda d: _NullCM()))
+    monkeypatch.setattr(capture_mod, "ctx", lambda *cms: _NullCM())
+    monkeypatch.setattr(capture_mod, "device_ctx", lambda device: _NullCM())
+    monkeypatch.setattr(capture_mod, "await_torch_linear_prewarm", lambda *a, **k: None)
+
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def debug(self, *a, **k):
+            pass
+
+        def warn(self, *a, **k):
+            pass
+
+        def pb(self, *a, **k):
+            class _Bar:
+                def manual(self):
+                    return self
+
+                def set(self, **kw):
+                    return self
+
+                def title(self, *a):
+                    return self
+
+                def subtitle(self, *a):
+                    return self
+
+                def draw(self):
+                    return self
+
+                def close(self):
+                    raise RuntimeError("progress bar close failed")
+
+            return _Bar()
+
+    capture = StageInputsCapture(_Looper(_FakeGPTQModel()), logger=_Logger())
+    removed = {"count": 0}
+    real_register = nn.Module.register_forward_pre_hook
+
+    class _TrackedHandle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def remove(self):
+            removed["count"] += 1
+            return self._inner.remove()
+
+    def _tracking_register(self, hook, with_kwargs=False):
+        return _TrackedHandle(real_register(self, hook, with_kwargs=with_kwargs))
+
+    monkeypatch.setattr(nn.Module, "register_forward_pre_hook", _tracking_register, raising=False)
+
+    with pytest.raises(RuntimeError, match="progress bar close failed"):
+        capture.cache_inputs(
+            layers=[model.hooked_layer],
+            calibration_data=[{"input_ids": torch.randint(0, 10, (1, 4))}],
+            use_cache=False,
+        )
+
+    assert events == ["hook_start", "hook_end"]
+    assert removed["count"] == 1
+    assert len(model.hooked_layer._forward_pre_hooks) == 0
+
+
 def test_release_module_skips_never_materialized_meta_module():
     """A checkpoint-only `meta` module has nothing to release.
 

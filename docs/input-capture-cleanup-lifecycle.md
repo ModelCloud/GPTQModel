@@ -62,6 +62,11 @@ first statement inside it. A start hook that raises partway through therefore
 still unwinds through the `finally`, so a half-materialized model is not left
 behind with a live pre-hook.
 
+Closing the progress bar is nested in its own `try`/`finally` ahead of that
+cleanup. It is a cosmetic step and must not be able to skip the only code that
+un-mutates the model and detaches the pre-hook; a raising `close()` propagates,
+but only after both obligations have run.
+
 The `try`/`finally` around `pre_quantize_generate_hook_end()` keeps the two
 obligations independent: a model-specific release that raises still detaches the
 pre-hook.
@@ -83,6 +88,7 @@ failed and silently swallow a real release error.
 | Calibration forward succeeds | hook end runs, handle removed | unchanged |
 | Forward raises a non-`StopForward` error | hook end **skipped**, handle **leaked** | hook end and handle removal both run, the capture error propagates |
 | Hook start raises partway through | handle **leaked**, model left half-materialized | handle removed, start error propagates |
+| Progress-bar `close()` raises | handle **leaked**, model left mutated: `close()` escaped before both obligations | hook end and handle removal still run, the `close()` error propagates |
 | Model-specific hook end raises, nothing else in flight | n/a (unreachable on the failure path) | handle removed, the release error propagates |
 | Model-specific hook end raises while the capture is already failing | n/a | handle removed, the release error is logged, the capture error propagates |
 | `offload_to_disk=True` capture | hook end offloads modules to disk | unchanged |

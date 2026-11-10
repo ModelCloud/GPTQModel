@@ -437,28 +437,33 @@ class StageInputsCapture:
             capture_failed = True
             raise
         finally:
-            if cache_forward_pb is not None:
-                cache_forward_pb.close()
-            # Cleanup must run on every exit path, not only a successful
-            # capture: a calibration forward can raise for ordinary reasons.
-            # The handle removal is nested so a failing model-specific release
-            # still detaches the pre-hook. When another exception is already
-            # propagating, a failure from `pre_quantize_generate_hook_end` is
-            # logged and the original calibration error is re-raised, so the
-            # user sees the cause instead of a cleanup symptom.
+            # Closing the progress bar is cosmetic; releasing the model state is
+            # not. Do not let a failing renderer skip the cleanup below, which is
+            # the only thing that un-mutates the model and detaches the pre-hook.
             try:
-                self.gptq_model.pre_quantize_generate_hook_end()
-            except Exception:
-                # Deliberately not `BaseException`: an interrupt must stay
-                # interruptible even while a capture error is unwinding.
-                if not capture_failed:
-                    raise
-                self.logger.warn(
-                    "pre_quantize_generate_hook_end() failed during capture cleanup; "
-                    "re-raising the original capture error:\n" + traceback.format_exc()
-                )
+                if cache_forward_pb is not None:
+                    cache_forward_pb.close()
             finally:
-                handle.remove()
+                # Cleanup must run on every exit path, not only a successful
+                # capture: a calibration forward can raise for ordinary reasons.
+                # The handle removal is nested so a failing model-specific release
+                # still detaches the pre-hook. When another exception is already
+                # propagating, a failure from `pre_quantize_generate_hook_end` is
+                # logged and the original calibration error is re-raised, so the
+                # user sees the cause instead of a cleanup symptom.
+                try:
+                    self.gptq_model.pre_quantize_generate_hook_end()
+                except Exception:
+                    # Deliberately not `BaseException`: an interrupt must stay
+                    # interruptible even while a capture error is unwinding.
+                    if not capture_failed:
+                        raise
+                    self.logger.warn(
+                        "pre_quantize_generate_hook_end() failed during capture cleanup; "
+                        "re-raising the original capture error:\n" + traceback.format_exc()
+                    )
+                finally:
+                    handle.remove()
 
         result = InputCache(
             layer_inputs=layer_inputs,
