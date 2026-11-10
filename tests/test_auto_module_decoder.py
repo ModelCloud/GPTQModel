@@ -604,6 +604,38 @@ def test_shell_materialize_forward_builds_fp8_wrapper_from_weight_scale_metadata
     assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
 
 
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_fp4_forward_module_keeps_stored_bias_width():
+    """The FP4 wrapper must receive the checkpoint bias at its stored width.
+
+    ``TorchFP4Linear`` selects its wide epilogue from the stored bias dtype, so
+    narrowing the bias to the activation dtype while the wrapper is built turns
+    an FP32 ``-65536`` into FP16 ``-inf`` before the epilogue can apply it.
+    """
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = SimpleNamespace(config=SimpleNamespace(quantization_config=None))
+
+    target = nn.Linear(32, 8, bias=True)
+    packed = torch.zeros((8, 16), dtype=torch.uint8)
+    scale = torch.ones((8, 2), dtype=torch.float32)
+    bias = torch.full((8,), -65536.0, dtype=torch.float32)
+
+    prepared = base_module.BaseQModel._build_fp4_forward_module(
+        harness,
+        target_submodule=target,
+        checkpoint_tensors={"weight": packed, "weight_scale": scale, "bias": bias},
+        device=torch.device("cpu"),
+        target_dtype=torch.float16,
+    )
+
+    assert isinstance(prepared, TorchFP4Linear)
+    assert prepared.bias.dtype is torch.float32
+    assert torch.isfinite(prepared.bias).all()
+    assert float(prepared.bias[0].item()) == -65536.0
+
+
 @pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
 @pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
 def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):

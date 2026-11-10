@@ -192,6 +192,21 @@ including Torch index unpacking, codebook lookup, and `F.linear`; the CUDA path
 calls the native module forward. Run both FP16 and BF16 when comparing the
 target GPU.
 
+### Bias epilogue precision
+
+Both backends store one bias per output feature. The buffer is FP32 so an FP32
+checkpoint bias keeps its range; through `VPTQLinear.forward`,
+`VPTQCudaLinear.forward`, and the shared `linear_fp32_reduce` helper, a bias
+wider than the activation is added after a wide reduction and the result is
+rounded once to the activation dtype. A narrower bias is widened losslessly
+inside the epilogue. The native fused kernel only accepts a bias whose dtype
+matches its low-precision output, so it is skipped when the stored bias has a
+value that FP16/BF16 cannot represent. An FP32 buffer whose values are all
+representable is narrowed losslessly for the kernel: it adds the bias after its
+own FP32 (FP64 for BF16) accumulation, so only the storage dtype changes. See
+[low-precision bias epilogues](low-precision-bias-epilogue.md) for the full
+flow, including FP4 and FP8.
+
 VPTQ checkpoints are not understood by Transformers, vLLM, or SGLang, and the
 checkpoint/resume feature is not available for VPTQ quantizations.
 

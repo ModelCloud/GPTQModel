@@ -29,7 +29,7 @@ from ...utils.vptq import (
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
-from ._numerics import linear_fp32_reduce
+from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 
 
 log = setup_logger()
@@ -263,8 +263,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 )
             if bias:
                 # `bias` may already exist as a plain attribute from `__init__`.
+                # Preserve the FP32 source range: the forward path decides
+                # which precision the epilogue needs, and narrowing here would
+                # be irreversible for an FP32 checkpoint bias.
                 self.__dict__.pop("bias", None)
-                self.register_buffer("bias", torch.zeros(self.out_features, dtype=dtype, device=device))
+                self.register_buffer(
+                    "bias",
+                    torch.zeros(self.out_features, dtype=torch.float32, device=device),
+                )
             else:
                 self.bias = None
 
@@ -298,6 +304,25 @@ class VPTQLinear(WeightOnlyQuantLinear):
             fullgraph=fullgraph,
         )
         super().optimize()
+
+    def _promote_stored_bias(
+        self, x: torch.Tensor, bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Narrow a wide stored bias only when the cast is exact.
+
+        The buffer is FP32 so an out-of-range checkpoint value survives, but a
+        wide buffer would otherwise take the FP32 epilogue on every forward.
+        An exact cast preserves every value, so the cheap narrow epilogue is
+        used instead; an inexact one is returned unchanged.
+        """
+
+        if bias is None or not linear_needs_wide_bias(x, bias):
+            return bias
+        # Not cached: an in-place ``.data`` write does not bump a version
+        # counter, and the check is a few microseconds on a device.
+        if bias_narrows_losslessly(bias, x.dtype):
+            return bias.to(dtype=x.dtype)
+        return bias
 
     def _validate_loaded_state(self) -> None:
         if self.indices.shape != (self.group_num, self.num_indices, self.packed_words):
@@ -435,7 +460,22 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 raise ValueError(
                     f"VPTQLinear `{self.name}`: received a bias but the module was built without one."
                 )
-            self.bias.data.copy_(bias.detach().to(device=device, dtype=self.bias.dtype))
+            # The buffer is FP32, so every supported checkpoint width survives
+            # the copy. Reject only values that FP32 cannot represent exactly
+            # instead of silently rounding them.
+            source = bias.detach().to(device=device)
+            stored = source.to(dtype=self.bias.dtype)
+            if not torch.equal(stored.to(torch.float64), source.to(torch.float64)):
+                raise ValueError(
+                    f"VPTQLinear `{self.name}`: bias values cannot be stored exactly "
+                    f"as {self.bias.dtype}."
+                )
+            self.bias.data.copy_(stored)
+
+        # ``.data.copy_`` does not bump the version counter of an inference
+        # tensor, so any derived key over these buffers must be dropped here
+        # rather than rely on the cache key alone.
+        self._clear_runtime_weight_cache()
 
     # ------------------------------------------------------------------
     # runtime
@@ -534,8 +574,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
             return out
 
         weight = self.dequantize().to(dtype=x.dtype, device=x.device)
-        if bias is not None and bias.dtype != x.dtype:
-            bias = bias.to(dtype=x.dtype)
+        bias = self._promote_stored_bias(x, bias)
         out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)

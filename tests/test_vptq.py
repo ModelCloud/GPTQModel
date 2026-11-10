@@ -36,6 +36,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausal
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Lora
+from gptqmodel.nn_modules.qlinear import vptq_torch as vptq_torch_module
 from gptqmodel.nn_modules.qlinear.vptq_cuda import (
     VPTQCudaLinear,
     _vptq_cuda_fused_max_rows,
@@ -2355,9 +2356,17 @@ def test_tiny_gpt2_vptq_conv1d_quantize_save_reload(tmp_path: Path):
 
     prompt = "tiny vptq calibration sample"
     inputs = tokenizer(prompt, return_tensors="pt")
+    wide_bias_name = "model.transformer.h.0.attn.c_attn"
+    wide_bias_module = dict(model.named_modules())[wide_bias_name]
+    assert wide_bias_module.bias is not None
+    wide_bias_module.bias.data[0] = -65537.0
     model.save(quantized_dir)
 
-    reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=torch.bfloat16)
+    for load_dtype in (torch.float16, torch.bfloat16):
+        reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=load_dtype)
+        restored_bias = dict(reloaded.named_modules())[wide_bias_name].bias
+        assert restored_bias.dtype is torch.float32
+        assert restored_bias[0].item() == -65537.0
     reloaded_modules = dict(reloaded.named_modules())
     for name, (in_features, out_features) in expected_modules.items():
         restored = reloaded_modules[name]
@@ -2469,3 +2478,287 @@ def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
         atol=1e-4,
         rtol=1e-4,
     )
+
+
+def test_vptq_pack_preserves_fp32_bias_range():
+    """A loaded FP32 bias must survive packing and cancel a wide FP16 dot.
+
+    The quantizer path copies the source layer's bias into the module's buffer.
+    Narrowing that buffer to the codebook dtype would turn an FP32 ``-65536``
+    bias into FP16 ``-inf`` before forward dispatch even runs.
+    """
+
+    weight = torch.ones((1, 16), dtype=torch.float32)
+    hessian = torch.eye(16, dtype=torch.float32)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=4,
+    )
+    source = torch.nn.Linear(16, 1, bias=True, dtype=torch.float32)
+    source.weight.data.copy_(weight)
+    source.bias.data.fill_(-65536.0)
+    quantizer = VPTQ(module=source, qcfg=qcfg)
+    quantizer.fallback = None
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    for dtype in (torch.float16, torch.bfloat16):
+        module = build_module(qcfg, 16, 1, dtype=dtype, bias=True)
+        module.pack(linear=source, vptq_result=result)
+
+        assert module.bias.dtype is torch.float32
+        assert float(module.bias.item()) == -65536.0
+
+        # The encoded weight is one E2M1-style code with a unit scale, so
+        # sixteen FP16 4096 activations exceed the FP16 finite range.
+        x = torch.full((1, 16), 4096.0, dtype=dtype)
+        with torch.inference_mode():
+            actual = module(x)
+
+        oracle = (x.double() @ module.dequantize().double().t() + module.bias.double()).to(dtype)
+        assert actual.dtype is dtype
+        torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+        if dtype is torch.float16:
+            # The narrowed expression used to return -inf for this input.
+            assert torch.isfinite(actual).all()
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_cuda_representable_wide_bias_keeps_fused_kernel(dtype, monkeypatch):
+    """A wide buffer whose values fit the activation dtype must keep the fused kernel.
+
+    The fused kernel accumulates in FP32 (FP64 for BF16) and adds the bias after
+    the reduction, so narrowing an exactly representable bias cannot change the
+    result. Skipping the kernel for every FP32 buffer would cost the decode path
+    its native implementation.
+    """
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("VPTQ_CUDA is CUDA-only")
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=71)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=8,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    # Every value is an FP16-representable multiple of 0.5.
+    bias = torch.tensor([0.5, -1.5, 2.0, -0.5] + [1.5] * (quantizer.layer.out_features - 4))
+    quantizer.layer.bias = torch.nn.Parameter(bias.to(dtype=torch.float32))
+    result, _ = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype
+    )
+    module = build_module(
+        qcfg, weight.shape[1], weight.shape[0], dtype=dtype, linear_cls=VPTQCudaLinear
+    ).to(device)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    assert module.bias.dtype is torch.float32
+
+    from gptqmodel.utils.vptq_cuda import vptq_cuda_linear as real_vptq_cuda_linear
+
+    fused_calls = []
+
+    def record_fused_call(*args, **kwargs):
+        fused_calls.append(True)
+        return real_vptq_cuda_linear(*args, **kwargs)
+
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", record_fused_call)
+
+    activations = torch.randn(4, weight.shape[1], device=device, dtype=dtype)
+    actual = module(activations)
+
+    assert bool(fused_calls)
+    assert actual.dtype is dtype
+    oracle = (
+        activations.double() @ module.dequantize().double().t() + module.bias.double()
+    ).to(dtype)
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+def _checkpoint_bias_module(dtype):
+    """Build a VPTQ layer whose FP32 buffer holds BF16-sourced checkpoint values."""
+
+    module = (
+        VPTQLinear(
+            bits=1,
+            in_features=64,
+            out_features=64,
+            bias=True,
+            vector_lens=[-1, 4],
+            num_centroids=[-1, 16],
+            num_res_centroids=[-1, -1],
+            group_size=64,
+            group_num=-1,
+            enable_norm=False,
+            enable_perm=False,
+            dtype=dtype,
+        )
+        .eval()
+    )
+    module.indices.zero_()
+    module.centroids.weight.data.fill_(0.01)
+    generator = torch.Generator().manual_seed(17)
+    source = torch.randn(64, generator=generator, dtype=torch.bfloat16) * 0.02
+    module.bias.data.copy_(source.to(module.bias.dtype))
+    return module
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_bias_epilogue_captures_and_replays_live_values(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA graph capture requires a GPU")
+
+    module = _checkpoint_bias_module(dtype).to("cuda:0")
+    x = torch.full((1, 64), 4096.0, dtype=dtype, device="cuda:0")
+    module.bias.data.fill_(0.5)
+
+    with torch.inference_mode():
+        module(x)  # Warm up kernels before graph capture.
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = module(x)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        for value in (0.5, -65537.0):
+            module.bias.data.fill_(value)
+            graph.replay()
+            torch.cuda.synchronize()
+            oracle = (
+                x.double() @ module.dequantize().double().t() + module.bias.double()
+            ).to(dtype)
+            torch.testing.assert_close(captured, oracle, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_bias_epilogue_compiles_fullgraph_with_live_values(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA compilation requires a GPU")
+
+    module = _checkpoint_bias_module(dtype).to("cuda:0")
+    x = torch.full((1, 64), 4096.0, dtype=dtype, device="cuda:0")
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+
+    for value in (0.5, -65537.0):
+        module.bias.data.fill_(value)
+        with torch.inference_mode():
+            actual = compiled(x)
+        oracle = (
+            x.double() @ module.dequantize().double().t() + module.bias.double()
+        ).to(dtype)
+        torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_representable_wide_bias_keeps_narrow_epilogue(dtype):
+    """A wide buffer whose values fit the activation dtype must not open the FP32 path.
+
+    The FP32 buffer exists so an out-of-range checkpoint bias survives packing.
+    Taking ``linear_wide_bias`` for that buffer on every forward would copy the
+    whole weight to FP32 for each call; an exactly representable value has to
+    narrow back to the cheap epilogue instead.
+    """
+
+    module = _checkpoint_bias_module(dtype)
+    assert module.bias.dtype is torch.float32
+    from gptqmodel.nn_modules.qlinear._numerics import bias_narrows_losslessly
+
+    assert bias_narrows_losslessly(module.bias, dtype)
+
+    x = (torch.randn(2, 64, generator=torch.Generator().manual_seed(3)) * 0.5).to(dtype)
+    oracle = (x.double() @ module.dequantize().double().t() + module.bias.double()).to(dtype)
+
+    promoted = module._promote_stored_bias(x, module.bias)
+    assert promoted.dtype is dtype
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert actual.dtype is dtype
+    assert torch.isfinite(actual).all()
+    # The exact cast cannot change a value, so the narrow epilogue matches the
+    # FP64 oracle bitwise exactly like the wide one does.
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_forward_consumes_the_exact_cast_gate(dtype, monkeypatch):
+    """The forward must pass the promoted bias, not the stored FP32 buffer.
+
+    ``_promote_stored_bias`` is only a win if ``VPTQLinear.forward`` uses its
+    result. This pins the call site so deleting it cannot silently reopen the
+    per-forward FP32 weight copy for every ordinary checkpoint bias.
+    """
+
+    module = _checkpoint_bias_module(dtype)
+    seen = []
+    original = vptq_torch_module.linear_fp32_reduce
+
+    def tracked(x, weight, bias=None):
+        seen.append(None if bias is None else bias.dtype)
+        return original(x, weight, bias)
+
+    monkeypatch.setattr(vptq_torch_module, "linear_fp32_reduce", tracked)
+    x = torch.ones(1, 64, dtype=dtype)
+
+    with torch.inference_mode():
+        module(x)
+
+    assert seen == [dtype]
+
+    # An in-place, out-of-range write must reach the helper still wide.
+    module.bias.data.fill_(-65537.0)
+    seen.clear()
+    with torch.inference_mode():
+        module(x)
+
+    assert seen == [torch.float32]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_unrepresentable_bias_still_opens_the_wide_epilogue(dtype):
+    """The widening fix must not shrink the range the FP32 buffer was added for."""
+
+    module = _checkpoint_bias_module(dtype)
+    inexact = float(16 * 4096) + 1.0
+    module.bias.data.fill_(inexact)
+
+    x = torch.full((1, 8), 4096.0, dtype=dtype)
+    promoted = module._promote_stored_bias(x, module.bias)
+
+    assert promoted.dtype is torch.float32
+    assert torch.equal(promoted, torch.full_like(promoted, inexact))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_inplace_bias_write_reenables_the_wide_epilogue(dtype):
+    """An in-place bias write must not leave a stale narrow decision behind.
+
+    ``.data.fill_`` does not bump a tensor's version counter, so a cached
+    representability answer would keep an out-of-range value on the narrow
+    epilogue and overflow it. The decision is therefore recomputed per call.
+    """
+
+    module = _checkpoint_bias_module(dtype)
+    x = torch.ones(1, 64, dtype=dtype)
+    module.bias.data.fill_(0.5)
+    assert module._promote_stored_bias(x, module.bias).dtype is dtype
+
+    # ``-65536 - 1`` is exact in neither FP16 nor BF16, so both dtypes must keep
+    # the wide epilogue for it.
+    inexact = -65537.0
+    module.bias.data.fill_(inexact)
+    promoted = module._promote_stored_bias(x, module.bias)
+
+    assert promoted.dtype is torch.float32
+    assert torch.equal(promoted, torch.full_like(promoted, inexact))
