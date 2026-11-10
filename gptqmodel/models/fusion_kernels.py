@@ -187,8 +187,9 @@ class FusionKernelSpec:
             fused.q_tensors.update({name: getattr(fused, name) for name in ("qweight", "qzeros", "scales")})
             fused.q_handle, _ = exllamav2_clone_q_matrix(fused, awq=not self.gptq)
             fused._fusion_native_view = False
-        if self.layout in ("cpu_aten", "cpu_legacy"):
-            fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
+        if self.layout in ("cpu_aten", "cpu_legacy", "cpu_avx512"):
+            if self.layout != "cpu_avx512":
+                fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
             fused._fused_state_key = None
             # The fused layer owns concatenated tensors. Do not inherit the
             # first source's checkpoint snapshot and restore it during the
