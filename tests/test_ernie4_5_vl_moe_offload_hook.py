@@ -739,6 +739,40 @@ def test_release_module_skips_never_materialized_meta_module():
     assert not hasattr(core_model.vision_tower, "_hf_hook")
 
 
+def test_release_module_handles_partially_materialized_module():
+    """A partially materialized module still has real tensors to release.
+
+    A start hook that raises partway through a device move (for example an OOM
+    while materializing the vision tower) leaves already-moved leaves on the
+    forward device next to untouched `meta` ones. `is_meta_module()` sees the
+    `meta` leaves and the module looks exactly like one that never left the
+    checkpoint, but skipping it would leak the materialized tensors. The release
+    must move those tensors and leave the `meta` leaves alone.
+    """
+
+    definition = _definition(offload_to_disk=False)
+    core_model = definition.model.model
+    loaded_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    class _PartiallyMaterialized(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.loaded = nn.Linear(_HIDDEN, _HIDDEN, bias=False, device=loaded_device)
+            self.pending = nn.Linear(_HIDDEN, _HIDDEN, bias=False, device="meta")
+
+    mixed = _PartiallyMaterialized()
+    core_model.vision_tower = mixed
+    assert mixed.loaded.weight.device == loaded_device
+    assert mixed.pending.weight.is_meta
+
+    definition.pre_quantize_generate_hook_end()
+
+    assert core_model.vision_tower is mixed
+    assert mixed.pending.weight.is_meta
+    assert not mixed.loaded.weight.is_meta
+    assert mixed.loaded.weight.device == torch.device("cpu")
+
+
 @pytest.mark.parametrize("forward_raises", [True, False])
 def test_capture_preserves_original_error_when_release_also_raises(monkeypatch, forward_raises):
     """Cleanup errors must not replace the error the capture was already raising.

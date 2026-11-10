@@ -110,12 +110,19 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
         module = getattr(parent, attr_name, None)
         if module is None:
             return
-        # A module that never left the checkpoint -- still on `meta` and with
-        # no Accelerate disk-offload hook to restore it -- has nothing to
-        # release, and `move_to()` deliberately raises for that state. Skip it
-        # so the release path itself stays total, including a partial or
-        # already-released round trip.
         if is_meta_module(module) and not has_offloaded_params(module):
+            # Some or all leaves never left the checkpoint: they are still on
+            # `meta` and there is no Accelerate hook to restore them.
+            # `move_to()` deliberately raises for that state, so a whole-module
+            # move is not available. Release is still *total*, though: a start
+            # hook that raised partway through a device move (an OOM while
+            # materializing the vision tower) leaves already-moved leaves on the
+            # forward device next to the untouched `meta` ones. Skipping the
+            # module there would keep real tensors on the accelerator for the
+            # rest of the run. Move only the materialized leaves and leave the
+            # `meta` ones as they are; `_apply()` keeps quantized subclasses'
+            # cache invalidation and the module's registration intact.
+            module._apply(lambda tensor: tensor if tensor.is_meta else tensor.to(CPU))
             return
         # setattr() requires the attribute *name*; passing the module object
         # here raised `TypeError: attribute name must be string, not 'Linear'`
