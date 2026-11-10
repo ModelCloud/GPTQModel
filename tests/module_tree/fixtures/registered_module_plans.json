@@ -389,8 +389,11 @@
     "DbrxConvertedQModel/gptq": {
       "layers": ["transformer.blocks"],
       "blocks": [
+        ["norm_attn_norm.norm_1:!"],
         ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],
         ["norm_attn_norm.attn.out_proj"],
+        ["norm_attn_norm.norm_2:!"],
+        ["ffn.router.layer:!"],
         ["ffn.experts.mlp.{expert_index}.w1", "ffn.experts.mlp.{expert_index}.v1"],
         ["ffn.experts.mlp.{expert_index}.w2"]
       ]
@@ -603,10 +606,10 @@
         ["mlp.shared_experts.gate_proj"],
         ["mlp.shared_experts.up_proj"],
         ["mlp.shared_experts.down_proj"],
-        ["mlp.text_moe.gate:!"],
+        ["mlp.text_moe.gate:!", "mlp.text_moe.gate.moe_statics:!"],
         ["mlp.text_moe.experts.{expert_index}.gate_proj", "mlp.text_moe.experts.{expert_index}.up_proj"],
         ["mlp.text_moe.experts.{expert_index}.down_proj"],
-        ["mlp.vision_moe.gate:!"],
+        ["mlp.vision_moe.gate:!", "mlp.vision_moe.gate.moe_statics:!"],
         ["mlp.vision_moe.experts.{expert_index}.gate_proj", "mlp.vision_moe.experts.{expert_index}.up_proj"],
         ["mlp.vision_moe.experts.{expert_index}.down_proj"]
       ]

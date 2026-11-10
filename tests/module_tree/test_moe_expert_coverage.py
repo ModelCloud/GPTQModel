@@ -69,6 +69,7 @@ FIXED_MODELS = (
     "granitemoehybrid",
     "bailing_hybrid",
     "afmoe",
+    "ernie4_5_vl_moe",
 )
 
 # Configs whose default layer mix does not exercise every branch of the tree.
@@ -110,12 +111,6 @@ DEFUSER_FUSED_EXPERTS = frozenset({
     "minicpmv4_6",
     "minimax_m3_vl",
 })
-
-# ``ernie4_5_vl_moe`` never sets ``dynamic_expert_index``, so its expert specs
-# keep the literal ``{expert_index}`` placeholder instead of expanding to
-# concrete indices. That is a separate definition bug; track it explicitly so a
-# real regression is still reported as a failure.
-PLACEHOLDER_EXPERT_MODELS = frozenset({"ernie4_5_vl_moe"})
 
 # Defuser gained the `afmoe` / `bailing_hybrid` expert registry entries in
 # 0.0.29. Older wheels leave those routed experts fused in 3-D parameters.
@@ -175,6 +170,28 @@ def _missing_specs(specs, resolved):
 
 
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
+def test_fixed_moe_definitions_expand_every_expert_placeholder(model_type):
+    """A definition must not leak the literal placeholder into quantization.
+
+    ``create_named_modules`` matches concrete module names, so a surviving
+    ``{expert_index}`` spec can never hit; with ``layer_modules_strict = False``
+    it is recorded as a silent miss and the experts stay in the source dtype.
+    """
+    _requires_defuser(model_type)
+    config, definition, _ = _build_defused_model(model_type)
+
+    specs = _quantizable_specs(definition, config)
+    assert not [spec for spec in specs if "{expert_index}" in spec]
+
+    blocks = definition.simple_layer_modules(model_config=config, quantize_config=QC)
+    for block in blocks:
+        for entry in block:
+            if ":!" in entry or ":?" in entry:
+                continue
+            assert "{expert_index}" not in entry, (model_type, entry)
+
+
+@pytest.mark.parametrize("model_type", FIXED_MODELS)
 def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
     _requires_defuser(model_type)
     config, definition, layers = _build_defused_model(model_type)
@@ -231,11 +248,6 @@ def test_every_defined_model_type_resolves_routed_experts(model_type):
     if not expert_specs:
         return
 
-    if model_type in PLACEHOLDER_EXPERT_MODELS:
-        pytest.xfail(
-            f"{model_type}: definition never sets dynamic_expert_index, so expert "
-            "specs keep the literal {expert_index} placeholder"
-        )
     if model_type in DEFUSER_FUSED_EXPERTS:
         pytest.xfail(
             f"{model_type}: installed Defuser leaves routed experts fused as 3-D "

@@ -29,7 +29,20 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
 
     require_load_processor = True
     require_trust_remote_code = False
+    # Deliberately non-strict: one tree serves both dense and sparse layers, so
+    # each decoder layer legitimately misses the other branch's specs. A dense
+    # layer has `mlp.gate_proj`/`up_proj`/`down_proj` but no experts; a sparse
+    # layer has both MoE families but no dense MLP. Strictness would therefore
+    # fail on every layer regardless of expert coverage. The expert specs are
+    # still fully expanded by `dynamic_expert_index` below, and
+    # `test_layer_modules_expand_every_expert` /
+    # `test_looper_records_no_miss_for_expanded_expert_specs` assert that no
+    # routed expert is among the recorded misses.
     layer_modules_strict = False
+
+    # Both routed-expert families live in the text config; Defuser turns the
+    # fused checkpoint experts into ``text_moe``/``vision_moe`` module lists.
+    dynamic_expert_index = "moe_num_experts"
 
     pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm", "model.norm"]
 
@@ -55,13 +68,18 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                     "down_proj": ("down_proj:1",),
                 },
                 "text_moe": {
-                    "gate": ("gate:!",),
+                    # `gate.moe_statics.e_score_correction_bias` is a separate
+                    # checkpoint-owned tensor under the router, not a child of
+                    # `gate`'s parameter. Declaring only `gate:!` leaves that
+                    # bias with no owning spec, so it needs its own `:!` entry.
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 },
                 "vision_moe": {
-                    "gate": ("gate:!",),
+                    # Same score-correction bias, one per modality router.
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
