@@ -235,10 +235,14 @@ derived cache invalidation follow the
 contract.
 
 Tenstorrent Blackhole cards use an explicit `DEVICE.XLA` family and a packed
-4-bit `XLALinear` through Torch/XLA and the TT PJRT plugin. The
-[Tenstorrent XLA execution flow](docs/tenstorrent.md) documents the exact
-runtime pins, packed checkpoint conversion, supported failure contract, and the
-complete conversion policy for every registered GPTQ linear kernel. The
+4-bit kernel. `XLALinear` runs through Torch/XLA and the TT PJRT plugin, and the
+opt-in `TTNNLinear` (`BACKEND.GPTQ_TTNN`) runs natively on TTNN with on-device
+nibble extraction, `g_idx` expansion, BF16 dequantization, `HiFi4` GEMM, and
+optional tensor parallelism across a `1xN` mesh via `FABRIC_1D` `all_gather`.
+The [Tenstorrent execution flow](docs/tenstorrent.md) documents both paths, the
+exact runtime pins, packed checkpoint conversion, measured numerical results,
+mesh networking behavior, supported failure contract, and the complete
+conversion policy for every registered GPTQ linear kernel. The
 [validated QuietBox inventory](hw/tenstorrent.md) records the four-card host,
 firmware, and hardware measurements. Tenstorrent runtime packages are installed
 from the pinned `requirements/tenstorrent-py312.txt` manifest because the PJRT

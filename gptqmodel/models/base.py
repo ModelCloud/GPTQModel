@@ -2641,7 +2641,17 @@ class BaseQModel(nn.Module):
         return runtime_generate(self.model, **kwargs)
 
     def generate(self, inputs=None, **kwargs):
-        with torch.inference_mode():
+        # Torch/XLA represents a slice as an in-place view update during graph
+        # construction. Inference tensors cannot receive a version counter, so
+        # ``torch.inference_mode`` fails before model math on the TT PJRT path.
+        # no_grad keeps autograd disabled without changing tensor semantics.
+        model_device = getattr(self.model, "device", torch.device("cpu"))
+        generate_context = (
+            torch.no_grad()
+            if getattr(model_device, "type", None) == "xla"
+            else torch.inference_mode()
+        )
+        with generate_context:
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)
             if pad_token_id is None and self.tokenizer:

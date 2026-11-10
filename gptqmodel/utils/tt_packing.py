@@ -163,18 +163,22 @@ def _repack_zero_words(
             f"[{groups}, {words_out}] packed words"
         )
     source = _as_uint32_words(qzeros)[:groups, :words_out]
-    neg_one = torch.zeros((groups, words_out, 8), dtype=torch.bool)
-    if qzero_format == 2:
-        # GPTQ v2 stores (zero_point + 1); preserve the logical zero point by
-        # subtracting one from each nibble independently on the CPU.
+    if qzero_format == 1:
+        # GPTQ v1 serializes ``zero_point - 1``.  TorchLinear converts v1 to
+        # v2 with ``(stored + 1) & 0xF`` and v2 decoders use that nibble as the
+        # logical zero point directly.  Decode and repack in logical space so a
+        # packed-word carry cannot cross an adjacent 4-bit field.
         shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64).view(1, 1, -1)
         stored = (source.to(torch.int64).unsqueeze(-1) >> shifts) & 0xF
-        neg_one = stored == 0
-        nibbles = stored - 1
-        # Encode -1 temporarily as 15 in the low nibble; zero_neg_one restores
-        # the signed value on device without relying on a signed 32-bit shift.
-        nibbles = torch.where(nibbles < 0, torch.full_like(nibbles, 15), nibbles)
+        nibbles = (stored + 1) & 0xF
         source = (nibbles << shifts).sum(dim=-1, dtype=torch.int64).to(torch.uint32).reshape(source.shape)
+    elif qzero_format != 2:
+        raise ValueError(f"unsupported GPTQ qzero format {qzero_format!r}; expected 1 or 2")
+
+    # GPTQ v2 stores the logical zero point directly.  Keep a stable mask in the
+    # packed ABI for compatibility, but no current GPTQ qzero format decodes to
+    # -1 as TorchLinear's zero-point unpack does not subtract an additional one.
+    neg_one = torch.zeros((groups, words_out, 8), dtype=torch.bool)
     return source.contiguous(), neg_one.reshape(groups, -1).contiguous()
 
 

@@ -59,7 +59,9 @@ def _fixture(*, qzero_format=2, bias=False, in_features=256, out_features=128):
     # GPTQ-v1 stores the logical zero point directly. GPTQ-v2 stores
     # (zero_point + 1), so a v2 stored nibble zero decodes to logical -1.
     raw_zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
-    logical_zeros = raw_zeros - 1 if qzero_format == 2 else raw_zeros
+    # TorchLinear normalizes GPTQ v1 by decoding ``zero_point - 1`` and
+    # adding one. GPTQ v2 stores the same logical value directly.
+    logical_zeros = (raw_zeros + 1) & 0xF if qzero_format == 1 else raw_zeros
     # Use scales representative of GPTQ checkpoints. Very large synthetic
     # scales push the output into a BF16 binade where a single BF16 output ULP
     # exceeds the repository's visible-output tolerance.
@@ -428,3 +430,175 @@ def test_forward_never_retains_expanded_weights(monkeypatch):
         if isinstance(value, torch.Tensor) and name not in {"qweight", "qzeros", "scales", "g_idx", "bias"}
     }
     assert all(not name.startswith(("weight_", "dequant", "codes")) for name in tensor_attrs)
+
+
+# ---------------------------------------------------------------------------
+# Native TTNN backend (no Torch/XLA in the execution path)
+# ---------------------------------------------------------------------------
+
+
+def test_ttnn_dispatch_is_registered_and_kept_out_of_auto():
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+
+    assert importer.get_kernel_for_backend(
+        BACKEND.GPTQ_TTNN, fmt=FORMAT.GPTQ, quant_method=METHOD.GPTQ
+    ) is TTNNLinear
+    assert BACKEND.GPTQ_TTNN in TTNNLinear.SUPPORTS_BACKENDS
+    # AUTO keeps the XLA path ahead of the native one so existing model loads
+    # do not silently switch execution backends.
+    auto = importer.get_auto_backend_kernel_mapping()[METHOD.GPTQ][FORMAT.GPTQ]
+    ordered = [backend for backend, _ in auto.items() if backend in (BACKEND.GPTQ_TT_XLA, BACKEND.GPTQ_TTNN)]
+    assert ordered[:2] == [BACKEND.GPTQ_TT_XLA, BACKEND.GPTQ_TTNN][: len(ordered)]
+
+
+def test_ttnn_rejects_non_8_aligned_widths():
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+
+    base = {
+        "bits": 4, "group_size": 128, "desc_act": False, "sym": True,
+        "in_features": 256, "out_features": 128, "pack_dtype": torch.int32,
+        "dtype": torch.bfloat16, "device": DEVICE.XLA,
+    }
+    for kwargs in (
+        {"in_features": 252},
+        {"out_features": 124},
+        {"sym": False},
+        {"bits": 8},
+        {"dtype": torch.float16},
+        {"pack_dtype": torch.int16},
+        {"device": DEVICE.CUDA},
+    ):
+        args = dict(base)
+        args.update(kwargs)
+        ok, _ = TTNNLinear._validate(**args)
+        assert not ok, kwargs
+
+
+def test_ttnn_arch_lookup_never_assumes_blackhole():
+    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
+    from gptqmodel.nn_modules.qlinear.ttnn import _ttnn_arch
+
+    class _TTNN:
+        Arch = type("Arch", (), {"BLACKHOLE": "blackhole-enum", "WORMHOLE_B0": "wormhole-enum"})
+
+        def __init__(self, name):
+            self._name = name
+
+        def get_arch_name(self):
+            return self._name
+
+    assert _ttnn_arch(_TTNN("blackhole")) == "blackhole-enum"
+    assert _ttnn_arch(_TTNN("wormhole_b0")) == "wormhole-enum"
+    with pytest.raises(TTNNUnavailable):
+        _ttnn_arch(_TTNN("quasar"))
+
+
+def test_ttnn_mesh_ownership_is_single_owner():
+    import importlib
+
+    runtime = importlib.import_module("gptqmodel.utils.ttnn_runtime")
+
+    class _FakeMesh:
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def num_devices(self):
+            return 1
+
+        def close(self):
+            pass
+
+    # No device is opened here: this only exercises the bookkeeping contract.
+    mesh = runtime.TTNNMesh(device=_FakeMesh(), mesh_shape=(1, 4), fabric="FABRIC_1D", owner="a")
+    assert mesh.num_devices == 4
+    assert runtime.current_mesh() is None
+
+
+@pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
+@pytest.mark.parametrize("device_count", [1, 4])
+def test_actual_ttnn_linear_matches_torch_oracle(device_count):
+    """Native TTNN dequant+matmul against an independent Torch oracle."""
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh
+
+    if not hasattr(__import__("ttnn"), "open_device"):
+        pytest.skip("ttnn is not installed")
+
+    fixture = _fixture(qzero_format=1, bias=True, in_features=256, out_features=128)
+    oracle_layout = _layout(fixture)
+    cpu_weights = dequantize_tt_packed_4bit(oracle_layout).to(torch.bfloat16)
+    torch.manual_seed(31)
+    activation = torch.randn(4, fixture["in_features"], dtype=torch.float32).to(torch.bfloat16)
+    # Independent FP32 oracle: dequantized checkpoint weights, activations and
+    # bias accumulated in FP32, rounded once to BF16.
+    expected = (
+        activation.reshape(-1, fixture["in_features"]).float()
+        @ cpu_weights.float()
+        + fixture["bias"].float()
+    ).to(torch.bfloat16)
+
+    module = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=fixture["in_features"], out_features=fixture["out_features"],
+        bias=True, pack_dtype=torch.int32, format=fixture["format"],
+    )
+    module.qweight.copy_(fixture["qweight"])
+    module.qzeros.copy_(fixture["qzeros"])
+    module.scales.copy_(fixture["scales"].float())
+    module.g_idx.copy_(fixture["g_idx"])
+    module.bias.copy_(fixture["bias"])
+    module.qzero_format(1)
+    module.ttnn_device_count = device_count
+    try:
+        module.post_init()
+    except Exception as exc:
+        # TT-Metal allows one runtime owner per chip. When another test in this
+        # session already initialized the PJRT plugin, the native path cannot
+        # open the devices; that is an environment constraint, not a kernel
+        # failure, so report it as a skip with the translated reason.
+        close_mesh()
+        if "already owned by another runtime" in str(exc):
+            pytest.skip(f"chips are owned by the XLA runtime: {exc}")
+        raise
+    module.eval()
+    try:
+        # Packed codes must survive the device round trip bit-exactly.
+        device_weights = module.dequantize_weight().to(torch.bfloat16)
+        assert torch.equal(device_weights, cpu_weights)
+
+        actual = module(activation).reshape(-1, fixture["out_features"]).float()
+        reference = expected.float()
+        pcc = torch.corrcoef(torch.stack([actual.flatten(), reference.flatten()]))[0, 1]
+        assert pcc >= 0.999
+        normalized = (actual - reference).abs().sum() / reference.abs().sum()
+        assert normalized <= 2e-3
+        # Tensix FMA precision leaves a bounded residual on material
+        # magnitudes; BF16 output rounding sits on top of it.
+        ulp = np.abs(_bf16_ordered_bits(actual) - _bf16_ordered_bits(reference))
+        material = (reference.abs() >= 0.05).numpy()
+        if material.any():
+            assert int(ulp[material].max()) <= 64
+        assert torch.allclose(
+            actual[~material], reference[~material], rtol=2e-3, atol=2e-3
+        )
+
+        # Persistent state stays packed: no dense weight cache may be retained.
+        retained = [
+            name for name, value in vars(module).items()
+            if isinstance(value, torch.Tensor)
+            and value.dtype in (torch.bfloat16, torch.float16, torch.float32)
+            and value.numel() >= fixture["in_features"] * fixture["out_features"]
+        ]
+        assert retained == []
+        layer = module._ttnn_layer
+        assert layer is not None
+        assert layer.weight_words.shape[0] == fixture["out_features"] // device_count
+        packed_bytes = layer.weight_words.shape[0] * layer.weight_words.shape[1] * 4
+        assert packed_bytes < fixture["in_features"] * fixture["out_features"] * 2
+        first = module._build_layer()
+        assert module._build_layer() is first
+    finally:
+        module.release_device()
+        close_mesh()
