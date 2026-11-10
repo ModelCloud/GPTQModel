@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import torch
+from accelerate.utils import has_offloaded_params
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask
@@ -15,7 +16,7 @@ from transformers.masking_utils import create_causal_mask
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, move_to
-from ...utils.offload import offload_to_disk
+from ...utils.offload import is_meta_module, offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
@@ -108,6 +109,13 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def _release_module(self, parent, attr_name: str):
         module = getattr(parent, attr_name, None)
         if module is None:
+            return
+        # A module that never left the checkpoint -- still on `meta` and with
+        # no Accelerate disk-offload hook to restore it -- has nothing to
+        # release, and `move_to()` deliberately raises for that state. Skip it
+        # so the release path itself stays total, including a partial or
+        # already-released round trip.
+        if is_meta_module(module) and not has_offloaded_params(module):
             return
         # setattr() requires the attribute *name*; passing the module object
         # here raised `TypeError: attribute name must be string, not 'Linear'`

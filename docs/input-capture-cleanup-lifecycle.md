@@ -34,36 +34,47 @@ success-path step.
 ```mermaid
 flowchart TD
     A["cache_inputs(layers, calibration_data)"] --> B["resolve module_path / layer_label"]
-    B --> C["register_forward_pre_hook(store_input_hook)<br/>handle"]
-    C --> D["pre_quantize_generate_hook_start()"]
-    D --> E["await_torch_linear_prewarm(...)"]
-    E --> F["try: iterate calibration_data"]
-    F --> G{"run_input_capture raises?"}
-    G -- "StopForward" --> H["skip batch<br/>record layer_inputs"]
-    G -- "other exception" --> I["propagate after cleanup"]
-    G -- "no" --> H
-    H --> J["finally"]
+    B --> C["register_forward_pre_hook(store_input_hook)<br/>produces handle"]
+    C --> D["try"]
+    D --> E["pre_quantize_generate_hook_start()"]
+    E --> F["await_torch_linear_prewarm(...)"]
+    F --> G["iterate calibration_data"]
+    G --> H{"run_input_capture raises?"}
+    H -- "StopForward" --> I["skip batch<br/>record layer_inputs"]
+    H -- "other exception" --> J["unwind to finally"]
+    H -- "no" --> I
     I --> J
-    J --> K["close progress bar"]
-    K --> L["try: pre_quantize_generate_hook_end()"]
-    L --> M["finally: handle.remove()"]
-    M --> N{"exception active?"}
-    N -- "yes" --> O["re-raise original"]
-    N -- "no" --> P["build InputCache and return"]
+    J --> K["finally"]
+    K --> L["close progress bar"]
+    L --> M{"capture already raised?"}
+    M -- "no" --> N["pre_quantize_generate_hook_end()"]
+    M -- "yes" --> O["try pre_quantize_generate_hook_end()<br/>log a failure instead of masking"]
+    N --> P["finally: handle.remove()"]
+    O --> P
+    P --> Q{"capture raised?"}
+    Q -- "yes" --> R["re-raise the capture error"]
+    Q -- "no" --> S["build InputCache and return"]
 ```
 
-The nested `try` around `pre_quantize_generate_hook_end()` keeps the two
+Both mutations are acquired inside the same `try`: the pre-hook handle is
+registered just before it, and `pre_quantize_generate_hook_start()` runs as the
+first statement inside it. A start hook that raises partway through therefore
+still unwinds through the `finally`, so a half-materialized model is not left
+behind with a live pre-hook.
+
+The `try`/`finally` around `pre_quantize_generate_hook_end()` keeps the two
 obligations independent: a model-specific release that raises still detaches the
-pre-hook, and the original calibration exception is not replaced by a cleanup
-failure.
+pre-hook.
 
 ## Failure and ambiguity contract
 
 | Situation | Before this change | After |
 | --- | --- | --- |
 | Calibration forward succeeds | hook end runs, handle removed | unchanged |
-| Forward raises a non-`StopForward` error | hook end **skipped**, handle **leaked** | hook end and handle removal both run, original exception re-raised |
-| Model-specific hook end raises | n/a (already unreachable on failure) | handle still removed, hook-end error propagates |
+| Forward raises a non-`StopForward` error | hook end **skipped**, handle **leaked** | hook end and handle removal both run, the capture error propagates |
+| Hook start raises partway through | handle **leaked**, model left half-materialized | handle removed, start error propagates |
+| Model-specific hook end raises, nothing else in flight | n/a (unreachable on the failure path) | handle removed, the release error propagates |
+| Model-specific hook end raises while the capture is already failing | n/a | handle removed, the release error is logged, the capture error propagates |
 | `offload_to_disk=True` capture | hook end offloads modules to disk | unchanged |
 | `offload_to_disk=False` capture | hook end moves modules to CPU | unchanged |
 
@@ -75,6 +86,11 @@ the materialized modules back under their original attribute names, and its
 module object to `setattr()` raises
 `TypeError: attribute name must be string, ...`, which is exactly the failure
 mode that motivated the ERNIE 4.5 VL MoE fix.
+
+A release must also be *total*: a module that never left the checkpoint is still
+on `meta` with no Accelerate offload hook to restore it, and `move_to()`
+deliberately raises for that state. A definition must skip such a module instead
+of turning an unrelated configuration into a cleanup error.
 
 Cleanup must not change checkpoint ownership: the set of `state_dict()` keys is
 identical before and after the hook round trip. Tests assert this on a real

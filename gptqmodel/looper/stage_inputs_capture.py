@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import sys
 import time
+import traceback
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
@@ -341,18 +343,24 @@ class StageInputsCapture:
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
-        self.gptq_model.pre_quantize_generate_hook_start()
-
-        # The first `linear` of the capture forward pays a one-time accelerator-library
-        # init unless the background prewarm kicked at load time already completed it.
-        # All CPU-bound setup is done here, so joining now costs only the prewarm's
-        # remaining tail; racing it instead would pay the init a second time inline.
-        await_torch_linear_prewarm(
-            self.gptq_model.quantize_config.device,
-            _forward_dtype(self.gptq_model.model),
-        )
-
+        # `pre_quantize_generate_hook_start` materializes the multimodal side
+        # modules onto the forward device, and the pre-hook above aborts the
+        # forward after the first layer. Both mutate the model for a bounded
+        # window, so both are acquired inside the `try` and released in its
+        # `finally`: a failing start (for example an OOM while moving a vision
+        # tower) must not leave a half-materialized model or a registered hook
+        # behind for the rest of the quantization run.
         try:
+            self.gptq_model.pre_quantize_generate_hook_start()
+
+            # The first `linear` of the capture forward pays a one-time accelerator-library
+            # init unless the background prewarm kicked at load time already completed it.
+            # All CPU-bound setup is done here, so joining now costs only the prewarm's
+            # remaining tail; racing it instead would pay the init a second time inline.
+            await_torch_linear_prewarm(
+                self.gptq_model.quantize_config.device,
+                _forward_dtype(self.gptq_model.model),
+            )
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     forward_device = self.gptq_model.quantize_config.device
@@ -419,14 +427,30 @@ class StageInputsCapture:
         finally:
             if cache_forward_pb is not None:
                 cache_forward_pb.close()
-            # Cleanup must run on every exit path, not only a successful capture.
-            # `pre_quantize_generate_hook_start` materializes the multimodal
-            # modules onto the forward device and this stage registers a
-            # first-layer pre-hook; leaking either leaves the model mutated for
-            # the rest of the quantization run. The handle removal is nested so
-            # a failing model-specific release still detaches the hook.
+            # Cleanup must run on every exit path, not only a successful
+            # capture: a calibration forward can raise for ordinary reasons.
+            # The handle removal is nested so a failing model-specific release
+            # still detaches the pre-hook. When another exception is already
+            # propagating, a failure from `pre_quantize_generate_hook_end` is
+            # logged and the original calibration error is re-raised, so the
+            # user sees the cause instead of a cleanup symptom.
+            #
+            # The propagating exception must be sampled *before* the inner
+            # handler runs: once `except` is entered, `sys.exc_info()` describes
+            # the cleanup failure itself, not what the capture was already
+            # raising.
+            capture_failed = sys.exc_info()[1] is not None
             try:
                 self.gptq_model.pre_quantize_generate_hook_end()
+            except Exception:
+                # Deliberately not `BaseException`: an interrupt must stay
+                # interruptible even while a capture error is unwinding.
+                if not capture_failed:
+                    raise
+                self.logger.warn(
+                    "pre_quantize_generate_hook_end() failed during capture cleanup; "
+                    "re-raising the original capture error:\n" + traceback.format_exc()
+                )
             finally:
                 handle.remove()
 
