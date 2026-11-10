@@ -229,3 +229,88 @@ def test_fp4_cpu_forward_promotes_narrow_bias(activation_dtype):
 
     assert output.dtype is activation_dtype
     torch.testing.assert_close(output, oracle, rtol=2e-3, atol=2e-3)
+
+
+def test_fp4_representable_fp32_bias_uses_narrow_epilogue():
+    """A wide bias whose values fit the activation dtype must not force the FP32 path.
+
+    The checkpoint bias is kept at its stored width, which is normally FP32, so
+    keying the epilogue off the buffer dtype alone would copy the whole weight
+    to FP32 on every CPU forward. An exact cast returns the same bias.
+    """
+
+    module = _make_cancellation_linear(
+        bias_dtype=torch.float32,
+        bias_value=0.5,
+    )
+    assert module.bias.dtype is torch.float32
+    x = torch.full((1, 16), 4096.0, dtype=torch.float16)
+
+    bias, wide = module._epilogue_bias(x, module.bias)
+    assert not wide
+    assert bias.dtype is x.dtype
+    assert bias.item() == 0.5
+
+    # An inexact value still has to keep the wide epilogue.
+    module.bias.data.fill_(-65536.0)
+    bias, wide = module._epilogue_bias(x, module.bias)
+    assert wide
+    assert bias.dtype is torch.float32
+
+
+def test_fp4_narrow_epilogue_rounds_once_for_representable_bias():
+    """The exact-cast path must still match the FP64 oracle bitwise."""
+
+    module = _make_cancellation_linear(bias_dtype=torch.float32, bias_value=-1.03125)
+    x = torch.full((1, 16), 1.0, dtype=torch.float16)
+    dense_weight = _fp4_dense_weight(module, torch.float64)
+    oracle = (x.double() @ dense_weight.t() + module.bias.double()).to(torch.float16)
+
+    with torch.inference_mode():
+        output = module(x)
+
+    assert output.dtype is torch.float16
+    torch.testing.assert_close(output, oracle, rtol=0, atol=0)
+
+
+def test_fp4_cpu_forward_uses_the_exact_cast_gate(monkeypatch):
+    """The forward must use the exact-cast decision, not the buffer dtype.
+
+    ``_epilogue_bias`` returning the narrow bias is only useful if the ephemeral
+    CPU path consumes it; this pins the call site so removing the call cannot
+    silently reopen the per-forward FP32 weight copy.
+    """
+
+    module = _make_cancellation_linear(bias_dtype=torch.float32, bias_value=0.5)
+    assert module.bias.dtype is torch.float32
+    seen = []
+    original = fp4_module.F.linear
+
+    def tracked(x, weight, bias=None):
+        seen.append(None if bias is None else bias.dtype)
+        return original(x, weight, bias)
+
+    monkeypatch.setattr(fp4_module.F, "linear", tracked)
+    x = torch.full((1, 16), 1.0, dtype=torch.float16)
+
+    with torch.inference_mode():
+        module(x)
+
+    assert seen == [torch.float16]
+
+    # An out-of-range value must still reach the wide helper with its FP32 bias.
+    module.bias.data.fill_(-65536.0)
+    seen.clear()
+    wide_bias = []
+    original_wide = fp4_module.linear_wide_bias
+
+    def tracked_wide(x, weight, bias=None):
+        wide_bias.append(None if bias is None else bias.dtype)
+        return original_wide(x, weight, bias)
+
+    monkeypatch.setattr(fp4_module, "linear_wide_bias", tracked_wide)
+    with torch.inference_mode():
+        module(x)
+
+    assert seen == []
+    assert wide_bias == [torch.float32]

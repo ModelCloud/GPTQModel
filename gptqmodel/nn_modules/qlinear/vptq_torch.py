@@ -29,7 +29,7 @@ from ...utils.vptq import (
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
-from ._numerics import linear_fp32_reduce
+from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 
 
 log = setup_logger()
@@ -305,6 +305,25 @@ class VPTQLinear(WeightOnlyQuantLinear):
         )
         super().optimize()
 
+    def _promote_stored_bias(
+        self, x: torch.Tensor, bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Narrow a wide stored bias only when the cast is exact.
+
+        The buffer is FP32 so an out-of-range checkpoint value survives, but a
+        wide buffer would otherwise take the FP32 epilogue on every forward.
+        An exact cast preserves every value, so the cheap narrow epilogue is
+        used instead; an inexact one is returned unchanged.
+        """
+
+        if bias is None or not linear_needs_wide_bias(x, bias):
+            return bias
+        # Not cached: an in-place ``.data`` write does not bump a version
+        # counter, and the check is a few microseconds on a device.
+        if bias_narrows_losslessly(bias, x.dtype):
+            return bias.to(dtype=x.dtype)
+        return bias
+
     def _validate_loaded_state(self) -> None:
         if self.indices.shape != (self.group_num, self.num_indices, self.packed_words):
             raise ValueError(
@@ -555,6 +574,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
             return out
 
         weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        bias = self._promote_stored_bias(x, bias)
         out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)

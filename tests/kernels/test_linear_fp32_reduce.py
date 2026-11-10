@@ -220,18 +220,18 @@ def test_vptq_wide_bias_cancels_without_dense_cache(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_vptq_cuda_fused_bias_gate_cache_invalidates(dtype):
-    """The cached representability gate must follow the live bias values.
+def test_vptq_cuda_fused_bias_gate_follows_live_values(dtype):
+    """The fused-kernel gate must read the live bias, including in-place writes.
 
-    The gate reads device memory, so caching it removes a per-forward host sync.
-    A stale entry would keep an inexact bias on the fused kernel after the buffer
-    is repacked, so an in-place ``copy_`` must invalidate it and
-    ``clear_weight_cache`` must drop it unconditionally.
+    The exact representability check reads device memory, so an answer cached
+    under a version counter would survive ``.data.copy_``/``.data.fill_``, which
+    do not bump it. The gate is therefore recomputed per call.
     """
 
     if not torch.cuda.is_available() or torch.version.hip is not None:
         pytest.skip("VPTQ_CUDA is CUDA-only")
 
+    from gptqmodel.nn_modules.qlinear._numerics import bias_narrows_losslessly
     from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 
     module = (
@@ -255,25 +255,18 @@ def test_vptq_cuda_fused_bias_gate_cache_invalidates(dtype):
     module.indices.zero_()
     module.centroids.weight.data.fill_(1.0)
     module.bias.copy_(torch.tensor([0.5], device="cuda", dtype=torch.float32))
-    assert module._bias_narrows_losslessly(module.bias, dtype) is True
-    key = module._bias_narrow_key
-    assert module._bias_narrows_losslessly(module.bias, dtype) is True
-    # A repeat call reuses the cached answer.
-    assert module._bias_narrow_key == key
+    assert bias_narrows_losslessly(module.bias, dtype) is True
 
-    # A value neither FP16 nor BF16 can hold must flip the answer: ``copy_``
-    # bumps the version counter, so the key changes and the gate recomputes.
-    # ``-65536`` is exact in BF16, so go one unit below it.
+    # ``-65536 - 1`` is exact in neither FP16 nor BF16. An in-place write must
+    # be observed on the very next call.
     inexact = float(_CANCELLATION_BIAS) - 1.0
     module.bias.copy_(torch.tensor([inexact], device="cuda", dtype=torch.float32))
-    assert module._bias_narrows_losslessly(module.bias, dtype) is False
+    assert bias_narrows_losslessly(module.bias, dtype) is False
 
-    # ``load_quant_result`` repacks through ``.data.copy_``, which does not bump
-    # the version counter, so it clears the cache explicitly instead.
+    # ``load_quant_result`` repacks through ``.data.copy_`` (no version bump);
+    # the value still has to be read fresh.
     module.bias.data.copy_(torch.tensor([0.5], device="cuda", dtype=torch.float32))
-    module.clear_weight_cache()
-    assert getattr(module, "_bias_narrow_key", None) is None
-    assert module._bias_narrows_losslessly(module.bias, dtype) is True
+    assert bias_narrows_losslessly(module.bias, dtype) is True
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
