@@ -66,6 +66,16 @@ The `try`/`finally` around `pre_quantize_generate_hook_end()` keeps the two
 obligations independent: a model-specific release that raises still detaches the
 pre-hook.
 
+### Capture-versus-release precedence belongs to the call, not the thread
+
+The precedence decision ("a release failure is logged only when the capture was
+already raising") is recorded by this `try` statement's own `except` clause, not
+read from `sys.exc_info()` inside the `finally`. `sys.exc_info()` is thread
+state: inside a caller's `except` block — a retry loop, `requantize()`, an
+application handler — it reports the caller's exception even when this capture
+completed successfully. Reading it there would mark a successful capture as
+failed and silently swallow a real release error.
+
 ## Failure and ambiguity contract
 
 | Situation | Before this change | After |

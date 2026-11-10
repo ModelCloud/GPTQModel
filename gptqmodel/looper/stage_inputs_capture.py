@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 import traceback
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
@@ -350,6 +349,14 @@ class StageInputsCapture:
         # `finally`: a failing start (for example an OOM while moving a vision
         # tower) must not leave a half-materialized model or a registered hook
         # behind for the rest of the quantization run.
+        #
+        # `capture_failed` tracks *this call's* exit state. Sampling
+        # `sys.exc_info()` in the `finally` instead reads the thread's active
+        # exception, which can belong to an enclosing handler in the caller
+        # (a retry loop, `requantize()`, an application `except` block). That
+        # would classify a successful capture as failed and silently swallow a
+        # genuine release error.
+        capture_failed = False
         try:
             self.gptq_model.pre_quantize_generate_hook_start()
 
@@ -424,6 +431,11 @@ class StageInputsCapture:
                         if processed_rows > 0:
                             subtitle += f" rows {processed_rows}"
                         cache_forward_pb.subtitle(subtitle).draw()
+        except BaseException:
+            # Record the failure before unwinding so the cleanup below can
+            # distinguish "the capture raised" from "only the release raised".
+            capture_failed = True
+            raise
         finally:
             if cache_forward_pb is not None:
                 cache_forward_pb.close()
@@ -434,12 +446,6 @@ class StageInputsCapture:
             # propagating, a failure from `pre_quantize_generate_hook_end` is
             # logged and the original calibration error is re-raised, so the
             # user sees the cause instead of a cleanup symptom.
-            #
-            # The propagating exception must be sampled *before* the inner
-            # handler runs: once `except` is entered, `sys.exc_info()` describes
-            # the cleanup failure itself, not what the capture was already
-            # raising.
-            capture_failed = sys.exc_info()[1] is not None
             try:
                 self.gptq_model.pre_quantize_generate_hook_end()
             except Exception:
