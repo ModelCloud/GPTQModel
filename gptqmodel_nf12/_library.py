@@ -18,7 +18,7 @@ import gptqmodel_nf12
 
 
 _lock = threading.Lock()
-_loaded = False
+_loaded = threading.Event()
 
 
 def library_path(name: str = "libnf12_ad.so") -> Path:
@@ -38,15 +38,14 @@ def library_path(name: str = "libnf12_ad.so") -> Path:
 
 def load() -> None:
     """Idempotently loads the torch extension (``torch.ops.nf12``) on first use."""
-    global _loaded
     # The vendored native kernels are CUDA/CUTLASS implementations. PyTorch
     # exposes HIP tensors through the same ``cuda`` API, so check the build.
     if torch.version.hip is not None:
         raise RuntimeError("gptqmodel_nf12: native NF12 kernels support NVIDIA CUDA, not ROCm")
-    if _loaded:
+    if _loaded.is_set():
         return
     with _lock:
-        if _loaded:
+        if _loaded.is_set():
             return
         # GPTQModel's legacy runtime or an explicitly imported standalone NF12
         # may already own the torch namespace. A second TORCH_LIBRARY load
@@ -55,14 +54,14 @@ def load() -> None:
         required = ("encode", "decode", "linear", "embedding", "encode_moe",
                     "moe_linear", "_fused_moe")
         if all(callable(getattr(namespace, name, None)) for name in required):
-            _loaded = True
+            _loaded.set()
             return
         # The Torch extension links the codec. Load it first so bare source
         # checkouts work without changing LD_LIBRARY_PATH.
         torch.ops.load_library(str(library_path("libnf12_ad.so")))
         torch.ops.load_library(str(library_path("libnf12_ad_torch.so")))
         _register_fakes()
-        _loaded = True
+        _loaded.set()
 
 
 def _register_fakes() -> None:

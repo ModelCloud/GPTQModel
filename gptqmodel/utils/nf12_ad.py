@@ -14,8 +14,7 @@ from pathlib import Path
 
 import torch
 
-import gptqmodel_nf12
-from gptqmodel_nf12 import _jit
+import gptqmodel_nf12._jit
 
 
 log = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ def last_error() -> str | None:
 
 def build_directory() -> Path | None:
     """Return the vendored JIT build directory, if one was used."""
-    return _jit._directory
+    return gptqmodel_nf12._jit._directory
 
 
 def encode(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:

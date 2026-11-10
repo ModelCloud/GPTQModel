@@ -116,13 +116,13 @@ def test_assisted_decoding_reuses_default_cache_after_window():
     ids = torch.tensor([[3, 4, 5] * 4])
     cache = model(ids[:, :10], use_cache=True).past_key_values
     assert int(cache.get_seq_length()) == 10
-    options = dict(
-        attention_mask=torch.ones_like(ids),
-        max_new_tokens=5,
-        do_sample=False,
-        eos_token_id=96,
-        suppress_tokens=[96],
-    )
+    options = {
+        "attention_mask": torch.ones_like(ids),
+        "max_new_tokens": 5,
+        "do_sample": False,
+        "eos_token_id": 96,
+        "suppress_tokens": [96],
+    }
     expected = model.generate(ids, **options)
     actual = model.generate(ids, past_key_values=cache, prompt_lookup_num_tokens=3, **options)
     assert torch.equal(actual, expected)
