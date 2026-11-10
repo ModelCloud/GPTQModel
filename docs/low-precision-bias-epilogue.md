@@ -63,10 +63,10 @@ flowchart TD
     class D,J failure
 ```
 
-FP4 does not use those loader lists. Its decoder in
-`models/base.py:3867-3871` registers the checkpoint bias at its stored width
-when it builds `TorchFP4Linear`, so the forward can still choose the wide
-epilogue. The loader lists cover the quantized-module path only.
+FP4 does not use those loader lists. `_build_fp4_forward_module`
+(`models/base.py:3831`) registers the checkpoint bias at its stored width when
+it builds `TorchFP4Linear` (`models/base.py:3871`), so the forward can still
+choose the wide epilogue. The loader lists cover the quantized-module path only.
 
 ```mermaid
 flowchart TD
@@ -100,7 +100,8 @@ FP32-output CUDA ops have no autograd derivative.
 ## Before and after
 
 The line references below point at the mechanism's location in the shipped code
-on this branch; the "Before" column quotes what that location did on `main`.
+on this branch; the "Before" column quotes what that location did before
+PR #3753.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
@@ -112,7 +113,7 @@ on this branch; the "Before" column quotes what that location did on `main`.
 | VPTQ bias buffer, `nn_modules/qlinear/vptq_torch.py:264-276` | Allocated at `codebook_dtype` | Allocated FP32 so the checkpoint range survives |
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:463-474` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
 | VPTQ checkpoint reload, `models/loader.py` | Requested FP16/BF16 dtype could narrow the saved FP32 bias | Keep the bias FP32 during load and restore it from the checkpoint if Accelerate narrows BF16 buffers |
-| FP4 checkpoint decoder, `models/base.py:3795-3802` | Bias narrowed to `target_dtype` when the wrapper is built | Bias kept at its stored width, so the forward can still go wide |
+| FP4 checkpoint decoder (`_build_fp4_forward_module`), `models/base.py:3871` | `bias.to(device=device, dtype=target_dtype)` before PR #3753 | Bias kept at its stored width, so the forward can still go wide |
 
 ## Dtype promotion contract
 
