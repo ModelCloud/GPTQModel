@@ -35,7 +35,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Bias cast | `gptqmodel/nn_modules/qlinear/nf12_ad.py:377` converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
+| Bias cast | `gptqmodel/nn_modules/qlinear/nf12_ad.py:377-378` (pre-#3735) converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
 | Native eligibility | `_native_forward` received the narrowed bias | It declines a mismatched bias dtype, then uses fallback |
 | Fallback precision | FP32 product could add a bias already narrowed to FP16 | FP32 product adds `bias.float()` before output rounding |
 | Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the FP32 decode and product |
@@ -44,6 +44,14 @@ flowchart TD
 The autocast guard is keyed on `autocast_active()`, not on the device type:
 CPU autocast narrows an FP32 `mm` to the autocast dtype just like the CUDA
 path, so a CUDA-only guard would leave the CPU fallback vulnerable.
+
+`_weight_dtype_is_lossless()` admits `float64` as well. It is outside
+`SUPPORTS_DTYPES`, but a caller that already holds float64 activations must not
+have the decoded weight or the product silently narrowed to float32.
+
+The meta and zero-row branches return `self.empty_linear_output(x)` directly.
+That helper already applies the adapter exactly once; applying it again in the
+caller doubled the adapter contribution on both paths.
 
 Measured on the decoded fallback with a BF16 weight `65536` and an FP16
 activation `2**-16`: CPU returned `1` before and after; the accelerator fallback

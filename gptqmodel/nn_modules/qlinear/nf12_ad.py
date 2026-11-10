@@ -41,9 +41,14 @@ log = setup_logger()
 
 
 def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
-    """Whether every BF16 NF12-AD weight survives a cast to the activation dtype."""
+    """Whether every BF16 NF12-AD weight survives a cast to the activation dtype.
 
-    return activation_dtype in (torch.bfloat16, torch.float32)
+    ``float64`` is included even though :attr:`SUPPORTS_DTYPES` does not list it:
+    a caller that already holds float64 activations must not have the decoded
+    weight (or the product) silently narrowed to float32.
+    """
+
+    return activation_dtype in (torch.bfloat16, torch.float32, torch.float64)
 
 
 def _hip_path(device: torch.device | str) -> bool:
@@ -385,15 +390,10 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             # and materializing `exp_base` or a decoded matrix would raise on
             # a meta tensor. Return the shape/dtype-correct empty output, the
             # same contract as the zero-row path and other quant-linear layers.
-            out = self.empty_linear_output(x)
-            if self.adapter is not None:
-                out = self.adapter.apply(x=x, out=out)
-            return out
+            # `empty_linear_output` already applies the adapter, exactly once.
+            return self.empty_linear_output(x)
         if self.input_rows(x) == 0:
-            out = self.empty_linear_output(x)
-            if self.adapter is not None:
-                out = self.adapter.apply(x=x, out=out)
-            return out
+            return self.empty_linear_output(x)
 
         out = self._native_forward(x, bias)
         if out is None:

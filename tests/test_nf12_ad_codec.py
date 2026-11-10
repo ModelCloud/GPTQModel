@@ -490,6 +490,64 @@ def test_linear_fallback_preserves_bf16_range_under_autocast(device, monkeypatch
     assert "weight" not in linear.state_dict()
 
 
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
+def test_linear_fallback_keeps_float64_activation_precision(device, monkeypatch):
+    """A float64 activation must not have its product rounded down to float32.
+
+    `float64` is outside `SUPPORTS_DTYPES`, but a caller that already holds
+    float64 activations expects the fallback to stay in float64. The lossless
+    predicate therefore admits float64 so the decoded weight is not narrowed to
+    float32 before the product.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    torch.manual_seed(0)
+    weight = (torch.randn((256, 256), dtype=torch.float32) * 1e-3).to(torch.bfloat16)
+    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.randn((4, 256), dtype=torch.float64, device=device) * 1e-3
+    oracle = x @ weight.double().to(device).t()
+
+    with torch.inference_mode():
+        actual = linear(x)
+
+    assert actual.dtype == torch.float64
+    if device == "cpu":
+        # CPU deliberately decodes and multiplies in FP32 for every activation
+        # dtype, so only the accelerator must stay bitwise exact in float64.
+        torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=1e-9)
+    else:
+        assert torch.equal(actual, oracle)
+
+
+def test_forward_on_meta_applies_the_adapter_exactly_once():
+    """`empty_linear_output` applies the adapter itself; do not apply it again."""
+
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    calls = []
+
+    class CountingAdapter:
+        def apply(self, x, out):
+            calls.append(out.shape)
+            return out
+
+    with torch.device("meta"):
+        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+    linear.adapter = CountingAdapter()
+
+    linear(torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta"))
+    assert len(calls) == 1, calls
+
+    calls.clear()
+    linear(torch.zeros((0, 64), dtype=torch.bfloat16, device="meta"))
+    assert len(calls) == 1, calls
+
+
 @pytest.mark.parametrize(
     ("activation_dtype", "bias_dtype"),
     [(torch.float16, torch.bfloat16), (torch.bfloat16, torch.float32)],
