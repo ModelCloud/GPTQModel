@@ -61,6 +61,9 @@ class FlashCase:
     key_modules: tuple[str, ...]
     roles: tuple[tuple[str, tuple[str, ...]], ...]
     nonquantized: tuple[str, ...]
+    # Trailing checkpoint-only blocks that the loader attaches beyond the
+    # config's ``num_hidden_layers`` target stack (GLM-5.3 MTP layer 45).
+    mtp_layers: int = 0
 
 
 CASES = {
@@ -114,9 +117,12 @@ CASES = {
         definition=Glm5NextQModel,
         config_class="Glm5NextConfig",
         layers_node="model.language_model.layers",
-        layer_count=45,
+        # 45 target layers plus the checkpoint-only MTP block at index 45.
+        layer_count=46,
         spec_count=873,
-        weight_owner_count=37,
+        # 37 target-layer owners plus the MTP envelope: enorm, hnorm, eh_proj
+        # and shared_head.norm are checkpoint-owned and stay dense.
+        weight_owner_count=41,
         moe=True,
         dense_layer=0,
         moe_layer=3,
@@ -172,7 +178,13 @@ CASES = {
             "mlp.shared_experts.gate_proj",
             "mlp.shared_experts.up_proj",
             "mlp.shared_experts.down_proj",
+            # Checkpoint-only MTP layer 45 envelope, dense by design.
+            "enorm",
+            "hnorm",
+            "eh_proj",
+            "shared_head.norm",
         ),
+        mtp_layers=1,
     ),
     "minimax_m3_vl": FlashCase(
         model_type="minimax_m3_vl",
@@ -397,8 +409,15 @@ def test_flash_definitions_build_real_meta_models(flash_case):
     assert flash_case.definition.extract_layers_node() == [case.layers_node]
 
     text_config = getattr(flash_case.config, "text_config", flash_case.config)
-    assert text_config.num_hidden_layers == case.layer_count
+    # The config only schedules target layers; a checkpoint-only auxiliary block
+    # (GLM-5.3 MTP) is appended by the loader, so the resolved layer list is
+    # longer by ``mtp_layers`` and each such layer reports the index past the
+    # target stack.
+    assert text_config.num_hidden_layers + case.mtp_layers == case.layer_count
     assert len(flash_case.layers) == case.layer_count
+    for offset in range(case.mtp_layers):
+        mtp_layer = flash_case.layers[case.layer_count - case.mtp_layers + offset]
+        assert getattr(mtp_layer, "layer_idx", None) == text_config.num_hidden_layers + offset
     assert flash_case.layer_names[0] == f"{case.layers_node}.0"
     assert flash_case.layer_names[-1] == f"{case.layers_node}.{case.layer_count - 1}"
     assert len(flash_case.specs) == case.spec_count
@@ -432,6 +451,14 @@ def test_flash_tree_marks_nonquantized_modules_as_dense(flash_case):
 
     assert set(case.nonquantized) <= full
     assert set(case.nonquantized).isdisjoint(simple)
+    # Every declared dense owner must resolve through the plan and carry an
+    # explicit exclusion tag, including checkpoint-only MTP envelope tensors.
+    for name in case.nonquantized:
+        spec = flash_case.plan.find(name)
+        assert spec is not None, f"{case.model_type}: dense owner {name!r} is undeclared"
+        assert not spec.quantize, (
+            f"{case.model_type}: dense owner {name!r} must carry an explicit `:!`/`:?` tag"
+        )
 
 
 def test_every_checkpoint_weight_owner_is_declared_with_the_right_tag(flash_case):

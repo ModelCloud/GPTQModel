@@ -164,16 +164,25 @@ def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
     # FP32 arithmetic bound: report separately from visible rounding.
     assert drift.max().item() <= 1e-3, f"FP32 accumulation drift {drift.max().item():.3e} exceeds 1e-3"
 
-    raw_rounded = raw.to(dtype)
-    accumulation_rounded = accumulation.to(dtype)
-    expected_visible = raw_rounded + module.bias if module.bias is not None else raw_rounded
-    assert torch.equal(visible, expected_visible), "visible output is not round(matmul) + bias"
+    # The visible output is one rounding of a fused epilogue, not
+    # ``round(matmul) + bias``: the bias is added to the FP32 partial sum before
+    # the store, so it participates in rounding instead of being added afterwards
+    # in the activation dtype.
+    bias = module.bias
+    wide_kernel = raw if bias is None else raw + bias.float()
+    expected_visible = wide_kernel.to(dtype)
+    assert torch.equal(visible, expected_visible), "visible output is not round(matmul + bias)"
 
-    differs = raw_rounded != accumulation_rounded
+    # The FP64 oracle applies the same fused-bias epilogue before rounding, so a
+    # remaining difference is accepted only when the FP32 and FP64 fused values
+    # straddle the rounding boundary.
+    wide_reference = accumulation if bias is None else accumulation + bias.double()
+    reference_rounded = wide_reference.to(dtype)
+    differs = visible != reference_rounded
     if differs.any():
-        midpoint = (raw_rounded.double() + accumulation_rounded.double()) / 2
-        boundary_distance = (accumulation - midpoint).abs()
-        accumulation_error = (raw.double() - accumulation).abs()
+        midpoint = (visible.double() + reference_rounded.double()) / 2
+        boundary_distance = (wide_reference - midpoint).abs()
+        accumulation_error = (wide_kernel.double() - wide_reference).abs()
         unexplained = differs & (boundary_distance > accumulation_error)
         assert not unexplained.any(), (
             f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "

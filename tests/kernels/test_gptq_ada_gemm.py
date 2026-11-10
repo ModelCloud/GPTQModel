@@ -271,35 +271,43 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
     )
 
     fused_dispatch = module._can_use_rocm_gemm(x)
+    bias = module.bias
     if fused_dispatch:
         # The fused kernel keeps the bias in the FP32 epilogue before the
         # output is narrowed, so the oracle must add it before rounding too.
-        visible_ref = (raw + module.bias).to(dtype) if module.bias is not None else raw.to(dtype)
+        wide_kernel = raw if bias is None else raw + bias.float()
         path = "fused GEMM"
-        expected_visible = visible_ref
     else:
         split_weight = _decoded_weights(module).to(dtype)
         # The CUDA split path keeps low-precision partial sums in FP32
-        # (``matmul_fp32_reduce``), so the oracle must request the same wide
-        # accumulation instead of a default reduced-precision ``torch.matmul``.
-        visible_ref = torch.mm(x, split_weight, out_dtype=torch.float32).to(dtype)
+        # (``matmul_fp32_reduce``) and fuses the bias into that FP32 epilogue
+        # before rounding once, so the oracle must use the same ``addmm``
+        # expression instead of a narrow ``matmul`` followed by a second add.
+        flat_x = x.reshape(-1, x.shape[-1])
+        if bias is None:
+            wide_kernel = torch.mm(flat_x, split_weight, out_dtype=torch.float32)
+        else:
+            wide_kernel = torch.addmm(
+                bias.float(), flat_x, split_weight, out_dtype=torch.float32
+            )
+        wide_kernel = wide_kernel.reshape(x.shape[:-1] + (split_weight.shape[-1],))
         path = "dequantize + matmul"
-        expected_visible = visible_ref + module.bias if module.bias is not None else visible_ref
+    expected_visible = wide_kernel.to(dtype)
     assert torch.equal(visible, expected_visible), f"visible output does not match the {path} contract"
 
-    if fused_dispatch:
-        raw_rounded = raw.to(dtype)
-        accumulation_rounded = accumulation.to(dtype)
-        differs = raw_rounded != accumulation_rounded
-        if differs.any():
-            midpoint = (raw_rounded.double() + accumulation_rounded.double()) / 2
-            boundary_distance = (accumulation - midpoint).abs()
-            accumulation_error = (raw.double() - accumulation).abs()
-            unexplained = differs & (boundary_distance > accumulation_error)
-            assert not unexplained.any(), (
-                f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "
-                f"error crossing the rounding boundary; max raw-vs-fp64 drift={drift.max().item():.3e}"
-            )
+    # Adjudicate against the FP64 oracle with the same fused-bias epilogue.
+    wide_reference = accumulation if bias is None else accumulation + bias.double()
+    reference_rounded = wide_reference.to(dtype)
+    differs = visible != reference_rounded
+    if differs.any():
+        midpoint = (visible.double() + reference_rounded.double()) / 2
+        boundary_distance = (wide_reference - midpoint).abs()
+        accumulation_error = (wide_kernel.double() - wide_reference).abs()
+        unexplained = differs & (boundary_distance > accumulation_error)
+        assert not unexplained.any(), (
+            f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "
+            f"error crossing the rounding boundary; max raw-vs-fp64 drift={drift.max().item():.3e}"
+        )
 
 
 # In-gate shapes (fused) plus out-of-gate shapes (must fall back and still be
