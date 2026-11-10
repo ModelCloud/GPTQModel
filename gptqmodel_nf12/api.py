@@ -139,12 +139,33 @@ def linear(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None
     return torch.ops.nf12.linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
 
 
+def linear_staged_b1(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Fuse 1..8 staged BF16 rows with the ordinary B1 kernel configuration.
+
+    The route is intended for speculative verification whose row outputs must
+    match separate one-row calls. Unsupported one-row dispatches fail closed.
+    """
+    _check_input(x, weight.shape[1])
+    if x.ndim != 2 or not 1 <= x.shape[0] <= 8:
+        raise ValueError("nf12: linear_staged_b1 requires a BF16 [1..8, K] matrix")
+    load()
+    return torch.ops.nf12.linear_staged_b1(x, weight.packed, weight.escapes, weight.exp_base, bias)
+
+
 def linear_fp32(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None,
                 rows: torch.Tensor | None = None) -> torch.Tensor:
     """Run an FP32 projection, optionally on selected output rows, from NF12."""
     from ._fp32 import linear_fp32 as impl
 
     return impl(x, weight, bias, rows)
+
+
+def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
+                          bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Project 1..8 FP32 verifier rows with the ordinary B1 reduction tree."""
+    from ._fp32 import linear_fp32_staged_b1 as impl
+
+    return impl(x, weight, bias)
 
 
 def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,

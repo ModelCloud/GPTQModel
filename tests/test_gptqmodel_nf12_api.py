@@ -125,6 +125,45 @@ def test_native_full_vocabulary_head_matches_dense_torch():
                        F.embedding(ids, weight).view(torch.int16))
 
 
+@pytest.mark.parametrize("n,k", [(384, 5120), (512, 5120), (5120, 5120), (129280, 5120)])
+def test_staged_b1_matches_independent_rows_and_torch(n, k):
+    device = _cuda()
+    if n >= 129280 and torch.cuda.mem_get_info(device)[0] < 4_000_000_000:
+        pytest.skip("full vocabulary head needs at least 4 GB free GPU memory")
+    generator = torch.Generator(device=device).manual_seed(851 + n)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0] = -0.0
+    dense[-1, -1] = 2.0**-20  # exercise escape decoding without a large outlier
+    packed = nf12.encode(dense)
+    assert torch.equal(nf12.decode(packed).view(torch.int16), dense.view(torch.int16))
+    for m in (1, 2, 6, 8):
+        x = (torch.randn((m, k), generator=generator, device=device) * 0.05).bfloat16()
+        bias = (torch.randn((n,), generator=generator, device=device) * 0.01).bfloat16()
+        expected = torch.cat([nf12.linear(x[i:i + 1], packed, bias) for i in range(m)])
+        actual = nf12.linear_staged_b1(x, packed, bias)
+        assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+        torch.testing.assert_close(actual.float(), F.linear(x.float(), dense.float(), bias.float()),
+                                   rtol=2e-3, atol=2e-3)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    with pytest.raises(ValueError, match="requires a BF16"):
+        nf12.linear_staged_b1(torch.empty((9, k), device=device, dtype=torch.bfloat16), packed)
+
+
+def test_fp32_staged_b1_matches_independent_rows_and_torch():
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(859)
+    dense = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0] = 2.0**10
+    packed = nf12.encode(dense)
+    x = torch.randn((6, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((384,), generator=generator, device=device) * 0.01
+    expected = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(6)])
+    actual = nf12.linear_fp32_staged_b1(x, packed, bias)
+    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual, F.linear(x, dense.float(), bias), rtol=2e-3, atol=2e-3)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
 @pytest.mark.parametrize("shape", [
     (32, 512), (32, 5120), (128, 5120), (384, 5120), (512, 5120),
 ])

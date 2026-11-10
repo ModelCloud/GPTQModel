@@ -190,7 +190,7 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
 
 def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 bias: torch.Tensor | None = None,
-                rows: torch.Tensor | None = None) -> torch.Tensor:
+                rows: torch.Tensor | None = None, *, _staged_b1: bool = False) -> torch.Tensor:
     """FP32 ``x @ weight.T + bias`` directly from packed NF12 storage.
 
     This is intended for small-row inference projections such as MoE routers,
@@ -212,10 +212,13 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
     m, k = x2.shape
     n = weight.shape[0]
     output_n = n if rows is None else rows.numel()
+    if _staged_b1 and (rows is not None or not 1 <= m <= 8 or
+                       (k <= 512 and output_n >= 1024)):
+        raise ValueError("linear_fp32_staged_b1 requires 1..8 full rows on the ordinary long-K B1 path")
     # The per-output-row packed kernel wins at decode sizes. For prefill,
     # cuBLAS amortizes a call-local decode across many input rows. Keep the
     # model weight packed between calls; this dense tensor dies with this call.
-    if rows is None and m and (m >= 256 or (m >= 16 and n * k >= 1_000_000)):
+    if not _staged_b1 and rows is None and m and (m >= 256 or (m >= 16 and n * k >= 1_000_000)):
         dense = weight.decode().float()
         result = F.linear(x, dense, bias)
         del dense
@@ -234,7 +237,7 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 num_warps=4,
             )
         else:
-            block_m = min(triton.next_power_of_2(m), 8)
+            block_m = 1 if _staged_b1 else min(triton.next_power_of_2(m), 8)
             _linear_fp32[(output_n, triton.cdiv(m, block_m))](
                 x2, weight.packed, weight.escapes, bias if bias is not None else x2,
                 rows if rows is not None else x2, out,
@@ -243,3 +246,9 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 num_warps=4,
             )
     return out
+
+
+def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
+                          bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Fuse FP32 staged rows while retaining each ordinary B1 reduction tree."""
+    return linear_fp32(x, weight, bias, _staged_b1=True)

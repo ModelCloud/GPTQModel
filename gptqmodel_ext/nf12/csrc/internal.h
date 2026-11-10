@@ -55,6 +55,8 @@ struct LinearArgs {
 
 size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
 cudaError_t linear(const LinearArgs& args);
+size_t linear_staged_b1_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
+cudaError_t linear_staged_b1(const LinearArgs& args);
 // Recommended N-slice height for decode + external BF16 GEMM (SPEC.md 6).
 // Zero selects the fused route.
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
