@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
@@ -341,18 +342,32 @@ class StageInputsCapture:
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
-        self.gptq_model.pre_quantize_generate_hook_start()
-
-        # The first `linear` of the capture forward pays a one-time accelerator-library
-        # init unless the background prewarm kicked at load time already completed it.
-        # All CPU-bound setup is done here, so joining now costs only the prewarm's
-        # remaining tail; racing it instead would pay the init a second time inline.
-        await_torch_linear_prewarm(
-            self.gptq_model.quantize_config.device,
-            _forward_dtype(self.gptq_model.model),
-        )
-
+        # `pre_quantize_generate_hook_start` materializes the multimodal side
+        # modules onto the forward device, and the pre-hook above aborts the
+        # forward after the first layer. Both mutate the model for a bounded
+        # window, so both are acquired inside the `try` and released in its
+        # `finally`: a failing start (for example an OOM while moving a vision
+        # tower) must not leave a half-materialized model or a registered hook
+        # behind for the rest of the quantization run.
+        #
+        # `capture_failed` tracks *this call's* exit state. Sampling
+        # `sys.exc_info()` in the `finally` instead reads the thread's active
+        # exception, which can belong to an enclosing handler in the caller
+        # (a retry loop, `requantize()`, an application `except` block). That
+        # would classify a successful capture as failed and silently swallow a
+        # genuine release error.
+        capture_failed = False
         try:
+            self.gptq_model.pre_quantize_generate_hook_start()
+
+            # The first `linear` of the capture forward pays a one-time accelerator-library
+            # init unless the background prewarm kicked at load time already completed it.
+            # All CPU-bound setup is done here, so joining now costs only the prewarm's
+            # remaining tail; racing it instead would pay the init a second time inline.
+            await_torch_linear_prewarm(
+                self.gptq_model.quantize_config.device,
+                _forward_dtype(self.gptq_model.model),
+            )
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     forward_device = self.gptq_model.quantize_config.device
@@ -416,12 +431,51 @@ class StageInputsCapture:
                         if processed_rows > 0:
                             subtitle += f" rows {processed_rows}"
                         cache_forward_pb.subtitle(subtitle).draw()
+        except BaseException:
+            # Record the failure before unwinding so the cleanup below can
+            # distinguish "the capture raised" from "only the release raised".
+            capture_failed = True
+            raise
         finally:
-            if cache_forward_pb is not None:
-                cache_forward_pb.close()
-
-        self.gptq_model.pre_quantize_generate_hook_end()
-        handle.remove()
+            # Closing the progress bar is cosmetic; releasing the model state is
+            # not. Do not let a failing renderer skip the cleanup below, which is
+            # the only thing that un-mutates the model and detaches the pre-hook.
+            # A renderer error also follows the same precedence as a release
+            # error: it propagates when nothing else is in flight, but is logged
+            # instead of masking a capture error that is already unwinding.
+            try:
+                if cache_forward_pb is not None:
+                    cache_forward_pb.close()
+            except Exception:
+                # Deliberately not `BaseException`: an interrupt must stay
+                # interruptible even while a capture error is unwinding.
+                if not capture_failed:
+                    raise
+                self.logger.warn(
+                    "cache_inputs() progress-bar close failed during capture cleanup; "
+                    "re-raising the original capture error:\n" + traceback.format_exc()
+                )
+            finally:
+                # Cleanup must run on every exit path, not only a successful
+                # capture: a calibration forward can raise for ordinary reasons.
+                # The handle removal is nested so a failing model-specific release
+                # still detaches the pre-hook. When another exception is already
+                # propagating, a failure from `pre_quantize_generate_hook_end` is
+                # logged and the original calibration error is re-raised, so the
+                # user sees the cause instead of a cleanup symptom.
+                try:
+                    self.gptq_model.pre_quantize_generate_hook_end()
+                except Exception:
+                    # Deliberately not `BaseException`: an interrupt must stay
+                    # interruptible even while a capture error is unwinding.
+                    if not capture_failed:
+                        raise
+                    self.logger.warn(
+                        "pre_quantize_generate_hook_end() failed during capture cleanup; "
+                        "re-raising the original capture error:\n" + traceback.format_exc()
+                    )
+                finally:
+                    handle.remove()
 
         result = InputCache(
             layer_inputs=layer_inputs,
