@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear import torch as torch_linear_mod
+from gptqmodel.nn_modules.qlinear._numerics import _can_fuse_hip_bias
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _rocm_arch_name
 from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
     MAX_IN_FEATURES,
@@ -351,35 +352,50 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
         f"(reference max |out|={max_ref:.3e}, relative={relative:.3e})"
     )
 
-    # The visible output must be the module's own rounded matmul plus bias.
-    # Which matmul that is depends on dispatch: the fused kernel when it is
-    # enabled for this (arch, dtype, shape), otherwise the module's dequantize +
-    # dtype matmul path.  BF16 on gfx1201 is gated off the fused GEMM (see
-    # ``gemm_fused_dtypes``), so that case must match the split path instead.
+    # The visible output is one rounding of a fused epilogue, not
+    # ``round(matmul) + bias``: the module adds the bias to the FP32 partial sum
+    # and rounds once, so the bias participates in rounding instead of being
+    # added afterwards in the activation dtype.  Which matmul that is depends on
+    # dispatch: the fused kernel when it is enabled for this (arch, dtype,
+    # shape), otherwise the module's dequantize + dtype matmul path.  BF16 on
+    # gfx1201 is gated off the fused GEMM (see ``gemm_fused_dtypes``), so that
+    # case must match the split path instead.
     fused_dispatch = module._can_use_rocm_gemm(x)
+    bias = module.bias
     if fused_dispatch:
-        visible_ref = raw.to(dtype)
+        expected_visible = (raw if bias is None else raw + bias.float()).to(dtype)
         path = "fused GEMM"
     else:
         # The dtype/arch gate keeps BF16 on gfx1201 off the fused kernel, so the
         # visible output must be reproducible from an independent decode of the
-        # packed weights followed by the same dtype matmul.
+        # packed weights followed by the same dtype matmul.  HIP fuses the bias
+        # into that matmul's epilogue when it can; otherwise it keeps the
+        # standalone add.
         split_weight = _decoded_weights(module).to(dtype)
-        visible_ref = (x @ split_weight).to(dtype)
+        split_matmul = torch.matmul(x, split_weight)
+        if bias is None:
+            expected_visible = split_matmul
+        elif _can_fuse_hip_bias(x, split_weight, bias):
+            expected_visible = torch.addmm(
+                bias, x.reshape(-1, x.shape[-1]), split_weight
+            ).reshape(split_matmul.shape)
+        else:
+            expected_visible = split_matmul + bias
         path = "dequantize + matmul"
-    expected_visible = visible_ref + module.bias if module.bias is not None else visible_ref
-    assert torch.equal(visible, expected_visible), f"visible output is not round({path}) + bias"
+    assert torch.equal(visible, expected_visible), f"visible output is not round({path} + bias)"
 
     if fused_dispatch:
-        # Any rounded difference must be explained by the FP32 accumulation
-        # crossing the rounding boundary.
-        raw_rounded = raw.to(dtype)
-        accumulation_rounded = accumulation.to(dtype)
-        differs = raw_rounded != accumulation_rounded
+        # The independent oracle adds the bias at FP64 and rounds once, matching
+        # the fused epilogue.  Any remaining rounded difference must be explained
+        # by the FP32 accumulation crossing the rounding boundary.
+        wide_reference = accumulation if bias is None else accumulation + bias.double()
+        wide_kernel = raw if bias is None else raw + bias.float()
+        reference_rounded = wide_reference.to(dtype)
+        differs = visible != reference_rounded
         if differs.any():
-            midpoint = (raw_rounded.double() + accumulation_rounded.double()) / 2
-            boundary_distance = (accumulation - midpoint).abs()
-            accumulation_error = (raw.double() - accumulation).abs()
+            midpoint = (visible.double() + reference_rounded.double()) / 2
+            boundary_distance = (wide_reference - midpoint).abs()
+            accumulation_error = (wide_kernel.double() - wide_reference).abs()
             unexplained = differs & (boundary_distance > accumulation_error)
             assert not unexplained.any(), (
                 f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "
