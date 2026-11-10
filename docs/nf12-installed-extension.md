@@ -105,4 +105,30 @@ load differed from the prior run, so compare within each pair. The real
 `layers.20.attn.compressor.wkv.weight` has 412 escape groups and measured
 1.034× at M=6 and 0.812× at M=512. Its prefill output was bitwise equal to
 dense BF16; its six-row output passed the dense and sampled FP64 tolerances.
-Neither path meets the 1.15× speed target.
+Neither path meets the earlier 1.15× speed target.
+
+### Real compressor prefill gate across eight GPUs (2026-11-10)
+
+The requested target for compressor BF16 prefill `(N,K,M)=(512,5120,512)` is
+now **at least 1.05×** dense BF16 on the same GPU. This prefill-specific target
+does not change the earlier 1.15× diagnostic gate for other shapes.
+[`scripts/bench_nf12_real_compressor_prefill.py`](../scripts/bench_nf12_real_compressor_prefill.py)
+loads the released layer-20 ratio-one compressor weight, encodes it once, and
+compares the full NF12 call with `F.linear` on identical BF16 activations. It
+uses 32 calls per CUDA graph and eight ABBA rounds per GPU with TF32 disabled.
+The [compact result](nf12-real-compressor-prefill-8gpu-20261110.json) records
+the weight hash, runtime, per-GPU times, output bits, and top-8 decisions.
+
+All eight GPUs missed 1.05×: speedups ranged from **0.8117× to 0.8191×**,
+with a median of **0.8161×**. NF12 restored every BF16 weight bit, and its
+prefill output matched dense BF16 bit-for-bit on all eight runs. The new gate
+requires roughly a 22% reduction in current NF12 latency at this shape.
+
+An experimental fused-MMA sweep split tile and K configurations across the
+eight GPUs. Nsight Compute showed the earlier 64×128 tile launched only 64
+blocks on a 124-SM GPU, with 182 registers per thread and 49 KiB dynamic shared
+memory per block. A smaller 64×64 tile improved occupancy but still measured
+37.79 µs NF12 and 29.15 µs with BF16 tiled weights against 20.99 µs dense
+BF16 on the same GPU. Its output also changed one top-1 row in the fixed
+fixture. These are diagnostic prototypes, not a qualified dispatch change.
+The production NF12 setting remains disabled.
