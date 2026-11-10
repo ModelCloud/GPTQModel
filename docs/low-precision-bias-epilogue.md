@@ -40,6 +40,41 @@ flowchart TD
     class N failure
 ```
 
+Two control flows decide whether the wide path is available at all, and each
+needs its own view.
+
+```mermaid
+flowchart TD
+    A["Checkpoint load"] --> B["named_modules scan for bias names"]
+    B --> C{"bias present and module is FP8, GGUF or VPTQ?"}
+    C -- "No" --> D["Accelerate narrows the buffer to the requested dtype"]
+    C -- "Yes" --> E["keep_in_fp32_modules: FP16 load keeps FP32"]
+    E --> F{"FP8, GGUF or VPTQ?"}
+    F -- "Yes" --> G["fp32_bf16_buffer_names: re-read as FP32 after a BF16 load"]
+    F -- "No" --> H["FP16 preservation only"]
+    G --> I["Forward sees the stored FP32 value"]
+    H --> I
+    D --> J["Failure path: VPTQ bias -65537 becomes FP16 -inf or BF16 -65536"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class D,J failure
+```
+
+```mermaid
+flowchart TD
+    A["bias_narrows_losslessly(bias, dtype)"] --> B{"bias.dtype == dtype?"}
+    B -- "Yes" --> C["True: exact by construction"]
+    B -- "No" --> D{"torch.compiler.is_compiling()?"}
+    D -- "Yes" --> E["False: trace the wide epilogue"]
+    D -- "No" --> F{"cuda bias and stream capturing?"}
+    F -- "Yes" --> E
+    F -- "No" --> G["torch.equal on FP64 casts: read live values"]
+    G --> H{"Values identical?"}
+    H -- "Yes" --> C
+    H -- "No" --> E
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class E failure
+```
+
 `linear_wide_bias` keeps the multiply and the bias in FP32 and rounds once.
 On NVIDIA CUDA it requests an FP32 output from `torch.mm` (`out_dtype`), so the
 tensor-core operands stay FP16/BF16 and no expanded FP32 weight copy is
@@ -103,6 +138,10 @@ paths return zero for FP16 and BF16, and a bias one unit below the cancelling
 value (which neither dtype can hold) is proven to leave the VPTQ CUDA fused
 kernel. Tests live in `tests/kernels/test_fp4_cpu.py`,
 `tests/kernels/test_linear_fp32_reduce.py`, and `tests/test_vptq.py`.
+
+The same gate is shared by the FP4 accelerator wrapper, which reaches it with
+an FP32 `-65536` bias; capture and `fullgraph=True` tracing are covered there
+too, so the escape hatch cannot regress on one quantizer only.
 
 A 4096x4096 layer with a representable FP32 bias was measured with resident
 inputs. Keying the epilogue off the buffer dtype alone opened the FP32 path for

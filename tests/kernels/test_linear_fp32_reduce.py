@@ -331,3 +331,61 @@ def test_vptq_cuda_unrepresentable_wide_bias_skips_fused_kernel(dtype, monkeypat
     oracle_weight = module.dequantize().to(dtype=torch.float64)
     oracle = (x.double() @ oracle_weight.t() + module.bias.double()).to(dtype)
     torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
+except Exception:
+    NVFP4Tensor = None
+
+
+@pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp4_accelerator_forward_is_graph_capturable(dtype):
+    """The FP4 accelerator wrapper shares the value-dependent gate.
+
+    Its bias may also be a stored FP32 ``-65536``; capture and tracing must
+    take the wide epilogue instead of reading the value back.
+    """
+
+    import gptqmodel.nn_modules.qlinear.fp4 as fp4_module
+
+    weight = torch.randn(16, 64, dtype=torch.bfloat16) * 0.04
+    packed = NVFP4Tensor.to_nvfp4(weight, block_size=16)
+    module = (
+        fp4_module.TorchFP4Linear(
+            in_features=64,
+            out_features=16,
+            weight=packed.qdata,
+            weight_scale=packed.scale,
+            weight_block_size=16,
+            orig_dtype=torch.bfloat16,
+            bias=torch.full((16,), -65536.0, device="cuda", dtype=torch.float32),
+        )
+        .to("cuda")
+        .eval()
+    )
+    x = torch.full((1, 64), 4096.0, device="cuda", dtype=dtype)
+
+    with torch.inference_mode():
+        expected = module(x)
+
+    graph = torch.cuda.CUDAGraph()
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        with torch.inference_mode():
+            module(x)
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    with torch.inference_mode():
+        with torch.cuda.graph(graph):
+            captured = module(x)
+    graph.replay()
+    assert captured.dtype is dtype
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+    with torch.inference_mode():
+        traced = compiled(x)
+    torch.testing.assert_close(traced, expected, rtol=0, atol=0)
