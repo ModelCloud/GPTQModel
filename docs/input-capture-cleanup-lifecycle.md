@@ -35,13 +35,14 @@ success-path step.
 flowchart TD
     A["cache_inputs(layers, calibration_data)"] --> B["resolve module_path / layer_label"]
     B --> C["register_forward_pre_hook(store_input_hook)<br/>produces handle"]
-    C --> D["try"]
+    C --> D["capture_failed = False<br/>try"]
     D --> E["pre_quantize_generate_hook_start()"]
     E --> F["await_torch_linear_prewarm(...)"]
     F --> G["iterate calibration_data"]
     G --> H{"run_input_capture raises?"}
     H -- "StopForward" --> I["skip batch<br/>record layer_inputs"]
-    H -- "other exception" --> J["unwind to finally"]
+    H -- "other exception" --> O1["capture_failed = True<br/>re-raise"]
+    O1 --> J["finally"]
     H -- "no" --> I
     I --> J
     J --> K["finally"]
