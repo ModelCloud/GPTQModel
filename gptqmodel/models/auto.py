@@ -34,9 +34,12 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
     log.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
-# FIX ROCm env conflict with CUDA_VISIBLE_DEVICES if both exits
-if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
-    del os.environ['ROCR_VISIBLE_DEVICES']
+# Never normalize accelerator visibility here. ``ROCR_VISIBLE_DEVICES`` is the
+# caller's hardware mask, and this module can be imported after ``gptqmodel``
+# (or after Torch) already enumerated devices: deleting it would widen the
+# process without changing the devices it already holds, and would leak the
+# wider mask to every child process. ``gptqmodel._accelerator_visibility``
+# reports inconsistencies at package import instead.
 
 # if not os.environ.get("NCCL_SHM_DISABLE", None):
 #     os.environ["NCCL_SHM_DISABLE"] = '1'

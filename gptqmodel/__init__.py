@@ -30,7 +30,7 @@ from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
-from .utils.rocm import warn_unsupported_rocm  # noqa: E402
+from .utils.rocm import warn_rocm_visibility_conflict, warn_unsupported_rocm  # noqa: E402
 
 # isort: on
 
@@ -48,6 +48,11 @@ if _installed_alloc_conf is not None:
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()
+
+# Report a visibility selection HIP cannot resolve inside the caller's ROCr
+# hardware mask. Read-only: the mask belongs to the caller and is inherited by
+# every child process, so it is never normalized or removed.
+warn_rocm_visibility_conflict()
 
 patch_safetensors_save_file()
 

@@ -6,6 +6,7 @@
 import os
 import re
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import torch
 
@@ -26,6 +27,15 @@ _ROCM_VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)")
 log = setup_logger()
 
 _UNSUPPORTED_ROCM_WARNED = False
+_VISIBILITY_WARNED = False
+
+#: The ROCr/HSA hardware mask. HIP filters agents by it first, then resolves
+#: ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` as positions in that
+#: filtered list rather than as physical ids.
+VISIBILITY_MASK_ENV = "ROCR_VISIBLE_DEVICES"
+
+#: Variables the HIP runtime resolves as positions inside the mask above.
+VISIBILITY_POSITION_ENVS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -107,6 +117,117 @@ def warn_unsupported_rocm(logger=None) -> bool:
         f"ROCm >= {MIN_ROCM_VERSION_STR}. Please upgrade to the latest ROCm "
         "release (>= 10.1) before quantizing or loading models."
     )
+    return True
+
+def _parse_positions(value: str) -> list[int] | None:
+    """Parse a comma-separated positional selection, or ``None`` when opaque.
+
+    UUIDs, MIG entries, empty entries and negative ids cannot be resolved
+    against a positional hardware mask, so they are never interpreted.
+    """
+
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        return None
+    try:
+        positions = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if any(position < 0 for position in positions):
+        return None
+    return positions
+
+
+class VisibilityIssue(NamedTuple):
+    """One visibility variable that does not resolve inside the hardware mask.
+
+    ``positional`` is the equivalent spelling when the value is a pure set of
+    physical ids present in the mask; it is ``None`` when the value mixes ids
+    with positions and no equivalent can be derived.
+    """
+
+    name: str
+    value: str
+    positional: str | None
+
+
+def check_rocm_visibility() -> tuple[VisibilityIssue, ...]:
+    """Return the visibility selections that the ROCr hardware mask will not resolve.
+
+    ``ROCR_VISIBLE_DEVICES`` is the caller's hardware mask: this function never
+    writes ``os.environ`` and never proposes deleting it. Each issue carries the
+    equivalent positional spelling for a pure physical-id selection, so a caller
+    can keep the same devices without escaping the mask.
+
+    Inert off ROCm and without a positional mask: a shared wrapper that exports
+    the mask on an NVIDIA host gets no ROCm-specific advice.
+    """
+
+    if not IS_ROCM:
+        return ()
+    mask_value = os.environ.get(VISIBILITY_MASK_ENV)
+    if mask_value is None:
+        return ()
+
+    available = _parse_positions(mask_value)
+    if available is None:
+        # Nothing positional to resolve against; the runtime owns the value.
+        return ()
+
+    issues: list[VisibilityIssue] = []
+    for name in VISIBILITY_POSITION_ENVS:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        requested = _parse_positions(raw)
+        if requested is None:
+            continue
+        # Already expressed as positions inside the filtered list.
+        if all(position < len(available) for position in requested):
+            continue
+        if all(position in available for position in requested):
+            positional = ",".join(str(available.index(position)) for position in requested)
+            issues.append(VisibilityIssue(name, raw, positional))
+        else:
+            issues.append(VisibilityIssue(name, raw, None))
+    return tuple(issues)
+
+
+def warn_rocm_visibility_conflict(logger=None) -> bool:
+    """Warn once when a visibility variable does not name positions in the mask.
+
+    Returns ``True`` when a warning was emitted. The check is read-only: device
+    isolation belongs to the caller, and child processes inherit it unchanged.
+    """
+
+    global _VISIBILITY_WARNED
+
+    if _VISIBILITY_WARNED:
+        return False
+    issues = check_rocm_visibility()
+    if not issues:
+        return False
+
+    _VISIBILITY_WARNED = True
+    target = logger or log
+    mask_value = os.environ.get(VISIBILITY_MASK_ENV)
+    width = len(_parse_positions(mask_value) or ())
+    for issue in issues:
+        if issue.positional is not None:
+            target.warn(
+                f"{issue.name}={issue.value!r} names physical device ids, but HIP "
+                f"resolves it as positions inside "
+                f"{VISIBILITY_MASK_ENV}={mask_value!r}. Use "
+                f"{issue.name}={issue.positional!r} to select the same devices."
+            )
+        else:
+            target.warn(
+                f"{issue.name}={issue.value!r} mixes physical ids with positions "
+                f"and does not resolve every named device inside "
+                f"{VISIBILITY_MASK_ENV}={mask_value!r} (positions 0..{width - 1}). "
+                f"Name positions inside the mask, or unset {issue.name} and rely "
+                f"on {VISIBILITY_MASK_ENV}."
+            )
     return True
 
 # hipBLASLt loads one Tensile library per (dtype, layout) pair on first use. On
