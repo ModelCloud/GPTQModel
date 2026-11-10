@@ -344,8 +344,12 @@ except Exception:
 def test_fp4_accelerator_forward_is_graph_capturable(dtype):
     """The FP4 accelerator wrapper shares the value-dependent gate.
 
-    Its bias may also be a stored FP32 ``-65536``; capture and tracing must
-    take the wide epilogue instead of reading the value back.
+    The stored bias must be a value the activation dtype cannot represent.
+    ``-65536`` is exact in BF16, so a BF16 fixture with that value never reaches
+    `bias_narrows_losslessly`: it takes the narrow ephemeral cast and the stock
+    torchao ``F.linear``. ``0.1`` is inexact in both dtypes, so both
+    parameterizations select `linear_wide_bias` and the capture/compile
+    short-circuit is genuinely pinned for each.
     """
 
     import gptqmodel.nn_modules.qlinear.fp4 as fp4_module
@@ -360,15 +364,24 @@ def test_fp4_accelerator_forward_is_graph_capturable(dtype):
             weight_scale=packed.scale,
             weight_block_size=16,
             orig_dtype=torch.bfloat16,
-            bias=torch.full((16,), -65536.0, device="cuda", dtype=torch.float32),
+            bias=torch.full((16,), 0.1, device="cuda", dtype=torch.float32),
         )
         .to("cuda")
         .eval()
     )
     x = torch.full((1, 64), 4096.0, device="cuda", dtype=dtype)
 
+    # Exact in neither FP16 nor BF16, so both dtypes take the wide epilogue.
+    assert module._epilogue_bias(x, module.bias)[1] is True
+
     with torch.inference_mode():
         expected = module(x)
+    # ``0.1`` keeps every FP16/BF16 output finite, so the comparison validates
+    # arithmetic instead of comparing ``-inf`` with ``-inf``.
+    assert torch.isfinite(expected).all()
+    density = module._native_weight().dequantize(x.dtype)
+    oracle = (x.double() @ density.double().t() + module.bias.double()).to(dtype)
+    torch.testing.assert_close(expected, oracle, rtol=0, atol=0)
 
     graph = torch.cuda.CUDAGraph()
     side_stream = torch.cuda.Stream()

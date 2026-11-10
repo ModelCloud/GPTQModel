@@ -47,17 +47,26 @@ needs its own view.
 flowchart TD
     A["Checkpoint load"] --> B["named_modules scan for bias names"]
     B --> C{"bias present and module is FP8, GGUF or VPTQ?"}
-    C -- "No" --> D["Accelerate narrows the buffer to the requested dtype"]
+    C -- "No" --> P["FP4 decoder path"]
     C -- "Yes" --> E["keep_in_fp32_modules: FP16 load keeps FP32"]
     E --> F{"FP8, GGUF or VPTQ?"}
     F -- "Yes" --> G["fp32_bf16_buffer_names: re-read as FP32 after a BF16 load"]
     F -- "No" --> H["FP16 preservation only"]
     G --> I["Forward sees the stored FP32 value"]
     H --> I
-    D --> J["Failure path: VPTQ bias -65537 becomes FP16 -inf or BF16 -65536"]
+    P --> Q{"_build_fp4_forward_module: checkpoint bias tensor?"}
+    Q -- "Yes" --> R["register the bias at its stored width, no dtype cast"]
+    Q -- "No" --> S["bias=None"]
+    R --> I
+    D["Accelerate narrows an unlisted buffer to the requested dtype"] --> J["Failure path: VPTQ bias -65537 becomes FP16 -inf or BF16 -65536"]
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
     class D,J failure
 ```
+
+FP4 does not use those loader lists. Its decoder in
+`models/base.py:3867-3871` registers the checkpoint bias at its stored width
+when it builds `TorchFP4Linear`, so the forward can still choose the wide
+epilogue. The loader lists cover the quantized-module path only.
 
 ```mermaid
 flowchart TD
@@ -65,7 +74,7 @@ flowchart TD
     B -- "Yes" --> C["True: exact by construction"]
     B -- "No" --> D{"torch.compiler.is_compiling()?"}
     D -- "Yes" --> E["False: trace the wide epilogue"]
-    D -- "No" --> F{"cuda bias and stream capturing?"}
+    D -- "No" --> F{"bias on cuda and stream capturing?"}
     F -- "Yes" --> E
     F -- "No" --> G["torch.equal on FP64 casts: read live values"]
     G --> H{"Values identical?"}
@@ -139,9 +148,13 @@ value (which neither dtype can hold) is proven to leave the VPTQ CUDA fused
 kernel. Tests live in `tests/kernels/test_fp4_cpu.py`,
 `tests/kernels/test_linear_fp32_reduce.py`, and `tests/test_vptq.py`.
 
-The same gate is shared by the FP4 accelerator wrapper, which reaches it with
-an FP32 `-65536` bias; capture and `fullgraph=True` tracing are covered there
-too, so the escape hatch cannot regress on one quantizer only.
+The same gate is shared by the FP4 accelerator wrapper, which is covered with an
+FP32 `0.1` bias: that value is inexact in both FP16 and BF16, so both
+parameterizations take the wide epilogue and the capture/`fullgraph=True`
+escape hatch is pinned for each. A `-65536` fixture would not have tested BF16,
+because BF16 holds that value exactly and the forward would use the stock
+torchao `F.linear` instead. FP4 is deliberately not advertised on ROCm, so that
+test exercises the portable dequantize-plus-`linear_wide_bias` branch on HIP.
 
 A 4096x4096 layer with a representable FP32 bias was measured with resident
 inputs. Keying the epilogue off the buffer dtype alone opened the FP32 path for
