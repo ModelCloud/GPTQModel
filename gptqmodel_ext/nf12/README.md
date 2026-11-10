@@ -71,10 +71,10 @@ outside this directory:
 * `gptqmodel/utils/nf12_codec.py` is an independent pure-Torch port of the
   upstream reference codec. It is used for quantization on every device and
   as the inference oracle/fallback.
-* `gptqmodel/utils/nf12_ad.py` lazily builds these sources with CMake
-  (`NF12_BUILD_TORCH=ON`) into the GPT-QModel JIT cache and loads
-  `torch.ops.nf12`; an installed upstream `nf12` package is reused when
-  present.
+* `gptqmodel_nf12` lazily builds these sources with CMake
+  (`NF12_BUILD_TORCH=ON`) and exposes linear, embedding, MoE, and packed FP32
+  projections without requiring a separate upstream `nf12` installation.
+  `gptqmodel/utils/nf12_ad.py` delegates legacy GPTQModel call sites to it.
 * `gptqmodel/nn_modules/qlinear/nf12_ad.py` stores only the packed NF12
   tensors. Its fallback decodes into bounded scratch for the current forward
   and never keeps a dense weight cache.

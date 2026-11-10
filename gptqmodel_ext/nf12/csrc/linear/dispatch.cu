@@ -210,6 +210,11 @@ size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo&
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   // SM86 2K gates: cuBLAS 13.1 selection cliffs bound the measured fused-MMA win.
   if (dev.sm_arch == 86 && k == 2048 && (n == 64 || n == 128) && m >= 2932 && m <= 4779) return 0;
+  // On SM80, medium-width long-K prefill tiles repeat the NF12 decode enough
+  // times that one call-local decode followed by BF16 GEMM is faster. The
+  // 384/512 by 5120 band was measured on an SM80 PG506-230 at M=128/256/512.
+  if (dev.sm_arch == 80 && m >= 128 && m < 1024 && n >= 384 && n <= 512 && k == 5120)
+    return slice_rows(n, k, kExternalSliceBytes);
   const SliceRoute r = slice_route(dev);
   const int64_t narrow_min_m = dev.sm_arch == 86 && k >= 4096 ? 49 : r.narrow_min_m;
   const bool route = n <= narrow_n(dev) ? !use_narrow(m, n, k, dev) &&

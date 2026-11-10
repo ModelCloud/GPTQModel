@@ -943,8 +943,8 @@ The [NF12 validation backend and performance flow](docs/nf12-validation-backends
 explains device selection, native encoder measurements, and Torch fallback.
 The [NF12 bias epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype bias
 handling before output rounding.
-The [NF12 installed extension flow](docs/nf12-installed-extension.md) describes
-how the runtime checks an installed `nf12` package before reusing its operators.
+The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
+how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
 layout normalization, routing bounds, and exact-byte encoder scheduling.

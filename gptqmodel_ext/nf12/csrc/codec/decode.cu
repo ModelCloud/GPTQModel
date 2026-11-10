@@ -94,6 +94,17 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   decode_rows<kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
 }
 
+template <int kPerWarp>
+cudaError_t launch_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                          int64_t num_sa, int64_t k_blocks, __nv_bfloat16* out, int64_t ldo,
+                          cudaStream_t stream) {
+  const int64_t blocks = grid_blocks<kPerWarp>(num_sa);
+  if (blocks > codec::kMaxGridX) return cudaErrorInvalidValue;
+  decode_kernel<kPerWarp><<<dim3(static_cast<unsigned>(blocks)), kThreadsPerBlock, 0, stream>>>(
+      reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa, k_blocks, out, ldo);
+  return cudaGetLastError();
+}
+
 // Match moe_linear's clamped, monotone offsets (moe/schedule.cuh).
 // Expert e owns [max(off'[0..e]), max(off'[0..e+1])).
 // Each warp reduces the prefix over at most kMoeMaxExperts.
@@ -191,12 +202,16 @@ cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_bas
                    __nv_bfloat16* out, int64_t ldo, cudaStream_t stream) {
   if (exp_base > kMaxExpBase) return cudaErrorInvalidValue;
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
-  const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
-  if (blocks == 0) return cudaSuccess;
-  if (blocks > codec::kMaxGridX) return cudaErrorInvalidValue;
-  decode_kernel<kDecodeSuperAtomsPerWarp><<<dim3(static_cast<unsigned>(blocks)), kThreadsPerBlock, 0, stream>>>(
-      reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa, k / kSuperAtomCols, out, ldo);
-  return cudaGetLastError();
+  if (num_sa == 0) return cudaSuccess;
+  // The compressor's 512x5120 SM80 prefill decode is latency-bound with two
+  // super-atoms per warp. A single super-atom measured faster on PG506-230.
+  if (n == 512 && k == 5120) {
+    int device = 0;
+    if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
+    if (device_info(device).sm_arch == 80)
+      return launch_decode<1>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+  }
+  return launch_decode<2>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
 }
 
 cudaError_t moe_decode(const uint8_t* packed, const uint4* escapes, const int64_t* escape_offsets,
