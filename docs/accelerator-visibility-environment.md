@@ -146,6 +146,21 @@ The ambiguous middle case is why the check refuses to guess: when the mask
 itself contains a small id, that number is both a position and an id, and any
 rewrite would change which device runs.
 
+### A repeated mask entry shortens the position space
+
+HIP walks the mask from the front and stops at the first entry it has already
+seen, so a repeat truncates the visible list instead of adding a device:
+
+| Mask | Devices exposed | Positions |
+| --- | --- | --- |
+| `i,j` | two | `0`, `1` |
+| `i,i,j` | the first id only | `0` |
+| `i,j,i` | both | `0`, `1` |
+
+The check therefore measures the resolvable prefix, not the number of
+comma-separated entries. Counting the raw entries would declare a selection
+inside the longer string valid while the runtime exposes no device for it.
+
 ## Tests
 
 `tests/test_accelerator_visibility.py` pins each row above with synthetic

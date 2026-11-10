@@ -176,6 +176,40 @@ def test_a_single_id_outside_the_position_space_keeps_its_equivalent(
     assert os.environ[CUDA] == cuda
 
 
+# --- a repeated mask entry truncates the position space ---------------------
+
+
+@pytest.mark.parametrize(
+    ("mask", "cuda"),
+    [
+        # HIP stops at the first repeated entry, so these expose only position 0.
+        ("6,6,7", "1"),
+        ("6,6,7", "2"),
+    ],
+)
+def test_a_repeated_mask_entry_shrinks_the_checked_position_space(on_rocm, monkeypatch, mask, cuda):
+    """A mask such as ``6,6,7`` exposes one device, so position 1 resolves nothing.
+
+    Counting the raw mask entries instead would call ``CUDA_VISIBLE_DEVICES=1``
+    valid and stay silent, while the runtime exposes no device for it.
+    """
+
+    _env(monkeypatch, mask=mask, cuda=cuda)
+
+    issue = _issues()[CUDA]
+    assert issue.value == cuda
+    assert issue.positional is None
+
+
+@pytest.mark.parametrize(("mask", "cuda", "positional"), [("6,7,6", "6", "0"), ("6,7,6", "7", "1")])
+def test_a_trailing_repeat_keeps_the_leading_equivalents(on_rocm, monkeypatch, mask, cuda, positional):
+    """Only entries after the repeat are dropped, so the prefix advice is exact."""
+
+    _env(monkeypatch, mask=mask, cuda=cuda)
+
+    assert _issues()[CUDA].positional == positional
+
+
 @pytest.mark.parametrize("cuda", ["GPU-1234", "MIG-GPU-1234/1/0", "6,,7", "-1"])
 def test_opaque_selections_are_left_alone(on_rocm, monkeypatch, cuda):
     _env(monkeypatch, mask="6,7", cuda=cuda)

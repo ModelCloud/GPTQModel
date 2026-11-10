@@ -139,6 +139,23 @@ def _parse_positions(value: str) -> list[int] | None:
     return positions
 
 
+def _visible_prefix(positions: list[int]) -> list[int]:
+    """Return the mask entries HIP actually exposes.
+
+    HIP walks the mask from the front and stops at the first entry it has
+    already seen, so a repeated id truncates the visible list: ``2,2,3`` exposes
+    one device, ``2,3,2`` exposes two. The position space is therefore the
+    length of this prefix, not the length of the mask string.
+    """
+
+    seen: list[int] = []
+    for position in positions:
+        if position in seen:
+            break
+        seen.append(position)
+    return seen
+
+
 class VisibilityIssue(NamedTuple):
     """One visibility variable that does not resolve inside the hardware mask.
 
@@ -171,10 +188,13 @@ def check_rocm_visibility() -> tuple[VisibilityIssue, ...]:
     if mask_value is None:
         return ()
 
-    available = _parse_positions(mask_value)
-    if available is None:
+    parsed_mask = _parse_positions(mask_value)
+    if parsed_mask is None:
         # Nothing positional to resolve against; the runtime owns the value.
         return ()
+    # A repeated entry truncates the visible list, so the position space is the
+    # resolvable prefix rather than the whole mask.
+    available = _visible_prefix(parsed_mask)
 
     issues: list[VisibilityIssue] = []
     for name in VISIBILITY_POSITION_ENVS:
@@ -217,7 +237,7 @@ def warn_rocm_visibility_conflict(logger=None) -> bool:
     _VISIBILITY_WARNED = True
     target = logger or log
     mask_value = os.environ.get(VISIBILITY_MASK_ENV)
-    width = len(_parse_positions(mask_value) or ())
+    width = len(_visible_prefix(_parse_positions(mask_value) or []))
     for issue in issues:
         if issue.positional is not None:
             target.warn(
