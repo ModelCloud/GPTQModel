@@ -291,6 +291,18 @@ class Glm5NextQModel(BaseQModel):
         "layers",
         "#",
         {
+            # Checkpoint-only MTP block (layer 45) envelope. The public
+            # checkpoint stores the normalized token embedding and the
+            # normalized target state, projects them together (``eh_proj``),
+            # and normalizes the MTP output (``shared_head.norm``) before the
+            # shared target head. All four tensors are checkpoint-owned and stay
+            # in the source representation; only the routed gate/up/down
+            # projections of that block are quantizable. Target layers 0..44 do
+            # not have these leaves, which this non-strict tree tolerates, and
+            # the order matches the MTP forward.
+            "enorm": ("enorm:!",),
+            "hnorm": ("hnorm:!",),
+            "eh_proj": ("eh_proj:!",),
             "attn_hc:!": ("input_norm:!",),
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
@@ -335,6 +347,9 @@ class Glm5NextQModel(BaseQModel):
                     "down_proj:!",
                 ),
             },
+            # MTP output normalization before the shared target head. Absent on
+            # target layers 0..44; dense by design.
+            "shared_head.norm": ("shared_head.norm:!",),
         },
     ]
 
