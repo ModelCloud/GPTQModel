@@ -9,6 +9,10 @@ why importing must not normalize them. Reference implementation:
 `check_rocm_visibility()` and `warn_rocm_visibility_conflict()` in
 `gptqmodel/utils/rocm.py`, called once from `gptqmodel/__init__.py`.
 
+Throughout this page the mask is written symbolically: `ROCR_VISIBLE_DEVICES`
+holds physical device ids `i,j`, and HIP exposes them as positions `0` and `1`.
+Any concrete numbers are examples, not part of the contract.
+
 ## Why the variables interact
 
 On a ROCm host, `ROCR_VISIBLE_DEVICES` is the ROCr/HSA **hardware mask**. HIP
@@ -19,8 +23,8 @@ position 0 of the filtered list, never physical GPU 0.
 
 ```mermaid
 flowchart TD
-    A["ROCR_VISIBLE_DEVICES=2,3<br/>physical GPU ids"] --> B["ROCr/HSA<br/>filters agents"]
-    B --> C["Visible list: position 0 = physical 2,<br/>position 1 = physical 3"]
+    A["ROCR_VISIBLE_DEVICES=graphics ids i,j"] --> B["ROCr/HSA<br/>filters agents"]
+    B --> C["Visible list: position 0 = physical i,<br/>position 1 = physical j"]
     C --> D{"HIP_VISIBLE_DEVICES<br/>or CUDA_VISIBLE_DEVICES<br/>set?"}
     D -- "no" --> E["Both positions visible"]
     D -- "all entries below 2" --> F["That subset, in the given order"]
@@ -29,16 +33,17 @@ flowchart TD
     class G failure
 ```
 
-Measured on a host whose mask selects two devices:
-
-| Environment | Visible devices | Note |
+| Environment (symbolic) | Visible devices | Note |
 | --- | --- | --- |
-| `ROCR_VISIBLE_DEVICES=2,3` | 2 | filtered list |
-| `ROCR_VISIBLE_DEVICES=2,3`, `CUDA_VISIBLE_DEVICES=0,1` | 2 | documented spelling |
-| `ROCR_VISIBLE_DEVICES=2,3`, `CUDA_VISIBLE_DEVICES=2,3` | 0 | `2`/`3` are positions |
-| `ROCR_VISIBLE_DEVICES=2,3`, `CUDA_VISIBLE_DEVICES=0,2` | 1 | `2` does not resolve; `0` does |
-| `ROCR_VISIBLE_DEVICES=2,3`, `HIP_VISIBLE_DEVICES=1` | 1 | second masked device |
-| `ROCR_VISIBLE_DEVICES` removed, `CUDA_VISIBLE_DEVICES=2,3` | 2 | now physical ids |
+| `ROCR_VISIBLE_DEVICES=i,j` | 2 | filtered list |
+| `ROCR_VISIBLE_DEVICES=i,j`, `CUDA_VISIBLE_DEVICES=0,1` | 2 | documented spelling |
+| `ROCR_VISIBLE_DEVICES=i,j`, `CUDA_VISIBLE_DEVICES=i,j` | 0 | `i`/`j` are read as positions |
+| `ROCR_VISIBLE_DEVICES=i,j`, `CUDA_VISIBLE_DEVICES=0,i` | 1 | `i` does not resolve, `0` does |
+| `ROCR_VISIBLE_DEVICES=i,j`, `HIP_VISIBLE_DEVICES=1` | 1 | second masked device |
+| `ROCR_VISIBLE_DEVICES` removed, `CUDA_VISIBLE_DEVICES=i,j` | 2 | now physical ids |
+
+The last row is the whole problem: with the mask gone, the same
+`CUDA_VISIBLE_DEVICES` value names different physical devices.
 
 ## The removed mechanism
 
@@ -58,7 +63,8 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ
 
 The deletion is not a no-op even when the current process has already
 initialized HIP: `os.environ` is the template every child process inherits, so
-the child runs without the caller's hardware mask.
+the child runs without the caller's hardware mask. It also fired for UUID/MIG
+form masks and on non-ROCm hosts, where the variable is meaningful to nobody.
 
 ## What the package does now
 
@@ -109,13 +115,13 @@ diagnostics share one import-time entry point.
 Reference the mask and use positions inside it:
 
 ```bash
-ROCR_VISIBLE_DEVICES=2,3 CUDA_VISIBLE_DEVICES=0,1 python quantize.py
+ROCR_VISIBLE_DEVICES=i,j CUDA_VISIBLE_DEVICES=0,1 python quantize.py
 ```
 
 Or name only the mask, and let every visible device through:
 
 ```bash
-ROCR_VISIBLE_DEVICES=2,3 python quantize.py
+ROCR_VISIBLE_DEVICES=i,j python quantize.py
 ```
 
 Do not pass physical ids to `CUDA_VISIBLE_DEVICES` while the mask is set. If a
@@ -124,8 +130,9 @@ in `CUDA_VISIBLE_DEVICES`.
 
 ## Tests
 
-`tests/test_accelerator_visibility.py` pins each row above, asserts the check
-never mutates `os.environ`, and runs subprocess imports to confirm both that the
-environment survives `import gptqmodel` and that a child process inherits the
-caller's mask. The reported regression (`ROCR_VISIBLE_DEVICES=2,3` with
-`CUDA_VISIBLE_DEVICES=0,1` losing the mask) is covered end to end.
+`tests/test_accelerator_visibility.py` pins each row above with synthetic
+values, asserts the check never mutates `os.environ`, and runs subprocess
+imports to confirm both that the environment survives `import gptqmodel` and
+that a child process inherits the caller's mask. The reported regression (a
+two-entry mask with `CUDA_VISIBLE_DEVICES=0,1` losing the mask) is covered end
+to end. The tests never open a device.

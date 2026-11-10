@@ -62,46 +62,46 @@ def _issues():
 
 
 def test_positions_inside_the_mask_are_accepted(on_rocm, monkeypatch):
-    """ROCR=2,3 with CUDA=0,1 is the documented, consistent spelling."""
+    """A mask holding ids 6,7 with CUDA=0,1 is the documented, consistent spelling."""
 
-    _env(monkeypatch, mask="2,3", cuda="0,1")
+    _env(monkeypatch, mask="6,7", cuda="0,1")
 
     assert check_rocm_visibility() == ()
-    assert os.environ[MASK] == "2,3"
+    assert os.environ[MASK] == "6,7"
     assert os.environ[CUDA] == "0,1"
 
 
 def test_physical_ids_report_the_equivalent_positions(on_rocm, monkeypatch):
-    """ROCR=2,3 with CUDA=2,3 names positions that do not exist."""
+    """A mask holding ids 6,7 with CUDA=6,7 names positions that do not exist."""
 
-    _env(monkeypatch, mask="2,3", cuda="2,3")
+    _env(monkeypatch, mask="6,7", cuda="6,7")
 
     issue = _issues()[CUDA]
-    assert issue.value == "2,3"
+    assert issue.value == "6,7"
     assert issue.positional == "0,1"
     # Reported, never rewritten.
-    assert os.environ[CUDA] == "2,3"
-    assert os.environ[MASK] == "2,3"
+    assert os.environ[CUDA] == "6,7"
+    assert os.environ[MASK] == "6,7"
 
 
 def test_a_single_physical_id_maps_to_its_position(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="3")
+    _env(monkeypatch, mask="6,7", cuda="7")
 
     assert _issues()[CUDA].positional == "1"
-    assert os.environ[CUDA] == "3"
+    assert os.environ[CUDA] == "7"
 
 
 def test_reordering_is_preserved_on_rocm(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="3,2")
+    _env(monkeypatch, mask="6,7", cuda="7,6")
 
     assert _issues()[CUDA].positional == "1,0"
 
 
 def test_hip_visibility_uses_the_same_positional_rules(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", hip="2,3")
+    _env(monkeypatch, mask="6,7", hip="6,7")
 
     assert _issues()[HIP].positional == "0,1"
-    assert os.environ[HIP] == "2,3"
+    assert os.environ[HIP] == "6,7"
 
 
 # --- the mask is never modified ---------------------------------------------
@@ -110,12 +110,12 @@ def test_hip_visibility_uses_the_same_positional_rules(on_rocm, monkeypatch):
 @pytest.mark.parametrize(
     ("mask", "cuda"),
     [
-        ("2,3", "0,1"),
-        ("2,3", "2,3"),
-        ("2,3", "0"),
-        ("0,2,3", "1"),
-        ("2", "0"),
-        ("2,3", "0,2"),
+        ("6,7", "0,1"),
+        ("6,7", "6,7"),
+        ("6,7", "0"),
+        ("0,6,7", "1"),
+        ("6", "0"),
+        ("6,7", "0,6"),
     ],
 )
 def test_checking_never_mutates_the_environment(on_rocm, monkeypatch, mask, cuda):
@@ -132,9 +132,9 @@ def test_checking_never_mutates_the_environment(on_rocm, monkeypatch, mask, cuda
 # --- ambiguity and opaque selections ----------------------------------------
 
 
-@pytest.mark.parametrize("cuda", ["0,2", "1,5", "2,9"])
+@pytest.mark.parametrize("cuda", ["0,6", "1,9", "6,13"])
 def test_mixed_selections_have_no_positional_equivalent(on_rocm, monkeypatch, cuda):
-    _env(monkeypatch, mask="2,3", cuda=cuda)
+    _env(monkeypatch, mask="6,7", cuda=cuda)
 
     issue = _issues()[CUDA]
     assert issue.value == cuda
@@ -142,9 +142,9 @@ def test_mixed_selections_have_no_positional_equivalent(on_rocm, monkeypatch, cu
     assert os.environ[CUDA] == cuda
 
 
-@pytest.mark.parametrize("cuda", ["GPU-1234", "MIG-GPU-1234/1/0", "2,,3", "-1"])
+@pytest.mark.parametrize("cuda", ["GPU-1234", "MIG-GPU-1234/1/0", "6,,7", "-1"])
 def test_opaque_selections_are_left_alone(on_rocm, monkeypatch, cuda):
-    _env(monkeypatch, mask="2,3", cuda=cuda)
+    _env(monkeypatch, mask="6,7", cuda=cuda)
 
     assert check_rocm_visibility() == ()
     assert os.environ[CUDA] == cuda
@@ -166,7 +166,7 @@ def test_a_non_positional_mask_is_left_alone(on_rocm, monkeypatch):
         {},
         {"cuda": "0,1"},
         {"hip": "0,1"},
-        {"cuda": "2,3", "hip": "2,3"},
+        {"cuda": "6,7", "hip": "6,7"},
     ],
 )
 def test_is_inert_without_a_hardware_mask(on_rocm, monkeypatch, env):
@@ -176,7 +176,7 @@ def test_is_inert_without_a_hardware_mask(on_rocm, monkeypatch, env):
 
 
 def test_mask_alone_requires_nothing(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3")
+    _env(monkeypatch, mask="6,7")
 
     assert check_rocm_visibility() == ()
 
@@ -185,10 +185,10 @@ def test_mask_is_inert_on_a_cuda_build(monkeypatch):
     """A shared wrapper may export the ROCr mask on an NVIDIA host."""
 
     monkeypatch.setattr(rocm_utils, "IS_ROCM", False)
-    _env(monkeypatch, mask="2,3", cuda="2,3")
+    _env(monkeypatch, mask="6,7", cuda="6,7")
 
     assert check_rocm_visibility() == ()
-    assert os.environ[CUDA] == "2,3"
+    assert os.environ[CUDA] == "6,7"
 
 
 # --- warning behaviour -------------------------------------------------------
@@ -203,20 +203,20 @@ class _Silent:
 
 
 def test_warning_names_the_positional_alternative(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="2,3")
+    _env(monkeypatch, mask="6,7", cuda="6,7")
     logger = _Silent()
 
     assert warn_rocm_visibility_conflict(logger=logger) is True
 
     assert len(logger.messages) == 1
-    assert "CUDA_VISIBLE_DEVICES='2,3'" in logger.messages[0]
+    assert "CUDA_VISIBLE_DEVICES='6,7'" in logger.messages[0]
     assert "CUDA_VISIBLE_DEVICES='0,1'" in logger.messages[0]
     # The mask is never advertised as something to delete.
     assert "unset" not in logger.messages[0]
 
 
 def test_ambiguous_warning_points_at_the_mask(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="0,2")
+    _env(monkeypatch, mask="6,7", cuda="0,6")
     logger = _Silent()
 
     warn_rocm_visibility_conflict(logger=logger)
@@ -227,7 +227,7 @@ def test_ambiguous_warning_points_at_the_mask(on_rocm, monkeypatch):
 
 
 def test_warning_is_emitted_once(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="2,3")
+    _env(monkeypatch, mask="6,7", cuda="6,7")
     logger = _Silent()
 
     assert warn_rocm_visibility_conflict(logger=logger) is True
@@ -236,7 +236,7 @@ def test_warning_is_emitted_once(on_rocm, monkeypatch):
 
 
 def test_no_warning_for_a_consistent_environment(on_rocm, monkeypatch):
-    _env(monkeypatch, mask="2,3", cuda="0,1")
+    _env(monkeypatch, mask="6,7", cuda="0,1")
     logger = _Silent()
 
     assert warn_rocm_visibility_conflict(logger=logger) is False
@@ -286,11 +286,11 @@ def _run_import(env: dict[str, str]) -> dict[str, str | None]:
     reason="subprocess import disabled in this environment",
 )
 def test_import_preserves_the_callers_visibility_environment():
-    """The reported case: ROCR=2,3 with CUDA=0,1 keeps both variables."""
+    """The reported case: a mask with CUDA=0,1 keeps both variables."""
 
-    env = _run_import({MASK: "2,3", CUDA: "0,1"})
+    env = _run_import({MASK: "6,7", CUDA: "0,1"})
 
-    assert env[MASK] == "2,3"
+    assert env[MASK] == "6,7"
     assert env[CUDA] == "0,1"
     assert env[HIP] is None
 
@@ -331,7 +331,7 @@ def test_child_process_inherits_the_callers_mask():
         """
     )
     child = {k: v for k, v in os.environ.items() if not k.endswith("VISIBLE_DEVICES")}
-    child.update({MASK: "2,3", CUDA: "0,1"})
+    child.update({MASK: "6,7", CUDA: "0,1"})
     child["PYTHONPATH"] = os.pathsep.join(
         entry for entry in (os.getcwd(), child.get("PYTHONPATH")) if entry
     )
@@ -343,5 +343,5 @@ def test_child_process_inherits_the_callers_mask():
         timeout=900,
     )
     assert result.returncode == 0, result.stderr[-4000:]
-    assert "PARENT:('2,3', '0,1')" in result.stdout
-    assert "CHILD 2,3 0,1" in result.stdout
+    assert "PARENT:('6,7', '0,1')" in result.stdout
+    assert "CHILD 6,7 0,1" in result.stdout
