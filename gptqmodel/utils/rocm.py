@@ -119,6 +119,7 @@ def warn_unsupported_rocm(logger=None) -> bool:
     )
     return True
 
+
 def _parse_positions(value: str) -> list[int] | None:
     """Parse a comma-separated positional selection, or ``None`` when opaque.
 
@@ -141,9 +142,10 @@ def _parse_positions(value: str) -> list[int] | None:
 class VisibilityIssue(NamedTuple):
     """One visibility variable that does not resolve inside the hardware mask.
 
-    ``positional`` is the equivalent spelling when the value is a pure set of
-    physical ids present in the mask; it is ``None`` when the value mixes ids
-    with positions and no equivalent can be derived.
+    ``positional`` is the equivalent spelling when every entry is an
+    unambiguous physical id (beyond the mask's position space, and present in
+    the mask). It is ``None`` when at least one entry is inside that position
+    space, where the runtime reads positions and ids differently.
     """
 
     name: str
@@ -182,10 +184,14 @@ def check_rocm_visibility() -> tuple[VisibilityIssue, ...]:
         requested = _parse_positions(raw)
         if requested is None:
             continue
+        width = len(available)
         # Already expressed as positions inside the filtered list.
-        if all(position < len(available) for position in requested):
+        if all(position < width for position in requested):
             continue
-        if all(position in available for position in requested):
+        # Only entries beyond the position space are unambiguously physical ids.
+        # An entry below ``width`` is read as a position, even when the mask also
+        # contains that number as an id, so no equivalent list can be derived.
+        if all(position >= width for position in requested) and all(position in available for position in requested):
             positional = ",".join(str(available.index(position)) for position in requested)
             issues.append(VisibilityIssue(name, raw, positional))
         else:
@@ -218,17 +224,20 @@ def warn_rocm_visibility_conflict(logger=None) -> bool:
                 f"{issue.name}={issue.value!r} names physical device ids, but HIP "
                 f"resolves it as positions inside "
                 f"{VISIBILITY_MASK_ENV}={mask_value!r}. Use "
-                f"{issue.name}={issue.positional!r} to select the same devices."
+                f"{issue.name}={issue.positional!r} to select the devices those "
+                f"ids name."
             )
         else:
             target.warn(
-                f"{issue.name}={issue.value!r} mixes physical ids with positions "
-                f"and does not resolve every named device inside "
-                f"{VISIBILITY_MASK_ENV}={mask_value!r} (positions 0..{width - 1}). "
-                f"Name positions inside the mask, or unset {issue.name} and rely "
-                f"on {VISIBILITY_MASK_ENV}."
+                f"{issue.name}={issue.value!r} does not resolve inside "
+                f"{VISIBILITY_MASK_ENV}={mask_value!r} (positions 0..{width - 1}): "
+                f"HIP reads entries below {width} as positions and keeps only the "
+                f"leading entries that resolve, while the rest are physical ids "
+                f"the mask does not contain. Name positions inside the mask, or "
+                f"unset {issue.name} and rely on {VISIBILITY_MASK_ENV}."
             )
     return True
+
 
 # hipBLASLt loads one Tensile library per (dtype, layout) pair on first use. On
 # gfx950 (MI350X) each of those loads spends ~0.8-1.2 s finalizing a code object

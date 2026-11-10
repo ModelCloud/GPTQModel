@@ -38,8 +38,8 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
 # caller's hardware mask, and this module can be imported after ``gptqmodel``
 # (or after Torch) already enumerated devices: deleting it would widen the
 # process without changing the devices it already holds, and would leak the
-# wider mask to every child process. ``gptqmodel._accelerator_visibility``
-# reports inconsistencies at package import instead.
+# wider mask to every child process. ``warn_rocm_visibility_conflict()`` in
+# ``gptqmodel/utils/rocm.py`` reports inconsistencies at package import instead.
 
 # if not os.environ.get("NCCL_SHM_DISABLE", None):
 #     os.environ["NCCL_SHM_DISABLE"] = '1'

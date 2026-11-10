@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,11 @@ from gptqmodel.utils.rocm import (
 MASK = VISIBILITY_MASK_ENV
 CUDA = "CUDA_VISIBLE_DEVICES"
 HIP = "HIP_VISIBLE_DEVICES"
+
+# The probe must import this checkout, not whatever ``gptqmodel`` the active
+# environment has installed. Derive the root from this file so the tests behave
+# the same whether pytest runs from the repository root or from elsewhere.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 @pytest.fixture(autouse=True)
@@ -142,6 +148,34 @@ def test_mixed_selections_have_no_positional_equivalent(on_rocm, monkeypatch, cu
     assert os.environ[CUDA] == cuda
 
 
+def test_mixing_id_space_with_position_space_has_no_equivalent(on_rocm, monkeypatch):
+    """An id below the mask width is also a valid position, so no equivalent exists.
+
+    ``mask=0,2`` with ``CUDA=0,2`` is the trap: ``0`` is position 0 (and also a
+    valid id), while ``2`` is a position the mask does not have but is an id it
+    does hold. Rewriting the list would silently change the first device, so the
+    value is reported as ambiguous and never rewritten.
+    """
+
+    _env(monkeypatch, mask="0,2", cuda="0,2")
+
+    issue = _issues()[CUDA]
+    assert issue.positional is None
+    assert os.environ[CUDA] == "0,2"
+
+
+@pytest.mark.parametrize(("mask", "cuda", "positional"), [("0,2", "2", "1"), ("6,7", "6", "0")])
+def test_a_single_id_outside_the_position_space_keeps_its_equivalent(
+    on_rocm, monkeypatch, mask, cuda, positional
+):
+    """One entry cannot be both a position and an id, so the advice is exact."""
+
+    _env(monkeypatch, mask=mask, cuda=cuda)
+
+    assert _issues()[CUDA].positional == positional
+    assert os.environ[CUDA] == cuda
+
+
 @pytest.mark.parametrize("cuda", ["GPU-1234", "MIG-GPU-1234/1/0", "6,,7", "-1"])
 def test_opaque_selections_are_left_alone(on_rocm, monkeypatch, cuda):
     _env(monkeypatch, mask="6,7", cuda=cuda)
@@ -224,6 +258,9 @@ def test_ambiguous_warning_points_at_the_mask(on_rocm, monkeypatch):
     assert len(logger.messages) == 1
     assert "0..1" in logger.messages[0]
     assert "unset CUDA_VISIBLE_DEVICES" in logger.messages[0]
+    # HIP keeps only the leading entries that resolve, so the message must not
+    # claim the whole selection was ignored.
+    assert "leading entries" in logger.messages[0]
 
 
 def test_warning_is_emitted_once(on_rocm, monkeypatch):
@@ -266,7 +303,7 @@ def _run_import(env: dict[str, str]) -> dict[str, str | None]:
     child = {k: v for k, v in os.environ.items() if not k.endswith("VISIBLE_DEVICES")}
     child.update(env)
     child["PYTHONPATH"] = os.pathsep.join(
-        entry for entry in (os.getcwd(), child.get("PYTHONPATH")) if entry
+        entry for entry in (REPO_ROOT, child.get("PYTHONPATH")) if entry
     )
     result = subprocess.run(
         [sys.executable, "-c", _PROBE],
@@ -333,7 +370,7 @@ def test_child_process_inherits_the_callers_mask():
     child = {k: v for k, v in os.environ.items() if not k.endswith("VISIBLE_DEVICES")}
     child.update({MASK: "6,7", CUDA: "0,1"})
     child["PYTHONPATH"] = os.pathsep.join(
-        entry for entry in (os.getcwd(), child.get("PYTHONPATH")) if entry
+        entry for entry in (REPO_ROOT, child.get("PYTHONPATH")) if entry
     )
     result = subprocess.run(
         [sys.executable, "-c", script],

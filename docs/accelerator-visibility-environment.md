@@ -106,9 +106,10 @@ diagnostics share one import-time entry point.
 | `ROCR_VISIBLE_DEVICES` unset | No-op. |
 | Mask is not a positional list (UUID) | No-op; nothing positional to resolve against. |
 | Relative selection inside the mask | No-op; this is the documented spelling. |
-| Physical ids that are all in the mask | Warns with the equivalent positions. |
-| Mixed or out-of-range selection | Warns as mixed; nothing is rewritten. |
-| `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` disagree | Not diagnosed here: HIP aborts inside its own agent enumeration, before this check can run. |
+| Physical ids, all beyond the mask's position space | Warns with the equivalent positions. |
+| An entry below the mask width (also a valid position) | Warns as ambiguous; no equivalent list is invented. |
+| Out-of-range position or an id the mask does not hold | Warns as unresolved; nothing is rewritten. |
+| `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` disagree | Not diagnosed here: HIP aborts inside its own agent enumeration, before this check can run. Measured: both `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` set to selections that disagree abort the process with `Conflicting visibility ...` even for `import torch` alone. |
 
 ## Correct spellings
 
@@ -128,6 +129,23 @@ Do not pass physical ids to `CUDA_VISIBLE_DEVICES` while the mask is set. If a
 selection must name physical devices, express it in the mask and use positions
 in `CUDA_VISIBLE_DEVICES`.
 
+### Why an invalid selection is not repaired
+
+HIP reads each entry below the mask width as a position and keeps only the
+leading entries that resolve, so a partially invalid list is neither empty nor
+equivalent to its ids. With a mask of ids `i,j`:
+
+| Selection | Devices the runtime exposes | Why no rewrite |
+| --- | --- | --- |
+| `0,1` | the two masked devices | valid spelling |
+| `i,j` | none, when `i` is not below 2 | every entry is outside the position space |
+| `0,i` | the first masked device | resolution stops at `i` |
+| `2,0` | none | the first entry does not resolve |
+
+The ambiguous middle case is why the check refuses to guess: when the mask
+itself contains a small id, that number is both a position and an id, and any
+rewrite would change which device runs.
+
 ## Tests
 
 `tests/test_accelerator_visibility.py` pins each row above with synthetic
@@ -136,3 +154,7 @@ imports to confirm both that the environment survives `import gptqmodel` and
 that a child process inherits the caller's mask. The reported regression (a
 two-entry mask with `CUDA_VISIBLE_DEVICES=0,1` losing the mask) is covered end
 to end. The tests never open a device.
+
+The subprocess probes put this checkout at the front of `PYTHONPATH` (derived
+from the test file, not the caller's working directory) so they exercise the
+working tree instead of an installed `gptqmodel` that still deletes the mask.
