@@ -2576,10 +2576,18 @@ def test_vptq_cuda_representable_wide_bias_keeps_fused_kernel(dtype, monkeypatch
 
     assert bool(fused_calls)
     assert actual.dtype is dtype
+    # The fused kernel accumulates in FP32 (FP64 for BF16) and rounds once, so
+    # its result is the activation-dtype rounding of a slightly different
+    # partial-sum order than the FP64 oracle's. Comparing the two bitwise is a
+    # natural rounding tie, not a precision regression: the measured spread is
+    # at most 2 ULP of the activation dtype across random draws, and eager FP32
+    # accumulation reproduces most draws exactly. Keep the oracle strict
+    # (`2e-3`, the inference limit) instead of asserting a bit pattern the
+    # kernel is not required to produce.
     oracle = (
         activations.double() @ module.dequantize().double().t() + module.bias.double()
     ).to(dtype)
-    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+    torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
 
 
 def _checkpoint_bias_module(dtype):

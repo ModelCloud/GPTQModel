@@ -350,6 +350,12 @@ def test_fp4_accelerator_forward_is_graph_capturable(dtype):
     torchao ``F.linear``. ``0.1`` is inexact in both dtypes, so both
     parameterizations select `linear_wide_bias` and the capture/compile
     short-circuit is genuinely pinned for each.
+
+    The replay also reads the *live* bias: ``.data.fill_`` does not bump a
+    version counter, so a graph that baked the captured value in, or that
+    cached a representability answer, would drift from the oracle after the
+    write. This is the FP4 counterpart of
+    ``test_vptq_bias_epilogue_captures_and_replays_live_values``.
     """
 
     import gptqmodel.nn_modules.qlinear.fp4 as fp4_module
@@ -398,6 +404,20 @@ def test_fp4_accelerator_forward_is_graph_capturable(dtype):
     assert captured.dtype is dtype
     torch.testing.assert_close(captured, expected, rtol=0, atol=0)
 
+    # `.data.fill_` is invisible to the version counter, so a captured graph
+    # that baked the bias value in or cached the gate answer would keep the old
+    # result. Re-read the live buffer on every replay instead. The values stay
+    # inside the FP16/BF16 range so the comparison measures the epilogue rather
+    # than saturating at the same `-inf` on both sides; `0.5` and `3.5` are
+    # exact in both dtypes and `0.1` is exact in neither.
+    for live_bias in (0.5, 0.1, 3.5):
+        module.bias.data.fill_(live_bias)
+        graph.replay()
+        torch.cuda.synchronize()
+        live_oracle = (x.double() @ density.double().t() + module.bias.double()).to(dtype)
+        torch.testing.assert_close(captured, live_oracle, rtol=0, atol=0)
+
+    module.bias.data.fill_(0.1)
     compiled = torch.compile(module, backend="eager", fullgraph=True)
     with torch.inference_mode():
         traced = compiled(x)
