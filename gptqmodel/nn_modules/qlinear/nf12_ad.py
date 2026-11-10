@@ -51,6 +51,29 @@ def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
     return activation_dtype in (torch.bfloat16, torch.float32, torch.float64)
 
 
+def _autocast_narrows_weight_range(
+    activation_dtype: torch.dtype, device_type: str
+) -> bool:
+    """Whether an active autocast context narrows BF16 NF12-AD weights.
+
+    Autocast rewrites GEMM operands to its own dtype, so an FP16 context
+    narrows a BF16 activation to FP16 before the product even though the
+    activation dtype itself can hold every BF16 weight. The correctness of the
+    narrow branch must follow the context's dtype, not the activation dtype.
+    ``float64`` is exempt because autocast never narrows it.
+    """
+
+    if activation_dtype is torch.float64 or not autocast_active(device_type):
+        return False
+    try:
+        autocast_dtype = torch.get_autocast_dtype(device_type)
+    except (AttributeError, TypeError, RuntimeError):
+        # No queryable autocast dtype: assume it narrows, which only widens the
+        # GEMM this predicate protects.
+        return True
+    return not _weight_dtype_is_lossless(autocast_dtype)
+
+
 def _hip_path(device: torch.device | str) -> bool:
     """True when the device is an RDNA4 GPU that must use the HIP port.
 
@@ -409,6 +432,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
                 if (
                     x.device.type == "cpu"
                     or not _weight_dtype_is_lossless(x.dtype)
+                    or _autocast_narrows_weight_range(x.dtype, x.device.type)
                     or (bias is not None and bias.dtype != x.dtype)
                 )
                 else x.dtype

@@ -491,6 +491,45 @@ def test_linear_fallback_preserves_bf16_range_under_autocast(device, monkeypatch
 
 
 @pytest.mark.parametrize("device", _GPU_OR_CPU)
+@pytest.mark.parametrize(
+    "activation_dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"]
+)
+def test_linear_fallback_preserves_bf16_range_for_lossless_activation_under_autocast(
+    device, activation_dtype, monkeypatch
+):
+    """A lossless activation is not enough when the autocast context narrows.
+
+    `bfloat16` and `float32` can hold every BF16 weight, but an FP16 autocast
+    context rewrites the GEMM operands to FP16 before the product. The narrow
+    branch must therefore widen when the autocast dtype cannot hold the weight
+    range, not only when the activation dtype cannot.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((256, 256), dtype=torch.bfloat16)
+    weight[0, 0] = 65536.0
+    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.zeros((1, 256), dtype=activation_dtype, device=device)
+    x[0, 0] = 2.0**-16
+    oracle = (x.double() @ weight.double().to(device).t()).to(activation_dtype)
+    assert torch.isfinite(oracle).all()
+    assert oracle.flatten()[0].item() == 1.0
+
+    with torch.autocast(device_type=device, dtype=torch.float16), torch.inference_mode():
+        actual = linear(x)
+
+    assert actual.dtype == activation_dtype
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual, oracle)
+    assert "weight" not in linear.state_dict()
+
+
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
 def test_linear_fallback_keeps_float64_activation_precision(device, monkeypatch):
     """A float64 activation must not have its product rounded down to float32.
 

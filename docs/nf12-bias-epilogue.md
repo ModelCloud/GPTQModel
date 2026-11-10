@@ -24,7 +24,7 @@ flowchart TD
     C --> E{"Native result available?"}
     E -- Yes --> F["Return native output"]
     E -- No --> D
-    D --> G{"CPU, activation dtype narrower than BF16, or bias dtype differs?"}
+    D --> G{"CPU, dtype not lossless for BF16, or bias dtype differs?"}
     G -- Yes --> H["dequantize_weight to FP32"]
     H --> I["FP32 mm with autocast disabled plus bias.float"]
     I --> J["Round once to input dtype"]
@@ -40,10 +40,20 @@ flowchart TD
 | Fallback precision | FP32 product could add a bias already narrowed to FP16 | FP32 product adds `bias.float()` before output rounding |
 | Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the FP32 decode and product |
 | Wide GEMM under autocast | Not applicable: the wide branch did not exist on accelerators | The FP32 product runs under `torch.autocast(..., enabled=False)` so autocast cannot narrow it back to FP16 |
+| Narrow branch under autocast | An FP16 autocast context narrowed BF16/FP32 activations too, because autocast rewrites GEMM operands; CUDA hid this only through its FP32 `out_dtype` request, while HIP returned `inf` | `_autocast_narrows_weight_range()` widens whenever the active autocast dtype cannot hold every BF16 weight |
 
 The autocast guard is keyed on `autocast_active()`, not on the device type:
 CPU autocast narrows an FP32 `mm` to the autocast dtype just like the CUDA
 path, so a CUDA-only guard would leave the CPU fallback vulnerable.
+
+The context dtype, not the activation dtype, decides correctness. A `bfloat16`
+or `float32` activation is lossless on its own, but an FP16 autocast context
+rewrites the GEMM operands to FP16 before the product. On CUDA that was masked
+by `_wants_fp32_reduce` requesting an FP32 `out_dtype`; HIP keeps low-precision
+operands by design, so the same call returned `inf` for an exact `1.0`.
+`_autocast_narrows_weight_range()` therefore routes an FP16 context to the wide
+branch regardless of the activation dtype, and `float64` stays exempt because
+autocast never narrows it.
 
 `_weight_dtype_is_lossless()` admits `float64` as well. It is outside
 `SUPPORTS_DTYPES`, but a caller that already holds float64 activations must not
@@ -60,10 +70,11 @@ range, a BF16 weight below the FP16 subnormal range, a weight that needs FP32
 accumulation, and a BF16 activation whose bias cancels an out-of-FP16 sum.
 
 The regressions `test_linear_fallback_preserves_bf16_weight_range`,
-`test_linear_fallback_rounds_only_the_final_bf16_output`, and
-`test_linear_fallback_preserves_bf16_range_under_autocast` compare the packed
-forward result to an independent FP64 Torch reference on CPU and on the
-available accelerator. No dense weight is retained after forward.
+`test_linear_fallback_rounds_only_the_final_bf16_output`,
+`test_linear_fallback_preserves_bf16_range_under_autocast`, and
+`test_linear_fallback_preserves_bf16_range_for_lossless_activation_under_autocast`
+compare the packed forward result to an independent FP64 Torch reference on CPU
+and on the available accelerator. No dense weight is retained after forward.
 
 ## Metadata-only inputs
 
@@ -73,4 +84,3 @@ hold no values; decoding them or reading `exp_base` would raise
 `Tensor.item() cannot be called on meta tensors`. `forward` returns the
 shape/dtype-correct empty output from `empty_linear_output()` before the decode
 path, matching the zero-row contract and the other quant-linear layers.
-
