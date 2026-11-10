@@ -22,7 +22,9 @@ flowchart TD
     X:::error
     I["linear_fp32_staged_b1: FP32 rows 1..8"] --> J["linear_fp32: _staged_b1 true"]
     J --> K{"full long-K B1 path?"}
-    K -->|yes| L["_linear_fp32 with block_m 1 and M grid rows"]
+    K -->|yes| L{"M = 6?"}
+    L -->|yes| M["_linear_fp32_six_b1: one packed decode, six independent accumulators"]
+    L -->|no| N["_linear_fp32 with block_m 1 and M grid rows"]
     K -->|no| Y["ValueError"]
     Y:::error
     classDef error fill:#fdd,stroke:#b33
@@ -31,7 +33,7 @@ flowchart TD
 | Before | After |
 | --- | --- |
 | Each physical row called `nf12.linear` and selected `small_m_heuristic(1,n,k)` separately (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). | `linear_staged_b1` selects the same one-row configuration once and passes all staged rows to `linear_small_m` (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). |
-| Each FP32 row launched `_linear_fp32` separately (`gptqmodel_nf12/_fp32.py`). | `linear_fp32_staged_b1` launches one grid with `block_m=1`, retaining the one-row reduction tree (`gptqmodel_nf12/_fp32.py`). |
+| Each FP32 row launched `_linear_fp32` separately (`gptqmodel_nf12/_fp32.py`). | Six rows use `_linear_fp32_six_b1`, decoding a packed tile once while retaining six independent one-row reduction trees. Other staged row counts use one grid with `block_m=1` (`gptqmodel_nf12/_fp32.py`). |
 
 The BF16 API rejects more than eight rows and returns an unsupported CUDA
 status when the one-row route or staged configuration is unavailable. The FP32
@@ -62,9 +64,18 @@ TB/s memory throughput, with 74.3% of scheduler cycles lacking an eligible
 warp. The M6 image used the same 64 registers and about 2.11 TB/s. Local
 memory spilling remains in this image and is a separate tuning opportunity.
 
+The six-row FP32 gate kernel measured 17.2 us for 384 x 5120 versus 50.0 us
+for the prior staged `block_m=1` grid; the 512 x 5120 score projection measured
+18.4 us versus 64.0 us. Both results were bitwise identical to six independent
+B1 calls. Nsight Compute showed 48 registers per thread, no local spills, and
+61,440 `PRMT` instructions for the six-row gate launch, the same packed decode
+count as one prior single-row invocation. The six accumulators performed
+368,640 `FFMA` instructions, as expected for six independent rows.
+
 The actual-device tests compare all BF16 staged rows bitwise with independent
 one-row NF12 calls at M=1,2,6,8 and N=384,512,5120,129280 (K=5120), including
 an escaped weight. A separate Torch BF16 weight projection checks arithmetic
-error. FP32 staged rows match one-row calls bitwise and a dense FP32 Torch
-oracle within the inference tolerance. Tests inspect the packed weight object
+error. FP32 staged rows at M=2,6,8 and N=128,384,512,5120 match one-row calls
+bitwise and a dense FP32 Torch oracle within the inference tolerance, including
+escaped weights and bias. Tests inspect the packed weight object
 after inference; neither path retains a dense weight cache.

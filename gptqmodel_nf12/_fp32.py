@@ -73,6 +73,69 @@ def _linear_fp32(
 
 
 @triton.jit
+def _linear_fp32_six_b1(
+    x_ptr, packed_ptr, escapes_ptr, bias_ptr, out_ptr,
+    n: tl.constexpr, k: tl.constexpr, exp_base: tl.constexpr,
+    has_bias: tl.constexpr,
+):
+    """One weight decode and six independent ordinary-B1 reduction trees."""
+    output_row = tl.program_id(0)
+    row = tl.arange(0, 1)
+    cols = tl.arange(0, 256)
+    acc0 = tl.full((1, 256), 0, tl.float32)
+    acc1 = tl.full((1, 256), 0, tl.float32)
+    acc2 = tl.full((1, 256), 0, tl.float32)
+    acc3 = tl.full((1, 256), 0, tl.float32)
+    acc4 = tl.full((1, 256), 0, tl.float32)
+    acc5 = tl.full((1, 256), 0, tl.float32)
+    packed_u32 = packed_ptr.to(tl.pointer_type(tl.uint32))
+
+    for block in range(tl.cdiv(k, 256)):
+        col = block * 256 + cols
+        valid = col < k
+        super_atom = ((output_row // 16) * (k // 64) + col // 64) * 1536
+        atom = (col % 64) // 16
+        lane = (output_row % 8) * 4 + ((col % 16) % 8) // 2
+        slot = ((output_row % 16) // 8) * 2 + ((col % 16) // 8) * 4 + col % 2
+        meta_offset = super_atom + 16 * lane + 4 * atom
+        low_offset = (super_atom + tl.where(atom < 2, 512, 1024)
+                      + 16 * lane + 8 * (atom % 2))
+        meta = tl.load(packed_u32 + meta_offset // 4, valid, other=0)
+        low0 = tl.load(packed_u32 + low_offset // 4, valid, other=0)
+        low1 = tl.load(packed_u32 + low_offset // 4 + 1, valid, other=0)
+        low = tl.where(slot < 4, low0 >> (8 * slot), low1 >> (8 * (slot - 4))) & 255
+        meta_byte = (meta >> (8 * (slot // 2))) & 255
+        high_even = (meta_byte & 0x87) + exp_base
+        high_odd = (((meta_byte << 1) & 0x80) | ((meta_byte >> 3) & 0x07)) + exp_base
+        high = tl.where(slot % 2 == 0, high_even, high_odd)
+        ordinary = (high << 8) | low
+        escaped = tl.load(escapes_ptr + low0 * 8 + slot,
+                          valid & (meta == 0), other=0).to(tl.uint16, bitcast=True)
+        bits = tl.where(meta == 0, escaped.to(tl.uint32), ordinary)
+        weight = (bits << 16).to(tl.float32, bitcast=True)[None, :]
+        x0 = tl.load(x_ptr + row[:, None] * k + col[None, :], valid[None, :], other=0)
+        x1 = tl.load(x_ptr + (row[:, None] + 1) * k + col[None, :], valid[None, :], other=0)
+        x2 = tl.load(x_ptr + (row[:, None] + 2) * k + col[None, :], valid[None, :], other=0)
+        x3 = tl.load(x_ptr + (row[:, None] + 3) * k + col[None, :], valid[None, :], other=0)
+        x4 = tl.load(x_ptr + (row[:, None] + 4) * k + col[None, :], valid[None, :], other=0)
+        x5 = tl.load(x_ptr + (row[:, None] + 5) * k + col[None, :], valid[None, :], other=0)
+        acc0 = tl.fma(x0, weight, acc0)
+        acc1 = tl.fma(x1, weight, acc1)
+        acc2 = tl.fma(x2, weight, acc2)
+        acc3 = tl.fma(x3, weight, acc3)
+        acc4 = tl.fma(x4, weight, acc4)
+        acc5 = tl.fma(x5, weight, acc5)
+
+    bias = tl.load(bias_ptr + output_row) if has_bias else 0.0
+    tl.store(out_ptr + row * n + output_row, tl.sum(acc0, axis=1) + bias)
+    tl.store(out_ptr + (row + 1) * n + output_row, tl.sum(acc1, axis=1) + bias)
+    tl.store(out_ptr + (row + 2) * n + output_row, tl.sum(acc2, axis=1) + bias)
+    tl.store(out_ptr + (row + 3) * n + output_row, tl.sum(acc3, axis=1) + bias)
+    tl.store(out_ptr + (row + 4) * n + output_row, tl.sum(acc4, axis=1) + bias)
+    tl.store(out_ptr + (row + 5) * n + output_row, tl.sum(acc5, axis=1) + bias)
+
+
+@triton.jit
 def _linear_fp32_short(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, rows_ptr, out_ptr,
     n: tl.constexpr, output_n: tl.constexpr, k: tl.constexpr,
@@ -237,14 +300,20 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 num_warps=4,
             )
         else:
-            block_m = 1 if _staged_b1 else min(triton.next_power_of_2(m), 8)
-            _linear_fp32[(output_n, triton.cdiv(m, block_m))](
-                x2, weight.packed, weight.escapes, bias if bias is not None else x2,
-                rows if rows is not None else x2, out,
-                n, output_n, k, m, weight.exp_base, block_m, 256,
-                bias is not None, rows is not None,
-                num_warps=4,
-            )
+            if _staged_b1 and m == 6 and k > 512:
+                _linear_fp32_six_b1[(n,)](
+                    x2, weight.packed, weight.escapes, bias if bias is not None else x2,
+                    out, n, k, weight.exp_base, bias is not None, num_warps=4,
+                )
+            else:
+                block_m = 1 if _staged_b1 else min(triton.next_power_of_2(m), 8)
+                _linear_fp32[(output_n, triton.cdiv(m, block_m))](
+                    x2, weight.packed, weight.escapes, bias if bias is not None else x2,
+                    rows if rows is not None else x2, out,
+                    n, output_n, k, m, weight.exp_base, block_m, 256,
+                    bias is not None, rows is not None,
+                    num_warps=4,
+                )
     return out
 
 

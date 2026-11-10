@@ -149,15 +149,17 @@ def test_staged_b1_matches_independent_rows_and_torch(n, k):
         nf12.linear_staged_b1(torch.empty((9, k), device=device, dtype=torch.bfloat16), packed)
 
 
-def test_fp32_staged_b1_matches_independent_rows_and_torch():
+@pytest.mark.parametrize("n", [128, 384, 512, 5120])
+@pytest.mark.parametrize("m", [2, 6, 8])
+def test_fp32_staged_b1_matches_independent_rows_and_torch(n, m):
     device = _cuda()
-    generator = torch.Generator(device=device).manual_seed(859)
-    dense = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    generator = torch.Generator(device=device).manual_seed(859 + n + m)
+    dense = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
     dense[0, 0] = 2.0**10
     packed = nf12.encode(dense)
-    x = torch.randn((6, 5120), generator=generator, device=device) * 0.05
-    bias = torch.randn((384,), generator=generator, device=device) * 0.01
-    expected = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(6)])
+    x = torch.randn((m, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((n,), generator=generator, device=device) * 0.01
+    expected = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(m)])
     actual = nf12.linear_fp32_staged_b1(x, packed, bias)
     assert torch.equal(actual, expected)
     torch.testing.assert_close(actual, F.linear(x, dense.float(), bias), rtol=2e-3, atol=2e-3)
