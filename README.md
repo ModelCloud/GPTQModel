@@ -941,8 +941,8 @@ checkpoint rather than a dense weight.
 
 The [NF12 validation backend and performance flow](docs/nf12-validation-backends.md)
 explains device selection, native encoder measurements, and Torch fallback.
-The [NF12 bias epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype bias
-handling before output rounding.
+The [NF12 fallback epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype
+bias handling and BF16 weight-range preservation before output rounding.
 The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
 how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
