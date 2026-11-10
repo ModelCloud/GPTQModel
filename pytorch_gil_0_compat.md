@@ -125,7 +125,7 @@ results below for that build.
 
 | API | Result | Where we use it | Evidence and limit |
 |---|---|---|---|
-| `gptqmodel_nf12` encode/decode/linear/linear_fp32/embedding | SAFE (concurrent), NVIDIA CUDA | online BF16 weight preparation and inference | `scripts/gil0_api_probe.py --only gptqmodel_nf12.ops` passed four separate processes, each 8 threads × 4 iterations, on 2026-11-10 with Python 3.14.7 GIL disabled, PyTorch 2.15.0+cu132 and two NVIDIA PG506-230 SM80 GPUs. The probe prewarms JIT compilation, assigns worker devices explicitly, checks exact decoded/embedded values and both BF16/FP32 linear results, then synchronizes each worker stream. ROCm is explicitly unsupported by this CUDA package; GPT-QModel's separate HIP runtime remains its path. |
+| `gptqmodel_nf12` encode/decode/linear/linear_fp32/linear_bf16_fp32/embedding | SAFE (concurrent), NVIDIA CUDA | online BF16 weight preparation and inference | `scripts/gil0_api_probe.py --only gptqmodel_nf12.ops` passed four separate processes, each 8 threads × 4 iterations, on 2026-11-10 with Python 3.14.7 GIL disabled, PyTorch 2.15.0+cu132 and two NVIDIA PG506-230 SM80 GPUs. The probe prewarms JIT compilation, assigns worker devices explicitly, checks exact decoded/embedded values, BF16/FP32 linear results, and FP32 Tensor Core scores, then synchronizes each worker stream. ROCm is explicitly unsupported by this CUDA package; GPT-QModel's separate HIP runtime remains its path. |
 
 ## Tensor creation and elementwise ops
 

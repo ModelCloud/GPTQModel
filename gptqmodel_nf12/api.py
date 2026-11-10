@@ -147,6 +147,14 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None =
     return impl(x, weight, bias, rows)
 
 
+def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
+                     bias: torch.Tensor | None = None) -> torch.Tensor:
+    """BF16 activation and packed weight, with FP32 accumulation and output."""
+    from ._fp32 import linear_bf16_fp32 as impl
+
+    return impl(x, weight, bias)
+
+
 def embedding(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
     """Embedding lookup ``W[ids]`` (SPEC.md section 10): int32 or int64 ``ids`` of any shape -> bf16
     ``[*ids.shape, K]``, preserving the table values. IDs outside ``[0, N)`` give ``+0.0`` rows."""

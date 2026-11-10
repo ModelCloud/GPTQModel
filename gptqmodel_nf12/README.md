@@ -20,6 +20,7 @@ embeddings = nf12.embedding(token_ids, packed)
 bf16_logits = nf12.linear(bf16_hidden, packed)
 fp32_scores = nf12.linear_fp32(fp32_hidden, packed)
 shortlist = nf12.linear_fp32(fp32_hidden, packed, rows=selected_rows)
+markov_scores = nf12.linear_bf16_fp32(bf16_embedding, packed)
 ```
 
 `NF12Linear`, `NF12Embedding`, `encode_moe`, and `fused_moe` are also exported.
@@ -30,6 +31,8 @@ IDs and routing decisions must be qualified by each serving application before
 promotion. For larger batches `linear_fp32` decodes a temporary dense weight
 for the current cuBLAS call and releases it before returning. The test suite
 compares output and decisions against dense Torch oracles on SM80.
+`linear_bf16_fp32` keeps BF16 inputs exact while returning FP32 accumulations;
+its short-K multirow path uses packed Tensor Core tiles for Markov heads.
 
 The format currently covers matrices with aligned dimensions. Norm vectors,
 biases, and other one-dimensional checkpoint tensors are outside its scope.

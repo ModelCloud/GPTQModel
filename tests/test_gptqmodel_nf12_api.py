@@ -210,6 +210,31 @@ def test_full_markov_fp32_single_row_matches_dense_torch():
                        F.embedding(ids, weight).view(torch.int16))
 
 
+@pytest.mark.parametrize("m", [1, 5, 16])
+def test_full_markov_bf16_input_fp32_output_matches_dense_torch(m):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(1201 + m)
+    weight = (torch.randn((129280, 256), generator=generator, device=device) * 0.02).bfloat16()
+    weight[0, 0] = 2.0**10
+    weight[-1, -1] = -(2.0**-20)
+    x = (torch.randn((m, 256), generator=generator, device=device) * 0.05).bfloat16()
+    bias = (torch.randn((129280,), generator=generator, device=device) * 0.001).float()
+    packed = nf12.encode(weight)
+    assert packed.num_escapes > 0
+    actual = nf12.linear_bf16_fp32(x, packed, bias)
+    oracle = F.linear(x.float(), weight.float(), bias)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+    assert torch.equal(actual.argmax(-1), oracle.argmax(-1))
+    sample = torch.cat((torch.arange(0, 129280, 1024, device=device),
+                        torch.tensor([129279], device=device)))
+    fp64 = F.linear(x.double(), weight.index_select(0, sample).double(),
+                    bias.index_select(0, sample).double())
+    torch.testing.assert_close(actual.index_select(1, sample).double(), fp64,
+                               rtol=2e-5, atol=2e-6)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
 def test_shape_contract_rejects_non_matrix_bf16_weights():
     device = _cuda()
     with pytest.raises(ValueError, match="multiple of 16"):

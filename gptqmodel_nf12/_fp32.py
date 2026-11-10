@@ -116,6 +116,78 @@ def _linear_fp32_short(
     tl.store(out_ptr + input_row * output_n + output_rows, result, output_rows < output_n)
 
 
+@triton.jit
+def _linear_bf16_fp32_tc(
+    x_ptr, packed_ptr, escapes_ptr, bias_ptr, out_ptr,
+    n: tl.constexpr, k: tl.constexpr, m: tl.constexpr,
+    exp_base: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+    has_bias: tl.constexpr,
+):
+    """Decode a short-K output tile once for an FP32-accumulating BF16 MMA."""
+    output_rows = tl.program_id(0) * block_n + tl.arange(0, block_n)
+    input_rows = tl.program_id(1) * 16 + tl.arange(0, 16)
+    row_n = output_rows[:, None]
+    col = tl.arange(0, block_k)[None, :]
+    valid = (row_n < n) & (col < k)
+    packed_u32 = packed_ptr.to(tl.pointer_type(tl.uint32))
+    super_atom = ((row_n // 16) * (k // 64) + col // 64) * 1536
+    atom = (col % 64) // 16
+    lane = (row_n % 8) * 4 + ((col % 16) % 8) // 2
+    slot = ((row_n % 16) // 8) * 2 + ((col % 16) // 8) * 4 + col % 2
+    meta_offset = super_atom + 16 * lane + 4 * atom
+    low_offset = (super_atom + tl.where(atom < 2, 512, 1024)
+                  + 16 * lane + 8 * (atom % 2))
+    meta = tl.load(packed_u32 + meta_offset // 4, valid, other=0)
+    low0 = tl.load(packed_u32 + low_offset // 4, valid, other=0)
+    low1 = tl.load(packed_u32 + low_offset // 4 + 1, valid, other=0)
+    low = tl.where(slot < 4, low0 >> (8 * slot), low1 >> (8 * (slot - 4))) & 255
+    meta_byte = (meta >> (8 * (slot // 2))) & 255
+    high_even = (meta_byte & 0x87) + exp_base
+    high_odd = (((meta_byte << 1) & 0x80) | ((meta_byte >> 3) & 0x07)) + exp_base
+    high = tl.where(slot % 2 == 0, high_even, high_odd)
+    ordinary = (high << 8) | low
+    escaped = tl.load(escapes_ptr + low0 * 8 + slot,
+                      valid & (meta == 0), other=0).to(tl.uint16, bitcast=True)
+    bits = tl.where(meta == 0, escaped.to(tl.uint32), ordinary)
+    weight = (bits << 16).to(tl.float32, bitcast=True).to(tl.bfloat16)
+    activation = tl.load(x_ptr + input_rows[:, None] * k + col,
+                         (input_rows[:, None] < m) & (col < k), other=0)
+    result = tl.dot(activation, tl.trans(weight))
+    if has_bias:
+        result += tl.load(bias_ptr + output_rows, output_rows < n, other=0)[None, :]
+    tl.store(out_ptr + input_rows[:, None] * n + output_rows[None, :], result,
+             (input_rows[:, None] < m) & (output_rows[None, :] < n))
+
+
+def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
+                     bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Project BF16 activations from packed weights with FP32 output.
+
+    Short-K full heads use BF16 Tensor Cores with FP32 accumulation. Other
+    shapes use the general packed FP32 path without retaining a dense weight.
+    """
+    if not x.is_cuda or x.dtype != torch.bfloat16 or x.ndim < 1:
+        raise ValueError("gptqmodel_nf12.linear_bf16_fp32 needs a CUDA BF16 activation")
+    if x.shape[-1] != weight.shape[1] or x.device != weight.device:
+        raise ValueError("activation shape/device does not match NF12 weight")
+    n, k = weight.shape
+    if bias is not None and (bias.dtype != torch.float32 or bias.shape != (n,)
+                             or bias.device != x.device):
+        raise ValueError("bias must be FP32 [out_features] on the activation device")
+    x2 = x.contiguous().view(-1, k)
+    m = x2.shape[0]
+    if m <= 1 or k > 512 or n < 1024 or m > 16:
+        return linear_fp32(x.float(), weight, bias)
+    out = torch.empty((*x.shape[:-1], n), dtype=torch.float32, device=x.device)
+    if m:
+        _linear_bf16_fp32_tc[(triton.cdiv(n, 16), triton.cdiv(m, 16))](
+            x2, weight.packed, weight.escapes, bias if bias is not None else x2,
+            out, n, k, m, weight.exp_base, 16, triton.next_power_of_2(k),
+            bias is not None, num_warps=8,
+        )
+    return out
+
+
 def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 bias: torch.Tensor | None = None,
                 rows: torch.Tensor | None = None) -> torch.Tensor:

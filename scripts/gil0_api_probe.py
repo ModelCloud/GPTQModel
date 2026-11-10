@@ -196,6 +196,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                         nf12.linear_fp32(x, p)
                         nf12.linear(x.bfloat16(), p)
                         nf12.embedding(torch.tensor([0, 127], device="cuda"), p)
+                        short = nf12.encode(torch.full(
+                            (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
+                        nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
                 nf12_ready[0] = True
             if not hasattr(nf12_thread, "device"):
                 nf12_thread.device = nf12_next_device[0] % 2
@@ -209,10 +212,14 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         y_bf16 = nf12.linear(x.bfloat16(), p)
         y_fp32 = nf12.linear_fp32(x, p)
         gathered = nf12.embedding(ids, p)
+        short = nf12.encode(torch.full(
+            (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
+        y_mma_fp32 = nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
         torch.cuda.current_stream().synchronize()
         if not (torch.equal(restored, w)
                 and bool(torch.all(y_bf16 == 1))
                 and bool(torch.all(y_fp32 == 1))
+                and bool(torch.all(y_mma_fp32 == 0.5))
                 and bool(torch.all(gathered == 0.015625))):
             raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
         return True

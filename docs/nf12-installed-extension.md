@@ -32,6 +32,8 @@ projection. Large input batches use a call-local decode and cuBLAS projection;
 the temporary dense weight is released after that call. No path retains a
 dense weight between calls. `NF12Weight.narrow_rows`
 views a 16-row-aligned packed range and shares the original escape table.
+`linear_bf16_fp32` uses packed BF16 Tensor Core tiles with FP32 output for
+short-K multirow heads; its other shapes use the FP32 packed dispatch.
 
 ```mermaid
 flowchart LR
@@ -42,6 +44,7 @@ flowchart LR
     D -- "Integer IDs" --> F["Native nf12.embedding"]
     D -- "FP32 small-row projection" --> G["linear_fp32 packed Triton"]
     D -- "FP32 prefill projection" --> L["Temporary decode plus cuBLAS"]
+    D -- "BF16 input, FP32 score" --> M["Packed Tensor Core tile"]
     D -- "BF16 MoE" --> H["Native fused_moe"]
     A --> I{"N multiple 16 and K multiple 64?"}
     I -- no --> J["Encoding rejects shape"]
