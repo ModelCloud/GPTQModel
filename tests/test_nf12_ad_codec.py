@@ -192,6 +192,28 @@ def test_repr_handles_meta_and_unallocated_exponent_buffers():
     assert "exp_base=unavailable" in repr(unallocated)
 
 
+def test_forward_on_meta_returns_metadata_output():
+    """A meta module must answer forward without materializing any value.
+
+    Lazy-load and offload shells build quant-linear layers on the meta device.
+    Decoding or reading `exp_base` there raises `Tensor.item() cannot be
+    called on meta tensors`, so forward returns the shape/dtype-correct empty
+    output that the zero-row path already uses.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+
+    with torch.device("meta"):
+        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+    x = torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta")
+
+    out = linear(x)
+
+    assert out.shape == (2, 3, 16)
+    assert out.device.type == "meta"
+    assert out.dtype == torch.bfloat16
+    assert "weight" not in linear.state_dict()
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_pack_and_reload_preserve_source_bias_precision(dtype):
     from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
@@ -343,6 +365,129 @@ def test_linear_fallback_keeps_bf16_weight_range_for_fp16_input(
     ).to(torch.float16)
 
     assert torch.equal(linear(x), expected)
+
+
+_GPU_OR_CPU = [
+    pytest.param("cpu", id="cpu"),
+    pytest.param(
+        "cuda",
+        id="cuda",
+        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required"),
+    ),
+]
+
+
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
+@pytest.mark.parametrize(
+    ("weight_value", "activation_value"),
+    [
+        # A BF16 weight outside the FP16 range: narrowing it to the FP16
+        # activation dtype yields `inf`, although the exact product is 1.
+        (65536.0, 2.0**-16),
+        (-65536.0, 2.0**-16),
+        # A BF16 weight below the FP16 subnormal range would be flushed to 0.
+        (1.00117e-8, 10.0),
+        (99840.0, 0.064),
+    ],
+)
+def test_linear_fallback_preserves_bf16_weight_range(
+    device, weight_value, activation_value, monkeypatch
+):
+    """The decoded fallback must not narrow a BF16 weight to the FP16 range.
+
+    NF12-AD checkpoints are lossless BF16. Converting the decoded matrix to the
+    activation dtype before the product loses representable final results on
+    every accelerator, so the fallback multiplies wide and rounds the output
+    only once.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((256, 256), dtype=torch.bfloat16)
+    weight[0, 0] = weight_value
+    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.zeros((1, 256), dtype=torch.float16, device=device)
+    x[0, 0] = activation_value
+    oracle = (x.double() @ weight.double().to(device).t()).to(torch.float16)
+    assert torch.isfinite(oracle).all()
+
+    with torch.inference_mode():
+        first = linear(x)
+        repeated = linear(x)
+
+    assert first.dtype == torch.float16
+    assert first.shape == oracle.shape
+    assert torch.isfinite(first).all()
+    assert torch.equal(first, oracle)
+    assert torch.equal(first, repeated)
+    # The wide scratch is local to the forward; only packed weights persist.
+    assert "weight" not in linear.state_dict()
+    assert {"nf12_packed", "nf12_escapes", "nf12_exp_base"} <= set(linear.state_dict())
+
+
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
+def test_linear_fallback_rounds_only_the_final_bf16_output(device, monkeypatch):
+    """A BF16 activation keeps the BF16 weight range and the BF16 output dtype."""
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((64, 128), dtype=torch.bfloat16)
+    weight[0, 0] = 65536.0
+    weight[1, 1] = -65536.0
+    bias = torch.zeros(64, dtype=torch.bfloat16)
+    bias[0] = -65536.0
+    linear = NF12ADLinear(bits=12, in_features=128, out_features=64, bias=True)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.zeros((2, 3, 128), dtype=torch.bfloat16, device=device)
+    x[0, 0, 0] = 1.0
+    x[1, 2, 1] = 1.0
+    oracle = (
+        x.double() @ weight.double().to(device).t() + bias.double().to(device)
+    ).to(torch.bfloat16)
+
+    with torch.inference_mode():
+        actual = linear(x)
+
+    assert actual.dtype == torch.bfloat16
+    assert actual.shape == oracle.shape
+    assert torch.equal(actual, oracle)
+    assert "weight" not in linear.state_dict()
+
+
+@pytest.mark.parametrize("device", _GPU_OR_CPU)
+def test_linear_fallback_preserves_bf16_range_under_autocast(device, monkeypatch):
+    """Autocast must not narrow the wide fallback GEMM back to FP16.
+
+    CPU autocast narrows an FP32 matmul exactly like the CUDA path, so the
+    guard is required on every device that the wide branch can run on.
+    """
+    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+
+    weight = torch.zeros((256, 256), dtype=torch.bfloat16)
+    weight[0, 0] = 65536.0
+    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = linear.to(device)
+    monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
+
+    x = torch.zeros((1, 256), dtype=torch.float16, device=device)
+    x[0, 0] = 2.0**-16
+    oracle = (x.double() @ weight.double().to(device).t()).to(torch.float16)
+    with torch.autocast(device_type=device, dtype=torch.float16), torch.inference_mode():
+        actual = linear(x)
+
+    assert actual.dtype == torch.float16
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual, oracle)
+    assert "weight" not in linear.state_dict()
 
 
 @pytest.mark.parametrize(

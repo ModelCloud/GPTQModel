@@ -18,6 +18,7 @@ forwards.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -33,10 +34,16 @@ from ...utils import nf12_codec
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
-from ._numerics import linear_fp32_reduce
+from ._numerics import autocast_active, linear_fp32_reduce
 
 
 log = setup_logger()
+
+
+def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
+    """Whether every BF16 NF12-AD weight survives a cast to the activation dtype."""
+
+    return activation_dtype in (torch.bfloat16, torch.float32)
 
 
 def _hip_path(device: torch.device | str) -> bool:
@@ -372,6 +379,16 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             x = self._apply_rotation_to_input(x)
 
         bias = getattr(self, "bias", None)
+        if x.device.type == "meta":
+            # Metadata-only modules (lazy load, offload shells) have packed
+            # buffers with no values. There is nothing to decode or multiply,
+            # and materializing `exp_base` or a decoded matrix would raise on
+            # a meta tensor. Return the shape/dtype-correct empty output, the
+            # same contract as the zero-row path and other quant-linear layers.
+            out = self.empty_linear_output(x)
+            if self.adapter is not None:
+                out = self.adapter.apply(x=x, out=out)
+            return out
         if self.input_rows(x) == 0:
             out = self.empty_linear_output(x)
             if self.adapter is not None:
@@ -381,23 +398,41 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         out = self._native_forward(x, bias)
         if out is None:
             # Bounded scratch: the decoded matrix lives only for this forward.
-            # On CPU, decode and multiply wide so a BF16 checkpoint value that
-            # cannot be represented as the FP16 activation dtype is not lost
-            # before the product is rounded.
+            # NF12-AD checkpoints store BF16, whose range is far wider than
+            # FP16. Narrowing the decoded weight to an FP16 activation dtype
+            # before the product turns a finite BF16 value (for example 65536)
+            # into `inf`, and flushes values below the FP16 subnormal range to
+            # zero. Multiply wide whenever the activation dtype cannot hold
+            # every BF16 weight exactly, and round only the final output.
             compute_dtype = (
                 torch.float32
-                if x.device.type == "cpu" or (bias is not None and bias.dtype != x.dtype)
+                if (
+                    x.device.type == "cpu"
+                    or not _weight_dtype_is_lossless(x.dtype)
+                    or (bias is not None and bias.dtype != x.dtype)
+                )
                 else x.dtype
             )
             weight = self.dequantize_weight(device=x.device, dtype=compute_dtype)
             if compute_dtype == torch.float32:
                 out_shape = x.shape[:-1] + (self.out_features,)
-                out = torch.mm(
-                    x.reshape(-1, x.shape[-1]).float(),
-                    weight.t(),
+                # Autocast would narrow this wide GEMM back to the autocast
+                # dtype and lose the weight range this branch exists to
+                # preserve. CPU autocast narrows an FP32 matmul just like the
+                # CUDA path, so the guard covers every device, not only
+                # accelerators.
+                autocast = (
+                    torch.autocast(device_type=x.device.type, enabled=False)
+                    if autocast_active(x.device.type)
+                    else nullcontext()
                 )
-                if bias is not None:
-                    out = out + bias.float()
+                with autocast:
+                    out = torch.mm(
+                        x.reshape(-1, x.shape[-1]).float(),
+                        weight.t(),
+                    )
+                    if bias is not None:
+                        out = out + bias.float()
                 out = out.to(x.dtype).reshape(out_shape)
             else:
                 out = linear_fp32_reduce(x, weight, bias)

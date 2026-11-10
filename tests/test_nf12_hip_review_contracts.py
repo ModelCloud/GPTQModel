@@ -38,8 +38,8 @@ def native():
     lib.nf12_ad_moe_silu_mul.restype = C.c_int
     lib.nf12_ad_moe_combine.argtypes = [p, i, i, i, i, p, i, p]
     lib.nf12_ad_moe_combine.restype = C.c_int
-    lib.nf12_ad_linear_wmma_workspace_bytes.argtypes = [i, i, i]
-    lib.nf12_ad_linear_wmma_workspace_bytes.restype = C.c_size_t
+    lib.nf12_ad_wmma_workspace_bytes.argtypes = [i, i, i]
+    lib.nf12_ad_wmma_workspace_bytes.restype = C.c_size_t
     lib.nf12_ad_linear_wmma_bf16t.argtypes = [p, p, p, i, i, i, p, p, C.c_size_t, p]
     lib.nf12_ad_linear_wmma_bf16t.restype = C.c_int
     return hip, lib
@@ -68,7 +68,7 @@ def test_bf16t_wmma_matches_nf12_split_k_plans(native, n, k, m):
     hip, lib = native
     if lib.nf12_ad_wmma_supported(m) == 0:
         pytest.skip(f"WMMA path unavailable for m={m}")
-    workspace_bytes = lib.nf12_ad_linear_wmma_workspace_bytes(n, k, m)
+    workspace_bytes = lib.nf12_ad_wmma_workspace_bytes(n, k, m)
     assert workspace_bytes > 0
 
     torch.manual_seed(m)
