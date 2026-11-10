@@ -419,9 +419,16 @@ class StageInputsCapture:
         finally:
             if cache_forward_pb is not None:
                 cache_forward_pb.close()
-
-        self.gptq_model.pre_quantize_generate_hook_end()
-        handle.remove()
+            # Cleanup must run on every exit path, not only a successful capture.
+            # `pre_quantize_generate_hook_start` materializes the multimodal
+            # modules onto the forward device and this stage registers a
+            # first-layer pre-hook; leaking either leaves the model mutated for
+            # the rest of the quantization run. The handle removal is nested so
+            # a failing model-specific release still detaches the hook.
+            try:
+                self.gptq_model.pre_quantize_generate_hook_end()
+            finally:
+                handle.remove()
 
         result = InputCache(
             layer_inputs=layer_inputs,

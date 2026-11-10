@@ -210,9 +210,360 @@ def test_hook_round_trip_on_real_ernie4_5_vl_moe(tmp_path, offload_to_disk):
     definition.pre_quantize_generate_hook_end()
 
     # The layout resolver and the register names must agree after cleanup; this
-    # is the exact contract the input-capture finally-block depends on.
+    # is the exact contract the input-capture cleanup relies on.
     assert Ernie4_5_VLMoeQModel._resolve_multimodal_layout(model) == ("model", core_model)
     assert core_model.vision_tower is vision_tower
     assert core_model.resampler_model is resampler_model
     # Cleanup only changes storage placement, never checkpoint ownership.
     assert set(model.state_dict().keys()) == owned_keys_before
+
+
+def test_hook_start_uses_shell_materialize_when_lazy_loading():
+    """The lazy/turtle path must materialize by name through the shell helper.
+
+    `_materialize_module` only takes the plain `move_to` shortcut when the
+    instance has no `_turtle_lock`. A loaded wrapper always has it, so the
+    hook start has to route through `shell_module_materialize` and register the
+    returned module under the same attribute name.
+    """
+
+    definition = _definition(offload_to_disk=False)
+    # `_turtle_lock` is what selects the shell-materialize branch.
+    definition._turtle_lock = object()
+
+    calls = []
+
+    def _fake_shell_materialize(target_submodule, device, **kwargs):
+        calls.append((target_submodule, device))
+        return target_submodule
+
+    definition.shell_module_materialize = _fake_shell_materialize
+    core_model = definition.model.model
+
+    definition.pre_quantize_generate_hook_start()
+
+    assert len(calls) == 4, "hook start must route all four modules through shell_module_materialize"
+    assert all(device == torch.device("cpu") for _, device in calls)
+    # Modules, not attribute names, are handed to the shell helper.
+    assert all(isinstance(module, nn.Module) for module, _ in calls)
+    # Registration survived the shell round trip, under the original names.
+    assert isinstance(core_model.vision_tower, nn.Linear)
+    assert isinstance(core_model.resampler_model, nn.Linear)
+    assert isinstance(core_model.language_model.embed_tokens, nn.Embedding)
+    assert isinstance(core_model.language_model.rotary_emb, nn.Linear)
+
+
+def test_hook_end_releases_by_name_when_lazy_loading():
+    """Cleanup stays a CPU release on the lazy path; it must not re-register."""
+
+    definition = _definition(offload_to_disk=False)
+    definition._turtle_lock = object()
+
+    def _fail_shell_materialize(*args, **kwargs):  # pragma: no cover - guard
+        raise AssertionError("hook end must not materialize; it releases")
+
+    definition.shell_module_materialize = _fail_shell_materialize
+    core_model = definition.model.model
+    vision_tower = core_model.vision_tower
+    resampler_model = core_model.resampler_model
+
+    definition.pre_quantize_generate_hook_end()
+
+    assert core_model.vision_tower is vision_tower
+    assert core_model.resampler_model is resampler_model
+    assert core_model.vision_tower.weight.device.type == "cpu"
+    assert core_model.resampler_model.weight.device.type == "cpu"
+
+
+def test_capture_cleanup_runs_when_forward_raises(monkeypatch):
+    """`cache_inputs` must release capture state even when the forward fails.
+
+    The generate hooks materialize modules onto the forward device and the
+    first-layer pre-hook is registered before the calibration loop. If the
+    forward raises, a cleanup that sits *after* the try/finally (rather than
+    inside it) is skipped, leaving the model mutated and the pre-hook attached
+    for the rest of the run.
+    """
+
+    import types
+
+    from gptqmodel.looper import stage_inputs_capture as capture_mod
+    from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
+    from gptqmodel.models.base import BaseQModel
+
+    events = []
+
+    class _ExplodingModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hooked_layer = nn.Linear(4, 4)
+            self.hooked_layer.full_name = "test_layer"
+            self.config = types.SimpleNamespace(model_type="test")
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            raise RuntimeError("calibration forward failed")
+
+    model = _ExplodingModel()
+
+    class _FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
+        run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
+
+        def __init__(self):
+            self.quantize_config = types.SimpleNamespace(
+                device=torch.device("cpu"),
+                calibration_data_device=torch.device("cpu"),
+                compute_device_filter=None,
+            )
+            self.model = model
+            self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
+            self.ATTENTION_MASKS_DTYPE = torch.long
+            self.INPUT_EMBEDDING_EXTRA_ARGS = None
+            self.quant_region_timer = None
+
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del device, kwargs
+            return target_submodule
+
+        def get_base_modules(self, model):
+            del model
+            return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            del model
+            return []
+
+        def pre_quantize_generate_hook_start(self):
+            events.append("hook_start")
+
+        def pre_quantize_generate_hook_end(self):
+            events.append("hook_end")
+
+    class _Looper:
+        def __init__(self, gptq_model):
+            self.gptq_model = gptq_model
+
+        def _batch_row_count(self, batch_inputs):
+            del batch_inputs
+            return 1
+
+    class _NullCM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(capture_mod, "DEVICE_THREAD_POOL", types.SimpleNamespace(read_lock=lambda d: _NullCM()))
+    monkeypatch.setattr(capture_mod, "ctx", lambda *cms: _NullCM())
+    monkeypatch.setattr(capture_mod, "device_ctx", lambda device: _NullCM())
+    monkeypatch.setattr(capture_mod, "await_torch_linear_prewarm", lambda *a, **k: None)
+
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def debug(self, *a, **k):
+            pass
+
+        def warn(self, *a, **k):
+            pass
+
+        def pb(self, *a, **k):
+            class _Bar:
+                def manual(self):
+                    return self
+
+                def set(self, **kw):
+                    return self
+
+                def title(self, *a):
+                    return self
+
+                def subtitle(self, *a):
+                    return self
+
+                def draw(self):
+                    return self
+
+                def close(self):
+                    pass
+
+            return _Bar()
+
+    capture = StageInputsCapture(_Looper(_FakeGPTQModel()), logger=_Logger())
+    calibration_data = [{"input_ids": torch.randint(0, 10, (1, 4))}]
+
+    handle_removed = {"count": 0}
+    real_register = nn.Module.register_forward_pre_hook
+
+    class _TrackedHandle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def remove(self):
+            handle_removed["count"] += 1
+            return self._inner.remove()
+
+    def _tracking_register(self, hook, with_kwargs=False):
+        return _TrackedHandle(real_register(self, hook, with_kwargs=with_kwargs))
+
+    monkeypatch.setattr(nn.Module, "register_forward_pre_hook", _tracking_register, raising=False)
+
+    with pytest.raises(RuntimeError, match="calibration forward failed"):
+        capture.cache_inputs(
+            layers=[model.hooked_layer],
+            calibration_data=calibration_data,
+            use_cache=False,
+        )
+
+    # Cleanup ran on the exception path, in order, and released the pre-hook.
+    assert events == ["hook_start", "hook_end"]
+    assert handle_removed["count"] == 1
+
+
+def test_capture_removes_hook_even_when_release_raises(monkeypatch):
+    """A failing generate-hook cleanup must still detach the capture pre-hook."""
+
+    import types
+
+    from gptqmodel.looper import stage_inputs_capture as capture_mod
+    from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
+    from gptqmodel.models.base import BaseQModel
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hooked_layer = nn.Linear(4, 4)
+            self.hooked_layer.full_name = "test_layer"
+            self.config = types.SimpleNamespace(model_type="test")
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            return None
+
+    model = _Model()
+    removed = {"count": 0}
+
+    class _FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
+        run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
+
+        def __init__(self):
+            self.quantize_config = types.SimpleNamespace(
+                device=torch.device("cpu"),
+                calibration_data_device=torch.device("cpu"),
+                compute_device_filter=None,
+            )
+            self.model = model
+            self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
+            self.ATTENTION_MASKS_DTYPE = torch.long
+            self.INPUT_EMBEDDING_EXTRA_ARGS = None
+            self.quant_region_timer = None
+
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del device, kwargs
+            return target_submodule
+
+        def get_base_modules(self, model):
+            del model
+            return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            del model
+            return []
+
+        def pre_quantize_generate_hook_start(self):
+            pass
+
+        def pre_quantize_generate_hook_end(self):
+            raise RuntimeError("release failed")
+
+    class _Looper:
+        def __init__(self, gptq_model):
+            self.gptq_model = gptq_model
+
+        def _batch_row_count(self, batch_inputs):
+            del batch_inputs
+            return 1
+
+    class _NullCM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(capture_mod, "DEVICE_THREAD_POOL", types.SimpleNamespace(read_lock=lambda d: _NullCM()))
+    monkeypatch.setattr(capture_mod, "ctx", lambda *cms: _NullCM())
+    monkeypatch.setattr(capture_mod, "device_ctx", lambda device: _NullCM())
+    monkeypatch.setattr(capture_mod, "await_torch_linear_prewarm", lambda *a, **k: None)
+
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def debug(self, *a, **k):
+            pass
+
+        def warn(self, *a, **k):
+            pass
+
+        def pb(self, *a, **k):
+            class _Bar:
+                def manual(self):
+                    return self
+
+                def set(self, **kw):
+                    return self
+
+                def title(self, *a):
+                    return self
+
+                def subtitle(self, *a):
+                    return self
+
+                def draw(self):
+                    return self
+
+                def close(self):
+                    pass
+
+            return _Bar()
+
+    capture = StageInputsCapture(_Looper(_FakeGPTQModel()), logger=_Logger())
+
+    real_register = nn.Module.register_forward_pre_hook
+
+    class _TrackedHandle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def remove(self):
+            removed["count"] += 1
+            return self._inner.remove()
+
+    def _tracking_register(self, hook, with_kwargs=False):
+        return _TrackedHandle(real_register(self, hook, with_kwargs=with_kwargs))
+
+    monkeypatch.setattr(nn.Module, "register_forward_pre_hook", _tracking_register, raising=False)
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        capture.cache_inputs(
+            layers=[model.hooked_layer],
+            calibration_data=[{"input_ids": torch.randint(0, 10, (1, 4))}],
+            use_cache=False,
+        )
+
+    assert removed["count"] == 1
