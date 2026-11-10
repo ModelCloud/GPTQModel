@@ -13,6 +13,8 @@ reduction rejects a 32-bit mask on wave32 RDNA4).
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -40,38 +42,86 @@ def test_native_awq_gemv_kernels_declare_cuda_only():
         assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES, cls.__name__
 
 
+def _legal_awq_gemv_shape(cls, in_features=128, out_features=128):
+    """Return an input/output width pair the native kernel can actually launch.
+
+    ``AwqGEMVLinear``/``LLMAwqLinear`` require ``out_features`` divisible by 64
+    and ``AwqGEMVFastLinear`` requires 128, so a shared case must satisfy every
+    kernel's ``SUPPORTS_OUT_FEATURES_DIVISIBLE_BY``. Device-family validation is
+    what these tests assert; an illegal shape would reject for the wrong reason.
+    """
+    out_align = 1
+    for value in cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY:
+        out_align = out_align * value // math.gcd(out_align, value)
+    in_align = 1
+    for value in cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY:
+        in_align = in_align * value // math.gcd(in_align, value)
+    return (
+        in_features + (-in_features % in_align),
+        out_features + (-out_features % out_align),
+    )
+
+
 def test_native_awq_gemv_validate_rejects_rocm_placement():
     # The device family check is what the AUTO selector and the loader consult.
     for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
+        in_features, out_features = _legal_awq_gemv_shape(cls)
         ok, error = cls.validate(
             bits=4,
             group_size=128,
             desc_act=False,
             sym=True,
-            in_features=128,
-            out_features=64,
+            in_features=in_features,
+            out_features=out_features,
             pack_dtype=cls.SUPPORTS_PACK_DTYPES[0],
             device=DEVICE.ROCM,
         )
         assert ok is False, cls.__name__
         assert isinstance(error, NotImplementedError), cls.__name__
+        # The rejection must be the device family, not a shape guard.
+        assert "out_features" not in str(error), cls.__name__
 
 
 def test_native_awq_gemv_validate_still_accepts_cuda(monkeypatch):
     # Test the NVIDIA contract even when this suite runs on a HIP host.
     monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", False)
     for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
+        in_features, out_features = _legal_awq_gemv_shape(cls)
         ok, error = cls.validate(
             bits=4,
             group_size=128,
             desc_act=False,
             sym=True,
-            in_features=128,
-            out_features=64,
+            in_features=in_features,
+            out_features=out_features,
             pack_dtype=cls.SUPPORTS_PACK_DTYPES[0],
             device=DEVICE.CUDA,
         )
         assert ok and error is None, cls.__name__
+
+
+def test_native_awq_gemv_validate_rejects_unaligned_out_features(monkeypatch):
+    # A legal device with an illegal width must still be refused, and the error
+    # must name the shape guard so callers can tell it apart from the device
+    # family rejection above. ``64`` is legal for the GEMV kernel whose tile is
+    # 64, so pick the largest value below each kernel's own alignment.
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", False)
+    for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
+        in_features, _ = _legal_awq_gemv_shape(cls)
+        alignment = math.lcm(*cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY)
+        ok, error = cls.validate(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            in_features=in_features,
+            out_features=alignment - 1,
+            pack_dtype=cls.SUPPORTS_PACK_DTYPES[0],
+            device=DEVICE.CUDA,
+        )
+        assert ok is False, cls.__name__
+        assert isinstance(error, NotImplementedError), cls.__name__
+        assert "out_features" in str(error), cls.__name__
 
 
 def test_native_awq_gemv_refusal_message_is_actionable():

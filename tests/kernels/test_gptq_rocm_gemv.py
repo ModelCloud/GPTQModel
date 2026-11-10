@@ -100,7 +100,8 @@ def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
     Decodes the packed codes with Torch integer shifts and accumulates in FP64.
     The dequantized weights are rounded to the activation dtype first, which is
     the arithmetic the reference Torch and Triton dequant paths both specify.
-    The returned tensor excludes bias.
+    The returned tensor excludes bias; the caller applies the module's fused
+    bias epilogue at FP64 before comparing visible outputs.
     """
     pack_factor = 32 // module.bits
     maxq = (1 << module.bits) - 1
@@ -180,23 +181,32 @@ def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
     torch.testing.assert_close(raw, accumulation.float(), rtol=2e-3, atol=2e-3)
     assert drift.max().item() <= 1e-3, f"FP32 accumulation drift {drift.max().item():.3e} exceeds 1e-3"
 
-    # The visible output must be the module's own rounded matmul plus bias. The bias add
-    # rounds in the activation dtype, so this is checked structurally rather than by a
-    # blanket relative tolerance (one bf16 ULP is already 0.5% near 1.5).
-    raw_rounded = raw.to(dtype)
-    accumulation_rounded = accumulation.to(dtype)
-    expected_visible = raw_rounded + module.bias if module.bias is not None else raw_rounded
-    assert torch.equal(visible, expected_visible), "visible output is not round(matmul) + bias"
+    # These oracle cases pin the fused M=1 kernel; a fallback would use a
+    # different epilogue expression and must not be silently accepted here.
+    assert module._can_use_rocm_gemv(x), "oracle case did not dispatch the fused GEMV"
 
-    # Visible accuracy: each remaining difference between the kernel's rounded result and
-    # the FP64 oracle's rounded result is adjudicated. It is accepted only when the FP64
-    # and FP32 accumulations straddle the rounding boundary, i.e. the FP32 accumulation
-    # error is at least the distance from that boundary.
-    differs = raw_rounded != accumulation_rounded
+    # The visible output is one rounding of the fused epilogue, not
+    # ``round(matmul) + bias``: the bias is added to the FP32 partial sum before
+    # the store, so it participates in rounding instead of being added afterwards
+    # in the activation dtype. The visible add also rounds in the activation
+    # dtype, so this is checked structurally rather than by a blanket relative
+    # tolerance (one bf16 ULP is already 0.5% near 1.5).
+    bias = module.bias
+    wide_kernel = raw if bias is None else raw + bias.float()
+    expected_visible = wide_kernel.to(dtype)
+    assert torch.equal(visible, expected_visible), "visible output is not round(matmul + bias)"
+
+    # Visible accuracy: the FP64 oracle applies the same fused-bias epilogue, so
+    # each remaining difference is adjudicated. It is accepted only when the FP64
+    # and FP32 fused accumulations straddle the rounding boundary, i.e. the FP32
+    # accumulation error is at least the distance from that boundary.
+    wide_reference = accumulation if bias is None else accumulation + bias.double()
+    reference_rounded = wide_reference.to(dtype)
+    differs = visible != reference_rounded
     if differs.any():
-        midpoint = (raw_rounded.double() + accumulation_rounded.double()) / 2
-        boundary_distance = (accumulation - midpoint).abs()
-        accumulation_error = (raw.double() - accumulation).abs()
+        midpoint = (visible.double() + reference_rounded.double()) / 2
+        boundary_distance = (wide_reference - midpoint).abs()
+        accumulation_error = (wide_kernel.double() - wide_reference).abs()
         unexplained = differs & (boundary_distance > accumulation_error)
         assert not unexplained.any(), (
             f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "

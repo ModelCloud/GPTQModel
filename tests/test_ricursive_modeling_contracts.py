@@ -6,6 +6,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+import transformers
 from ricursive_test_utils import compatibility_module, make_model
 
 
@@ -85,8 +86,46 @@ def test_default_cache_bounds_sliding_layers():
     out = model(torch.arange(3, 23).unsqueeze(0), use_cache=True)
     cache = out.past_key_values
     assert cache.get_seq_length() == 20
-    assert cache.layers[0].keys.shape[-2] <= model.config.sliding_window
-    assert cache.layers[1].keys.shape[-2] == 20
+    if transformers.__version__.split(".", 1)[0] == "4":
+        # Transformers 4 cannot crop a configured sliding layer after it has
+        # seen more tokens than its window, so the default must stay a plain
+        # full cache that assisted decoding and rollback can crop.
+        assert all(layer.keys.shape[-2] == 20 for layer in cache.layers)
+        cache.crop(5)
+        assert cache.get_seq_length() == 5
+    else:
+        assert cache.layers[0].keys.shape[-2] <= model.config.sliding_window
+        assert cache.layers[1].keys.shape[-2] == 20
+
+
+@torch.inference_mode()
+def test_assisted_decoding_reuses_default_cache_after_window():
+    """A cache returned by a direct forward must survive assisted decoding.
+
+    Constructing an explicit full cache here would hide the Transformers 4
+    regression: the model's own default previously built a hybrid cache whose
+    sliding layers cannot be cropped once they pass the window.
+    """
+    model = make_model(
+        vocab_size=97,
+        num_hidden_layers=5,
+        layer_types=["sliding_attention"] * 4 + ["full_attention"],
+        sliding_window=8,
+        eos_token_id=96,
+    )
+    ids = torch.tensor([[3, 4, 5] * 4])
+    cache = model(ids[:, :10], use_cache=True).past_key_values
+    assert int(cache.get_seq_length()) == 10
+    options = {
+        "attention_mask": torch.ones_like(ids),
+        "max_new_tokens": 5,
+        "do_sample": False,
+        "eos_token_id": 96,
+        "suppress_tokens": [96],
+    }
+    expected = model.generate(ids, **options)
+    actual = model.generate(ids, past_key_values=cache, prompt_lookup_num_tokens=3, **options)
+    assert torch.equal(actual, expected)
 
 
 @torch.inference_mode()

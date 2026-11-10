@@ -531,6 +531,13 @@ std::map<std::tuple<int64_t, int64_t, int64_t, int>, SmallMConfig> g_choices;
 // Memoized per (m, n, k, device): the SM8x search spans ~90 configs and
 // their slice choices.
 SmallMConfig small_m_heuristic(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
+  // The 124-SM Ampere compressor decode benefits from five K ranks and eight
+  // in-CTA K parts; the generic SM80 model was fitted on a 74-SM card.
+  if (dev.sm_arch == 80 && dev.num_sms >= 120 && m == 6 && n == 512 && k == 5120) {
+    SmallMConfig tuned{1, 16, 5, 0, 8};
+    tuned.slice = heuristic_slice(tuned, m, n, k, dev);
+    if (tuned.slice >= 0 && small_m_config_supported(tuned, m, n, k, dev)) return tuned;
+  }
   const auto key = std::make_tuple(m, n, k, dev.device);
   {
     std::lock_guard<std::mutex> lock(g_choice_mu);

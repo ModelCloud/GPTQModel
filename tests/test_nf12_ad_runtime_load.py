@@ -1,48 +1,44 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Installed NF12 package checks before accepting its Torch operators."""
+"""The legacy GPTQModel NF12 shim delegates to the vendored runtime."""
 
-import sys
-from types import ModuleType, SimpleNamespace
+import importlib.util
+from pathlib import Path
 
 import pytest
+import torch
 
 
-@pytest.mark.parametrize("available_ops", [(), ("encode",), ("encode", "decode")])
-def test_installed_nf12_requires_all_runtime_operators(monkeypatch, available_ops):
-    from gptqmodel.utils import nf12_ad
-
-    package = ModuleType("nf12")
-    package.__file__ = "/tmp/incompatible-nf12-package/__init__.py"
-    package.load = lambda: None
-    monkeypatch.setitem(sys.modules, "nf12", package)
-    namespace = SimpleNamespace(**{name: lambda: None for name in available_ops})
-    monkeypatch.setattr(nf12_ad, "torch", SimpleNamespace(ops=SimpleNamespace(nf12=namespace)))
-
-    assert nf12_ad._load_installed() is False
+@pytest.fixture
+def nf12_ad():
+    # Exercise the shim without importing the full quantization framework;
+    # its optional transformer dependencies are unrelated to this dispatch.
+    path = Path(__file__).resolve().parents[1] / "gptqmodel/utils/nf12_ad.py"
+    spec = importlib.util.spec_from_file_location("_test_gptqmodel_nf12_ad", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_installed_nf12_accepts_complete_runtime_operators(monkeypatch):
-    from gptqmodel.utils import nf12_ad
+def test_legacy_runtime_loads_vendored_package(monkeypatch, nf12_ad):
 
-    package = ModuleType("nf12")
-    package.__file__ = "/tmp/compatible-nf12-package/__init__.py"
-    package.load = lambda: None
-    monkeypatch.setitem(sys.modules, "nf12", package)
-    namespace = SimpleNamespace(encode=lambda: None, decode=lambda: None, linear=lambda: None)
-    monkeypatch.setattr(nf12_ad, "torch", SimpleNamespace(ops=SimpleNamespace(nf12=namespace)))
-
-    assert nf12_ad._load_installed() is True
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(nf12_ad.gptqmodel_nf12, "load", lambda: calls.append("load"))
+    assert nf12_ad.load()
+    assert calls == ["load"]
+    assert nf12_ad.last_error() is None
 
 
-def test_installed_nf12_rejects_noncallable_operator(monkeypatch):
-    from gptqmodel.utils import nf12_ad
+def test_legacy_runtime_reports_vendored_load_error(monkeypatch, nf12_ad):
 
-    package = ModuleType("nf12")
-    package.__file__ = "/tmp/incompatible-nf12-package/__init__.py"
-    package.load = lambda: None
-    monkeypatch.setitem(sys.modules, "nf12", package)
-    namespace = SimpleNamespace(encode=lambda: None, decode=object(), linear=lambda: None)
-    monkeypatch.setattr(nf12_ad, "torch", SimpleNamespace(ops=SimpleNamespace(nf12=namespace)))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
-    assert nf12_ad._load_installed() is False
+    def fail():
+        raise RuntimeError("vendored build failed")
+
+    monkeypatch.setattr(nf12_ad.gptqmodel_nf12, "load", fail)
+    assert not nf12_ad.load()
+    assert "vendored build failed" in nf12_ad.last_error()
+    with pytest.raises(RuntimeError, match="vendored build failed"):
+        nf12_ad.encode(torch.empty((16, 64), dtype=torch.bfloat16))
