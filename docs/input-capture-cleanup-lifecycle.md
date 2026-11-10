@@ -45,15 +45,17 @@ flowchart TD
     H -- "no" --> I
     I --> J
     J --> K["finally"]
-    K --> L["close progress bar"]
-    L --> M{"capture already raised?"}
-    M -- "no" --> N["pre_quantize_generate_hook_end()"]
-    M -- "yes" --> O["try pre_quantize_generate_hook_end()<br/>log a failure instead of masking"]
-    N --> P["finally: handle.remove()"]
-    O --> P
-    P --> Q{"capture raised?"}
-    Q -- "yes" --> R["re-raise the capture error"]
-    Q -- "no" --> S["build InputCache and return"]
+    K --> L["try: close progress bar"]
+    L --> M["finally"]
+    M --> N{"capture_failed?"}
+    N -- "no" --> O["pre_quantize_generate_hook_end()<br/>a release error propagates"]
+    N -- "yes" --> P["try pre_quantize_generate_hook_end()<br/>log a release error instead of masking"]
+    O --> Q["finally: handle.remove()"]
+    P --> Q
+    Q --> R{"anything still propagating?"}
+    R -- "capture_failed" --> S["re-raise the capture error"]
+    R -- "renderer or release only" --> T["re-raise that error"]
+    R -- "no" --> U["build InputCache and return"]
 ```
 
 Both mutations are acquired inside the same `try`: the pre-hook handle is
