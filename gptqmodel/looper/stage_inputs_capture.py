@@ -440,9 +440,21 @@ class StageInputsCapture:
             # Closing the progress bar is cosmetic; releasing the model state is
             # not. Do not let a failing renderer skip the cleanup below, which is
             # the only thing that un-mutates the model and detaches the pre-hook.
+            # A renderer error also follows the same precedence as a release
+            # error: it propagates when nothing else is in flight, but is logged
+            # instead of masking a capture error that is already unwinding.
             try:
                 if cache_forward_pb is not None:
                     cache_forward_pb.close()
+            except Exception:
+                # Deliberately not `BaseException`: an interrupt must stay
+                # interruptible even while a capture error is unwinding.
+                if not capture_failed:
+                    raise
+                self.logger.warn(
+                    "cache_inputs() progress-bar close failed during capture cleanup; "
+                    "re-raising the original capture error:\n" + traceback.format_exc()
+                )
             finally:
                 # Cleanup must run on every exit path, not only a successful
                 # capture: a calibration forward can raise for ordinary reasons.
