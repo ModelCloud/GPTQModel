@@ -557,7 +557,7 @@ class QQQTorchLinear(QQQLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -565,6 +565,21 @@ class QQQTorchLinear(QQQLinear):
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "qqq"
+
+    @classmethod
+    def validate_device(cls, device: DEVICE | torch.device):
+        # The portable path has no CUDA-only Marlin requirement; it must not
+        # inherit the native QQQ kernel's ROCm rejection.
+        if IS_ROCM:
+            return
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
+            targets = (
+                (device,)
+                if isinstance(device, torch.device)
+                else tuple(torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count()))
+            )
+            if not targets or any(torch.cuda.get_device_capability(target)[0] < 8 for target in targets):
+                raise NotImplementedError("QQQ portable kernel only supports compute capability >= 8.0 on NVIDIA.")
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)

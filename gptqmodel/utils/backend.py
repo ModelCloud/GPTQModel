@@ -23,6 +23,7 @@ class BACKEND(str, Enum):
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_TORCH_CPU_AVX512 = "gptq_torch_cpu_avx512"  # CPU AVX512-BF16 GPTQ kernel ported from HF kernels
+    GPTQ_TTXLA = "gptq_ttxla"  # Packed GPTQ through Torch/XLA on Tenstorrent PJRT
 
     # AllSpark kernels
     # A single backend covers both AllSpark sub-kernels. The quantization method

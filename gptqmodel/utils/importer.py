@@ -26,7 +26,7 @@ from ..utils.logger import setup_logger
 from . import BACKEND
 from .backend import normalize_backend
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
+from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available, require_xla_runtime
 
 
 ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
@@ -328,13 +328,19 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
     target = targets[0]
     if isinstance(target, DEVICE):
         family = target
-    elif isinstance(target, torch.device) and target.index is None and target.type in {"cuda", "xpu", "npu"}:
+    elif isinstance(target, torch.device) and target.index is None and target.type in {"cuda", "xpu", "npu", "xla"}:
         family = _device_family(target)
     else:
         return target
 
-    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA):
         return family
+
+    if family == DEVICE.XLA:
+        count = int(require_xla_runtime().runtime.addressable_device_count())
+        devices = tuple(torch.device(f"xla:{index}") for index in range(count))
+        _validate_selector_device_families(devices)
+        return devices[0] if len(devices) == 1 else devices
 
     runtime_type = "cuda" if family == DEVICE.ROCM else family.type
     runtime = getattr(torch, runtime_type, None)
@@ -1131,6 +1137,8 @@ def auto_select_device(
             device = DEVICE.XPU
         elif HAS_NPU:
             device = DEVICE.NPU
+        elif is_xla_available():
+            device = DEVICE.XLA
         elif HAS_MPS:
             device = DEVICE.MPS
         else:

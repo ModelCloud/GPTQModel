@@ -106,6 +106,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
+from ..utils.torch import require_xla_runtime
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -428,6 +429,8 @@ def _layerwise_device_count(device) -> int:
         return torch.xpu.device_count()
     if family == DEVICE.NPU:
         return torch.npu.device_count()
+    if family == DEVICE.XLA:
+        return int(require_xla_runtime().runtime.addressable_device_count())
     return 1
 
 
@@ -450,6 +453,10 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
         if HAS_NPU:
             return [f"npu:{index}" for index in range(num_gpus)]
         raise RuntimeError("NPU is not available")
+    if family == DEVICE.XLA:
+        if int(require_xla_runtime().runtime.addressable_device_count()) >= num_gpus:
+            return [f"xla:{index}" for index in range(num_gpus)]
+        raise RuntimeError("XLA is not available")
     return ["cpu"] * num_gpus
 
 
@@ -469,7 +476,7 @@ def _external_runtime_device_kwargs(
 ) -> Dict[str, Union[str, int]]:
     device_family = selector_device_family(device) or DEVICE.CPU
     runtime_kwargs: Dict[str, Union[str, int]] = {"device": device_family.type}
-    if not requested_device_map or device_family not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU}:
+    if not requested_device_map or device_family not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA}:
         return runtime_kwargs
 
     targets = (

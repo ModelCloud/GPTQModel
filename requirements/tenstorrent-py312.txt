@@ -1,0 +1,52 @@
+# Validated Tenstorrent Blackhole p300c runtime for CPython 3.12.
+# Install with the companion script, which also supplies Tenstorrent's index:
+#
+#   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel checkout
+#
+# This file is intentionally not a project extra: pjrt-plugin-tt is not on
+# PyPI, and its CPU Torch 2.11 pin predates GPT-QModel's declared Torch floor.
+# GPT-QModel must therefore be installed into this isolated environment with
+# --no-deps after this manifest has pinned its runtime.
+
+accelerate==1.15.0
+click==8.3.1
+datasets==5.2.0
+defuser==0.0.29
+device-smi==0.5.7
+dill==0.4.1
+filelock==4.2.10
+jax==0.7.1
+jaxlib==0.7.1
+jinja2==3.1.6
+logbar==0.4.15
+maturin==1.16.0
+ninja==1.13.2
+numpy==1.26.4
+packaging==26.3
+pillow==13.0.0
+pjrt-plugin-tt==1.5.0.dev20260831000501
+protobuf==7.36.2
+pyluwen==0.10.0
+pypcre==0.6.4
+PyYAML==6.0.3
+pyarrow==26.0.1
+requests==2.34.2
+safetensors==0.8.0
+threadpoolctl==3.8.0
+tokenicer==0.0.14
+torch==2.11.0+cpu
+torchao==0.18.0
+torch-xla==2.9.0+gited8a445
+transformers==5.22.2
+tt-flash==4.2.0
+tt-lang==1.1.5.dev20260704+light
+tt-smi==6.8.1
+tt-tools-common==1.6.0
+tt-topology==1.2.20
+tt-umd==0.9.17
+xxhash==4.1.0
+
+# System packages, not installable by pip, are recorded in docs/tenstorrent.md:
+#   sfpi==7.69.0
+#   tenstorrent-dkms==2.12.0
+#   tenstorrent-tools==1.4.1

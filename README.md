@@ -234,6 +234,16 @@ derived cache invalidation follow the
 [kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
 contract.
 
+Tenstorrent Blackhole cards use an explicit `DEVICE.XLA` family and a packed
+4-bit `TTXLALinear` through Torch/XLA and the TT PJRT plugin. The
+[Tenstorrent XLA execution flow](docs/tenstorrent.md) documents the exact
+runtime pins, packed checkpoint conversion, supported failure contract, and the
+complete conversion policy for every registered GPTQ linear kernel. The
+[validated QuietBox inventory](hw/tenstorrent.md) records the four-card host,
+firmware, and hardware measurements. Tenstorrent runtime packages are installed
+from the pinned `requirements/tenstorrent-py312.txt` manifest because the PJRT
+plugin is not available from the default PyPI index.
+
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
 

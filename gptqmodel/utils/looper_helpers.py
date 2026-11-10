@@ -33,7 +33,7 @@ from ..utils.p2p import (
 )
 from ..utils.python import has_gil_disabled
 from ..utils.safe import ThreadSafe
-from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
+from ..utils.torch import CPU, HAS_NPU, all_torch_devices, torch_sync
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -450,7 +450,7 @@ def select_forward_devices(base_device: Optional[torch.device]) -> List[torch.de
     _add(base_device)
     base_type = devices[0].type
     if base_type in {"cuda", "xpu", "mps", "npu"}:
-        for dev in ALL_DEVICES:
+        for dev in all_torch_devices():
             if dev.type == base_type:
                 _add(dev)
     return devices
