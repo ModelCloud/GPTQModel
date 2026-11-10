@@ -18,6 +18,7 @@ forwards.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -33,10 +34,60 @@ from ...utils import nf12_codec
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
-from ._numerics import linear_fp32_reduce
+from ._numerics import autocast_active, linear_fp32_reduce
 
 
 log = setup_logger()
+
+
+def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
+    """Whether every BF16 NF12-AD weight survives a cast to the activation dtype.
+
+    ``float64`` is included even though :attr:`SUPPORTS_DTYPES` does not list it:
+    a caller that already holds float64 activations must not have the decoded
+    weight narrowed to float32 on an accelerator. CPU keeps its FP32 decode by
+    design (see `forward` and `test_linear_fallback_keeps_float64_activation_precision`).
+    """
+
+    return activation_dtype in (torch.bfloat16, torch.float32, torch.float64)
+
+
+def _autocast_enabled(device_type: str) -> bool:
+    """Whether autocast is active, tolerating backends without autocast support.
+
+    ``torch.is_autocast_enabled`` raises for a device type that the installed
+    build does not know (for example ``npu`` on a stock Torch). Such a backend
+    cannot hold an ambient autocast context, so report ``False`` rather than
+    failing the fallback for a module that declares every device family.
+    """
+
+    try:
+        return autocast_active(device_type)
+    except (RuntimeError, TypeError):
+        return False
+
+
+def _autocast_narrows_weight_range(
+    activation_dtype: torch.dtype, device_type: str
+) -> bool:
+    """Whether an active autocast context narrows BF16 NF12-AD weights.
+
+    Autocast rewrites GEMM operands to its own dtype, so an FP16 context
+    narrows a BF16 activation to FP16 before the product even though the
+    activation dtype itself can hold every BF16 weight. The correctness of the
+    narrow branch must follow the context's dtype, not the activation dtype.
+    ``float64`` is exempt because autocast never narrows it.
+    """
+
+    if activation_dtype is torch.float64 or not _autocast_enabled(device_type):
+        return False
+    try:
+        autocast_dtype = torch.get_autocast_dtype(device_type)
+    except (AttributeError, TypeError, RuntimeError):
+        # Autocast is active but its dtype cannot be queried: assume it narrows,
+        # which only widens the GEMM this predicate protects.
+        return True
+    return not _weight_dtype_is_lossless(autocast_dtype)
 
 
 def _hip_path(device: torch.device | str) -> bool:
@@ -368,36 +419,72 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             return None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bias = getattr(self, "bias", None)
+        if x.device.type == "meta":
+            # Metadata-only modules (lazy load, offload shells) have packed
+            # buffers with no values. There is nothing to decode or multiply,
+            # and materializing `exp_base` or a decoded matrix would raise on
+            # a meta tensor. Answer before the online rotation as well: it
+            # preserves shape/dtype/device but its native Hadamard op has no
+            # meta kernel, so a rotation-enabled shell would still raise.
+            # `empty_linear_output` already applies the adapter, exactly once.
+            return self.empty_linear_output(x)
+
         if self.online_full_had or self.online_partial_had:
             x = self._apply_rotation_to_input(x)
 
-        bias = getattr(self, "bias", None)
         if self.input_rows(x) == 0:
-            out = self.empty_linear_output(x)
-            if self.adapter is not None:
-                out = self.adapter.apply(x=x, out=out)
-            return out
+            return self.empty_linear_output(x)
 
         out = self._native_forward(x, bias)
         if out is None:
             # Bounded scratch: the decoded matrix lives only for this forward.
-            # On CPU, decode and multiply wide so a BF16 checkpoint value that
-            # cannot be represented as the FP16 activation dtype is not lost
-            # before the product is rounded.
-            compute_dtype = (
-                torch.float32
-                if x.device.type == "cpu" or (bias is not None and bias.dtype != x.dtype)
-                else x.dtype
+            # NF12-AD checkpoints store BF16, whose range is far wider than
+            # FP16. Narrowing the decoded weight to an FP16 activation dtype
+            # before the product turns a finite BF16 value (for example 65536)
+            # into `inf`, and flushes values below the FP16 subnormal range to
+            # zero. Multiply wide whenever the activation dtype cannot hold
+            # every BF16 weight exactly, and round only the final output.
+            #
+            # The wide scratch dtype follows the activation: float64 (outside
+            # SUPPORTS_DTYPES but accepted) must not be narrowed to float32,
+            # while every other wide case uses FP32. CPU keeps its established
+            # FP32 decode for every activation dtype (`test_linear_fallback_
+            # keeps_float64_activation_precision` pins that contract), so only
+            # an accelerator promotes float64. A mismatched bias dtype already
+            # forces the wide branch.
+            wide_dtype = (
+                torch.float64
+                if x.dtype is torch.float64 and x.device.type != "cpu"
+                else torch.float32
             )
+            wide = (
+                x.device.type == "cpu"
+                or not _weight_dtype_is_lossless(x.dtype)
+                or _autocast_narrows_weight_range(x.dtype, x.device.type)
+                or (bias is not None and bias.dtype != x.dtype)
+            )
+            compute_dtype = wide_dtype if wide else x.dtype
             weight = self.dequantize_weight(device=x.device, dtype=compute_dtype)
-            if compute_dtype == torch.float32:
+            if wide:
                 out_shape = x.shape[:-1] + (self.out_features,)
-                out = torch.mm(
-                    x.reshape(-1, x.shape[-1]).float(),
-                    weight.t(),
+                # Autocast would narrow this wide GEMM back to the autocast
+                # dtype and lose the weight range this branch exists to
+                # preserve. CPU autocast narrows an FP32 matmul just like the
+                # CUDA path, so the guard covers every device, not only
+                # accelerators.
+                autocast = (
+                    torch.autocast(device_type=x.device.type, enabled=False)
+                    if _autocast_enabled(x.device.type)
+                    else nullcontext()
                 )
-                if bias is not None:
-                    out = out + bias.float()
+                with autocast:
+                    out = torch.mm(
+                        x.reshape(-1, x.shape[-1]).to(compute_dtype),
+                        weight.t(),
+                    )
+                    if bias is not None:
+                        out = out + bias.to(compute_dtype)
                 out = out.to(x.dtype).reshape(out_shape)
             else:
                 out = linear_fp32_reduce(x, weight, bias)

@@ -133,6 +133,7 @@ save, reload, and validate a model. It also maps advanced features to their guid
 
 For checkpoint reshaping, see [reshard source selection](docs/reshard-source-selection.md).
 For checkpoint-backed module loading, see [lazy checkpoint materialization](docs/lazy-checkpoint-materialization.md).
+For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 
@@ -940,10 +941,10 @@ checkpoint rather than a dense weight.
 
 The [NF12 validation backend and performance flow](docs/nf12-validation-backends.md)
 explains device selection, native encoder measurements, and Torch fallback.
-The [NF12 bias epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype bias
-handling before output rounding.
-The [NF12 installed extension flow](docs/nf12-installed-extension.md) describes
-how the runtime checks an installed `nf12` package before reusing its operators.
+The [NF12 fallback epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype
+bias handling and BF16 weight-range preservation before output rounding.
+The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
+how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
 layout normalization, routing bounds, and exact-byte encoder scheduling.

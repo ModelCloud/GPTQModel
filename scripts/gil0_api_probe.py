@@ -31,6 +31,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List
 
@@ -169,10 +170,120 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("CPU autocast state or FP32 reduction changed across a nested context")
         return True
 
+    def cuda_autocast_disable() -> bool:
+        x = torch.full((1, 32), 1000.0, device="cuda")
+        weight = torch.full((32, 1), 3.125, device="cuda")
+        before_dtype = torch.get_autocast_dtype("cuda")
+        # BF16 keeps 100000 finite; FP16 would overflow it to `inf` and hide
+        # the FP32 reduction this probe compares against.
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outer = torch.is_autocast_enabled("cuda")
+            outer_dtype = torch.get_autocast_dtype("cuda")
+            narrowed = torch.mm(x, weight)
+            with torch.autocast(device_type="cuda", enabled=False):
+                inner = torch.is_autocast_enabled("cuda")
+                # A disabled context keeps the enclosing dtype; only the
+                # enabled flag changes.
+                inner_dtype = torch.get_autocast_dtype("cuda")
+                wide = torch.mm(x, weight)
+            resumed_enabled = torch.is_autocast_enabled("cuda")
+            resumed_dtype = torch.get_autocast_dtype("cuda")
+            resumed = torch.mm(x, weight)
+        correct = (
+            outer
+            and not inner
+            and resumed_enabled
+            and not torch.is_autocast_enabled("cuda")
+            and before_dtype == torch.float16
+            and outer_dtype == resumed_dtype == inner_dtype == torch.bfloat16
+            and torch.get_autocast_dtype("cuda") is before_dtype
+            and narrowed.dtype == resumed.dtype == torch.bfloat16
+            and wide.dtype == torch.float32
+            and narrowed.item() == resumed.item() == 99840.0
+            and wide.item() == 100000.0
+        )
+        if not correct:
+            raise AssertionError(
+                "CUDA autocast state, context dtype, or FP32 reduction changed across a nested context"
+            )
+        return True
+
+    def cuda_autocast_dtype() -> bool:
+        # `torch.get_autocast_dtype` is read on the NF12-AD fallback path to
+        # decide whether an active context narrows BF16 weights. The disabled
+        # context keeps the enclosing dtype; only the enabled flag changes.
+        before_enabled = torch.is_autocast_enabled("cuda")
+        before_dtype = torch.get_autocast_dtype("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outer_dtype = torch.get_autocast_dtype("cuda")
+            with torch.autocast(device_type="cuda", enabled=False):
+                disabled_enabled = torch.is_autocast_enabled("cuda")
+                disabled_dtype = torch.get_autocast_dtype("cuda")
+            resumed_dtype = torch.get_autocast_dtype("cuda")
+        correct = (
+            not before_enabled
+            and before_dtype == torch.float16
+            and outer_dtype == disabled_dtype == resumed_dtype == torch.bfloat16
+            and not disabled_enabled
+            and torch.get_autocast_dtype("cuda") is before_dtype
+        )
+        if not correct:
+            raise AssertionError("torch.get_autocast_dtype is not thread-local across nested contexts")
+        return True
+
     def set_device_isolation(index: int = 0) -> bool:
         device = index % max(_gpu_count(), 1)
         torch.cuda.set_device(device)
         return int(torch.cuda.current_device()) == device
+
+    nf12_lock = threading.Lock()
+    nf12_thread = threading.local()
+    nf12_next_device = [0]
+    nf12_ready = [False]
+
+    def nf12_ops() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        # Build/compile on the main initializer path, then make the 8 workers
+        # exercise actual concurrent operators on two visible GPUs.
+        with nf12_lock:
+            if not nf12_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
+                        p = nf12.encode(w)
+                        x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
+                        nf12.linear_fp32(x, p)
+                        nf12.linear(x.bfloat16(), p)
+                        nf12.embedding(torch.tensor([0, 127], device="cuda"), p)
+                        short = nf12.encode(torch.full(
+                            (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
+                        nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
+                nf12_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
+        p = nf12.encode(w)
+        x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
+        ids = torch.tensor([0, 127], device="cuda")
+        restored = nf12.decode(p)
+        y_bf16 = nf12.linear(x.bfloat16(), p)
+        y_fp32 = nf12.linear_fp32(x, p)
+        gathered = nf12.embedding(ids, p)
+        short = nf12.encode(torch.full(
+            (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
+        y_mma_fp32 = nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
+        torch.cuda.current_stream().synchronize()
+        if not (torch.equal(restored, w)
+                and bool(torch.all(y_bf16 == 1))
+                and bool(torch.all(y_fp32 == 1))
+                and bool(torch.all(y_mma_fp32 == 0.5))
+                and bool(torch.all(gathered == 0.015625))):
+            raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
+        return True
 
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
@@ -182,6 +293,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.get_device_properties": lambda: torch.cuda.get_device_properties(0).total_memory,
         "torch.cuda.current_device": torch.cuda.current_device,
         "torch.cuda.set_device": set_device_isolation,
+        "gptqmodel_nf12.ops": nf12_ops,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
         "torch.cuda.stream (context manager)": lambda: str(torch.cuda.stream(torch.cuda.Stream())),
@@ -256,6 +368,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.inference_mode": lambda: _no_grad_result(torch, torch.inference_mode),
         "torch.no_grad": lambda: _no_grad_result(torch, torch.no_grad),
         "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
+        "torch.is_autocast_enabled + torch.autocast (CUDA)": cuda_autocast_disable,
+        "torch.get_autocast_dtype + torch.autocast (CUDA)": cuda_autocast_dtype,
     }
     return probes
 
@@ -267,14 +381,20 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 
 
 def _requires_two_gpus(name: str) -> bool:
-    return ".comm." in name or "cuda:0 -> cuda:1" in name or name.endswith("can_device_access_peer")
+    return (".comm." in name or "cuda:0 -> cuda:1" in name
+            or name.endswith("can_device_access_peer") or name == "gptqmodel_nf12.ops")
 
 
 def run_child(name: str) -> int:
+    import torch
+
     probes = build_probes()
     fn = probes[name]
     if _requires_two_gpus(name) and _gpu_count() < 2:
         print(json.dumps({"status": "SKIP", "detail": "needs >= 2 GPUs"}))
+        return 0
+    if name == "gptqmodel_nf12.ops" and torch.version.hip is not None:
+        print(json.dumps({"status": "SKIP", "detail": "native NF12 operator is NVIDIA-only"}))
         return 0
     try:
         if name in SINGLE_SHOT:

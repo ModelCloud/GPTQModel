@@ -909,6 +909,9 @@
     "Glm5NextQModel/gptq": {
       "layers": ["model.language_model.layers"],
       "blocks": [
+        ["enorm:!"],
+        ["hnorm:!"],
+        ["eh_proj:!"],
         ["attn_hc:!"],
         ["attn_hc.input_norm:!"],
         ["input_layernorm:!"],
@@ -922,7 +925,8 @@
         ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
         ["mlp.experts.{expert_index}.down_proj"],
-        ["mlp.shared_experts.gate_proj:!", "mlp.shared_experts.up_proj:!", "mlp.shared_experts.down_proj:!"]
+        ["mlp.shared_experts.gate_proj:!", "mlp.shared_experts.up_proj:!", "mlp.shared_experts.down_proj:!"],
+        ["shared_head.norm:!"]
       ]
     },
     "GlmMoeDsaQModel/gptq": {

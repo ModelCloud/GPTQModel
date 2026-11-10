@@ -236,16 +236,70 @@ single run, not a tuned or repeated benchmark.
 
 ### Inference numerics (fused GPTQ kernels, gfx1201)
 
-`tests/kernels/test_gptq_rocm_gemv.py` (20 passed) and
-`tests/kernels/test_gptq_rocm_gemm.py` (44 passed) compare the fused kernels
-against an independent FP64 Torch oracle at `rtol=atol=2e-3` for 2/4/8-bit,
-group sizes 128 and 256, and several K/N shapes; both assert the output dtype
-equals the input dtype. Dense-weight residency is judged from the module's
+`tests/kernels/test_gptq_rocm_gemv.py` (30 passed, 19 skipped) and
+`tests/kernels/test_gptq_rocm_gemm.py` (70 passed, 73 skipped) compare the fused
+kernels against an independent FP64 Torch oracle at `rtol=atol=2e-3` for
+2/4/8-bit, group sizes 128 and 256, and several K/N shapes; both assert the
+output dtype equals the input dtype. The skips are the CDNA4 (`gfx950`)-only
+cases on an RDNA4 host. Dense-weight residency is judged from the module's
 persistent state after the first *and* repeated forwards (the fused GEMV/GEMM,
 the RDNA4 BF16 split path, and the CPU dequantize+matmul fallback at M=1 and
 small M): no dense/dequantized copy is installed, `qweight`/`scales`/`qzeros`
 remain the only full-size resident tensors, and `GPTQ_TORCH_CACHE_WEIGHTS` stays
 unset.
+
+### Bias epilogue on ROCm (fused before rounding)
+
+`TorchLinear` adds the bias to the FP32 partial sum and rounds the result once.
+The visible output is therefore `round(matmul + bias)`, not
+`round(matmul) + bias`. Which matmul supplies the partial sum depends on
+dispatch:
+
+| Path | Partial sum | Epilogue |
+|---|---|---|
+| Fused GEMV (M=1) | `gptq_gemv(..., out_dtype=float32)` | `(raw + bias.float()).to(x.dtype)` |
+| Fused small-M GEMM | `gptq_gemm(..., out_dtype=float32)` | `(raw + bias.float()).to(x.dtype)` |
+| Split `dequantize + matmul` | `torch.addmm(bias, x, weight)` when `_can_fuse_hip_bias` | one rounding to `x.dtype` |
+| Split path, autocast or broadcast bias | `torch.matmul(x, weight)` | standalone add in the promoted dtype |
+
+`_can_fuse_hip_bias` (`gptqmodel/nn_modules/qlinear/_numerics.py`) is the single
+decision point: it is enabled only for low-precision ROCm activations with a
+matching-dtype bias, outside autocast, and only when the bias broadcasts to the
+flattened 2D output.
+
+```mermaid
+flowchart TD
+    A["TorchLinear._forward_eager"] --> B{"fused GEMV / GEMM?"}
+    B -- "yes" --> C["gptq_gemv / gptq_gemm with out_dtype=float32"]
+    C --> D["_apply_fused_bias: (out + bias.float()).to(x.dtype)"]
+    B -- "no" --> E{"_can_fuse_hip_bias?"}
+    E -- "yes" --> F["torch.addmm(bias, x_flat, weight)"]
+    E -- "no" --> G["torch.matmul then add bias"]
+    D --> H["visible output"]
+    F --> H
+    G --> H
+```
+
+The oracles in `tests/kernels/test_gptq_rocm_gemm.py` and
+`tests/kernels/test_gptq_rocm_gemv.py` apply the same rule: they add the bias to
+an independent FP64 accumulation and round once. FP32 arithmetic error is still
+compared separately against the FP64 accumulation, and a visible difference from
+the rounded FP64 oracle is only accepted when the FP32 and FP64 fused values
+straddle the rounding boundary
+(`|fp64_midpoint - fp64_fused| <= |fp32_fused - fp64_fused|`).
+
+Representative measurement (4-bit, group size 128, `K=2048`, `N=1024`, one
+seeded sample per row):
+
+| Activation | Path | Fused-rule mismatches | Differs from `round(fp64 + bias)` | Unexplained |
+|---|---|---|---|---|
+| float16 | GEMV (M=1) | 0 | 0 | 0 |
+| float16 | fused GEMM (M=2) | 0 | 17 elements | 0 |
+| bfloat16 | GEMV (M=1) | 0 | 0 | 0 |
+| bfloat16 | split `addmm` (M=2) | 0 | 0 | 0 |
+
+The earlier contract compared the visible value with `round(matmul) + bias` and
+rejected the shipped epilogue; it was a stale test rule, not a kernel regression.
 
 ### Activation dtype gate for the fused small-M GEMM (gfx1201)
 

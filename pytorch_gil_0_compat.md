@@ -121,6 +121,12 @@ results below for that build.
 | `torch.nn.parallel.replicate` | CAUTION (serialized), skipped when GIL=0 | `gptqmodel/utils/looper_helpers.py` replica fast path | Internally calls `broadcast_coalesced`, so it inherits the failure above. It is called through `_THREAD_SAFE_PARALLEL` (a module-wide lock), and `clone_module_for_devices` now skips it entirely when `has_gil_disabled()`; the deepcopy path uses `move_module_to_device`/`peer_copy_batch`. `use_torch_replicate` is off by default; enable it only after qualifying replicate for the target build. |
 | `gptqmodel.utils.p2p.peer_copy_batch` (ours) | SAFE (concurrent) | module moves, calibration input staging, Hessian copies | `ctypes` call into `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync`; the GIL is released for the call. The enqueue runs with the **destination device current**, which HIP requires (manual finding 5). Returns `False` when the group is not a simple two-device batch so callers can fall back to `Tensor.to`. |
 
+## Vendored NF12 operators
+
+| API | Result | Where we use it | Evidence and limit |
+|---|---|---|---|
+| `gptqmodel_nf12` encode/decode/linear/linear_fp32/linear_bf16_fp32/embedding | SAFE (concurrent), NVIDIA CUDA | online BF16 weight preparation and inference | `scripts/gil0_api_probe.py --only gptqmodel_nf12.ops` passed four separate processes, each 8 threads × 4 iterations, on 2026-11-10 with Python 3.14.7 GIL disabled, PyTorch 2.15.0+cu132 and two NVIDIA PG506-230 SM80 GPUs. The probe prewarms JIT compilation, assigns worker devices explicitly, checks exact decoded/embedded values, BF16/FP32 linear results, and FP32 Tensor Core scores, then synchronizes each worker stream. ROCm is explicitly unsupported by this CUDA package; GPT-QModel's separate HIP runtime remains its path. |
+
 ## Tensor creation and elementwise ops
 
 | API | Result | Where we use it | Notes / workaround |
@@ -169,7 +175,9 @@ results below for that build.
 | `Tensor.copy_` (non_blocking, cross-device) | SAFE (concurrent) (needs 2 GPUs) | P2P verify, Hessian adopt | Must synchronize the destination stream before reading the result. |
 | `torch.inference_mode` | SAFE (concurrent), thread-local | inference paths | Thread-local grad mode; no shared state. |
 | `torch.no_grad` | SAFE (concurrent), thread-local | calibration | Same as above. |
-| `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. GPU autocast was not tested by this CPU probe. |
+| `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. |
+| `torch.is_autocast_enabled("cuda")` + `torch.autocast("cuda", enabled=False)` | SAFE (concurrent CUDA) | NF12-AD wide fallback GEMM, Torch FP8 wide fallback | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations, 3 subprocesses, all PASS. The CUDA autocast flag stayed thread-local and the nested disabled context produced the FP32 dot `100000` while the surrounding BF16 dots stayed `99840`. An 8-thread x 3-process stress of `NF12ADLinear`'s FP16 wide branch returned no hangs and no torn data; the bitwise differences observed were FP32-vs-FP64 rounding ties that also appear single-threaded. |
+| `torch.get_autocast_dtype("cuda")` | SAFE (concurrent CUDA) | NF12-AD fallback predicate choosing FP16 vs wide | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations in 3 subprocesses, three repeated runs, all PASS (probe `torch.get_autocast_dtype + torch.autocast (CUDA)`). The value stayed thread-local: `float16` outside a context, `bfloat16` inside one, unchanged across a nested `enabled=False` context. |
 
 ## Manual findings
 

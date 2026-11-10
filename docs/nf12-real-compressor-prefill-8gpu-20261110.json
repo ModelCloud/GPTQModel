@@ -1,0 +1,109 @@
+{
+  "schema": "gptqmodel.nf12.real_compressor_prefill_8gpu.v1",
+  "captured_utc": "2026-11-10T09:21:52.266079+00:00",
+  "kernel_commit": "9e7751d05d82697dccda287ad4997b602d15cfcf",
+  "benchmark_script": "scripts/bench_nf12_real_compressor_prefill.py",
+  "benchmark_script_sha256": "4ba8c19277672e811f81e455868eef28ff94b2ebb7a75eefc29b1d865aa864ba",
+  "checkpoint_shard": "/fast/model/DeepSeek-V4.1-Flash-1017/model-00023-of-00048.safetensors",
+  "weight_key": "layers.20.attn.compressor.wkv.weight",
+  "weight_sha256": "6d3c287aa1f1d87d8691728a506aacd40b6f26f172acc9626840e69c38ba34a6",
+  "shape_nkm": [
+    512,
+    5120,
+    512
+  ],
+  "activation_seed": 18201,
+  "torch": "2.15.0+cu132",
+  "gil_enabled": false,
+  "method": "CUDA graph; ABBA paired order",
+  "repeat": 32,
+  "rounds": 8,
+  "target": 1.05,
+  "median_speedup": 0.8161,
+  "all_speed_gates_pass": false,
+  "all_weight_bits_match": true,
+  "all_output_bits_match": true,
+  "all_topk_decisions_match": true,
+  "rows": [
+    {
+      "gpu": 0,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.48,
+      "nf12_bf16_us": 29.888,
+      "speedup": 0.8191,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 1,
+      "gpu_name": "NVIDIA PG506-232",
+      "dense_bf16_us": 24.4,
+      "nf12_bf16_us": 29.968,
+      "speedup": 0.8142,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 2,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.352,
+      "nf12_bf16_us": 29.824,
+      "speedup": 0.8165,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 3,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.272,
+      "nf12_bf16_us": 29.696,
+      "speedup": 0.8173,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 4,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.224,
+      "nf12_bf16_us": 29.632,
+      "speedup": 0.8175,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 5,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.144,
+      "nf12_bf16_us": 29.728,
+      "speedup": 0.8122,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 6,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.368,
+      "nf12_bf16_us": 29.872,
+      "speedup": 0.8157,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    },
+    {
+      "gpu": 7,
+      "gpu_name": "NVIDIA PG506-230",
+      "dense_bf16_us": 24.352,
+      "nf12_bf16_us": 30.0,
+      "speedup": 0.8117,
+      "passes_speed": false,
+      "output_bit_mismatches": 0,
+      "topk_mismatch_rows": 0
+    }
+  ]
+}
