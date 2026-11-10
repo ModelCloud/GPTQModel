@@ -139,6 +139,29 @@ def test_hook_end_with_disk_offload_keeps_modules_registered(tmp_path):
     assert hasattr(resampler_model, "_hf_hook")
 
 
+def test_hook_end_releases_other_modules_after_one_offload_fails(monkeypatch, tmp_path):
+    definition = _definition(offload_to_disk=True)
+    definition.quantize_config.offload_to_disk_path = str(tmp_path)
+    core_model = definition.model.model
+    failing_module = core_model.language_model.embed_tokens
+    real_offload = definitions.ernie4_5_vl_moe.offload_to_disk
+
+    def failing_first_offload(*, model, module, disk_path):
+        if module is failing_module:
+            raise OSError("embedding offload failed")
+        return real_offload(model=model, module=module, disk_path=disk_path)
+
+    monkeypatch.setattr(definitions.ernie4_5_vl_moe, "offload_to_disk", failing_first_offload)
+
+    with pytest.raises(OSError, match="embedding offload failed"):
+        definition.pre_quantize_generate_hook_end()
+
+    assert not failing_module.weight.is_meta
+    assert core_model.language_model.rotary_emb.weight.is_meta
+    assert core_model.vision_tower.weight.is_meta
+    assert core_model.resampler_model.weight.is_meta
+
+
 @pytest.mark.parametrize("offload_to_disk", [True, False])
 def test_hook_end_skips_absent_optional_modules(tmp_path, offload_to_disk):
     definition = _definition(offload_to_disk=offload_to_disk)

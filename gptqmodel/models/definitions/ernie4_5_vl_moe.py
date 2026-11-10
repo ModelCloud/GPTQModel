@@ -161,10 +161,23 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
         # materialized module (a start hook that raised mid-move) must have its
         # real tensors released in the disk configuration too, where
         # `offload_to_disk()` cannot help because it early-returns on `meta`.
-        self._release_module(language_model, "embed_tokens", disk=disk)
-        self._release_module(language_model, "rotary_emb", disk=disk)
-        self._release_module(core_model, "vision_tower", disk=disk)
-        self._release_module(core_model, "resampler_model", disk=disk)
+        first_error = None
+        for parent, attr_name in (
+            (language_model, "embed_tokens"),
+            (language_model, "rotary_emb"),
+            (core_model, "vision_tower"),
+            (core_model, "resampler_model"),
+        ):
+            try:
+                self._release_module(parent, attr_name, disk=disk)
+            except Exception as error:
+                # A failed release must not keep the other captured modules on
+                # the forward device. Report the first failure after attempting
+                # every independent cleanup obligation.
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _flatten_multimodal_features(features: Any) -> torch.Tensor:
