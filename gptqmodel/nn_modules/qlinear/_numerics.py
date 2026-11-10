@@ -168,6 +168,11 @@ def linear_wide_bias(
         bias = bias.to(device=x.device)
     weight_t = weight.t()
     wide_autograd = _needs_wide_autograd(x, weight, bias)
+    # A bias that does not broadcast against the flattened 2-D product (for
+    # example a per-token bias over a 3-D input) must be added after reshaping,
+    # where the original broadcast shape applies.
+    flat_shape = (flat_x.shape[0], weight.shape[0])
+    reshape_bias = bias is not None and bias.dim() != 1 and bias.shape != flat_shape
 
     def reduce() -> torch.Tensor:
         if x.device.type == "cuda" and not wide_autograd:
@@ -177,7 +182,10 @@ def linear_wide_bias(
         else:
             output = torch.mm(flat_x.float(), weight_t.float())
         if bias is not None:
-            output = output + bias.float()
+            if reshape_bias:
+                output = output.reshape(shape) + bias.float()
+            else:
+                output = output + bias.float()
         return output.to(x.dtype).reshape(shape)
 
     if not autocast_active(x.device.type):
@@ -195,6 +203,23 @@ def linear_wide_bias(
 _FLOAT_WIDTH = {torch.float16: 0, torch.bfloat16: 0, torch.float32: 1, torch.float64: 2}
 
 
+def bias_narrows_losslessly(bias: torch.Tensor, dtype: torch.dtype) -> bool:
+    """Whether ``bias`` has the same values after a cast to ``dtype``.
+
+    Used for kernels that add the bias after their own wide accumulation (VPTQ
+    CUDA sums in FP32, or FP64 for BF16) and therefore only restrict the bias
+    storage dtype, not its arithmetic. A value FP16 cannot hold, such as
+    ``-65536``, is rejected so the caller keeps the FP32 epilogue.
+
+    The comparison is computed in FP64, so it also rejects NaN (``torch.equal``
+    never reports NaN as equal) and preserves the sign of zero.
+    """
+
+    if bias.dtype == dtype:
+        return True
+    return torch.equal(bias.to(dtype=dtype).to(torch.float64), bias.to(torch.float64))
+
+
 def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
     """Whether the stored bias must stay wide through the reduction epilogue."""
 
@@ -207,6 +232,7 @@ def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
         # operands.
         and _FLOAT_WIDTH.get(bias.dtype, 3) >= _FLOAT_WIDTH.get(x.dtype, 3)
     )
+
 
 
 def promote_bias(x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:

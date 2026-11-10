@@ -13,7 +13,7 @@ from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
-from ._numerics import linear_fp32_reduce, linear_needs_wide_bias
+from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 from .vptq_torch import VPTQLinear
 
 
@@ -117,7 +117,13 @@ class VPTQCudaLinear(VPTQLinear):
             raise RuntimeError("VPTQ_CUDA requires VPTQ buffers and activations on the same CUDA device.")
 
         fused_max_rows = _vptq_cuda_fused_max_rows(self)
-        wide_bias = linear_needs_wide_bias(x, bias)
+        # A stored bias that FP16/BF16 cannot represent exactly keeps the FP32
+        # epilogue. An exactly representable one may still take the fused kernel:
+        # it adds the bias after its own FP32 (BF16: FP64) accumulation, so only
+        # the storage dtype changes, never the arithmetic.
+        wide_bias = linear_needs_wide_bias(x, bias) and not bias_narrows_losslessly(
+            bias, x.dtype
+        )
         if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows and not wide_bias:
             from ...utils.vptq_cuda import vptq_cuda_linear
 
@@ -131,7 +137,7 @@ class VPTQCudaLinear(VPTQLinear):
                 self.inverse_perm if self.enable_perm else None,
                 self.weight_scale if self.enable_norm else None,
                 self.weight_bias if self.enable_norm else None,
-                bias,
+                None if bias is None else bias.to(dtype=x.dtype),
                 group_size=self.group_size,
                 in_features=self.in_features,
                 out_features=self.out_features,

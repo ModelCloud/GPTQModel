@@ -2513,3 +2513,61 @@ def test_vptq_pack_preserves_fp32_bias_range():
         if dtype is torch.float16:
             # The narrowed expression used to return -inf for this input.
             assert torch.isfinite(actual).all()
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_cuda_representable_wide_bias_keeps_fused_kernel(dtype, monkeypatch):
+    """A wide buffer whose values fit the activation dtype must keep the fused kernel.
+
+    The fused kernel accumulates in FP32 (FP64 for BF16) and adds the bias after
+    the reduction, so narrowing an exactly representable bias cannot change the
+    result. Skipping the kernel for every FP32 buffer would cost the decode path
+    its native implementation.
+    """
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("VPTQ_CUDA is CUDA-only")
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=71)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=8,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    # Every value is an FP16-representable multiple of 0.5.
+    bias = torch.tensor([0.5, -1.5, 2.0, -0.5] + [1.5] * (quantizer.layer.out_features - 4))
+    quantizer.layer.bias = torch.nn.Parameter(bias.to(dtype=torch.float32))
+    result, _ = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype
+    )
+    module = build_module(
+        qcfg, weight.shape[1], weight.shape[0], dtype=dtype, linear_cls=VPTQCudaLinear
+    ).to(device)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    assert module.bias.dtype is torch.float32
+
+    from gptqmodel.utils.vptq_cuda import vptq_cuda_linear as real_vptq_cuda_linear
+
+    fused_calls = []
+
+    def record_fused_call(*args, **kwargs):
+        fused_calls.append(True)
+        return real_vptq_cuda_linear(*args, **kwargs)
+
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", record_fused_call)
+
+    activations = torch.randn(4, weight.shape[1], device=device, dtype=dtype)
+    actual = module(activations)
+
+    assert bool(fused_calls)
+    assert actual.dtype is dtype
+    oracle = (
+        activations.double() @ module.dequantize().double().t() + module.bias.double()
+    ).to(dtype)
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)

@@ -193,12 +193,18 @@ def test_vptq_wide_bias_cancels_without_dense_cache(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_vptq_cuda_wide_bias_skips_fused_kernel(dtype, monkeypatch):
-    """A wide stored bias must not reach the native kernel, which requires its dtype."""
+def test_vptq_cuda_unrepresentable_wide_bias_skips_fused_kernel(dtype, monkeypatch):
+    """A bias the activation dtype cannot hold must not reach the native kernel.
+
+    The fused kernel adds the bias after its own wide accumulation but requires
+    the bias storage dtype to match the output, so an inexact value such as
+    ``-(rows * value) - 1`` has to route through the FP32 epilogue instead.
+    """
 
     if not torch.cuda.is_available() or torch.version.hip is not None:
         pytest.skip("VPTQ_CUDA is CUDA-only")
 
+    from gptqmodel.nn_modules.qlinear._numerics import bias_narrows_losslessly
     from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 
     module = (
@@ -221,7 +227,13 @@ def test_vptq_cuda_wide_bias_skips_fused_kernel(dtype, monkeypatch):
     )
     module.indices.zero_()
     module.centroids.weight.data.fill_(1.0)
-    module.register_buffer("bias", torch.tensor([_CANCELLATION_BIAS], dtype=torch.float32, device="cuda"))
+    # One unit below the cancelling value: not representable in FP16 or BF16, so
+    # the cancelling dot must still be evaluated wide.
+    bias_value = _CANCELLATION_BIAS - 1.0
+    module.register_buffer(
+        "bias", torch.tensor([bias_value], dtype=torch.float32, device="cuda")
+    )
+    assert not bias_narrows_losslessly(module.bias, dtype)
     # One row is inside the fused-kernel row limit; only the wide bias skips it.
     x = torch.full((1, _CANCELLATION_ROWS), _CANCELLATION_VALUE, device="cuda", dtype=dtype)
 
@@ -229,7 +241,7 @@ def test_vptq_cuda_wide_bias_skips_fused_kernel(dtype, monkeypatch):
 
     def fail_fused(*args, **kwargs):
         fused_calls.append(True)
-        raise AssertionError("wide bias must not reach the native VPTQ kernel")
+        raise AssertionError("an inexact wide bias must not reach the native VPTQ kernel")
 
     monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", fail_fused)
 
@@ -238,4 +250,7 @@ def test_vptq_cuda_wide_bias_skips_fused_kernel(dtype, monkeypatch):
 
     assert not fused_calls
     assert actual.dtype is dtype
-    assert float(actual.item()) == 0.0
+    assert torch.isfinite(actual).all()
+    oracle_weight = module.dequantize().to(dtype=torch.float64)
+    oracle = (x.double() @ oracle_weight.t() + module.bias.double()).to(dtype)
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0)

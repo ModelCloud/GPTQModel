@@ -200,8 +200,10 @@ checkpoint bias keeps its range; through `VPTQLinear.forward`,
 wider than the activation is added after a wide reduction and the result is
 rounded once to the activation dtype. A narrower bias is widened losslessly
 inside the epilogue. The native fused kernel only accepts a bias whose dtype
-matches its low-precision output, so a wide bias routes the layer through the
-dequantize-plus-GEMM path instead. See
+matches its low-precision output, so it is skipped when the stored bias has a
+value that FP16/BF16 cannot represent. An FP32 buffer whose values are all
+representable is narrowed losslessly for the kernel: it adds the bias after its
+own FP32 (FP64 for BF16) accumulation, so only the storage dtype changes. See
 [low-precision bias epilogues](low-precision-bias-epilogue.md) for the full
 flow, including FP4 and FP8.
 

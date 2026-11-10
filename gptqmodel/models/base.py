@@ -3792,7 +3792,11 @@ class BaseQModel(nn.Module):
                 weight_scale=scale.to(device=device),
                 weight_block_size=block_size,
                 orig_dtype=target_dtype,
-                bias=checkpoint_tensors.get("bias").to(device=device, dtype=target_dtype)
+                # Keep the checkpoint bias at its stored width. Narrowing it to the
+                # activation dtype here would overflow a value such as an FP32 -65536
+                # into FP16 -inf before the epilogue can apply it, defeating the
+                # wide-bias handling in TorchFP4Linear.
+                bias=checkpoint_tensors.get("bias").to(device=device)
                 if isinstance(checkpoint_tensors.get("bias"), torch.Tensor)
                 else None,
             )

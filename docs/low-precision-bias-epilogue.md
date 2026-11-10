@@ -41,11 +41,13 @@ flowchart TD
 ```
 
 `linear_wide_bias` keeps the multiply and the bias in FP32 and rounds once.
-On NVIDIA CUDA it requests an FP32 output from `torch.mm`, so the tensor-core
-operands stay FP16/BF16 and no expanded FP32 weight copy is retained. CPU and
-HIP multiply in FP32 because those backends cannot otherwise keep the
-reduction wide in all layouts. When autograd is active it uses the FP32 operand
-path as well, because the FP32-output CUDA ops have no autograd derivative.
+On CUDA and HIP it requests an FP32 output from `torch.mm` (`out_dtype`), so the
+tensor-core operands stay FP16/BF16 and no expanded FP32 weight copy is
+retained. CPU has no `out_dtype` for `torch.mm`, so it multiplies FP32 operands
+instead: that path costs a transient FP32 weight copy, measured at 10.9 ms for
+one 4096x4096 FP16 decode against 0.17 ms for the fused low-precision epilogue.
+When autograd is active the FP32 operand path is used as well, because the
+FP32-output CUDA ops have no autograd derivative.
 
 ## Before and after
 
@@ -55,9 +57,10 @@ path as well, because the FP32-output CUDA ops have no autograd derivative.
 | FP4 accelerator forward, `nn_modules/qlinear/fp4.py:79-83` | `bias.to(dtype=x.dtype)` before the torchao wrapper | Dequantize for the call and use `linear_wide_bias` |
 | VPTQ Torch forward, `nn_modules/qlinear/vptq_torch.py:536-539` | `bias.to(dtype=x.dtype)` before `linear_fp32_reduce` | Bias passed at its stored width |
 | VPTQ CUDA dense path, `nn_modules/qlinear/vptq_cuda.py:150-152` | `bias.to(dtype=x.dtype)` before the GEMM | Bias passed at its stored width |
-| VPTQ CUDA fused path, `nn_modules/qlinear/vptq_cuda.py:117-120` | Sent a wide bias to a kernel that requires the output dtype | The wide-bias request skips the fused kernel |
+| VPTQ CUDA fused path, `nn_modules/qlinear/vptq_cuda.py:117-120` | Sent a wide bias to a kernel that requires the output dtype | The fused kernel is used unless the bias has a value FP16/BF16 cannot hold |
 | VPTQ bias buffer, `nn_modules/qlinear/vptq_torch.py:264-267` | Allocated at `codebook_dtype` | Allocated FP32 so the checkpoint range survives |
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:433-438` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
+| FP4 checkpoint decoder, `models/base.py:3795` | Bias narrowed to `target_dtype` when the wrapper is built | Bias kept at its stored width, so the forward can still go wide |
 
 ## Dtype promotion contract
 
@@ -73,9 +76,9 @@ contains the other: BF16 has the exponent range and FP16 has the mantissa.
 | Situation | Behaviour |
 | --- | --- |
 | Stored bias wider than the activation | `linear_needs_wide_bias` is true; the wide epilogue runs |
-| VPTQ CUDA fused kernel with a wide bias | The fused kernel is skipped, avoiding its dtype rejection |
+| VPTQ CUDA fused kernel with a wide bias | Skipped only when a stored value is not representable in FP16/BF16; representable buffers are narrowed losslessly for the kernel |
 | Autocast active | The wide helper disables autocast for its own GEMM so the product is not re-narrowed |
-| Bias needs broadcasting beyond the flattened output | `_fuse_bias_epilogue` declines; the standalone expression keeps type promotion |
+| Bias needs broadcasting beyond the flattened output | `_fuse_bias_epilogue` declines; `linear_wide_bias` reshapes before adding, so type promotion and the broadcast shape are preserved |
 | Bias cannot be stored exactly in the FP32 buffer | `load_quant_result` raises instead of rounding silently |
 | Temporary dense weight after forward | Released with the call; no dense cache is installed |
 
