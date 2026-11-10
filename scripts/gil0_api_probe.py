@@ -31,6 +31,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List
 
@@ -174,6 +175,48 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         torch.cuda.set_device(device)
         return int(torch.cuda.current_device()) == device
 
+    nf12_lock = threading.Lock()
+    nf12_thread = threading.local()
+    nf12_next_device = [0]
+    nf12_ready = [False]
+
+    def nf12_ops() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        # Build/compile on the main initializer path, then make the 8 workers
+        # exercise actual concurrent operators on two visible GPUs.
+        with nf12_lock:
+            if not nf12_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
+                        p = nf12.encode(w)
+                        x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
+                        nf12.linear_fp32(x, p)
+                        nf12.linear(x.bfloat16(), p)
+                        nf12.embedding(torch.tensor([0, 127], device="cuda"), p)
+                nf12_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
+        p = nf12.encode(w)
+        x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
+        ids = torch.tensor([0, 127], device="cuda")
+        restored = nf12.decode(p)
+        y_bf16 = nf12.linear(x.bfloat16(), p)
+        y_fp32 = nf12.linear_fp32(x, p)
+        gathered = nf12.embedding(ids, p)
+        torch.cuda.current_stream().synchronize()
+        if not (torch.equal(restored, w)
+                and bool(torch.all(y_bf16 == 1))
+                and bool(torch.all(y_fp32 == 1))
+                and bool(torch.all(gathered == 0.015625))):
+            raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -182,6 +225,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.get_device_properties": lambda: torch.cuda.get_device_properties(0).total_memory,
         "torch.cuda.current_device": torch.cuda.current_device,
         "torch.cuda.set_device": set_device_isolation,
+        "gptqmodel_nf12.ops": nf12_ops,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
         "torch.cuda.stream (context manager)": lambda: str(torch.cuda.stream(torch.cuda.Stream())),
@@ -267,14 +311,20 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 
 
 def _requires_two_gpus(name: str) -> bool:
-    return ".comm." in name or "cuda:0 -> cuda:1" in name or name.endswith("can_device_access_peer")
+    return (".comm." in name or "cuda:0 -> cuda:1" in name
+            or name.endswith("can_device_access_peer") or name == "gptqmodel_nf12.ops")
 
 
 def run_child(name: str) -> int:
+    import torch
+
     probes = build_probes()
     fn = probes[name]
     if _requires_two_gpus(name) and _gpu_count() < 2:
         print(json.dumps({"status": "SKIP", "detail": "needs >= 2 GPUs"}))
+        return 0
+    if name == "gptqmodel_nf12.ops" and torch.version.hip is not None:
+        print(json.dumps({"status": "SKIP", "detail": "native NF12 operator is NVIDIA-only"}))
         return 0
     try:
         if name in SINGLE_SHOT:

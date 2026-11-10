@@ -121,6 +121,12 @@ results below for that build.
 | `torch.nn.parallel.replicate` | CAUTION (serialized), skipped when GIL=0 | `gptqmodel/utils/looper_helpers.py` replica fast path | Internally calls `broadcast_coalesced`, so it inherits the failure above. It is called through `_THREAD_SAFE_PARALLEL` (a module-wide lock), and `clone_module_for_devices` now skips it entirely when `has_gil_disabled()`; the deepcopy path uses `move_module_to_device`/`peer_copy_batch`. `use_torch_replicate` is off by default; enable it only after qualifying replicate for the target build. |
 | `gptqmodel.utils.p2p.peer_copy_batch` (ours) | SAFE (concurrent) | module moves, calibration input staging, Hessian copies | `ctypes` call into `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync`; the GIL is released for the call. The enqueue runs with the **destination device current**, which HIP requires (manual finding 5). Returns `False` when the group is not a simple two-device batch so callers can fall back to `Tensor.to`. |
 
+## Vendored NF12 operators
+
+| API | Result | Where we use it | Evidence and limit |
+|---|---|---|---|
+| `gptqmodel_nf12` encode/decode/linear/linear_fp32/embedding | SAFE (concurrent), NVIDIA CUDA | online BF16 weight preparation and inference | `scripts/gil0_api_probe.py --only gptqmodel_nf12.ops` passed four separate processes, each 8 threads × 4 iterations, on 2026-11-10 with Python 3.14.7 GIL disabled, PyTorch 2.15.0+cu132 and two NVIDIA PG506-230 SM80 GPUs. The probe prewarms JIT compilation, assigns worker devices explicitly, checks exact decoded/embedded values and both BF16/FP32 linear results, then synchronizes each worker stream. ROCm is explicitly unsupported by this CUDA package; GPT-QModel's separate HIP runtime remains its path. |
+
 ## Tensor creation and elementwise ops
 
 | API | Result | Where we use it | Notes / workaround |
