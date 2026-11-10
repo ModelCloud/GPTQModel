@@ -1233,15 +1233,28 @@ class BaseQModel(nn.Module):
         return layer_modules
 
     @classmethod
+    def _expert_count_config(cls, model_config):
+        """Return the config object that owns the routed-expert cardinality.
+
+        Multimodal and remote-code configs nest the language config, and DBRX
+        nests its MoE fields under ``ffn_config``. Precedence is preserved for
+        existing definitions: ``text_config``, then ``thinker_config``, then
+        ``ffn_config``, then the top-level config.
+        """
+        if hasattr(model_config, "text_config"):
+            return model_config.text_config
+        if hasattr(model_config, "thinker_config"):
+            return model_config.thinker_config.text_config
+        ffn_config = getattr(model_config, "ffn_config", None)
+        if ffn_config is not None:
+            return ffn_config
+        return model_config
+
+    @classmethod
     def get_num_experts(cls, model_config):
         """Return the model-wide fallback expert count."""
-        if hasattr(model_config, "text_config"):
-            num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
-        elif hasattr(model_config, "thinker_config"):
-            num_experts = getattr(model_config.thinker_config.text_config, cls.dynamic_expert_index)
-        else:
-            num_experts = getattr(model_config, cls.dynamic_expert_index)
-        return num_experts
+        config = cls._expert_count_config(model_config)
+        return getattr(config, cls.dynamic_expert_index)
 
     @classmethod
     def get_num_experts_for_module(cls, model_config, module_name: str) -> Optional[int]:
@@ -1270,11 +1283,7 @@ class BaseQModel(nn.Module):
         if not field_name:
             return None
 
-        config = model_config
-        if hasattr(config, "text_config"):
-            config = config.text_config
-        elif hasattr(config, "thinker_config"):
-            config = config.thinker_config.text_config
+        config = cls._expert_count_config(model_config)
         value = getattr(config, field_name, None)
         if value is None and matched is not None:
             # Mapped fields are optional on dense/checkpoint compatibility

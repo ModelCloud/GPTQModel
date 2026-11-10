@@ -126,3 +126,109 @@ def test_registered_model_plan_matches_quantization_consumers(model_type):
         payload = json.loads(plan.to_json())
         assert len(payload["specs"]) == len(plan.specs)
         assert "ModulePlan:" in plan.render(color=False, max_depth=2)
+
+
+def test_dbrx_converted_nested_ffn_config_expert_count():
+    """DBRX keeps ``moe_num_experts`` under ``ffn_config``, not on the top config."""
+
+    import transformers
+
+    definition = MODEL_MAP["dbrx_converted"]
+    config = transformers.AutoConfig.for_model("dbrx")
+
+    assert definition.dynamic_expert_index == "moe_num_experts"
+    assert not hasattr(config, "moe_num_experts")
+    assert definition.get_num_experts(config) == config.ffn_config.moe_num_experts
+
+    class _QuantizeConfig(SimpleNamespace):
+        dynamic = None
+
+    blocks = definition.simple_layer_modules(
+        model_config=config, quantize_config=_QuantizeConfig(dynamic=None)
+    )
+    entries = [entry for block in blocks for entry in block]
+
+    for entry in entries:
+        assert EXPERT_INDEX_PLACEHOLDER not in entry, entry
+
+    expert_names = [entry for entry in entries if ".experts.mlp." in entry]
+    assert len(expert_names) == 3 * config.ffn_config.moe_num_experts
+    for index in range(config.ffn_config.moe_num_experts):
+        for projection in ("w1", "v1", "w2"):
+            assert f"ffn.experts.mlp.{index}.{projection}" in expert_names
+
+    # Routers and the pre/post attention norms are checkpoint-owned but never
+    # quantized; the definition must declare them explicitly.  Use the tree
+    # blocks because ``simple_layer_modules`` drops every ``:!`` entry.
+    declared = [
+        entry
+        for block in definition.build_layer_modules(
+            definition.module_tree, include_capture_only=True
+        )
+        for entry in block
+    ]
+    for tagged in (
+        "ffn.router.layer:!",
+        "norm_attn_norm.norm_1:!",
+        "norm_attn_norm.norm_2:!",
+    ):
+        assert tagged in declared, tagged
+
+
+@pytest.mark.parametrize("model_type", sorted(MODEL_MAP))
+def test_every_expert_placeholder_expands_to_concrete_names(model_type):
+    """Routed-expert placeholders must expand before quantization sees them.
+
+    ``ModuleLooper.create_named_modules`` matches concrete names; a surviving
+    ``{expert_index}`` entry can never hit and, on ``layer_modules_strict = False``
+    definitions, is only recorded as a miss.  Every definition that declares the
+    placeholder must therefore also declare the config field that expands it.
+    """
+    definition = MODEL_MAP[model_type]
+    tree = definition._resolve_effective_module_tree(
+        SimpleNamespace(model_type=model_type), SimpleNamespace(method="gptq"),
+    )
+    if tree is None:
+        # Registry sentinels (original DBRX) reject quantization explicitly.
+        assert model_type == "dbrx"
+        return
+
+    templates = {
+        entry.replace(":!", "").replace(":?", "").split(":", 1)[0]
+        for block in definition.build_layer_modules(tree, include_capture_only=True)
+        for entry in block
+    }
+    if not any(EXPERT_INDEX_PLACEHOLDER in template for template in templates):
+        return
+
+    assert definition.dynamic_expert_index, (
+        f"{model_type}: module tree declares routed-expert placeholders but the "
+        "definition has no dynamic_expert_index to expand them"
+    )
+
+    # Expansion must leave no placeholder behind.  Every nesting precedence the
+    # definitions use (top level, ``text_config``, ``thinker_config``,
+    # ``ffn_config``) gets the same field so this stays registry-generic.
+    field = definition.dynamic_expert_index
+    inner = SimpleNamespace(**{field: 2})
+    config = SimpleNamespace(
+        **{
+            field: 2,
+            "text_config": SimpleNamespace(**{field: 2}),
+            "thinker_config": SimpleNamespace(text_config=inner),
+            "ffn_config": SimpleNamespace(**{field: 2}),
+        }
+    )
+    expanded = definition.build_moe_modules_if_need(
+        config, definition.build_layer_modules(tree, include_capture_only=True)
+    )
+    leftovers = [
+        entry
+        for block in expanded
+        for entry in block
+        if EXPERT_INDEX_PLACEHOLDER in entry
+    ]
+    assert not leftovers, (
+        f"{model_type}: expert placeholder survived expansion even though "
+        f"{field} is declared: {leftovers[:5]}"
+    )

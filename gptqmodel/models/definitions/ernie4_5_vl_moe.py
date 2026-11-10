@@ -30,6 +30,10 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     require_trust_remote_code = False
     layer_modules_strict = False
 
+    # Both routed-expert families live in the text config; Defuser turns the
+    # fused checkpoint experts into ``text_moe``/``vision_moe`` module lists.
+    dynamic_expert_index = "moe_num_experts"
+
     pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm", "model.norm"]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
@@ -54,13 +58,13 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                     "down_proj": ("down_proj:1",),
                 },
                 "text_moe": {
-                    "gate": ("gate:!",),
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 },
                 "vision_moe": {
-                    "gate": ("gate:!",),
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },

@@ -313,6 +313,17 @@ lifecycle hooks compatible with its forward signature and dispatch. The plan
 recognizes the shared branch from its declared projection family; the word
 `shared` is not what grants it that meaning.
 
+`dynamic_expert_index` is resolved against the config object that actually owns
+it, not the top-level wrapper: `BaseQModel._expert_count_config()` follows
+`text_config`, then `thinker_config.text_config`, then `ffn_config`, and only
+then the top-level config. A multimodal checkpoint such as ERNIE 4.5 VL MoE
+keeps `moe_num_experts` on `text_config` even though the routed experts live in
+both `mlp.text_moe` and `mlp.vision_moe`; a remote-code config such as DBRX
+puts it on `ffn_config`. Setting the field name without a resolvable owner
+leaves the literal `{expert_index}` in `simple_layer_modules()`, and a
+`layer_modules_strict = False` definition then only records a miss for every
+expert projection, so quantization "succeeds" with the experts unquantized.
+
 ## Add and validate a new model
 
 1. **Pin the architecture evidence.** Record the checkpoint revision,
