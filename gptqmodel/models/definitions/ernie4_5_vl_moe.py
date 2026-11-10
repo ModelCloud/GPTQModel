@@ -105,6 +105,15 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             return
         setattr(parent, attr_name, self.shell_module_materialize(module, self.quantize_config.device))
 
+    def _release_module(self, parent, attr_name: str):
+        module = getattr(parent, attr_name, None)
+        if module is None:
+            return
+        # setattr() requires the attribute *name*; passing the module object
+        # here raised `TypeError: attribute name must be string, not 'Linear'`
+        # whenever disk offload was disabled.
+        setattr(parent, attr_name, move_to(module, device=CPU))
+
     def _core_multimodal_model(self):
         _, core_model = self._resolve_multimodal_layout(self.model)
         return core_model
@@ -120,8 +129,8 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def pre_quantize_generate_hook_end(self):
         core_model = self._core_multimodal_model()
         language_model = core_model.language_model
-        vision_module = core_model.vision_tower
-        resampler_module = core_model.resampler_model
+        vision_module = getattr(core_model, "vision_tower", None)
+        resampler_module = getattr(core_model, "resampler_model", None)
 
         if self.quantize_config.offload_to_disk:
             if hasattr(language_model, "embed_tokens"):
@@ -150,14 +159,10 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                 )
             return
 
-        if hasattr(language_model, "embed_tokens"):
-            language_model.embed_tokens = move_to(language_model.embed_tokens, device=CPU)
-        if hasattr(language_model, "rotary_emb"):
-            language_model.rotary_emb = move_to(language_model.rotary_emb, device=CPU)
-        if vision_module is not None:
-            setattr(core_model, vision_module, move_to(vision_module, device=CPU))
-        if resampler_module is not None:
-            setattr(core_model, resampler_module, move_to(resampler_module, device=CPU))
+        self._release_module(language_model, "embed_tokens")
+        self._release_module(language_model, "rotary_emb")
+        self._release_module(core_model, "vision_tower")
+        self._release_module(core_model, "resampler_model")
 
     @staticmethod
     def _flatten_multimodal_features(features: Any) -> torch.Tensor:
