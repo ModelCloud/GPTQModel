@@ -70,15 +70,25 @@ def test_native_embedding_preserves_row_bits_and_shape():
 
 
 @pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])
-def test_native_linear_large_m_fallback_matches_dense_torch(n, m):
+def test_native_linear_prefill_matches_torch_oracle(n, m):
     device = _cuda()
     generator = torch.Generator(device=device).manual_seed(304)
     weight = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
     x = (torch.randn((m, 5120), generator=generator, device=device) * 0.05).bfloat16()
     packed = nf12.encode(weight)
     actual = nf12.linear(x, packed)
-    oracle = F.linear(x, weight)
-    assert torch.equal(actual, oracle)
+    dense = F.linear(x, weight)
+    fp64 = F.linear(x.double(), weight.double())
+    assert actual.dtype == torch.bfloat16
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual.float(), fp64.float(), rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(actual.float(), dense.float(), rtol=2e-3, atol=2e-3)
+    # This shape takes call-local decode + cuBLAS on SM80, matching the dense
+    # Torch call bit for bit. SM89 keeps the native reduction, whose FP32 sum
+    # order can round to a different BF16 value without exceeding the oracle
+    # error bound above.
+    if torch.cuda.get_device_capability(device) == (8, 0):
+        assert torch.equal(actual, dense)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 

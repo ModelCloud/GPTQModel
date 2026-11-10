@@ -364,9 +364,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._current_subset: Optional[Dict[str, Any]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
+        # `get_num_experts()` returns None when the config does not expose a
+        # scalar cardinality (e.g. a per-modality list); routing override
+        # cannot be resolved against that, so leave it disabled.
         if getattr(self.gptq_model, "dynamic_expert_index", None):
             num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
-            self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+            self.moe_routing_override = (
+                None
+                if num_experts is None
+                else self.gptq_model.quantize_config.moe_routing_override(num_experts)
+            )
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()

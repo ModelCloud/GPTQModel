@@ -792,7 +792,14 @@
           "mlp_layer_types": [
             "dense",
             "sparse"
-          ]
+          ],
+          "moe_intermediate_size": [
+            64,
+            32
+          ],
+          "moe_k": 1,
+          "moe_num_experts": 2,
+          "moe_num_shared_experts": 1
         },
         "vision_config": {
           "id2label": {

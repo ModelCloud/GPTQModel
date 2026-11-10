@@ -238,6 +238,96 @@ The expert family key used for device co-location is the declared family path, s
 `gate`/`up`/`down` of one expert stay together on one device regardless of what
 the projections are named.
 
+### Expert cardinality resolution
+
+`#` in a module tree is a placeholder, not a path. `build_moe_modules_if_need()`
+only expands it when the definition declares `dynamic_expert_index`, and the
+count is read from whichever config object actually owns that field. That is a
+resolution decision: the same `#` entry expands to 384 concrete paths or to
+nothing, depending on which config node answers.
+
+```mermaid
+flowchart TD
+    T["definition.module_tree contains #"] --> G{"dynamic_expert_index declared?"}
+    G -->|"no"| RAW["simple_layer_modules returns the literal<br/>EXPERT_INDEX_PLACEHOLDER path"]
+    G -->|"yes"| R["get_num_experts(config)"]
+    R --> C["_expert_count_config(config, field)"]
+    C --> T1{"config.text_config?"}
+    T1 -->|"yes"| USE1["text_config"]
+    T1 -->|"no"| T2{"config.thinker_config?"}
+    T2 -->|"yes"| USE2["thinker_config.text_config"]
+    T2 -->|"no"| T3{"ffn_config declares field?"}
+    T3 -->|"yes"| USE3["ffn_config"]
+    T3 -->|"no"| USE4["top-level config"]
+    USE1 --> N["expert count"]
+    USE2 --> N
+    USE3 --> N
+    USE4 --> N
+    N --> S{"scalar value?"}
+    S -->|"yes"| EXP["expand # to 0..N-1"]
+    S -->|"no, e.g. [64, 64]"| NONSCALAR["_coerce_expert_count returns None"]
+    NONSCALAR --> KEEP["keep literal placeholder<br/>warn once per definition"]
+    KEEP --> MISS
+    RAW --> MISS["create_named_modules: record_miss<br/>no exception when strict is False"]
+    EXP --> HIT["concrete names resolve"]
+    style RAW fill:#ffa39e,stroke:#a8071a
+    style MISS fill:#ffa39e,stroke:#a8071a
+    style NONSCALAR fill:#ffe7ba,stroke:#ad6800
+    style KEEP fill:#ffe7ba,stroke:#ad6800
+    style HIT fill:#d9f7be,stroke:#237804
+```
+
+The `ffn_config` branch requires the sub-config to *declare* the field. Selecting
+it merely because the attribute exists would shadow a cardinality kept on the
+top-level config and raise `AttributeError` for unrelated `ffn_config` objects.
+
+#### Non-scalar cardinality is unresolved, not a crash
+
+`get_num_experts()` returns a non-negative int only when the owning field is a
+scalar. A per-modality list — the published ERNIE 4.5 VL checkpoints ship a flat
+remote-code config with `moe_num_experts = [64, 64]` — cannot size
+`range()`. `_coerce_expert_count()` returns `None` for that value and
+`build_moe_modules_if_need()` keeps the placeholder, warns once, and lets
+`create_named_modules()` record the miss. Before this guard the same input raised
+`TypeError: 'list' object cannot be interpreted as an integer` from the expansion
+loop, so the checkpoint failed to quantize at all. A *missing* field still raises
+`AttributeError`, because that means the definition and the config disagree.
+
+| Situation | Before | After | Evidence |
+| --- | --- | --- | --- |
+| Field holds `[64, 64]` | `TypeError` from `range()` | `None` → placeholder kept → miss | `gptqmodel/models/base.py` `_coerce_expert_count`, `build_moe_modules_if_need` |
+| Field missing entirely | `AttributeError` | `AttributeError` (unchanged) | `get_num_experts` |
+| Field holds `64` | expands | expands | `build_moe_modules_if_need` |
+
+#### Before and after
+
+| Mechanism | Before | After | Evidence |
+| --- | --- | --- | --- |
+| Config owner lookup | Duplicated inline in `get_num_experts` and `get_num_experts_for_module`; `text_config`, `thinker_config`, else top level | Single `_expert_count_config()`; adds a guarded `ffn_config` step | old `gptqmodel/models/base.py:1236-1244` and `:1273-1277` |
+| ERNIE `dynamic_expert_index` | unset | `"moe_num_experts"` | `gptqmodel/models/definitions/ernie4_5_vl_moe.py:44` |
+| ERNIE expert specs | 6 literal placeholders of 16 | 384 concrete of 394 (192 per family) | measured on the default 64-expert config |
+| ERNIE router bias | `gate:!` only | `moe_statics:!` per family | `ernie4_5_vl_moe.py:74,81` |
+| DBRX `dynamic_expert_index` | unset | `"moe_num_experts"` | `dbrx_converted.py:15` |
+| DBRX undeclared owners | `norm_1`, `norm_2`, `router.layer` | explicit `:!` each | `dbrx_converted.py:25,27,31` |
+| Silent-miss path | placeholder reaches `create_named_modules` and is only recorded | concrete names, no expert miss | `gptqmodel/looper/module_looper.py:2063-2066` |
+| Non-scalar expert count | `TypeError` in `range()` | unresolved → placeholder kept, warned, recorded as miss | `gptqmodel/models/base.py` `_coerce_expert_count` |
+
+The failure path matters more than the happy path: a surviving placeholder is not
+an error. `create_named_modules` records a miss and raises only when
+`layer_modules_strict` is true, so a non-strict definition quantizes to
+completion with those experts left in the source dtype.
+
+#### Why ERNIE stays `layer_modules_strict = False`
+
+One tree serves both dense and sparse layers. A dense layer has
+`mlp.gate_proj`/`up_proj`/`down_proj` and no experts; a sparse layer has both MoE
+families and no dense MLP. Each layer therefore legitimately misses the other
+branch's specs, so strictness would fail on every layer for reasons unrelated to
+expert coverage. The expert specs are still fully expanded, and
+`test_layer_modules_expand_every_expert` plus
+`test_looper_records_no_miss_for_expanded_expert_specs` assert that no routed
+expert appears among the misses.
+
 ## Registry-wide module-plan unit tests
 
 `tests/module_tree/test_registered_module_plans.py` runs for every `MODEL_MAP`
