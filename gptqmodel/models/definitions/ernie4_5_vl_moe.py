@@ -106,7 +106,7 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             return
         setattr(parent, attr_name, self.shell_module_materialize(module, self.quantize_config.device))
 
-    def _release_module(self, parent, attr_name: str):
+    def _release_module(self, parent, attr_name: str, *, disk: bool = False):
         module = getattr(parent, attr_name, None)
         if module is None:
             return
@@ -114,15 +114,25 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             # Some or all leaves never left the checkpoint: they are still on
             # `meta` and there is no Accelerate hook to restore them.
             # `move_to()` deliberately raises for that state, so a whole-module
-            # move is not available. Release is still *total*, though: a start
-            # hook that raised partway through a device move (an OOM while
-            # materializing the vision tower) leaves already-moved leaves on the
-            # forward device next to the untouched `meta` ones. Skipping the
-            # module there would keep real tensors on the accelerator for the
-            # rest of the run. Move only the materialized leaves and leave the
-            # `meta` ones as they are; `_apply()` keeps quantized subclasses'
-            # cache invalidation and the module's registration intact.
+            # move is not available, and `offload_to_disk()` silently returns
+            # for it (it cannot serialize leaves that have no storage). Release
+            # is still *total*, though: a start hook that raised partway through
+            # a device move (an OOM while materializing the vision tower) leaves
+            # already-moved leaves on the forward device next to the untouched
+            # `meta` ones. Skipping the module there would keep real tensors on
+            # the accelerator for the rest of the run — in both offload
+            # configurations, since the disk branch early-returns on `meta` too.
+            # Move only the materialized leaves and leave the `meta` ones as
+            # they are; `_apply()` keeps quantized subclasses' cache
+            # invalidation and the module's registration intact.
             module._apply(lambda tensor: tensor if tensor.is_meta else tensor.to(CPU))
+            return
+        if disk:
+            offload_to_disk(
+                model=parent,
+                module=module,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
             return
         # setattr() requires the attribute *name*; passing the module object
         # here raised `TypeError: attribute name must be string, not 'Linear'`
@@ -144,40 +154,17 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def pre_quantize_generate_hook_end(self):
         core_model = self._core_multimodal_model()
         language_model = core_model.language_model
-        vision_module = getattr(core_model, "vision_tower", None)
-        resampler_module = getattr(core_model, "resampler_model", None)
+        disk = self.quantize_config.offload_to_disk
 
-        if self.quantize_config.offload_to_disk:
-            if hasattr(language_model, "embed_tokens"):
-                offload_to_disk(
-                    model=language_model,
-                    module=language_model.embed_tokens,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if hasattr(language_model, "rotary_emb"):
-                offload_to_disk(
-                    model=language_model,
-                    module=language_model.rotary_emb,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if vision_module is not None:
-                offload_to_disk(
-                    model=core_model,
-                    module=vision_module,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if resampler_module is not None:
-                offload_to_disk(
-                    model=core_model,
-                    module=resampler_module,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            return
-
-        self._release_module(language_model, "embed_tokens")
-        self._release_module(language_model, "rotary_emb")
-        self._release_module(core_model, "vision_tower")
-        self._release_module(core_model, "resampler_model")
+        # The same four releases serve both configurations. Routing them through
+        # one helper keeps the `meta` handling identical: a partially
+        # materialized module (a start hook that raised mid-move) must have its
+        # real tensors released in the disk configuration too, where
+        # `offload_to_disk()` cannot help because it early-returns on `meta`.
+        self._release_module(language_model, "embed_tokens", disk=disk)
+        self._release_module(language_model, "rotary_emb", disk=disk)
+        self._release_module(core_model, "vision_tower", disk=disk)
+        self._release_module(core_model, "resampler_model", disk=disk)
 
     @staticmethod
     def _flatten_multimodal_features(features: Any) -> torch.Tensor:

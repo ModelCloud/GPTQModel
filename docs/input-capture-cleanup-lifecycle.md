@@ -87,7 +87,7 @@ failed and silently swallow a real release error.
 | Model-specific hook end raises while the capture is already failing | n/a | handle removed, the release error is logged, the capture error propagates |
 | `offload_to_disk=True` capture | hook end offloads modules to disk | unchanged |
 | `offload_to_disk=False` capture | `TypeError: attribute name must be string` at hook end | unchanged (modules moved to CPU by name) |
-| Partially materialized module (start hook raised mid-move) | not reachable: the start error escaped before hook end ran | materialized leaves moved to CPU, `meta` leaves left as-is, start error propagates |
+| Partially materialized module (start hook raised mid-move) | not reachable: the start error escaped before hook end ran | materialized leaves moved to CPU, `meta` leaves left as-is, start error propagates (both `offload_to_disk` configurations) |
 
 ## Model-side contract
 
@@ -98,8 +98,7 @@ module object to `setattr()` raises
 `TypeError: attribute name must be string, ...`, which is exactly the failure
 mode that motivated the ERNIE 4.5 VL MoE fix.
 
-A release must also be *total*. Two states look alike but need different
-handling:
+A release must also be *total*. Three states need different handling:
 
 - A module that never left the checkpoint is still entirely on `meta` with no
   Accelerate offload hook to restore it, and `move_to()` deliberately raises for
@@ -113,8 +112,17 @@ handling:
   rest of the run, so the release moves only its materialized leaves and leaves
   the `meta` ones in place.
 
-A definition must handle both: never turn the all-`meta` case into an error, and
-never skip the real tensors of a partially materialized module.
+The mixed case has to be handled in *both* offload configurations. The disk
+path cannot rely on `offload_to_disk()` for it: that helper early-returns for any
+module that still has a `meta` leaf, so a mixed module would silently keep its
+materialized tensors on the accelerator. ERNIE 4.5 VL MoE therefore routes both
+configurations through one `_release_module(..., disk=...)` helper: the
+partially materialized state is released to CPU either way, and only a fully
+materialized module is passed to `offload_to_disk()`.
+
+A definition must handle all three: never turn the all-`meta` case into an
+error, never skip the real tensors of a partially materialized module, and never
+assume the disk helper covers that mixed state.
 
 Cleanup must not change checkpoint ownership: the set of `state_dict()` keys is
 identical before and after the hook round trip. Tests assert this on a real
