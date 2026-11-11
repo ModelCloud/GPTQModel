@@ -321,11 +321,42 @@ Why this shape and not a generic op chain:
   and is the unavoidable cost of 4-bit; the design minimises how often it runs
   and how much it moves, rather than pretending it is free.
 
-Status: this is the design and its measured justification. It is **not yet
-implemented** — it needs a custom TT-Metalium op (LLK-level unpack), which is a
-larger build than the TTNN-level work in this repository. The interim state
-remains the TTNN dequant path, which is correct but pays 85 % of a layer in
-expansion.
+### What "optimising GPTQ for bfloat4_b" would actually mean
+
+Two different things get conflated here, and only one of them is an
+optimisation.
+
+1. **Re-encoding an existing int4 checkpoint as `bfloat4_b` is not an
+   optimisation.** It is a requantisation: GPTQ is uniform int4 with a per-group
+   scale *and a zero point*, while block-float is symmetric with one shared
+   exponent per 16 values on a logarithmic grid. The zero point has nowhere to
+   go, and the measurement above shows the cost (~9.8 % normalized error on a
+   real layer). This repository therefore does **not** offer a
+   `bfloat4_b` target for GPTQ checkpoints.
+2. **Quantising onto a block-float grid with GPTQ is a legitimate
+   optimisation.** GPTQ's algorithm is grid-agnostic: it needs a quantiser
+   `Q(w)` and its error, then solves column-by-column minimising
+   Hessian-weighted error. Nothing requires `Q` to be uniform. Running the same
+   solve with a block-float grid (shared exponent per 16 + 3-bit mantissa)
+   produces a checkpoint whose weights *are* native `bfloat4_b` — so the unpack
+   stage expands them for free and there is **no dequant in the hot path at
+   all**. That is genuinely "GPTQ for bfloat4_b", and it is a quantization-time
+   feature producing a new checkpoint format, not an inference trick.
+
+Both paths are worth having, and they are independent:
+
+| Target | Keeps exact int4 GPTQ | Effort | Status |
+| --- | --- | --- | --- |
+| Fused int4 kernel (existing checkpoints) | yes | custom TT-Metalium op | design only |
+| GPTQ onto block-float grid (new checkpoints) | no, by construction | quantiser work + native bf4 inference | not started |
+| `bfloat8_b` storage re-encode (interim) | ~1 % loss, 2x memory | TTNN only | implemented, opt-in |
+
+Status of the fused kernel: design plus measured justification, **not
+implemented**. Feasibility is now established, though: the installed build
+exposes `ttnn.generic_op` with `ProgramDescriptor`, `CBDescriptor` and
+`KernelDescriptor`, so a custom TT-Metalium kernel can be dispatched from Python
+without rebuilding tt-metal. The interim state remains the TTNN dequant path,
+which is correct but pays 85 % of a layer in expansion.
 
 ## 10. Qualified host
 
