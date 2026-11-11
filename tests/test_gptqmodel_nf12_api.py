@@ -166,10 +166,11 @@ def test_fp32_staged_b1_matches_independent_rows_and_torch(n, m):
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
-def test_prepared_fp32_gate_matches_b1_and_fp64_oracle():
+@pytest.mark.parametrize("n", (128, 384))
+def test_prepared_fp32_gate_matches_b1_and_fp64_oracle(n):
     device = _cuda()
     generator = torch.Generator(device=device).manual_seed(20261111)
-    dense = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    dense = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
     dense[0, 0] = -0.0
     dense[0, 7] = 2.0**10
     dense[-1, -1] = -(2.0**-20)
@@ -184,7 +185,7 @@ def test_prepared_fp32_gate_matches_b1_and_fp64_oracle():
     assert meta.nbytes + low.nbytes + escapes.nbytes < dense.nbytes
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
     x = torch.randn((6, 5120), generator=generator, device=device) * 0.05
-    bias = torch.randn((384,), generator=generator, device=device) * 0.01
+    bias = torch.randn((n,), generator=generator, device=device) * 0.01
     staged = nf12.linear_fp32_staged_b1(x, packed, bias)
     singles = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(6)])
     assert torch.equal(staged, singles)

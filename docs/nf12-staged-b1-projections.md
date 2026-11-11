@@ -23,13 +23,13 @@ flowchart TD
     I["linear_fp32_staged_b1: FP32 rows 1..8"] --> J["linear_fp32: _staged_b1 true"]
     J --> K{"full long-K B1 path?"}
     T["linear_fp32: ordinary M1"] --> L
-    K -->|yes| L{"prepared 384x5120 gate<br/>and M = 1 or 6?"}
+    K -->|yes| L{"prepared 128 or 384x5120 gate<br/>and M = 1 or 6?"}
     L -->|yes| P["_linear_fp32_gate_planes: K-contiguous 12-bit view"]
     L -->|no| Q{"M = 6?"}
     Q -->|yes| M["_linear_fp32_six_b1: original tiled NF12"]
     Q -->|no| N["_linear_fp32 with block_m 1 and M grid rows"]
     K -->|no| Y["ValueError"]
-    R["prepare_fp32_gate: CUDA NF12 384x5120"] --> S["temporary BF16 decode; repack 12-bit planes; release dense"]
+    R["prepare_fp32_gate: CUDA NF12 128 or 384x5120"] --> S["temporary BF16 decode; repack 12-bit planes; release dense"]
     S --> L
     R -->|wrong shape or device| Z["ValueError"]
     Y:::error
@@ -41,7 +41,7 @@ flowchart TD
 | --- | --- |
 | Each physical row called `nf12.linear` and selected `small_m_heuristic(1,n,k)` separately (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). | `linear_staged_b1` selects the same one-row configuration once and passes all staged rows to `linear_small_m` (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). |
 | Each FP32 row launched `_linear_fp32` separately (`gptqmodel_nf12/_fp32.py`). | Six rows use `_linear_fp32_six_b1`, decoding a packed tile once while retaining six independent one-row reduction trees. Other staged row counts use one grid with `block_m=1` (`gptqmodel_nf12/_fp32.py`). |
-| FP32 B1 reads the original tiled NF12 layout for every 384x5120 router (`gptqmodel_nf12/_fp32.py:_linear_fp32_six_b1`). | `prepare_fp32_gate` keeps a second compressed K-contiguous 12-bit view. `linear_fp32` uses `_linear_fp32_gate_planes` for ordinary M1 and staged M6 when prepared, retaining the tiled path otherwise (`gptqmodel_nf12/_fp32.py`). |
+| FP32 B1 reads the original tiled NF12 layout for every 128/384x5120 router (`gptqmodel_nf12/_fp32.py:_linear_fp32_six_b1`). | `prepare_fp32_gate` keeps a second compressed K-contiguous 12-bit view. `linear_fp32` uses `_linear_fp32_gate_planes` for ordinary M1 and staged M6 when prepared, retaining the tiled path otherwise (`gptqmodel_nf12/_fp32.py`). |
 
 The BF16 API rejects more than eight rows and returns an unsupported CUDA
 status when the one-row route or staged configuration is unavailable. The FP32
@@ -50,14 +50,15 @@ Callers requiring those shapes keep their existing per-row path.
 
 ## Prepared FP32 router view
 
-`prepare_fp32_gate` accepts only a CUDA NF12 384x5120 weight. At load time it
+`prepare_fp32_gate` accepts only a CUDA NF12 128x5120 or 384x5120 weight. At load time it
 temporarily decodes BF16, repacks each row into a 32-bit metadata word and
 eight low bytes per eight values, compacts exceptional groups, and releases
 the dense tensor. A weak map keyed by `NF12Weight` owns this view, so it dies
 with the model weight. The original tiled NF12 tensor remains available for
 other shapes and kernels. Both views are 12-bit compressed; no BF16 weight
-matrix remains resident. The view uses 2,949,120 bytes plus its exceptional
-table per gate, in addition to the original packed view.
+matrix remains resident. The view uses 2,949,120 bytes for 384 rows or 983,040
+bytes for 128 rows, plus its exceptional table, in addition to the original
+packed view.
 
 ```mermaid
 flowchart LR
@@ -84,6 +85,11 @@ Ordinary M1 and staged M6 share the same BK1024 reduction. The actual-device
 test checks bitwise agreement between them, FP64 Torch arithmetic, escaped
 groups, changed inputs, and packed-only persistent storage. The free-threaded
 probe exercised eight threads across two GPUs in three processes.
+On the three released 128x5120 MTP gates with six FP32 verifier rows, an
+isolated CUDA graph measured 17.186 microseconds per gate for the original
+tiled NF12 path and 10.837 microseconds for the prepared path. Their top-eight
+route IDs matched dense Torch for the sampled inputs, with maximum score
+difference 4.173e-7. This is a projection measurement, not an endpoint claim.
 
 ## SM80 measurements
 

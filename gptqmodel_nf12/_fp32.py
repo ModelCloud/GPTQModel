@@ -28,20 +28,21 @@ _gate_lock = threading.Lock()
 
 
 def prepare_fp32_gate(weight: NF12Weight) -> None:
-    """Prepare compressed K-contiguous planes for the 384x5120 B1 router.
+    """Prepare compressed K-contiguous planes for 128/384x5120 B1 routers.
 
     This is a load-time operation. The temporary BF16 decode dies before
     inference; the weakly owned cache retains only 12-bit packed planes and
     escaped BF16 groups. The ordinary tiled NF12 layout remains available for
     all other projection geometries.
     """
-    if weight.shape != (384, 5120) or weight.device.type != "cuda":
-        raise ValueError("prepare_fp32_gate requires a CUDA NF12 [384,5120] weight")
+    n, k = weight.shape
+    if n not in (128, 384) or k != 5120 or weight.device.type != "cuda":
+        raise ValueError("prepare_fp32_gate requires a CUDA NF12 [128 or 384,5120] weight")
     with _gate_lock:
         if weight in _gate_views:
             return
         dense = weight.decode()
-        bits = (dense.view(torch.int16).to(torch.int32) & 65535).view(384, 640, 8)
+        bits = (dense.view(torch.int16).to(torch.int32) & 65535).view(n, 640, 8)
         exponent = (bits >> 7) & 255
         sign = bits >> 15
         offset = (exponent - 2 * weight.exp_base) >> 1
@@ -49,14 +50,14 @@ def prepare_fp32_gate(weight: NF12Weight) -> None:
                       (sign[:, :, 1::2] << 6) | (offset[:, :, 1::2] << 3))
         meta = (meta_bytes[:, :, 0] | (meta_bytes[:, :, 1] << 8) |
                 (meta_bytes[:, :, 2] << 16) | (meta_bytes[:, :, 3] << 24)).contiguous()
-        low = (bits & 255).to(torch.uint8).view(384, 5120).contiguous()
+        low = (bits & 255).to(torch.uint8).view(n, 5120).contiguous()
         valid = (((exponent >= 2 * weight.exp_base) &
                   (exponent <= 2 * weight.exp_base + 15)).all(-1) & (meta != 0))
         escaped_groups = ~valid
         escapes = bits[escaped_groups].to(torch.int16).contiguous()
         escaped_count = escapes.shape[0]
         if escaped_count:
-            low_words = low.view(torch.int32).view(384, 640, 2)
+            low_words = low.view(torch.int32).view(n, 640, 2)
             low_words[:, :, 0][escaped_groups] = torch.arange(
                 escaped_count, dtype=torch.int32, device=weight.device)
             low_words[:, :, 1][escaped_groups] = 0
@@ -73,7 +74,7 @@ def _get_gate_view(weight: NF12Weight):
 @triton.jit
 def _linear_fp32_gate_planes(
     x_ptr, meta_ptr, low_ptr, escapes_ptr, bias_ptr, out_ptr,
-    exp_base: tl.constexpr, has_bias: tl.constexpr, m: tl.constexpr,
+    n: tl.constexpr, exp_base: tl.constexpr, has_bias: tl.constexpr, m: tl.constexpr,
     block_k: tl.constexpr,
 ):
     """One router row per CTA; share its packed decode across six inputs."""
@@ -121,11 +122,11 @@ def _linear_fp32_gate_planes(
     bias = tl.load(bias_ptr + output_row) if has_bias else 0.0
     tl.store(out_ptr + output_row, tl.sum(acc0, 0) + bias)
     if m == 6:
-        tl.store(out_ptr + 384 + output_row, tl.sum(acc1, 0) + bias)
-        tl.store(out_ptr + 768 + output_row, tl.sum(acc2, 0) + bias)
-        tl.store(out_ptr + 1152 + output_row, tl.sum(acc3, 0) + bias)
-        tl.store(out_ptr + 1536 + output_row, tl.sum(acc4, 0) + bias)
-        tl.store(out_ptr + 1920 + output_row, tl.sum(acc5, 0) + bias)
+        tl.store(out_ptr + n + output_row, tl.sum(acc1, 0) + bias)
+        tl.store(out_ptr + 2 * n + output_row, tl.sum(acc2, 0) + bias)
+        tl.store(out_ptr + 3 * n + output_row, tl.sum(acc3, 0) + bias)
+        tl.store(out_ptr + 4 * n + output_row, tl.sum(acc4, 0) + bias)
+        tl.store(out_ptr + 5 * n + output_row, tl.sum(acc5, 0) + bias)
 
 
 @triton.jit
@@ -398,13 +399,13 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
         return result
     out = torch.empty((*x.shape[:-1], output_n), dtype=torch.float32, device=x.device)
     if m and output_n:
-        gate_view = (_get_gate_view(weight) if rows is None and n == 384 and k == 5120
+        gate_view = (_get_gate_view(weight) if rows is None and n in (128, 384) and k == 5120
                      and (m == 1 or (m == 6 and _staged_b1)) else None)
         if gate_view is not None:
             meta, low, escapes = gate_view
-            _linear_fp32_gate_planes[(384,)](
+            _linear_fp32_gate_planes[(n,)](
                 x2, meta, low, escapes, bias if bias is not None else x2,
-                out, weight.exp_base, bias is not None, m, 1024, num_warps=4,
+                out, n, weight.exp_base, bias is not None, m, 1024, num_warps=4,
             )
         elif k <= 512 and output_n >= 1024 and m == 1:
             # Full short-K heads benefit from eight output rows per CTA;

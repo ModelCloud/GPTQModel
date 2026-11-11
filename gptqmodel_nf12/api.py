@@ -169,7 +169,7 @@ def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
 
 
 def prepare_fp32_gate(weight: NF12Weight) -> None:
-    """Prepare a lossless compressed view for the 384x5120 FP32 B1 router."""
+    """Prepare a lossless compressed view for 128/384x5120 FP32 B1 routers."""
     from ._fp32 import prepare_fp32_gate as impl
 
     impl(weight)
