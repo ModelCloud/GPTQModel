@@ -23,11 +23,12 @@ flowchart TD
     H -- no --> J["launch_embedding<8><br/>one-dimensional grid"]
     F --> K["embedding_kernel<Grid2D=true>"]
     P --> S["embedding_kernel<Grid2D=true, IdsPerCTA=16><br/>__stcg output stores"]
-    Q --> K
+    Q --> T["embedding_kernel<Grid2D=true, IdsPerCTA=1><br/>__stcs output stores"]
     I --> L["embedding_kernel<Grid2D=false>"]
     J --> L
     K --> Z["Exact BF16 row bits; invalid IDs write +0.0"]
     S --> Z
+    T --> Z
     L --> Z
     classDef failure fill:#f9d8d8,stroke:#b42318,color:#111;
     class X failure;
@@ -173,11 +174,12 @@ were not controlled across profiler runs.
 
 ## Bypass L1 for 16-ID prefill output stores
 
-The 16-ID specialization now writes its two 128-bit output vectors with
-`__stcg`, leaving L1 available for packed source lines. The 8-ID specialization
-at M=312/313, one-ID specialization at M=3072, and decode use their original
-stores. This changes no weight layout, adds no cache, and preserves exact BF16
-bits. The [benchmark harness](../scripts/bench_nf12_embedding_load_policy.py)
+The 16-ID specialization writes its two 128-bit output vectors with
+`__stcg`, leaving L1 available for packed source lines. In that first change,
+the 8-ID specialization at M=312/313, one-ID specialization at M=3072, and
+decode used their original stores. This changes no weight layout, adds no
+cache, and preserves exact BF16 bits. The
+[benchmark harness](../scripts/bench_nf12_embedding_load_policy.py)
 compares native libraries with the same released `embed.weight`, the same IDs,
 and paired CUDA graphs. [GPU1 run A](nf12-embedding-load-policy-gpu1-balanced-20261111.json),
 [fresh GPU1 run B](nf12-embedding-load-policy-gpu1-balanced-reconfirm-20261111.json),
@@ -226,3 +228,29 @@ it lost on Lite's observed repeated IDs at M=1536 and M=3072. The experiment
 retains only packed weights; neither layout retained expanded BF16 weights.
 The store-policy change does not close the dense BF16 prefill gap, so the Lite
 service remains on BF16 by default.
+
+## Evict-first stores for single-copy one-ID prefill
+
+The SM80 K=5120 single-copy (`Repeats=1`) one-ID specialization now uses
+`__stcs` for its two 128-bit
+output vectors. The 8-ID specialization retains default stores; 16-ID retains
+`__stcg`. The four-copy HC4 specialization retains its separately tuned store
+policy. A GPU 2 sweep tested `.cg`, `.ca`, and `.cs` on the three packed loads,
+and `.cg`, `.wb`, and `.cs` on the two output stores, one policy at a time. The
+[GPU 2 report](nf12-embedding-cache-policy-gpu2-20261111.md) and
+[raw samples](nf12-embedding-cache-policy-gpu2-20261111.json) use the same full
+released `embed.weight` and Lite int64 code IDs. Three independent paired
+ABBA runs of the one-ID `.cs` variant yielded 1.044×, 1.044×, and 1.067× at
+M=3072. Random IDs stayed within measurement noise. The final source's
+full-weight run gave 24.000 → 22.496 µs for code IDs and 44.992 → 44.920 µs
+for random IDs. Dense BF16 took 18.000 µs on the same code IDs, so the packed
+lookup still does not reach dense latency.
+
+SM80 SASS has `STG.E.EF.128` for the one-ID specialization, replacing
+`STG.E.128`; the 8-ID instruction sequence is byte-identical to the baseline.
+The full released table restored exact BF16 bits in bounded 128-row chunks.
+Int32 and int64 valid and invalid IDs returned exact BF16 and +0.0 bits in
+the native paired runs; the production Python API embedding cases passed on
+physical GPU 2. Inference retains only the packed and escape tensors, with no
+expanded weight cache or extra packed layout. The benchmark process peaked at
+3010 MiB of physical GPU 2 memory, below its 3072 MiB limit.

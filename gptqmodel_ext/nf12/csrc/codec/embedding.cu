@@ -115,6 +115,10 @@ __global__ void __launch_bounds__(4 * Quads) embedding_kernel(EmbeddingParams p,
         // Keep the four replicated activation writes out of L1 as well.
         __stcg(out, v0);
         __stcg(out + 4, v1);
+      } else if constexpr (Repeats == 1 && Grid2D && IdsPerCTA == 1) {
+        // Evict single-copy output before repeatedly read packed source lines.
+        __stcs(out, v0);
+        __stcs(out + 4, v1);
       } else {
         out[0] = v0;
         out[4] = v1;
