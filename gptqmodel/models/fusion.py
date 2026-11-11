@@ -440,7 +440,7 @@ class _FusionGroup:
             sizes = [getattr(module, name).shape[dim] for module in self.modules]
             for module, view in zip(self.modules, tensor.split(sizes, dim=dim)):
                 _set_operand(module, name, view)
-        suppress_restore = self.kernel.layout in ("cpu_aten", "cpu_legacy")
+        suppress_restore = self.kernel.layout in ("cpu_aten", "cpu_legacy", "cpu_avx512")
         try:
             if suppress_restore:
                 for module in self.modules:

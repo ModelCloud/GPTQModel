@@ -320,6 +320,68 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
     record_property("extra_packed_weight_bytes", 0)
 
 
+@pytest.mark.skipif(not has_avx512_bf16(), reason="AVX512-BF16 CPU is required")
+def test_avx512_fusion_does_not_restore_source_checkpoint_state():
+    """The fused layer must own concatenated int4pack tensors.
+
+    ``copy.copy(first)`` inherits the sources' ``_fused_train_state`` snapshot,
+    which holds the pre-transform GPTQ-v2 ``qweight``/``qzeros`` shapes. Clearing
+    the fused shell restored that snapshot over the combined int4pack operands,
+    so ``_share_operands`` then failed to split them across the sources.
+    """
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+
+    if not TorchCpuAvx512Linear.cached_validate_once()[0]:
+        pytest.skip("int4pack CPU extension is unavailable")
+
+    torch.manual_seed(23)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8, vocab_size=64,
+                         attention_bias=True, mlp_bias=True)
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(torch.bfloat16).eval()
+    parent = model.model.layers[0].mlp
+    modules = []
+    for name in ("gate_proj", "up_proj"):
+        module, _w, _b = _projection(TorchCpuAvx512Linear, getattr(parent, name), torch.bfloat16, "cpu")
+        setattr(parent, name, module)
+        modules.append(module)
+    parent.to("cpu")
+
+    # The snapshot is captured lazily by the first fused forward, so warm the
+    # sources up before fusing exactly as a real inference server would.
+    with torch.inference_mode():
+        warmup = torch.randn(1, 8, 512, dtype=torch.bfloat16)
+        for module in modules:
+            module(warmup)
+    for module in modules:
+        assert module._fused_train_state, "sources must carry a pre-transform snapshot"
+        assert tuple(module.qweight.shape) == (module.out_features, module.in_features // 2)
+        assert isinstance(module._fused_train_state, dict)
+
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=torch.bfloat16)
+    try:
+        group.install()
+        fused = group.packed
+        assert type(fused) is TorchCpuAvx512Linear
+        assert getattr(fused, "_fused_train_state", None) is None
+        total = sum(module.out_features for module in modules)
+        assert tuple(fused.qweight.shape) == (total, modules[0].in_features // 2)
+        assert tuple(fused.qzeros.shape) == (modules[0].in_features // modules[0].group_size, total)
+        for module in modules:
+            for name in ("qweight", "qzeros", "scales", "bias"):
+                source, packed = getattr(module, name), getattr(fused, name)
+                assert isinstance(source, torch.Tensor) and source.numel()
+                assert source.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr(), name
+        with torch.inference_mode():
+            x = torch.randn(1, 8, 512, dtype=torch.bfloat16)
+            torch.testing.assert_close(fused(x), torch.cat([m(x) for m in modules], -1),
+                                       rtol=2e-3, atol=2e-3)
+    finally:
+        group.remove()
+
+
 @pytest.mark.parametrize("method", ["gptq", "awq"])
 @pytest.mark.parametrize("mutation", ["replace", "resize", "dtype"])
 def test_marlin_rebuilds_native_workspace_after_binding_changes(method, mutation):
