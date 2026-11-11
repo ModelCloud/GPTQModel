@@ -216,6 +216,8 @@ def _native() -> ctypes.CDLL:
                                          ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_int, ctypes.c_void_p]
     lib.nf12_rowmajor_lookup.restype = ctypes.c_int
+    lib.nf12_rowmajor_repeat4_lookup.argtypes = lib.nf12_rowmajor_lookup.argtypes
+    lib.nf12_rowmajor_repeat4_lookup.restype = ctypes.c_int
     return lib
 
 
@@ -295,4 +297,39 @@ def embedding(ids: torch.Tensor, weight: NF12RowMajorWeight, *, threads: int = 2
                 ids.data_ptr(), weight.packed.data_ptr(), weight.escapes.data_ptr(),
                 weight.escapes.shape[0], n, k, weight.exp_base, ids.numel(),
                 output.data_ptr(), ids.element_size(), threads, ids_per_cta, mode, stream), "lookup")
+    return output
+
+
+def embedding_repeat4(ids: torch.Tensor, weight: NF12RowMajorWeight, *,
+                      threads: int = 128, ids_per_cta: int = 1,
+                      store_policy: Literal["default", "cg", "cs", "transpose_cs", "transpose_cg"] = "cs") -> torch.Tensor:
+    """Decode each packed row block once and write four exact BF16 copies.
+
+    This is an experimental comparison target. It does not install a Torch op
+    or alter the canonical NF12 repeat4 dispatch.
+    """
+    if not isinstance(weight, NF12RowMajorWeight):
+        raise TypeError("row-major repeat4 requires NF12RowMajorWeight")
+    _check_sm80(weight.device)
+    if (ids.device != weight.device or ids.dtype not in (torch.int32, torch.int64)
+            or not ids.is_contiguous()):
+        raise ValueError("ids must be contiguous int32/int64 on the row-major CUDA device")
+    if threads not in (64, 128, 256) or ids_per_cta not in (1, 2, 4, 8, 16):
+        raise ValueError("unsupported row-major repeat4 CTA geometry")
+    if ids_per_cta > threads // 4:
+        raise ValueError("IDs per CTA exceed available four-lane groups")
+    if store_policy not in ("default", "cg", "cs", "transpose_cs", "transpose_cg"):
+        raise ValueError("unsupported row-major repeat4 store policy")
+    n, k = weight.shape
+    output = torch.empty((*ids.shape, 4, k), dtype=torch.bfloat16, device=ids.device)
+    if ids.numel():
+        policy = {"default": 0, "cg": 1, "cs": 2,
+                  "transpose_cs": 3, "transpose_cg": 4}[store_policy]
+        with torch.cuda.device(ids.device):
+            stream = torch.cuda.current_stream(ids.device).cuda_stream
+            _cuda_error(_native().nf12_rowmajor_repeat4_lookup(
+                ids.data_ptr(), weight.packed.data_ptr(), weight.escapes.data_ptr(),
+                weight.escapes.shape[0], n, k, weight.exp_base, ids.numel(),
+                output.data_ptr(), ids.element_size(), threads, ids_per_cta,
+                policy, stream), "repeat4 lookup")
     return output

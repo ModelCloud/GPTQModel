@@ -116,17 +116,11 @@ save/load route is installed in production by this prototype.
 
 ## Repeat4 coordination
 
-Agent7's canonical fused repeat4 benchmark reports about 44.6 µs at M1536
-and 79.5 µs at M3072 on code int64 IDs, with four BF16 activation copies.
-The row-major single-copy gain suggests a possible improvement from its
-contiguous vector stores and smaller selected-row reads. The four-copy output
-is much larger, so the single-copy speedup cannot be carried over. A combined
-kernel is **plausibly beneficial but unmeasured**; it should be evaluated in
-the fused repeat4 branch, without duplicating that geometry sweep here. The
-needed evidence is paired ABBA on the same physical GPU and full released
-weight against canonical fused repeat4 and dense lookup plus repeat, at both
-Lite M values, with exact four-copy BF16 bits, output-byte traffic, retained
-layout bytes, and peak VRAM reported.
+The [fused repeat4 follow-up](nf12-rowmajor-repeat4-gpu1.md) now compares
+this packed layout directly with agent7's tuned public HC4 operator on the
+full released table. Coalesced row-major stores win by 1.13–1.24× on Lite
+code IDs at M1536/2048/3072, while M312/313 is 3–4% slower. It remains an
+experimental layout with no dynamic cache or production dispatch.
 
 Prototype: [API](../gptqmodel_nf12/experimental_rowmajor.py),
 [native transform and lookup](../gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu),
