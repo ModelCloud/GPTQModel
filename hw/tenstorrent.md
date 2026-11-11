@@ -641,9 +641,40 @@ implied by the single-core number. The remaining gap is honest work, not
 structure: the kernel still stages every weight and activation tile through L1
 with a full barrier, and dequantizes on BRISC.
 
-Status: the fused int4 GEMM is **correct for a full multi-core layer** and within
-4x of the reference implementation. It is not yet faster, and it needs a
-checkpoint that is already int4 -- which is exactly what path 1 exists for.
+### Where the 3.6x actually goes
+
+Ablating the kernel on the same 8x8 / M=256 / K=768 / N=2048 config isolates each
+stage:
+
+| variant | time | share |
+| --- | --- | --- |
+| full kernel | 0.3463 ms | 100% |
+| matmul removed | 0.3390 ms | -- |
+| matmul **and** LUT removed (pure NOC staging) | 0.1564 ms | -- |
+
+Derived:
+
+| stage | time | share |
+| --- | --- | --- |
+| NOC staging (reads + writes) | 0.1564 ms | **45%** |
+| BRISC LUT dequant | 0.1826 ms | **53%** |
+| FPU matmul | 0.0073 ms | **2%** |
+
+The matrix engine is 2% of the runtime. **97.9% is moving and expanding data.**
+
+The staging cost is also structurally wasteful: every core reads the *entire*
+activation set for its M tiles, so 64 cores read the same activations 64 times --
+24 MiB of redundant traffic for a 0.38 MiB activation. That is the cost
+`ttnn.linear` avoids by letting the framework shard and multicast.
+
+So the remaining 3.6x is not one bug. It is:
+1. redundant activation reads that multicast would remove,
+2. a full barrier per staging round rather than pipelining,
+3. dequant on an FPU-less core rather than in the compute path.
+
+Closing it needs the kernel to participate in TTNN's sharding/multicast machinery
+rather than staging through L1 by hand, which is a larger redesign than tuning
+what exists.
 
 A deadlock worth recording: updating the shared compute kernel to expect staged
 buffers while one reader still pushed tiles one at a time wedged the device (reset
