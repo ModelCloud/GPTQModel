@@ -159,6 +159,9 @@ source key is `f9f7155c973fcc8c1dfae32efa39d243baa4230f50ff93f103f1c8d5f663f8c5`
 The 1536/3072 prefill lookups remain below dense BF16, and the whole-service
 8K parity gate remains unmet. The last Lite A/B/A measurements used the
 preceding native source key `57f012675277782c45e14b4fc1032effbf7ebf2e84ef471c467825dead8b82a4`.
+A final M=3072 sweep assigned one quad per ID in a 32-ID CTA. Eight paired
+ABBA rounds gave 0.994× the preceding route on code IDs and 0.931× on random
+IDs, with bit-exact output; that variant was reverted.
 The [uniform-random ID final run](nf12-real-embedding-random-ids-packed-cta-20261111.json)
 reaches only 0.516× dense at M=1536, so the code-ID speedup must not be
 generalized to all prompt distributions. Nsight Compute on GPU 7 observed
