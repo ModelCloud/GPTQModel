@@ -261,37 +261,42 @@ unchanged runtime self-load keeps the checkpoint snapshot for a later save.
 If the runtime operands changed, their affine offsets may not have an exact
 checkpoint representation; export and training restore then fail explicitly.
 
-`state_dict_matches_checkpoint_layout()` decides this from the operands whose
-shape the transform actually changes (`_discriminating_operands`):
-`qweight` and `qzeros` for the CPU int4pack and AVX512 paths. `scales` keeps
-its checkpoint shape in both layouts (only its dtype may widen), so it carries
-no discriminating power and must never decide the load by itself.
+`classify_fused_state_layout()` checks the **supplied** operands whose shape
+changed (`_discriminating_operands`): `qweight` and `qzeros` for the CPU
+int4pack and AVX512 paths. This also permits `strict=False` loads containing
+only one of those operands. Supplied discriminators must agree; mixed or
+unknown shapes raise before the module is changed. `scales` keeps its shape in
+both layouts, so a dict containing only shared-shape operands loads into the
+live runtime layout. If those values changed, checkpoint export fails instead
+of writing the old snapshot. A dict with no local operands leaves the layout
+untouched.
 
 ```mermaid
 flowchart TD
     A["BaseQuantLinear._load_from_state_dict(state_dict, prefix, ...)"] --> B{"_fused_train_state present?"}
     B -- no --> S["super()._load_from_state_dict"]
-    B -- yes --> C["_discriminating_operands(module)"]
-    C --> D{"every discriminating operand<br/>matches the snapshot shape?"}
-    D -- yes --> E["state_dict_matches_checkpoint_layout = True"]
-    D -- no --> F{"every discriminating operand<br/>matches the live shape?"}
-    F -- yes --> G["state_dict_matches_runtime_layout = True"]
-    F -- no --> S
-    E --> H["mark snapshot exportable<br/>_clear_runtime_weight_cache restores it"]
-    H --> S
-    G --> V["runtime_state_matches_live<br/>mark snapshot exportable or dirty"]
-    V --> I{"assign_to_params_buffers?"}
-    I -- no --> J["materialize_fused_runtime_state<br/>clone inference tensors to normal tensors"]
+    B -- yes --> C["classify_fused_state_layout<br/>supplied shape-changing operands"]
+    C --> D{"layout?"}
+    D -- invalid --> X["raise RuntimeError<br/>mixed or invalid shapes"]
+    D -- checkpoint --> E["_clear_runtime_weight_cache<br/>restore snapshot"]
+    E --> S
+    D -- runtime --> R["runtime_state_matches_live<br/>set exportable flag"]
+    R --> I{"assign_to_params_buffers?"}
+    I -- no --> J["materialize_fused_runtime_state"]
     I -- yes --> S
     J --> S
-    S --> L["_clear_runtime_weight_cache<br/>suppress snapshot restore for runtime load"]
-    L --> M["load complete"]
-    M --> X{"later export or training restore<br/>snapshot exportable?"}
-    X -- no --> Y["raise: changed runtime layout<br/>cannot be saved as checkpoint"]
-    X -- yes --> Z["restore checkpoint snapshot"]
-    D -. "partial or ambiguous dict" .-> N["no restore, no discard:<br/>load against the live layout"]
+    D -- empty --> S
+    S --> P{"layout after copy?"}
+    P -- runtime --> L["_clear_runtime_weight_cache<br/>suspend snapshot restore"]
+    P -- checkpoint or no snapshot --> Q["_clear_runtime_weight_cache"]
+    P -- empty --> M["load complete"]
+    L --> M
+    Q --> M
+    M --> Y{"later export<br/>snapshot exportable?"}
+    Y -- no --> Z["raise RuntimeError<br/>changed runtime state"]
+    Y -- yes --> T["save checkpoint layout"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
-    class N,Y failure;
+    class X,Z failure;
 ```
 
 The runtime branch also handles an `inference_mode` side effect: the transform
@@ -302,19 +307,22 @@ outright and skips the clone.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Layout verdict | `state_dict_matches_checkpoint_layout()` returned `True` on the **first** snapshot operand whose shape matched (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:81-105` before this change). `scales` is shape-identical in both layouts, so a runtime dict was classified as a checkpoint. | The verdict requires **all** shape-changing operands to match the snapshot; `scales` no longer participates (`_discriminating_operands`). |
+| Layout verdict | `state_dict_matches_checkpoint_layout()` returned `True` on the **first** snapshot operand whose shape matched (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:81-105` before PR #3769). `scales` is shape-identical in both layouts, so a runtime dict was classified as a checkpoint. | PR #3769 required all shape-changing operands to match. `classify_fused_state_layout()` now requires only the **supplied** shape-changing operands to agree, so partial loads work. |
 | Runtime-layout load | The snapshot was restored before the copy, then `super()._load_from_state_dict()` copied `(64, 64)` `qweight` into the restored `(16, 64)` buffer: `RuntimeError: size mismatch for qweight`. | `state_dict_matches_runtime_layout()` keeps the live `int4pack` layout and rebuilds derived metadata. An unchanged self-load retains the checkpoint snapshot for save. |
 | `assign=False` on a transformed layer | Copying into inference tensors raised `Inplace update to inference tensor outside InferenceMode is not allowed`. | `materialize_fused_runtime_state()` clones inference-tensor operands into normal tensors before the copy. |
 | Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | A runtime-layout load suppresses snapshot restoration during its cache clear. A later save restores an unchanged snapshot; a modified runtime state raises instead of writing stale weights. |
+| Partial checkpoint load | The all-operand check (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:168-190` in PR #3769) missed a lone checkpoint `qweight`, then copying into the runtime shape raised even with `strict=False`. | One supplied checkpoint discriminator restores the snapshot before the copy. |
+| Partial runtime or shared-shape load | Missing discriminators fell through to the unconditional cache clear (`gptqmodel/nn_modules/qlinear/__init__.py:399-406` in PR #3769), discarding updated values. | A supplied runtime discriminator, or only shared-shape keys, keeps the live layout and invalidates derived metadata. Empty loads do nothing. |
+| Mixed layouts | A mixed dict reached the copy and could mutate some buffers before a size error. | Conflicting discriminator shapes raise before any local buffer is touched. |
 
 The regression is pinned by
 `tests/test_kernel_audit_regressions.py::test_transformed_cpu_layer_round_trips_its_own_state_dict`
 (both `assign` values, all six CPU GPTQ/AWQ kernels) and
-`::test_checkpoint_layout_gate_uses_discriminating_operands`, plus save and
-inference-buffer regressions. The load path
-itself was introduced in
-[PR #3765](https://github.com/ModelCloud/GPTQModel/pull/3765); this gate keeps
-its checkpoint-restore behavior while making the self round-trip lossless.
+`::test_checkpoint_layout_gate_uses_discriminating_operands`, plus partial-load,
+save, and inference-buffer regressions. The load path was introduced in
+[PR #3765](https://github.com/ModelCloud/GPTQModel/pull/3765), then refined in
+[PR #3769](https://github.com/ModelCloud/GPTQModel/pull/3769). Partial-load
+classification was added in [PR #3770](https://github.com/ModelCloud/GPTQModel/pull/3770).
 
 ## Activation permutation and fused matmul
 

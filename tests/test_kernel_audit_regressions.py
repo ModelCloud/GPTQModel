@@ -798,6 +798,102 @@ def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_
         ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
     ),
 )
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_accepts_partial_checkpoint_state(class_name, module_path, assign):
+    from tests.test_torch_weight_storage import state_tensors
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support bfloat16")
+    holder, x, baseline = _transformed_layer(cls)
+    layer = holder.proj
+    saved = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    missing = holder.load_state_dict({"proj.qweight": saved}, strict=False, assign=assign)
+    assert "proj.qzeros" in missing.missing_keys
+    assert torch.equal(layer.qweight, saved)
+    with torch.inference_mode():
+        actual = holder(x)
+        holder(x)
+    torch.testing.assert_close(actual.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+    assert all(tensor.numel() < layer.in_features * layer.out_features for tensor in state_tensors(layer))
+
+
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_keeps_partial_runtime_state(assign):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+    from tests.test_torch_weight_storage import state_tensors
+
+    holder, x, _ = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    updated = layer.qweight.clone()
+    updated.view(-1)[0] ^= 1
+    layer.load_state_dict({"qweight": updated}, strict=False, assign=assign)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert torch.equal(layer.qweight, updated)
+    with torch.inference_mode():
+        assert torch.isfinite(holder(x)).all()
+        holder(x)
+    assert all(tensor.numel() < layer.in_features * layer.out_features for tensor in state_tensors(layer))
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_keeps_shared_shape_update(assign):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    holder, x, baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    updated = layer.scales.clone() * 2
+    layer.load_state_dict({"scales": updated}, strict=False, assign=assign)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert torch.equal(layer.scales, updated)
+    with torch.inference_mode():
+        actual = holder(x)
+    assert not torch.equal(actual, baseline)
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+
+def test_transformed_cpu_layer_rejects_mixed_layout_without_mutation():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_qweight = layer.qweight.clone()
+    checkpoint_qweight = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    with pytest.raises(RuntimeError, match="mixed or invalid CPU int4pack"):
+        layer.load_state_dict({"qweight": checkpoint_qweight, "qzeros": layer.qzeros.clone()}, strict=False)
+    assert torch.equal(layer.qweight, runtime_qweight)
+    assert layer._fused_train_state
+
+
+def test_empty_partial_load_does_not_restore_transformed_layer():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    layer.load_state_dict({}, strict=False)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert layer._fused_train_state
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
 def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_path):
     """Fusing CPU projections must not corrupt what ``save()`` writes.
 

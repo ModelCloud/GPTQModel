@@ -145,66 +145,59 @@ def _discriminating_operands(module: nn.Module):
             yield name, buffer_name
 
 
-def state_dict_matches_checkpoint_layout(module: nn.Module, state_dict, prefix: str = "") -> bool:
-    """Report whether an incoming state dict describes the checkpoint layout.
+def classify_fused_state_layout(module: nn.Module, state_dict, prefix: str = "") -> str:
+    """Classify the supplied local operands before changing the live tensors.
 
-    A CPU inference forward replaces the checkpoint operands with int4pack
-    shapes in place. Two very different state dicts can then arrive:
-
-    * a real checkpoint (``save()`` output or the file being resumed), whose
-      shapes match the ``_fused_train_state`` snapshot, and
-    * the model's own runtime ``state_dict()``, whose shapes match the live
-      transformed operands.
-
-    Only the first must be restored into the snapshot layout; restoring for the
-    second would reject a self round-trip that must keep working.
-
-    The decision uses every operand whose shape actually changed. A single
-    coincidentally equal operand - notably ``scales``, which the int4pack
-    transform leaves at its checkpoint shape - must never carry the verdict on
-    its own, and requiring all discriminating operands to agree is what keeps
-    the model's own runtime dict from being mistaken for a checkpoint.
-
-    When no operand changed shape (nothing to discriminate on), or any
-    discriminating operand does not match the snapshot, this returns ``False``
-    so the load proceeds against the live layout.
+    A partial load can supply only one shape-changing operand. Every supplied
+    discriminator must agree on its layout; missing operands are not evidence
+    against that layout. Shared-shape operands alone use the live layout so a
+    partial load cannot silently discard their new values. A load with no local
+    operands leaves the transformed module untouched.
     """
 
-    matched = 0
+    layout = None
     for name, buffer_name in _discriminating_operands(module):
-        incoming = state_dict.get(f"{prefix}{name}")
-        expected = module._buffers.get(buffer_name)
+        key = f"{prefix}{name}"
+        if key not in state_dict:
+            continue
+        incoming = state_dict[key]
+        expected = module._buffers[buffer_name]
+        live = getattr(module, name)
         if not isinstance(incoming, torch.Tensor):
-            return False
-        if tuple(incoming.shape) != tuple(expected.shape):
-            return False
-        matched += 1
-    return matched > 0
+            return "invalid"
+        if tuple(incoming.shape) == tuple(expected.shape):
+            candidate = "checkpoint"
+        elif tuple(incoming.shape) == tuple(live.shape):
+            candidate = "runtime"
+        else:
+            return "invalid"
+        if layout is not None and layout != candidate:
+            return "invalid"
+        layout = candidate
+    if layout is not None:
+        return layout
+
+    for name in (*module._parameters, *module._buffers):
+        if name not in module._non_persistent_buffers_set and f"{prefix}{name}" in state_dict:
+            return "runtime"
+    return "empty"
+
+
+def state_dict_matches_checkpoint_layout(module: nn.Module, state_dict, prefix: str = "") -> bool:
+    """Whether supplied shape-changing operands match the checkpoint snapshot."""
+
+    return classify_fused_state_layout(module, state_dict, prefix) == "checkpoint"
 
 
 def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str = "") -> bool:
-    """Report whether an incoming state dict matches the live transformed layout.
+    """Whether supplied operands must load into the live transformed layout."""
 
-    This identifies the model's own ``state_dict()``. Such a load must copy
-    into the live int4pack tensors and then rebuild derived caches *without*
-    restoring the checkpoint snapshot, which would rewrite the shapes the
-    caller just supplied.
-    """
-
-    matched = 0
-    for name, _buffer_name in _discriminating_operands(module):
-        incoming = state_dict.get(f"{prefix}{name}")
-        live = getattr(module, name, None)
-        if not isinstance(incoming, torch.Tensor) or not isinstance(live, torch.Tensor):
-            return False
-        if tuple(incoming.shape) != tuple(live.shape):
-            return False
-        matched += 1
-    return matched > 0
+    return classify_fused_state_layout(module, state_dict, prefix) == "runtime"
 
 
 __all__ = [
     "capture_fused_train_state",
+    "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",
     "runtime_state_matches_live",

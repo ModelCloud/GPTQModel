@@ -337,33 +337,29 @@ class BaseQuantLinear(nn.Module):
 
         ``load_state_dict`` may also copy into an existing buffer, which does
         not replace the Python object. Cache keys catch versioned tensors, but
-        an inference tensor has no version counter, so clear unconditionally.
+        an inference tensor has no version counter, so clear after a local load.
         """
 
-        restore_layout = False
-        runtime_layout = False
+        layout = None
         if getattr(self, "_fused_train_state", None) is not None:
-            from ._fused_train_state import (
-                state_dict_matches_checkpoint_layout,
-                state_dict_matches_runtime_layout,
-            )
+            from ._fused_train_state import classify_fused_state_layout
 
             state_dict = args[0] if args else kwargs.get("state_dict")
             prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
             if state_dict is not None:
-                restore_layout = state_dict_matches_checkpoint_layout(
-                    self, state_dict, prefix
+                layout = classify_fused_state_layout(self, state_dict, prefix)
+            if layout == "invalid":
+                raise RuntimeError(
+                    f"{self.__class__.__name__} cannot load mixed or invalid CPU int4pack "
+                    "operand shapes; supply one checkpoint or runtime layout."
                 )
-                runtime_layout = not restore_layout and state_dict_matches_runtime_layout(
-                    self, state_dict, prefix
-                )
-            if restore_layout:
+            if layout == "checkpoint":
                 # ``clear_weight_cache`` is the kernels' full restore hook: it
                 # puts the checkpoint tensors back *and* retires the derived
                 # layout state (``_cpu_transformed``, ``scales_and_zeros``).
                 self._fused_train_state_exportable = True
                 self._clear_runtime_weight_cache()
-            elif runtime_layout:
+            elif layout == "runtime":
                 # The snapshot describes an older checkpoint layout the caller
                 # is deliberately replacing. Keep the live transformed tensors
                 # the load is about to write, and let the clear below rebuild
@@ -389,7 +385,7 @@ class BaseQuantLinear(nn.Module):
                     # copying into inference tensors outside it is rejected.
                     materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
-        if runtime_layout:
+        if layout == "runtime":
             # Invalidate derived metadata without restoring the snapshot that
             # a later checkpoint export still needs.
             was_suspended = getattr(self, "_suspend_fused_train_restore", False)
@@ -399,7 +395,7 @@ class BaseQuantLinear(nn.Module):
             finally:
                 if not was_suspended:
                     self.__dict__.pop("_suspend_fused_train_restore", None)
-        else:
+        elif layout != "empty":
             self._clear_runtime_weight_cache()
 
     def _apply(self, fn, recurse=True):
