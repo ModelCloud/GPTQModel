@@ -950,6 +950,8 @@ The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
 how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
 The [NF12 staged B1 and prefill projection flow](docs/nf12-staged-b1-projections.md) explains
 the verifier-row fusion, prepared compressed FP32 router view, and Ampere profile.
+The [NF12 embedding prefill dispatch](docs/nf12-embedding-prefill-dispatch.md) records
+the SM80 packed lookup geometry, exact-row contract, and observed Lite shapes.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
 layout normalization, routing bounds, and exact-byte encoder scheduling.

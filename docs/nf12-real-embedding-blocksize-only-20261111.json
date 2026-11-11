@@ -1,0 +1,88 @@
+{
+  "gpu": "NVIDIA PG506-230",
+  "compute_capability": [
+    8,
+    0
+  ],
+  "torch": "2.15.0.dev20260928+cu130",
+  "gil_enabled": false,
+  "checkpoint": "/fast/model/DeepSeek-V4.1-Flash-1017",
+  "method": "same IDs and released BF16 weight; 16-call CUDA graph; paired ABBA rounds",
+  "families": [
+    {
+      "name": "embedding",
+      "weight_key": "embed.weight",
+      "weight_sha256": "aa1ac979edab508950a871c370fa645a875203a1a35c20ba9c1d45bb1ed46e3c",
+      "shape_nk": [
+        129280,
+        5120
+      ],
+      "dense_weight_bytes": 1323827200,
+      "packed_weight_bytes": 995314416,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.56,
+          "nf12_us": 2.368,
+          "speedup": 1.0811,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 6,
+          "dense_us": 5.248,
+          "nf12_us": 2.496,
+          "speedup": 2.1026,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 512,
+          "dense_us": 4.928,
+          "nf12_us": 6.752,
+          "speedup": 0.7299,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 1536,
+          "dense_us": 11.424,
+          "nf12_us": 24.0,
+          "speedup": 0.476,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 3072,
+          "dense_us": 34.624,
+          "nf12_us": 43.424,
+          "speedup": 0.7973,
+          "exact_bf16_bits": true
+        }
+      ]
+    },
+    {
+      "name": "markov-embedding",
+      "weight_key": "mtp.2.markov_head.embed.weight",
+      "weight_sha256": "af4448e3d7360d955b38316c7d0fde55d791eb39ad59eb09e67c3faeb0b4ad9b",
+      "shape_nk": [
+        129280,
+        256
+      ],
+      "dense_weight_bytes": 66191360,
+      "packed_weight_bytes": 49772928,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.368,
+          "nf12_us": 2.176,
+          "speedup": 1.0882,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 5,
+          "dense_us": 4.48,
+          "nf12_us": 2.272,
+          "speedup": 1.9718,
+          "exact_bf16_bits": true
+        }
+      ]
+    }
+  ]
+}

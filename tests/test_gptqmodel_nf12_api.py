@@ -69,6 +69,33 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
+@pytest.mark.parametrize("m,id_dtype", [(512, torch.int32), (1536, torch.int64), (3072, torch.int32)])
+def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(10101 + m)
+    weight = (torch.randn((512, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    weight[0, 0] = -0.0
+    weight[-1, -1] = 2.0**-20
+    ids = torch.randint(weight.shape[0], (m,), generator=generator, device=device, dtype=id_dtype)
+    ids[0], ids[-1] = 0, weight.shape[0] - 1
+    packed = nf12.encode(weight)
+    module = nf12.NF12Embedding.from_weight(packed)
+    oracle = F.embedding(ids, weight)
+    for _ in range(2):
+        actual = module(ids)
+        assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
+    if m == 512:
+        invalid = ids.clone()
+        invalid[1], invalid[2] = -1, weight.shape[0]
+        actual = module(invalid)
+        assert torch.equal(actual[1:3].view(torch.int16), torch.zeros_like(actual[1:3]).view(torch.int16))
+        assert torch.equal(actual[3:].view(torch.int16), oracle[3:].view(torch.int16))
+    assert packed.nbytes < weight.nbytes
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    assert {name for name, _ in module.named_buffers()} == {"nf12_packed", "nf12_escapes"}
+    assert all(buffer.dtype != torch.bfloat16 for _, buffer in module.named_buffers())
+
+
 @pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])
 def test_native_linear_prefill_matches_torch_oracle(n, m):
     device = _cuda()
