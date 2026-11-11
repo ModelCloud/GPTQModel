@@ -484,6 +484,7 @@ def test_stage_subset_early_stop_and_callbacks():
         lm_head="lm_head",
         shell_module_materialize=lambda target_submodule, device, role, named_module=None: target_submodule,
         prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device: additional_inputs,
+        prepare_layer_replay_keep_mask=lambda **kwargs: kwargs["keep_mask"],
     )
 
     processor = _StubAWQProcessor(quant_cfg)
@@ -630,6 +631,8 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
                 additional_inputs["position_ids"] = position_ids
             additional_inputs["position_embeddings"] = model.model.rotary_emb(hidden_states, position_ids)
             return additional_inputs
+
+        prepare_layer_replay_keep_mask = BaseQModel.prepare_layer_replay_keep_mask
 
     processor = _StubAWQProcessor(quant_cfg)
     looper = ModuleLooper(model=_DummyQwen3_5Model(quant_cfg), processors=[processor])
