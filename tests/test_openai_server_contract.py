@@ -18,8 +18,12 @@ import warnings
 import httpx
 import pytest
 import torch
-from fastapi.testclient import TestClient
-from starlette.datastructures import Headers
+
+
+# FastAPI (and its Starlette test client) is an optional server dependency.
+# Skip the module instead of failing collection when it is not installed.
+TestClient = pytest.importorskip("fastapi.testclient").TestClient
+Headers = pytest.importorskip("starlette.datastructures").Headers
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 

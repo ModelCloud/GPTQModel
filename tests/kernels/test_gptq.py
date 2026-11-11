@@ -16,6 +16,8 @@ from parameterized import parameterized
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
 from gptqmodel.adapter.remote import configure_explicit_remote_adapter
+from gptqmodel.models._const import DEVICE as DEVICE_FAMILY
+from gptqmodel.models._const import normalize_device
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
@@ -24,15 +26,7 @@ from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.utils.logger import render_table
-from gptqmodel.utils.machete import (
-    machete_runtime_available,
-    machete_runtime_error,
-)
 from gptqmodel.utils.model import find_modules
-from gptqmodel.utils.swordfish import (
-    swordfish_runtime_available,
-    swordfish_runtime_error,
-)
 
 
 log = LogBar.shared()
@@ -70,6 +64,31 @@ def _bitblas_supports_gptq_case(dtype: torch.dtype) -> bool:
 
 def _expand_input_dims(shapes: List[Tuple[int, int]]) -> List[int]:
     return [dim_0 for dim_0, samples in shapes for _ in range(samples)]
+
+
+def _kernel_skip_reason(kernel_cls, device: torch.device) -> str | None:
+    """Return why ``kernel_cls`` cannot run on ``device``, or ``None``.
+
+    HIP reuses torch's ``cuda`` namespace, so ``torch.cuda.is_available()`` is
+    true on ROCm as well. Ask the kernel instead: its ``SUPPORTS_DEVICES``
+    family declaration, its device rules (compute capability, ROCm) and its
+    runtime availability all come from the kernel that has to execute.
+    """
+
+    family = normalize_device(device)
+    if DEVICE_FAMILY.ALL not in kernel_cls.SUPPORTS_DEVICES:
+        if family not in kernel_cls.SUPPORTS_DEVICES:
+            supported = ", ".join(declared.value for declared in kernel_cls.SUPPORTS_DEVICES)
+            return f"{kernel_cls.__name__} supports {supported} only, not {family.value}"
+        try:
+            kernel_cls.validate_device(device)
+        except NotImplementedError as exc:
+            return str(exc)
+
+    ok, err = kernel_cls.cached_validate_once()
+    if not ok:
+        return f"{kernel_cls.__name__} unavailable: {err}"
+    return None
 
 
 def test_input_shape_plan_expands_each_sample_once():
@@ -346,22 +365,11 @@ class TestKernelOutput(unittest.TestCase):
         if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
             self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
 
-        if backend == BACKEND.MACHETE:
-            if not machete_runtime_available():
-                self.skipTest(f"Machete kernel unavailable: {machete_runtime_error()}")
-
-        if backend == BACKEND.SWORDFISH:
-            if not swordfish_runtime_available():
-                self.skipTest(f"Swordfish kernel unavailable: {swordfish_runtime_error()}")
-
-        if backend == BACKEND.EXLLAMA_V2:
-            # The native ExLlamaV2 extension is CUDA-only. On ROCm (and on a
-            # CUDA host without a working JIT toolchain) validate_once now
-            # refuses immediately with an actionable error, so skip instead of
-            # reporting a kernel failure.
-            ok, error = ExllamaV2Linear.cached_validate_once()
-            if not ok:
-                self.skipTest(f"ExLlamaV2 kernel unavailable: {error}")
+        # The kernel declares the device families it supports; a CUDA-only
+        # kernel must be skipped on ROCm instead of failing while loading.
+        reason = _kernel_skip_reason(self.target_qliner_map[backend], DEVICE)
+        if reason:
+            self.skipTest(reason)
 
     # Updated CUDA kernel tolerances below were re-baselined from full
     # torch-vs-kernel validation on H200.
