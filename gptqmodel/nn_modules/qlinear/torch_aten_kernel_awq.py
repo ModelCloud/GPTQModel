@@ -18,7 +18,11 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    restore_fused_train_state,
+    restore_fused_train_state_after_dtype_move,
+)
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -205,6 +209,32 @@ class TorchAtenAwqLinear(AWQuantLinear):
     def clear_weight_cache(self):
         self._fused_state_key = None
         self._refresh_fused_state()
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the affine layout after a low-precision move.
+
+        The AWQ affine offsets are scale-dtype coupled, so a low-precision move
+        must restore the checkpoint snapshot instead of narrowing them in
+        place. Device moves and moves to FP32 keep the live layout.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        if restore_fused_train_state_after_dtype_move(self, scale_dtype):
+            return result
+        scales = getattr(self, "scales", None)
+        if (
+            transformed
+            and isinstance(scales, torch.Tensor)
+            and scales.dtype != scale_dtype
+            and scales.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # No exportable snapshot: keep the live layout usable at the new
+            # activation dtype. A later checkpoint load can re-finalize it.
+            self._cpu_transform_dtype = scales.dtype
+        return result
 
     def train(self, mode: bool = True):
         old_train = self.training

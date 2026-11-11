@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -77,6 +78,9 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
         layer.scales = torch.zeros((1, 32), dtype=torch.float16)
         layer.qzeros = torch.zeros((1, 32), dtype=torch.float16)
         layer.scales_and_zeros = torch.zeros((1, 32, 2), dtype=torch.float16)
+        # Mirror the real CPU transform's runtime-layout markers.
+        layer._cpu_transformed = True
+        layer._cpu_transform_dtype = torch.float16
 
     monkeypatch.setattr(layer, "transform", fake_transform)
     monkeypatch.setattr(
@@ -104,9 +108,9 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     layer.__dict__.pop("_suspend_fused_train_restore")
 
     layer.to(dtype=torch.bfloat16)
-    # A move invalidates derived state but keeps the live runtime layout; only
-    # the explicit training resume restores the checkpoint snapshot.
-    assert tuple(layer.qweight.shape) == (16, 16)
+    # A low-precision move re-finalizes from the checkpoint snapshot because the
+    # affine offsets are scale-dtype coupled.
+    assert tuple(layer.qweight.shape) == original_shape
     assert layer.scales.dtype == torch.bfloat16
 
     layer.train()
@@ -117,6 +121,59 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     assert tuple(layer.qweight.shape) == original_shape
     assert out.requires_grad
     out.sum().backward()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
+)
+def test_aten_cpu_layer_accepts_new_activation_dtype_after_move(
+    module_name,
+    class_name,
+    source_dtype,
+    target_dtype,
+):
+    """A dtype move must update the finalized activation dtype.
+
+    The cache clear that ``nn.Module._apply`` triggers keeps the packed runtime
+    layout, so ``_cpu_transform_dtype`` still described the pre-move activation.
+    ``TorchAtenLinear`` then rejected its own moved model with a RuntimeError.
+    Compare the moved layer with a checkpoint-layout copy that is moved before
+    its first forward, which finalizes the same operands for the target dtype.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    if target_dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {target_dtype}")
+
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, source_dtype, "cpu")
+    fresh = copy.deepcopy(layer)
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=source_dtype))
+    layer.to(dtype=target_dtype)
+
+    fresh.to(dtype=target_dtype)
+    fresh.eval()
+    activation = torch.randn(2, 5, 256, dtype=target_dtype)
+    with torch.no_grad():
+        actual = layer(activation)
+        expected = fresh(activation)
+
+    assert actual.dtype == target_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_gemv_fast_rejects_unaligned_shapes_before_packing():

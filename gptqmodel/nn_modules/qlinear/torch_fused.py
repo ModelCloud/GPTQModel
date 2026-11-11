@@ -16,7 +16,11 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    restore_fused_train_state,
+    restore_fused_train_state_after_dtype_move,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -180,6 +184,22 @@ class TorchFusedLinear(PackableQuantLinear):
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
         self._fused_state_key = key
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the affine layout after a low-precision move.
+
+        The fused affine pair is scale-dtype coupled; narrowing it in place
+        would decode different weights. Restore the checkpoint snapshot and let
+        the next forward transform the new dtype. Device moves and moves to
+        FP32 keep the live layout.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        restore_fused_train_state_after_dtype_move(self, scale_dtype)
+        return result
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)

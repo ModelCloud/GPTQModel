@@ -16,7 +16,11 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    restore_fused_train_state,
+    restore_fused_train_state_after_dtype_move,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
@@ -179,6 +183,34 @@ class TorchAtenLinear(PackableQuantLinear):
         self._ret_idx_key = None
         self._fused_state_key = None
         self._refresh_fused_state()
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the affine layout after a low-precision move.
+
+        ``_apply`` narrows the live runtime operands. The affine offsets were
+        built from the pre-move scale dtype, so keeping them would change the
+        decoded weights; restore the checkpoint snapshot and let the next
+        forward transform the new dtype. Device moves and moves to FP32 keep
+        the live layout.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        if restore_fused_train_state_after_dtype_move(self, scale_dtype):
+            return result
+        scales = getattr(self, "scales", None)
+        if (
+            transformed
+            and isinstance(scales, torch.Tensor)
+            and scales.dtype != scale_dtype
+            and scales.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # No exportable snapshot: keep the live layout usable at the new
+            # activation dtype. A later checkpoint load can re-finalize it.
+            self._cpu_transform_dtype = scales.dtype
+        return result
 
     def _refresh_fused_state(self) -> None:
         """Rebuild derived int4pack metadata after its sources changed."""

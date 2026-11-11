@@ -11,6 +11,7 @@ real load path and compare against an independent re-derivation of the index.
 
 from __future__ import annotations
 
+import copy
 import weakref
 
 import pytest
@@ -304,6 +305,27 @@ def _fused_checkpoint(seed, order, dtype=torch.float16):
     }
 
 
+def _asymmetric_checkpoint(dtype):
+    """Checkpoint with non-symmetric zero codes and non-power-of-two scales."""
+
+    generator = torch.Generator().manual_seed(7)
+    qweight = torch.randint(
+        -(2 ** 31), 2 ** 31 - 1, (IN_FEATURES // 8, OUT_FEATURES),
+        dtype=torch.int32, generator=generator,
+    )
+    codes = torch.randint(
+        0, 16, (IN_FEATURES // GROUP_SIZE, OUT_FEATURES),
+        dtype=torch.int32, generator=generator,
+    )
+    qzeros = torch.zeros((IN_FEATURES // GROUP_SIZE, OUT_FEATURES // 8), dtype=torch.int32)
+    for lane in range(8):
+        qzeros |= codes[:, lane::8] << (4 * lane)
+    scales = (torch.rand(
+        (IN_FEATURES // GROUP_SIZE, OUT_FEATURES), generator=generator,
+    ) * 0.02 + 0.01).to(dtype)
+    return {"qweight": qweight, "qzeros": qzeros, "scales": scales, "g_idx": _group_labels((3, 0, 2, 1))}
+
+
 def _fused_module(cls, checkpoint):
     module = cls(
         bits=4, group_size=GROUP_SIZE, sym=True, desc_act=True,
@@ -315,6 +337,38 @@ def _fused_module(cls, checkpoint):
     module.eval()
     module._init_wf_unsqueeze_buffers()
     return module
+
+
+@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
+)
+def test_low_precision_move_refinalizes_asymmetric_affine(cls, source_dtype, target_dtype):
+    """A narrowed affine pair must not decode with the pre-move offsets.
+
+    ``qzeros`` stores offsets computed from the scale dtype. Keeping the live
+    runtime layout across an FP16/BF16 move would pair the narrowed scales with
+    offsets built at the old precision, silently changing the decoded weights.
+    Compare with a checkpoint-layout copy moved before its first transform.
+    """
+
+    checkpoint = _asymmetric_checkpoint(source_dtype)
+    layer = _fused_module(cls, checkpoint)
+    fresh = copy.deepcopy(layer)
+    activation = torch.randn(4, IN_FEATURES, dtype=source_dtype)
+    with torch.no_grad():
+        layer(activation)
+
+    layer.to(dtype=target_dtype)
+    fresh.to(dtype=target_dtype)
+    moved_input = activation.to(target_dtype)
+    with torch.no_grad():
+        actual = layer(moved_input)
+        expected = fresh(moved_input)
+
+    assert actual.dtype == target_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def _dense_oracle(checkpoint, activation):

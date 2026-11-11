@@ -102,6 +102,28 @@ def reset_fused_runtime_state(module: nn.Module) -> None:
             setattr(module, name, value)
 
 
+def restore_fused_train_state_after_dtype_move(module: nn.Module, previous_scale_dtype) -> bool:
+    """Re-finalize the checkpoint layout after a low-precision dtype move.
+
+    The runtime affine offsets are computed from the scale dtype, so narrowing
+    ``scales``/``qzeros`` in place would pair the new scales with offsets built
+    from the old precision and silently change the decoded weights. Restore the
+    snapshot and let the next forward transform the new dtype instead. A device
+    move or a move to FP32 keeps the live layout: neither narrows those offsets.
+    A modified runtime state has no valid checkpoint layout to re-finalize from,
+    so ``restore_fused_train_state`` raises the same error as export.
+    """
+
+    if previous_scale_dtype is None:
+        return False
+    scales = getattr(module, "scales", None)
+    if not isinstance(scales, torch.Tensor):
+        return False
+    if scales.dtype == previous_scale_dtype or scales.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    return restore_fused_train_state(module)
+
+
 def discard_fused_train_state(module: nn.Module) -> None:
     snapshot = getattr(module, "_fused_train_state", None)
     if snapshot:
@@ -229,6 +251,7 @@ __all__ = [
     "reset_fused_runtime_state",
     "runtime_state_matches_live",
     "restore_fused_train_state",
+    "restore_fused_train_state_after_dtype_move",
     "state_dict_matches_checkpoint_layout",
     "state_dict_matches_runtime_layout",
 ]
