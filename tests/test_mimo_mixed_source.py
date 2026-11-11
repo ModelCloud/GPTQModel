@@ -16,7 +16,7 @@ from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.mimo_v2 import MimoV2QModel, _compatible_mask
 from gptqmodel.models.writer import (
-    _merge_prefix_tensors_into_state_dict,
+    _merge_selected_tensors_into_state_dict,
     _normalize_out_of_model_tensors_entries,
 )
 from gptqmodel.quantization.config import (
@@ -500,13 +500,15 @@ def test_offline_decoder_preserves_mtp_and_non_targets(
 
 def test_mtp_prefix_preservation_allows_absent_auxiliary(tmp_path: Path) -> None:
     save_file({"model.norm.weight": torch.ones(8)}, tmp_path / "model.safetensors")
-    files, prefixes = _normalize_out_of_model_tensors_entries(
+    files, prefixes, suffixes, tensor_names = _normalize_out_of_model_tensors_entries(
         MimoV2QModel.out_of_model_tensors
     )
     assert files == []
     assert prefixes == ["model.mtp"]
     state_dict = {}
-    _merge_prefix_tensors_into_state_dict(prefixes, str(tmp_path), state_dict)
+    _merge_selected_tensors_into_state_dict(
+        prefixes, suffixes, tensor_names, str(tmp_path), state_dict
+    )
     assert state_dict == {}
 
 
