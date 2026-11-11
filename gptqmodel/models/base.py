@@ -3036,6 +3036,26 @@ class BaseQModel(nn.Module):
     def after_model_load(self, model, load_quantized_model):
         return model
 
+    def release_device(self) -> bool:
+        """Release Tenstorrent devices held by this model's kernels.
+
+        Closing the mesh is what starts the thermal idle window: the parts only
+        cool once TT-Metal no longer owns them. Call this between model loads in
+        a benchmark loop instead of relying on garbage collection, which leaves
+        the chips owned (and hot) until the interpreter drops the last reference.
+
+        Returns ``True`` when a Tenstorrent device was actually released, and
+        ``False`` for every other backend so the call is safe to make
+        unconditionally.
+        """
+
+        from ..utils.ttnn_runtime import close_mesh, current_mesh
+
+        if current_mesh() is None:
+            return False
+        close_mesh()
+        return True
+
     def pre_quantize_generate_hook_start(self):
         pass
 

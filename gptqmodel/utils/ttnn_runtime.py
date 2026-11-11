@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .logger import setup_logger
+from .tt_thermal import after_device_close, before_device_open
 
 
 log = setup_logger()
@@ -190,6 +191,11 @@ def open_mesh(
 
         _reject_pjrt_owner()
 
+        # The chips are idle here by construction: no TT-Metal runtime owns them,
+        # so PCI telemetry is safe to read. Pace the open when the previous model
+        # left the GDDR hot, and give the parts a fixed idle window otherwise.
+        before_device_open(owner=owner)
+
         fabric = (fabric or "DISABLED").upper()
         applied_fabric = "DISABLED"
         if fabric != "DISABLED":
@@ -243,6 +249,9 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
             )
         mesh, _MESH = _MESH, None
         mesh.close()
+        # Pace the next open only after the device is genuinely closed, so the
+        # idle window is not spent with the chips still running.
+        after_device_close(owner=mesh.owner)
 
 
 def current_mesh() -> Optional[TTNNMesh]:

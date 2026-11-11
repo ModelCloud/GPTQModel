@@ -199,6 +199,65 @@ which measured no latency difference at row counts 6, 64 and 128. The residual
 is the Tensix FMA floor: storing inputs as `float32` instead of BF16 does not
 reduce it (`max abs 0.00164` against float64 with FP32 storage).
 
+## GDDR thermal pacing
+
+A Blackhole p300c throttles GDDR at 90 C and shuts the card down at 110 C.
+A benchmark loop that loads and unloads models back to back never idles long
+enough for the previous run's heat to leave the GDDR dies, so the temperature
+ratchets upward across cycles instead of recovering between them. On this host
+that produced a hard thermal shutdown, after which a warm reboot left one card
+in `D3cold` and only three of four root ports enumerated; recovery required
+`poweroff` plus a cold start.
+
+Measured on `tt-quietbox` on 2026-11-10, before choosing any number here:
+
+| Quantity | Measured |
+| --- | --- |
+| Idle baseline, after full cooldown | 58-64 C |
+| GDDR rise caused by one model load | **+20 to +34 C** |
+| GDDR cooling rate at idle | **about 2 C per minute** |
+| Residual heat after killing a load mid-compile | 90/96/94/98 C, minutes to clear |
+
+The last two rows are why the guard is a temperature gate and not a sleep. At
+2 C/min a five-second pause removes roughly 0.2 C -- useful for settling the
+driver, useless as thermal protection. A load that starts at 80 C can reach the
+110 C shutdown limit on its own, so the soft limit defaults to 80 C rather than
+sitting just under the throttle point.
+
+`gptqmodel/utils/tt_thermal.py` gates the ownership transitions:
+
+| Hook | When | Effect |
+| --- | --- | --- |
+| `before_device_open` | before a load claims a chip | wait for the GDDR to fall below the soft limit, then sleep the configured cooldown |
+| `after_device_close` | after the mesh is closed | sleep the cooldown, so the idle window is real idle |
+
+Both hooks are wired into the runtime: `open_mesh`/`close_mesh` in
+`gptqmodel/utils/ttnn_runtime.py` cover the native TTNN path, and
+`from_quantized` covers the Torch/XLA path, which never opens a TTNN mesh. The
+cooldown is a rate limit, not a per-hook sleep, so a load that passes through
+both gates pays one idle window rather than two.
+
+Read the temperature with PCI telemetry only (`pyluwen`,
+`detect_chips_fallible(noc_safe=True)`), which takes about two milliseconds and
+does not open a TT-Metal device. A missing driver, a missing `pyluwen`, or a
+failed read disables the guard instead of failing the load.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GPTQMODEL_TT_COOLDOWN_SECS` | `5` | teardown settle delay between ownership transitions; `0` disables |
+| `GPTQMODEL_TT_GDDR_SOFT_LIMIT_C` | `80` | peak GDDR above which a load waits; `0` disables the guard |
+| `GPTQMODEL_TT_GDDR_MAX_WAIT_SECS` | `900` | upper bound on a thermal wait, after which the load proceeds and logs the temperature |
+
+Because cooling is measured in minutes, the wait budget has to be minutes too:
+cooling 98 C to 80 C legitimately takes about 9 min. Set
+`GPTQMODEL_TT_GDDR_SOFT_LIMIT_C=0` to bypass the gate during a deliberate hot
+run, and prefer one long session over many reloads -- each load spends 20-34 C
+of thermal budget, and the budget refills at only 2 C/min.
+
+Use `model.release_device()` between models in a loop. Closing the mesh is what
+starts the idle window; leaving it to garbage collection keeps the chips owned
+and hot until the last reference dies.
+
 ## Multi-card mesh networking
 
 The four p300c cards form one fabric domain. TTNN exposes them as

@@ -560,6 +560,168 @@ def test_ttnn_mesh_ownership_is_single_owner():
     assert runtime.current_mesh() is None
 
 
+class _ThermalClock:
+    """Deterministic monotonic clock and sleeper for the pacing tests."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+    @property
+    def total(self):
+        return sum(self.slept)
+
+
+def test_gddr_guard_waits_for_cooldown():
+    """A hot card must be paced until it drops below the soft limit."""
+
+    from gptqmodel.utils import tt_thermal
+
+    clock = _ThermalClock()
+    readings = [[104], [104], [97], [88]]
+    tt_thermal.reset_cooldown_state()
+    peak = tt_thermal.wait_for_cooldown(
+        sleep=clock.sleep,
+        read_temps=lambda: readings.pop(0) if readings else [88],
+        monotonic=clock.monotonic,
+    )
+    assert peak == 88
+    assert clock.total > 0
+    # GDDR sheds only ~2 C/min, so the guard must poll coarsely instead of
+    # busy-spinning PCI reads between near-identical temperatures.
+    assert all(step >= 5.0 for step in clock.slept)
+
+
+def test_gddr_guard_gives_up_at_budget(monkeypatch):
+    """A card that never cools must not hang the load forever."""
+
+    from gptqmodel.utils import tt_thermal
+
+    monkeypatch.setenv("GPTQMODEL_TT_GDDR_MAX_WAIT_SECS", "5")
+    clock = _ThermalClock()
+    tt_thermal.reset_cooldown_state()
+    peak = tt_thermal.wait_for_cooldown(
+        sleep=clock.sleep, read_temps=lambda: [110], monotonic=clock.monotonic,
+    )
+    assert peak == 110
+    assert clock.total <= 5.0
+
+
+def test_gddr_guard_is_skipped_without_telemetry():
+    """An unreadable temperature disables the guard instead of failing a load."""
+
+    from gptqmodel.utils import tt_thermal
+
+    clock = _ThermalClock()
+    tt_thermal.reset_cooldown_state()
+    assert tt_thermal.wait_for_cooldown(
+        sleep=clock.sleep, read_temps=lambda: None, monotonic=clock.monotonic,
+    ) is None
+    assert clock.slept == []
+
+
+def test_guard_can_be_disabled(monkeypatch):
+    from gptqmodel.utils import tt_thermal
+
+    monkeypatch.setenv("GPTQMODEL_TT_GDDR_SOFT_LIMIT_C", "0")
+    clock = _ThermalClock()
+    tt_thermal.reset_cooldown_state()
+    assert tt_thermal.wait_for_cooldown(
+        sleep=clock.sleep, read_temps=lambda: [110], monotonic=clock.monotonic,
+    ) == 110
+    assert clock.slept == []
+
+
+def test_cooldown_is_paid_at_most_once_per_window(monkeypatch):
+    """Load-level and mesh-level gates must not stack two full cooldowns."""
+
+    from gptqmodel.utils import tt_thermal
+
+    monkeypatch.setenv("GPTQMODEL_TT_COOLDOWN_SECS", "5")
+    clock = _ThermalClock()
+    tt_thermal.reset_cooldown_state()
+    first = tt_thermal.before_device_open(
+        owner="loader", sleep=clock.sleep, read_temps=lambda: [60],
+        monotonic=clock.monotonic,
+    )
+    second = tt_thermal.before_device_open(
+        owner="mesh", sleep=clock.sleep, read_temps=lambda: [60],
+        monotonic=clock.monotonic,
+    )
+    assert first == second == 60
+    assert clock.total == 5.0
+
+    # A close starts a fresh window, so the pending open is not charged again.
+    tt_thermal.after_device_close(
+        owner="mesh", sleep=clock.sleep, read_temps=lambda: [60],
+        monotonic=clock.monotonic,
+    )
+    assert clock.total == 10.0
+    tt_thermal.before_device_open(
+        owner="loader", sleep=clock.sleep, read_temps=lambda: [60],
+        monotonic=clock.monotonic,
+    )
+    assert clock.total == 10.0
+
+
+def test_zero_cooldown_disables_sleep(monkeypatch):
+    from gptqmodel.utils import tt_thermal
+
+    monkeypatch.setenv("GPTQMODEL_TT_COOLDOWN_SECS", "0")
+    clock = _ThermalClock()
+    tt_thermal.reset_cooldown_state()
+    tt_thermal.before_device_open(
+        owner="loader", sleep=clock.sleep, read_temps=lambda: [60], monotonic=clock.monotonic,
+    )
+    tt_thermal.after_device_close(
+        owner="mesh", sleep=clock.sleep, read_temps=lambda: [60], monotonic=clock.monotonic,
+    )
+    assert clock.slept == []
+
+
+def test_mesh_lifecycle_applies_cooldown(monkeypatch):
+    """``open_mesh``/``close_mesh`` must pace the parts, not just the loader."""
+
+    import importlib
+
+    runtime = importlib.import_module("gptqmodel.utils.ttnn_runtime")
+
+    calls = []
+    monkeypatch.setattr(runtime, "before_device_open", lambda **kw: calls.append(("open", kw["owner"])))
+    monkeypatch.setattr(runtime, "after_device_close", lambda **kw: calls.append(("close", kw["owner"])))
+
+    class _FakeDevice:
+        pass
+
+    class _FakeTTNN:
+        FabricConfig = type("FabricConfig", (), {"DISABLED": "dis"})
+
+        @staticmethod
+        def open_device(device_id=0):
+            return _FakeDevice()
+
+        @staticmethod
+        def close_device(device):
+            return None
+
+    monkeypatch.setattr(runtime, "import_ttnn", lambda: _FakeTTNN)
+    monkeypatch.setattr(runtime, "_MESH", None)
+    monkeypatch.setattr(runtime, "_reject_pjrt_owner", lambda: None)
+    try:
+        runtime.open_mesh(device_count=1, owner="unit-test")
+        runtime.close_mesh(owner="unit-test")
+    finally:
+        runtime.close_mesh()
+    assert calls == [("open", "unit-test"), ("close", "unit-test")]
+
+
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
 @pytest.mark.parametrize("device_count", [1, 4])
 def test_actual_ttnn_linear_matches_torch_oracle(device_count):

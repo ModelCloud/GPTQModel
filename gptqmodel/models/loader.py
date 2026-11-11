@@ -1520,6 +1520,15 @@ def ModelLoader(cls):
 
         warn_unsupported_rocm()
 
+        # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
+        # this one before any device is claimed. The native TTNN backend also
+        # gates its own mesh open; the two gates share one rate limit, so a load
+        # never pays the cooldown twice.
+        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+            from ..utils.tt_thermal import before_device_open
+
+            before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")
+
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
