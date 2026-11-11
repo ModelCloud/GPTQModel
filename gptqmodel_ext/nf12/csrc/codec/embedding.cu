@@ -107,7 +107,11 @@ __global__ void __launch_bounds__(4 * Quads) embedding_kernel(EmbeddingParams p,
     #pragma unroll
     for (int rep = 0; rep < Repeats; ++rep) {
       uint4* out = dst + rep * p.k_blocks * (kSuperAtomCols / 8);
-      if constexpr (Grid2D && IdsPerCTA == 16) {
+      if constexpr (Repeats == 4 && Grid2D && Quads == 32 && IdsPerCTA == 1) {
+        // Streaming stores preserve packed-row cache residency at long prefill M.
+        __stcs(out, v0);
+        __stcs(out + 4, v1);
+      } else if constexpr (Grid2D && IdsPerCTA == 16) {
         // Keep the four replicated activation writes out of L1 as well.
         __stcg(out, v0);
         __stcg(out + 4, v1);
@@ -167,6 +171,10 @@ cudaError_t embedding_impl(const uint8_t* packed, const uint4* escapes, uint32_t
     int device = 0;
     if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
     if (device_info(device).sm_arch == 80) {
+      if constexpr (Repeats == 4) {
+        if (ids64 != nullptr && num_ids >= 1536 && num_ids <= 2048)
+          return launch_embedding_prefill<32, 1, Repeats>(p, ids64, stream);
+      }
       if (num_ids <= 512)
         return ids32 != nullptr ? launch_embedding_prefill<32, 8, Repeats>(p, ids32, stream)
                                 : launch_embedding_prefill<32, 8, Repeats>(p, ids64, stream);

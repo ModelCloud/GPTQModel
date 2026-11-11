@@ -45,10 +45,10 @@ from Lite's CUDA fixture, int64 serving IDs, and physical GPU7 (PG506-230,
 SM80). These source IDs omit the service-added request header. Each candidate
 returned exact BF16 bits against independent `F.embedding` followed by
 `repeat`. Sixteen-call CUDA graphs ran in eight alternating paired ABBA rounds.
-The [raw report](nf12-embedding-repeat4-gpu7-20261111.json) includes every
+The [initial raw report](nf12-embedding-repeat4-gpu7-20261111.json) includes every
 sample, deterministic random-ID cases, source hash, and storage counts.
 
-| M | Dense BF16 + repeat | NF12 + repeat | Fused NF12 repeat4 | Fused / dense |
+| M | Dense BF16 + repeat | NF12 + repeat | Initial fused NF12 repeat4 | Fused / dense |
 | ---: | ---: | ---: | ---: | ---: |
 | 1 | 5.824 µs | 5.952 µs | 2.816 µs | 2.068× |
 | 6 | 8.832 µs | 6.528 µs | 2.944 µs | 3.000× |
@@ -78,3 +78,36 @@ fused at M=312: 26.688 versus 9.312 µs; M=1536: 128.320 versus 44.576 µs;
 and M=3072: 258.720 versus 79.904 µs. The M=3072 dense timing varied
 between GPUs, while fused timing stayed near 80 µs. All candidate outputs
 matched independent Torch BF16 bits on both GPUs.
+
+## SM80 observed-wave tuning
+
+The final dispatch uses a 32-quad, one-ID CTA with `__stcs` output stores for
+int64 IDs at M=1536..2048, K=5120, `Repeats=4` on SM80. The preceding
+16-ID CTA wrote the same four BF16 copies with `__stcg`. The new route keeps
+the packed table and output layout unchanged and never applies to the
+single-copy embedding operator.
+
+With both native libraries reading the same full released packed table and
+IDs, 32 paired ABBA rounds of 16-call CUDA graphs on GPU7 gave these medians:
+
+| IDs | M | Initial fused | Tuned fused | Initial / tuned |
+| --- | ---: | ---: | ---: | ---: |
+| Lite code | 1536 | 43.520 µs | 38.048 µs | 1.144× |
+| Lite code | 2048 | 57.088 µs | 51.808 µs | 1.102× |
+| Random | 1536 | 53.632 µs | 50.240 µs | 1.068× |
+| Random | 2048 | 71.584 µs | 65.920 µs | 1.086× |
+
+The [paired native report](nf12-embedding-repeat4-tuning-gpu7-20261111.json)
+records every sample and exact BF16 checks. The same one-ID/streaming option
+at M=3072 slowed random IDs by about 1.5%, so that shape keeps the prior
+route. A 64-quad short-tail route helped single-copy lookup but slowed fused
+HC4 at M=312/313 by about 6%, so those shapes also keep the prior route.
+
+The [final public-op GPU7 run](nf12-embedding-repeat4-tuned-gpu7-20261111.json)
+measured Lite code M=1536 at **128.320 µs dense+repeat versus 38.848 µs
+tuned NF12** (3.303×). An independent [physical GPU3
+run](nf12-embedding-repeat4-tuned-gpu3-20261111.json) measured **128.096
+versus 39.360 µs** (3.254×) with the same full table and exact BF16 bits.
+All five targeted CUDA tests passed on GPU3 after the final source change.
+These are activation-stage results; a concurrent three-lane service gate is
+still needed before Lite can make NF12 its default.
