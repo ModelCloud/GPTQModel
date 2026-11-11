@@ -981,6 +981,44 @@ def test_blockfloat_beats_uniform_int4_for_heavy_tails():
     assert bf4_err < int4_err
 
 
+def test_int4_kernel_reference_matches_packing():
+    """The kernel's reference must invert the packing exactly (CPU, no hardware)."""
+
+    import importlib
+
+    kern = importlib.import_module("gptqmodel.utils.tt_int4_kernel")
+
+    torch.manual_seed(7)
+    codes = torch.randint(0, 16, (2048,), dtype=torch.int64)
+    words = kern.pack_codes_to_words(codes)
+    assert words.numel() == 2048 // 8
+
+    expected = kern.bf16_truncate(0.5 * (codes.to(torch.float32) - 7.0))
+    assert torch.equal(kern.reference_dequant(words, 0.5, 7), expected)
+
+    # Nibble order is low-first, which is GPTQ's checkpoint convention.
+    single = kern.pack_codes_to_words(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
+    assert int(single[0]) & 0xFFFFFFFF == 0x87654321
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_int4_dequant_kernel_is_bit_exact_on_device():
+    """Custom TT-Metalium dequant must match the torch reference exactly."""
+
+    from gptqmodel.utils.tt_int4_kernel import verify_on_device
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        exact, max_err = verify_on_device(1024, 0.0173, 7, device=mesh.device)
+        assert exact, f"kernel dequant differs from reference (max abs err {max_err})"
+    finally:
+        close_mesh()
+
+
 
 
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")

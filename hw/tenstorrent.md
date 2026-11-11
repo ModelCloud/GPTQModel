@@ -351,12 +351,52 @@ Both paths are worth having, and they are independent:
 | GPTQ onto block-float grid (new checkpoints) | no, by construction | quantiser work + native bf4 inference | not started |
 | `bfloat8_b` storage re-encode (interim) | ~1 % loss, 2x memory | TTNN only | implemented, opt-in |
 
-Status of the fused kernel: design plus measured justification, **not
-implemented**. Feasibility is now established, though: the installed build
-exposes `ttnn.generic_op` with `ProgramDescriptor`, `CBDescriptor` and
-`KernelDescriptor`, so a custom TT-Metalium kernel can be dispatched from Python
-without rebuilding tt-metal. The interim state remains the TTNN dequant path,
-which is correct but pays 85 % of a layer in expansion.
+### Status: dequant stage implemented and bit-exact, GEMM fusion outstanding
+
+A custom TT-Metalium kernel now performs the GPTQ dequant on device via
+`ttnn.generic_op`, with no rebuild of tt-metal (see
+`gptqmodel/utils/tt_int4_kernel.py`).
+
+Correctness, measured on a p300c: 8192 codes dequantized **bit-exactly** against
+an independent torch reference (`torch.equal` true, max abs error 0.0), matching
+the BF16 truncation the TTNN path produces.
+
+Throughput, single core, RMW through DRAM:
+
+| codes | time | rate |
+| --- | --- | --- |
+| 8,192 | 1.28 ms | 6.4 Mcodes/s |
+| 32,768 | 4.74 ms | 6.9 Mcodes/s |
+| 131,072 | 18.1 ms | 7.2 Mcodes/s |
+
+At 7.2 Mcodes/s a `768x768` layer (589,824 codes) extrapolates to **~0.082 ms on
+one core**, against **1.27 ms** for the TTNN op chain — roughly 15x, before
+spreading across the 11x10 grid. The comparison is like-for-like in the sense
+that both end with a BF16 tile, but the kernel number is an extrapolation from
+a smaller peak-rate sample, not a full-layer run, and a full layer (1.18 MB of
+output) does not fit in the 1464 KiB L1 in one page, so it needs tiling.
+
+Outstanding for the fused design: consume the dequantized tile inside the compute
+path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores
+and pages. What exists today is the dequant stage on one core.
+
+### Dispatching a custom kernel on this install
+
+Four things are required and none are documented for the wheel:
+
+1. `ttnn.generic_op(io_tensors, program)` needs **at least two** io tensors (one
+   input, one output) — a single output tensor is rejected.
+2. Include `api/dataflow/dataflow_api.h`; the flat `dataflow_api.h` does **not**
+   resolve against the wheel's `-I` set.
+3. Address DRAM with `InterleavedAddrGen<true>{...}`; the older
+   `get_noc_addr_from_buf_addr_constant` helper is absent from the shipped
+   headers.
+4. The wheel bakes `/project/third_party/tt-mlir/.../tt-metal` into its JIT
+   include paths. Built-in ops only work from the JIT cache; a **new** kernel
+   cannot compile until that root resolves. A symlink from that path to
+   `site-packages/pjrt_plugin_tt/tt-metal` makes it work (verify with
+   `generic_op_smoke.py`). Rebuilding the plugin with a correct prefix is the
+   clean fix.
 
 ## 10. Qualified host
 
