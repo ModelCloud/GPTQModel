@@ -29,6 +29,7 @@ not resolve) and addresses DRAM through ``InterleavedAddrGen<true>``.
 from __future__ import annotations
 
 import struct
+from collections import OrderedDict
 from typing import Tuple
 
 import torch
@@ -340,6 +341,32 @@ def verify_on_device(nwords: int, scale: float, zero: int, *, device, seed: int 
 #   * io_tensors must include every weight buffer, or the kernel reads addresses
 #     the program does not track.
 
+#: Device-resident packed weights for :func:`run_fused_gemm_grid`, keyed by the
+#: source tensor identity. Bounded so a benchmark loop cannot grow it without end;
+#: the oldest entry is dropped first.
+_GRID_WEIGHT_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_GRID_WEIGHT_CACHE_MAX = 8
+
+
+def _GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh):
+    """Cache key for the packed/uploaded grid weights.
+
+    Reuses :func:`tensor_cache_key`, which handles inference tensors (no version
+    counter) by falling back to storage identity -- model weights are normally
+    packed inside ``InferenceMode``, so a naive ``_version`` read would never hit.
+    """
+
+    from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+
+    return (tensor_cache_key(codes), nk, gw, gh)
+
+
+def clear_grid_weight_cache() -> None:
+    """Drop cached packed grid weights (call on device close or weight mutation)."""
+
+    _GRID_WEIGHT_CACHE.clear()
+
+
 FUSED_GRID_READER = r"""
 #include "api/dataflow/dataflow_api.h"
 void kernel_main() {
@@ -461,20 +488,41 @@ def run_fused_gemm_grid(act, codes, scale, zero, *, device, grid=(8, 8)):
         raise ValueError(f"M={m} must be a multiple of 32")
     nm, nt = m // 32, cores
 
-    order_t = tile_order_indices()
-    wd = []
-    for n in range(nt):
-        rows = torch.stack([
-            pack_codes_to_words(codes[n, k][order_t]) for k in range(nk)
-        ]).to(torch.int32)
-        wd.append(ttnn.to_device(ttnn.from_torch(rows, dtype=ttnn.uint32,
-                                                layout=ttnn.ROW_MAJOR_LAYOUT), device))
+    # Packing and uploading the weights is ~57 ms at 64 cores, far more than the
+    # ~0.24 ms kernel, so it is cached on the weight tensor's identity. Without
+    # this the public function is unusable in a model loop.
+    cache_key = (_GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh))
+    cached = _GRID_WEIGHT_CACHE.get(cache_key)
+    if cached is not None:
+        wd = list(cached)
+    else:
+        order_t = tile_order_indices()
+        wd = []
+        for n in range(nt):
+            rows = torch.stack([
+                pack_codes_to_words(codes[n, k][order_t]) for k in range(nk)
+            ]).to(torch.int32)
+            wd.append(ttnn.to_device(ttnn.from_torch(rows, dtype=ttnn.uint32,
+                                                    layout=ttnn.ROW_MAJOR_LAYOUT), device))
+        _GRID_WEIGHT_CACHE[cache_key] = tuple(wd)
+        _GRID_WEIGHT_CACHE.move_to_end(cache_key)
+        while len(_GRID_WEIGHT_CACHE) > _GRID_WEIGHT_CACHE_MAX:
+            _GRID_WEIGHT_CACHE.popitem(last=False)
     actd = ttnn.to_device(ttnn.from_torch(act.to(torch.bfloat16).reshape(1, m, nk * 32),
                                           dtype=ttnn.bfloat16,
                                           layout=ttnn.TILE_LAYOUT), device)
-    lutd = ttnn.to_device(ttnn.from_torch(build_dequant_pair_lut(scale, zero),
-                                          dtype=ttnn.uint32,
-                                          layout=ttnn.ROW_MAJOR_LAYOUT), device)
+    # The LUT is 1 KiB and depends only on (scale, zero); uploading it per call
+    # was measurable. Cache it alongside the weights.
+    lut_key = ("lut", float(scale), int(zero))
+    lutd = _GRID_WEIGHT_CACHE.get(lut_key)
+    if lutd is None:
+        lutd = ttnn.to_device(ttnn.from_torch(build_dequant_pair_lut(scale, zero),
+                                              dtype=ttnn.uint32,
+                                              layout=ttnn.ROW_MAJOR_LAYOUT), device)
+        _GRID_WEIGHT_CACHE[lut_key] = lutd
+        _GRID_WEIGHT_CACHE.move_to_end(lut_key)
+        while len(_GRID_WEIGHT_CACHE) > _GRID_WEIGHT_CACHE_MAX:
+            _GRID_WEIGHT_CACHE.popitem(last=False)
     # TILE_LAYOUT is required: the writer pushes raw tile bytes.
     out = ttnn.allocate_tensor_on_device(ttnn.Shape([nt, nm, 32, 32]), ttnn.bfloat16,
                                          ttnn.TILE_LAYOUT, device, ttnn.DRAM_MEMORY_CONFIG)
@@ -550,6 +598,7 @@ __all__ = [
     "bf16_truncate",
     "build_dequant_lut",
     "build_dequant_pair_lut",
+    "clear_grid_weight_cache",
     "dequantize_on_device",
     "dequantize_tiled_on_device",
     "pack_codes_to_words",

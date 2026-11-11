@@ -727,9 +727,30 @@ Two notes for anyone repeating this:
 - `run_fused_gemm_grid` re-packs and re-uploads the weights on every call
   (measured **57 ms** of host work on 64 cores), so a per-call timing of the
   public function is dominated by packing, not the kernel. The kernel number above
-  comes from a harness that reuses the uploaded weights. Caching the packed and
-  uploaded form across calls is required before this path is usable in a model
-  loop. Here the
+  comes from a harness that reuses the uploaded weights.
+
+### Caching the weight and LUT tensors: 61.8 ms -> 0.85 ms per call
+
+Both are now cached on the source tensors' identity, using the shared
+`tensor_cache_key` helper (which falls back to storage identity for inference
+tensors -- model weights are normally packed inside `InferenceMode`, so a naive
+`_version` read would never hit). The cache is bounded at 8 entries, FIFO.
+
+| | per call at 64 cores |
+| --- | --- |
+| no cache (pack + upload + LUT) | 61.8 ms |
+| weights cached | 2.2 ms |
+| weights + LUT cached | **0.85 ms** |
+
+The LUT mattered more than expected: it is only 1 KiB, but uploading it per call
+cost ~1.4 ms. The kernel itself is ~0.24 ms, so the remaining 0.6 ms is building
+the `ProgramDescriptor` and runtime args, which embed the activation and output
+addresses and therefore cannot be cached across calls without a persistent output
+buffer.
+
+That is the next step if this path needs to go faster: hold a device output buffer
+across calls and update only the pointer-bearing runtime args, rather than
+constructing a fresh program each time. Here the
 mesh open was failing for reasons that had nothing to do with the kernel.
 
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
