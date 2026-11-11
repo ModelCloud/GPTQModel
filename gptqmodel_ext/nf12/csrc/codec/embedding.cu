@@ -104,8 +104,15 @@ __global__ void __launch_bounds__(4 * Quads) embedding_kernel(EmbeddingParams p,
   codec::quad_transpose(v1, lane);
   if (active) {
     uint4* dst = reinterpret_cast<uint4*>(p.out + i * p.ldo + kb * kSuperAtomCols) + (lane & 3);
-    dst[0] = v0;
-    dst[4] = v1;
+    if constexpr (Grid2D && IdsPerCTA == 16) {
+      // The 16-ID prefill CTA writes many rows. Keep those stores out of L1
+      // so nearby lookups can reuse packed source lines.
+      __stcg(dst, v0);
+      __stcg(dst + 4, v1);
+    } else {
+      dst[0] = v0;
+      dst[4] = v1;
+    }
   }
 }
 

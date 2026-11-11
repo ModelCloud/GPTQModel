@@ -22,11 +22,12 @@ flowchart TD
     H -- yes --> I["launch_embedding<16><br/>one-dimensional grid"]
     H -- no --> J["launch_embedding<8><br/>one-dimensional grid"]
     F --> K["embedding_kernel<Grid2D=true>"]
-    P --> K
+    P --> S["embedding_kernel<Grid2D=true, IdsPerCTA=16><br/>__stcg output stores"]
     Q --> K
     I --> L["embedding_kernel<Grid2D=false>"]
     J --> L
     K --> Z["Exact BF16 row bits; invalid IDs write +0.0"]
+    S --> Z
     L --> Z
     classDef failure fill:#f9d8d8,stroke:#b42318,color:#111;
     class X failure;
@@ -169,3 +170,59 @@ generalized to all prompt distributions. Nsight Compute on GPU 7 observed
 occupancy, and 14.53 µs profiled duration for the packed M=1536 kernel;
 the paired CUDA graph timings above are the latency comparison because clocks
 were not controlled across profiler runs.
+
+## Bypass L1 for 16-ID prefill output stores
+
+The 16-ID specialization now writes its two 128-bit output vectors with
+`__stcg`, leaving L1 available for packed source lines. The 8-ID specialization
+at M=312/313, one-ID specialization at M=3072, and decode use their original
+stores. This changes no weight layout, adds no cache, and preserves exact BF16
+bits. The [benchmark harness](../scripts/bench_nf12_embedding_load_policy.py)
+compares native libraries with the same released `embed.weight`, the same IDs,
+and paired CUDA graphs. [GPU1 run A](nf12-embedding-load-policy-gpu1-balanced-20261111.json),
+[fresh GPU1 run B](nf12-embedding-load-policy-gpu1-balanced-reconfirm-20261111.json),
+and the [GPU5 cross-check](nf12-embedding-load-policy-gpu5-crosscheck-20261111.json)
+retain the raw timing samples and exact-output checks. GPU1 is a PG506-232;
+GPU5 is a PG506-230. Both are SM80. Lite passes `torch.long` IDs to embedding.
+
+| M, int64 IDs | Dense BF16 GPU1 | Old NF12 GPU1 | New NF12 GPU1 | New / old | New / dense |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 312, code IDs | 3.584 µs | 4.320 µs | 4.368 µs | 0.989× | 0.821× |
+| 1536, code IDs | 8.896 µs | 11.568 µs | 11.200 µs | 1.033× | 0.794× |
+| 1536, random IDs | 14.304 µs | 24.336 µs | 24.136 µs | 1.008× | 0.593× |
+| 3072, code IDs | 18.016 µs | 23.904 µs | 23.920 µs | 0.999× | 0.753× |
+
+The second GPU1 run reproduced the 1536-code-ID gain (11.568 → 11.200 µs).
+GPU5 measured 11.584 → 11.296 µs (1.025×) for the same shape. The M=312
+offset is within an identical-library self-control's 0.048 µs offset; the
+M=312 and M=3072 compiled instructions are unchanged. The embedding remains
+below dense BF16 on the observed prefill rows, so this kernel change does not
+qualify NF12 as a Lite default. The full released embedding occupies
+995,314,416 packed bytes versus 1,323,827,200 dense BF16 bytes per copy.
+
+## Eight-GPU experiment triage
+
+One isolated worktree and one physical GPU were assigned to each experiment.
+All reported speedups compare against the same experiment's current NF12
+kernel, not against measurements from another GPU. GPU0 and GPU6 used compact
+released-weight subsets; GPU4's compact geometry result was checked again on
+the full released weight before its rejection.
+
+| GPU | Experiment | Observed result | Decision |
+| ---: | --- | --- | --- |
+| 0 | Selective decoder | M=312 5.568 → 5.760 µs; M=1536 approximately flat | Revert |
+| 1 | L1-bypassing stores for 16-ID CTAs | M=1536 code IDs 11.568 → 11.200 µs, repeated | Keep |
+| 2 | Row-major packed layout | Int64 code IDs M=1536 14.144 → 15.808 µs; random IDs 24.000 → 14.592 µs | Experiment only |
+| 3 | Per-call ID deduplication | M=1536 parallel gather 15.36 → 23.81 µs | Revert |
+| 4 | Wider CTA layout | Full-weight M=312 code IDs +3.8%, random IDs −1.2% | Revert |
+| 5 | Escape-group warp voting | M=3072 slowed about 9% | Revert |
+| 6 | Grid ordering and swizzles | Reversed axes near flat; grouped swizzles slower on compact table | Revert |
+| 7 | Column scheduling and preload | M=3072 code IDs near flat; random IDs slower | Revert |
+
+The row-major layout reads 96 packed bytes per 64 BF16 outputs, compared with
+192 bytes for the present tiled lookup. Its full released-weight outputs were
+bit exact for int32 and int64 IDs, including escape and invalid-ID checks, but
+it lost on Lite's observed repeated IDs at M=1536 and M=3072. The experiment
+retains only packed weights; neither layout retained expanded BF16 weights.
+The store-policy change does not close the dense BF16 prefill gap, so the Lite
+service remains on BF16 by default.
