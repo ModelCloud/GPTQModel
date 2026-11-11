@@ -359,10 +359,31 @@ block-float against *plain rounding* on a uniform grid, which is not a fair A/B.
 Corrected here: block-float is on par at equal width.
 
 That is still a useful result, because the uniform path needs a dequant op at
-inference and this one does not. The remaining question is speed: whether packing
-at 4 bits on this grid beats the fused int4 kernel's LUT expansion. That has not
-been measured, and until it is, path 2 should be described as *correct and
-format-native*, not as the faster option.
+inference and this one does not.
+
+**Speed of path 2, measured.** A weight already on the format's grid needs no
+expansion step, so the comparison is storage format against storage format
+(`ttnn.linear`, one core):
+
+| storage | 128x128x128 | 512x512x512 |
+| --- | --- | --- |
+| `bfloat16` | 0.0659 ms | 0.0588 ms |
+| `bfloat8_b` | 0.0538 ms | -- |
+| `bfloat4_b` | **0.0467 ms** (-29%) | 0.0571 ms |
+
+So at small sizes block-float storage is meaningfully faster than BF16, and at
+`512^3` the three converge to within a few percent -- the GEMM becomes
+compute-bound and the unpack cost stops mattering.
+
+Versus path 1: the fused int4 kernel needs 0.2405 ms to produce one `32x32`
+output tile at K=768, whereas path 2 asks `ttnn.linear` to do the whole GEMM with
+no expansion at all. **Path 2 is the faster route for a checkpoint quantized on
+its grid**, and the reason is structural: there is no dequant to perform, so there
+is nothing to optimise away. Path 1 exists for checkpoints that are already int4.
+
+These linear measurements were taken one dtype per process with a device reset
+between wedges; mixed-dtype loops hung the device repeatedly, which is recorded
+below.
 
 **A solver bug worth recording.** The first implementation took `triu` of a
 lower-triangular Cholesky factor, which left only the diagonal and silently
