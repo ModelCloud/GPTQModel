@@ -91,6 +91,67 @@ tiled NF12 path and 10.837 microseconds for the prepared path. Their top-eight
 route IDs matched dense Torch for the sampled inputs, with maximum score
 difference 4.173e-7. This is a projection measurement, not an endpoint claim.
 
+A follow-up CUDA graph sweep rotated all 40 released main gates with the same
+resident six-row FP32 input and interleaved BF16-pair controls. The control
+stayed near 13.16 microseconds per gate. The prepared kernel measured:
+
+| K tile | Warps | Microseconds per gate | NF12/BF16 speed |
+| ---: | ---: | ---: | ---: |
+| 512 | 4 | 13.49 | 0.977x |
+| 512 | 8 | 12.44 | 1.058x |
+| 1024 | 2 | 17.57 | 0.750x |
+| 1024 | 4 | 11.93 | 1.105x |
+| 1024 | 8 | 14.75 | 0.892x |
+| 2048 | 4 | 28.65 | 0.459x |
+| 2048 | 8 | 22.58 | 0.583x |
+
+All tested shapes matched the sampled gate's top-eight route IDs. BK1024 with
+four warps remains the measured choice; the sweep did not produce a candidate
+with enough additional gain to justify another production restart.
+
+A separate [real-weight FP64 oracle](nf12-real-gate-fp64-20261111.json)
+compared one released main gate and one MTP gate with six fixed FP32 input
+rows, IEEE FP32 Torch, and TF32 disabled. The candidate used the same packed
+BK1024 arithmetic for ordinary and staged B1. The 384-row legacy comparator
+was Lite's BF16-pair gate; the 128-row comparator was dense FP32 Torch.
+
+| Weight | NF12 mean / max absolute FP64 error | Legacy mean / max | NF12 closer / legacy closer / ties | Top-eight IDs |
+| --- | ---: | ---: | ---: | --- |
+| Main 384x5120 | 1.08e-8 / 6.69e-8 | 2.64e-8 / 1.62e-7 | 1603 / 430 / 271 | Equal |
+| MTP 128x5120 | 2.73e-8 / 1.48e-7 | 5.02e-8 / 3.36e-7 | 478 / 209 / 81 | Equal |
+
+The detailed record includes RMSE and normalized maximum error. These small
+FP32 reduction differences are accepted as arithmetic variation when routes
+and serving state pass their independent checks; full output hashes alone do
+not determine numerical accuracy.
+
+### Lite service check for the 128-row view
+
+Lite loaded the released checkpoint with every eligible BF16 matrix online
+NF12, including prepared 128-row MTP gates, at clean Lite revision `eaf77abe`
+and pinned GPT-QModel revision `c3811f24`. Two matched 8K trials used three
+concurrent B1 Zig/CUDA/PyTorch lanes, 512 output tokens, two repeats, MTP,
+GIL disabled, an exclusive lease, and fresh BF16 main controls before and
+after the candidate process. All 18 prompt/lane pairs matched within each
+trial, with zero cached tokens and
+allocator retries. The loaded-model MTP target and commit oracles passed.
+
+| Prompt namespace | HTTP decode vs BF16 before / after | Synchronized decode vs before / after | Prefill vs before / after |
+| --- | ---: | ---: | ---: |
+| `ab-equal-20261110-8k` | 0.761x / 0.842x | 0.813x / 0.814x | 0.652x / 0.796x |
+| `ab-equal-20261111-gate-8k` | 0.937x / 0.926x | 0.996x / 1.017x | 0.732x / 0.685x |
+
+The first trial included a 6.1-second prefill stall on one lane and 29.5/29.7
+ms verifier steps on the other two lanes during that group. Subsequent groups
+returned to roughly 15–16 ms steps. BF16 itself varied from 394 to 356 HTTP
+decode tokens/s in the first namespace across the before and after controls.
+The isolated 128-row projection gain did not establish a whole-service gain;
+the cause of the stall is unproven. Lite
+therefore uses the tiled MTP gate path in its proposed serving profile while
+retaining this explicit `prepare_fp32_gate` API for controlled experiments.
+The [Lite trial record](https://github.com/ModelCloud/Inference-Ultra/blob/deploy/nf12-online-merged-20261110/lite/results/nf12_gate_128_matched_8k_20261111.json)
+contains exact commands, runtime identities, affinity, and group timings.
+
 ## SM80 measurements
 
 NVIDIA PG506-230, CUDA 13.2, stable PyTorch 2.15, GIL disabled, GPU-resident

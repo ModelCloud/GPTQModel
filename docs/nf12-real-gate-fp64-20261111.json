@@ -1,0 +1,77 @@
+{
+  "schema": "nf12-real-gate-fp64-20261111-v1",
+  "results": [
+    {
+      "weight": "layers.0.ffn.gate.weight",
+      "shape": [
+        384,
+        5120
+      ],
+      "candidate": {
+        "mean_abs": 1.082030538882159e-08,
+        "rmse": 1.4385228901301335e-08,
+        "max_abs": 6.687736475718964e-08,
+        "normalized_max": 1.1301674770632387e-07
+      },
+      "legacy": {
+        "mean_abs": 2.6392709093881264e-08,
+        "rmse": 3.4527171124767053e-08,
+        "max_abs": 1.6231322585991137e-07,
+        "normalized_max": 2.742947926104861e-07
+      },
+      "closer_to_fp64": {
+        "left_closer": 1603,
+        "right_closer": 430,
+        "ties": 271,
+        "values": 2304
+      },
+      "candidate_legacy_max_abs": 1.7881393432617188e-07,
+      "route_top8_match": true,
+      "staged_equals_single_rows_bitwise": true
+    },
+    {
+      "weight": "mtp.0.ffn.gate.weight",
+      "shape": [
+        128,
+        5120
+      ],
+      "candidate": {
+        "mean_abs": 2.7283445699682798e-08,
+        "rmse": 3.62245571342719e-08,
+        "max_abs": 1.484239051663394e-07,
+        "normalized_max": 1.1365473218489799e-07
+      },
+      "legacy": {
+        "mean_abs": 5.016329422071194e-08,
+        "rmse": 6.768898813578407e-08,
+        "max_abs": 3.3567334145612193e-07,
+        "normalized_max": 2.5703988641216177e-07
+      },
+      "closer_to_fp64": {
+        "left_closer": 478,
+        "right_closer": 209,
+        "ties": 81,
+        "values": 768
+      },
+      "candidate_legacy_max_abs": 3.5762786865234375e-07,
+      "route_top8_match": true,
+      "staged_equals_single_rows_bitwise": true
+    }
+  ],
+  "environment": {
+    "checkpoint": "/fast/model/DeepSeek-V4.1-Flash-1017",
+    "device": "NVIDIA PG506-230, physical GPU 5 (SM80)",
+    "torch": "2.15.0+cu132",
+    "triton": "3.9.0",
+    "python": "3.14.7 free-threaded",
+    "PYTHON_GIL": "0",
+    "tf32": false,
+    "float32_matmul_precision": "highest",
+    "activation": "six FP32 Gaussian rows, seed 19017, scale 0.05",
+    "reference": "lite.numerical_oracle.sampled_matmul_fp64, all output columns",
+    "legacy_384": "Lite gate_rows._project_unqualified(..., bf16_pair)",
+    "legacy_128": "torch.nn.functional.linear(FP32 activation, BF16 weight cast to FP32)",
+    "candidate": "gptqmodel_nf12.linear_fp32_staged_b1 on prepared NF12 gate",
+    "topk": 8
+  }
+}
