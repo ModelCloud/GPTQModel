@@ -39,6 +39,7 @@ def capture_fused_train_state(module: nn.Module, *, names=None) -> None:
                 )
                 snapshot[name] = buffer_name
         module._fused_train_state = snapshot
+        module._fused_train_state_exportable = True
 
 
 def _replace_tensor(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
@@ -62,6 +63,11 @@ def restore_fused_train_state(module: nn.Module) -> bool:
     snapshot = getattr(module, "_fused_train_state", None)
     if not snapshot:
         return False
+    if not getattr(module, "_fused_train_state_exportable", True):
+        raise RuntimeError(
+            "Cannot restore or save a modified CPU int4pack runtime state as a checkpoint. "
+            "Load checkpoint-layout weights to restore the checkpoint format."
+        )
     for name, buffer_name in snapshot.items():
         tensor = module._buffers.pop(buffer_name, None)
         if tensor is not None:
@@ -76,25 +82,43 @@ def discard_fused_train_state(module: nn.Module) -> None:
         for buffer_name in snapshot.values():
             module._buffers.pop(buffer_name, None)
     module._fused_train_state = None
+    module.__dict__.pop("_fused_train_state_exportable", None)
 
 
-def materialize_fused_runtime_state(module: nn.Module) -> bool:
+def runtime_state_matches_live(module: nn.Module, state_dict, prefix: str = "") -> bool:
+    """Whether a runtime-layout load leaves every local checkpoint operand unchanged."""
+
+    for name, live in (*module._parameters.items(), *module._buffers.items()):
+        if name in module._non_persistent_buffers_set:
+            continue
+        incoming = state_dict.get(f"{prefix}{name}")
+        if incoming is None:
+            continue
+        if not isinstance(live, torch.Tensor) or not isinstance(incoming, torch.Tensor):
+            return False
+        if live.dtype != incoming.dtype or live.shape != incoming.shape or not torch.equal(live, incoming):
+            return False
+    return True
+
+
+def materialize_fused_runtime_state(module: nn.Module, state_dict, prefix: str = "") -> bool:
     """Replace inference-tensor operands with normal tensors in place.
 
     The CPU inference transform runs inside ``inference_mode``, so the live
-    ``qweight``/``qzeros``/``scales`` (and a widened ``bias``) are inference
-    tensors. ``load_state_dict(assign=False)`` copies into them outside
+    checkpoint operands, including ``g_idx``, can be inference tensors.
+    ``load_state_dict(assign=False)`` copies into them outside
     inference mode, which Torch rejects. Cloning them into normal tensors keeps
     the runtime layout while allowing that copy; ``assign=True`` does not need
     it because the load replaces the tensors outright.
     """
 
-    snapshot = getattr(module, "_fused_train_state", None)
-    if not snapshot:
+    if not getattr(module, "_fused_train_state", None):
         return False
     materialized = False
     with torch.inference_mode(False):
-        for name in snapshot:
+        for name in (*module._parameters, *module._buffers):
+            if f"{prefix}{name}" not in state_dict:
+                continue
             live = getattr(module, name, None)
             if isinstance(live, torch.Tensor) and torch.is_inference(live):
                 _replace_tensor(module, name, live.detach().clone())
@@ -183,6 +207,7 @@ __all__ = [
     "capture_fused_train_state",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",
+    "runtime_state_matches_live",
     "restore_fused_train_state",
     "state_dict_matches_checkpoint_layout",
     "state_dict_matches_runtime_layout",

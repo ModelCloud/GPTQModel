@@ -672,6 +672,8 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     and remain numerically lossless.
     """
 
+    from tests.test_torch_weight_storage import state_tensors
+
     cls = getattr(importlib.import_module(module_path), class_name)
     if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
         pytest.skip(f"{class_name} does not support {torch.bfloat16}")
@@ -679,6 +681,8 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     holder, x, baseline = _transformed_layer(cls)
     layer = holder.proj
     assert layer._fused_train_state, "the forward must have captured a snapshot"
+    for tensor in state_tensors(layer):
+        assert tensor.numel() < layer.in_features * layer.out_features
     # ``scales`` is shape-identical across both layouts; it must never be the
     # operand that decides the load.
     live_qweight = tuple(layer.qweight.shape)
@@ -697,6 +701,48 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     with torch.inference_mode():
         restored = holder(x).clone()
     torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+    for tensor in state_tensors(layer):
+        assert tensor.numel() < layer.in_features * layer.out_features
+
+    # A self round-trip still needs its original packed checkpoint layout for save.
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    exported = get_state_dict_for_save(holder)
+    assert exported["proj.qweight"].shape == snapshot_qweight
+
+
+def test_changed_runtime_state_cannot_silently_export_stale_checkpoint():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
+    checkpoint = dict(state)
+    for name, buffer_name in holder.proj._fused_train_state.items():
+        checkpoint[name] = holder.proj._buffers[buffer_name].clone()
+    state["scales"].mul_(2)
+    holder.proj.load_state_dict(state, assign=True)
+
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+    holder.proj.load_state_dict(checkpoint)
+    assert get_state_dict_for_save(holder)["proj.qweight"].shape == checkpoint["qweight"].shape
+
+
+def test_runtime_load_materializes_inference_g_idx():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, x, baseline = _transformed_layer(TorchAtenLinear)
+    with torch.inference_mode():
+        holder.proj.g_idx = holder.proj.g_idx.clone()
+    assert torch.is_inference(holder.proj.g_idx)
+    state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
+    holder.proj.load_state_dict(state, assign=False)
+
+    with torch.inference_mode():
+        actual = holder(x).clone()
+    torch.testing.assert_close(actual.float(), baseline.float(), rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize(

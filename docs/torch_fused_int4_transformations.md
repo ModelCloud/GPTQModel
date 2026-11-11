@@ -256,7 +256,10 @@ must decide which one it is before touching any buffer:
 Only the checkpoint case may restore the snapshot before the copy. The runtime
 case must keep the live layout the caller just supplied; restoring the snapshot
 first makes the subsequent strict copy fail with a size mismatch, and
-restoring it after the copy would silently discard the loaded values.
+restoring it after the copy would silently discard the loaded values. An
+unchanged runtime self-load keeps the checkpoint snapshot for a later save.
+If the runtime operands changed, their affine offsets may not have an exact
+checkpoint representation; export and training restore then fail explicitly.
 
 `state_dict_matches_checkpoint_layout()` decides this from the operands whose
 shape the transform actually changes (`_discriminating_operands`):
@@ -274,37 +277,41 @@ flowchart TD
     D -- no --> F{"every discriminating operand<br/>matches the live shape?"}
     F -- yes --> G["state_dict_matches_runtime_layout = True"]
     F -- no --> S
-    E --> H["_clear_runtime_weight_cache<br/>restore snapshot + retire derived state"]
+    E --> H["mark snapshot exportable<br/>_clear_runtime_weight_cache restores it"]
     H --> S
-    G --> I{"assign_to_params_buffers?"}
+    G --> V["runtime_state_matches_live<br/>mark snapshot exportable or dirty"]
+    V --> I{"assign_to_params_buffers?"}
     I -- no --> J["materialize_fused_runtime_state<br/>clone inference tensors to normal tensors"]
-    I -- yes --> K["discard_fused_train_state"]
-    J --> K
-    K --> S
-    S --> L["_clear_runtime_weight_cache<br/>rebuild derived metadata"]
+    I -- yes --> S
+    J --> S
+    S --> L["_clear_runtime_weight_cache<br/>suppress snapshot restore for runtime load"]
     L --> M["load complete"]
+    M --> X{"later export or training restore<br/>snapshot exportable?"}
+    X -- no --> Y["raise: changed runtime layout<br/>cannot be saved as checkpoint"]
+    X -- yes --> Z["restore checkpoint snapshot"]
     D -. "partial or ambiguous dict" .-> N["no restore, no discard:<br/>load against the live layout"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
-    class N failure;
+    class N,Y failure;
 ```
 
 The runtime branch also handles an `inference_mode` side effect: the transform
 runs inside inference mode, so the live operands are inference tensors, and
 `load_state_dict(assign=False)` cannot copy into them outside it. The branch
-clones those operands into normal tensors first; `assign=True` replaces them
+clones those operands, including `g_idx`, into normal tensors first; `assign=True` replaces them
 outright and skips the clone.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Layout verdict | `state_dict_matches_checkpoint_layout()` returned `True` on the **first** snapshot operand whose shape matched (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:81-105` before this change). `scales` is shape-identical in both layouts, so a runtime dict was classified as a checkpoint. | The verdict requires **all** shape-changing operands to match the snapshot; `scales` no longer participates (`_discriminating_operands`). |
-| Runtime-layout load | The snapshot was restored before the copy, then `super()._load_from_state_dict()` copied `(64, 64)` `qweight` into the restored `(16, 64)` buffer: `RuntimeError: size mismatch for qweight`. | `state_dict_matches_runtime_layout()` keeps the live `int4pack` layout, drops the stale snapshot, and rebuilds derived metadata from the loaded tensors. |
+| Runtime-layout load | The snapshot was restored before the copy, then `super()._load_from_state_dict()` copied `(64, 64)` `qweight` into the restored `(16, 64)` buffer: `RuntimeError: size mismatch for qweight`. | `state_dict_matches_runtime_layout()` keeps the live `int4pack` layout and rebuilds derived metadata. An unchanged self-load retains the checkpoint snapshot for save. |
 | `assign=False` on a transformed layer | Copying into inference tensors raised `Inplace update to inference tensor outside InferenceMode is not allowed`. | `materialize_fused_runtime_state()` clones inference-tensor operands into normal tensors before the copy. |
-| Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | A runtime-layout load discards the snapshot first, so the clear rebuilds from the loaded tensors instead of overwriting them. |
+| Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | A runtime-layout load suppresses snapshot restoration during its cache clear. A later save restores an unchanged snapshot; a modified runtime state raises instead of writing stale weights. |
 
 The regression is pinned by
 `tests/test_kernel_audit_regressions.py::test_transformed_cpu_layer_round_trips_its_own_state_dict`
 (both `assign` values, all six CPU GPTQ/AWQ kernels) and
-`::test_checkpoint_layout_gate_uses_discriminating_operands`. The load path
+`::test_checkpoint_layout_gate_uses_discriminating_operands`, plus save and
+inference-buffer regressions. The load path
 itself was introduced in
 [PR #3765](https://github.com/ModelCloud/GPTQModel/pull/3765); this gate keeps
 its checkpoint-restore behavior while making the self round-trip lossless.

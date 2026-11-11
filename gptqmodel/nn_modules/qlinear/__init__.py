@@ -330,10 +330,10 @@ class BaseQuantLinear(nn.Module):
 
         The two layouts are told apart by the operands whose shape the
         transform actually changes (``qweight``/``qzeros``); see
-        :func:`state_dict_matches_checkpoint_layout`. A runtime-layout load must
-        not be followed by a restore either - the post-copy cache clear has to
-        keep the live tensors the caller just supplied, so the snapshot is
-        dropped instead.
+        :func:`state_dict_matches_checkpoint_layout`. A runtime-layout load
+        keeps the live tensors and the checkpoint snapshot. Its post-copy cache
+        clear must not restore that snapshot. A changed runtime state cannot
+        always be converted back to checkpoint format, so export rejects it.
 
         ``load_state_dict`` may also copy into an existing buffer, which does
         not replace the Python object. Cache keys catch versioned tensors, but
@@ -361,6 +361,7 @@ class BaseQuantLinear(nn.Module):
                 # ``clear_weight_cache`` is the kernels' full restore hook: it
                 # puts the checkpoint tensors back *and* retires the derived
                 # layout state (``_cpu_transformed``, ``scales_and_zeros``).
+                self._fused_train_state_exportable = True
                 self._clear_runtime_weight_cache()
             elif runtime_layout:
                 # The snapshot describes an older checkpoint layout the caller
@@ -368,10 +369,17 @@ class BaseQuantLinear(nn.Module):
                 # the load is about to write, and let the clear below rebuild
                 # derived metadata from them.
                 from ._fused_train_state import (
-                    discard_fused_train_state,
                     materialize_fused_runtime_state,
+                    runtime_state_matches_live,
                 )
 
+                # Keep the checkpoint snapshot for a true self round-trip.
+                # A modified runtime layout has no guaranteed inverse back to
+                # checkpoint zero codes, so export must fail explicitly.
+                self._fused_train_state_exportable = (
+                    getattr(self, "_fused_train_state_exportable", True)
+                    and runtime_state_matches_live(self, state_dict, prefix)
+                )
                 local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
                 assign = isinstance(local_metadata, dict) and bool(
                     local_metadata.get("assign_to_params_buffers", False)
@@ -379,10 +387,20 @@ class BaseQuantLinear(nn.Module):
                 if not assign:
                     # A forward ran the transform inside ``inference_mode``;
                     # copying into inference tensors outside it is rejected.
-                    materialize_fused_runtime_state(self)
-                discard_fused_train_state(self)
+                    materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
-        self._clear_runtime_weight_cache()
+        if runtime_layout:
+            # Invalidate derived metadata without restoring the snapshot that
+            # a later checkpoint export still needs.
+            was_suspended = getattr(self, "_suspend_fused_train_restore", False)
+            self._suspend_fused_train_restore = True
+            try:
+                self._clear_runtime_weight_cache()
+            finally:
+                if not was_suspended:
+                    self.__dict__.pop("_suspend_fused_train_restore", None)
+        else:
+            self._clear_runtime_weight_cache()
 
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
