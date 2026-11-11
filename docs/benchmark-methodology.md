@@ -1,6 +1,6 @@
 # Benchmark methodology
 
-Performance claims in this repository come from `scripts/bench_*.py`. This page
+Performance claims in this repository come from `scripts/benchmark_*.py`. This page
 records the protocol those numbers are expected to follow, why it exists, and
 how to calibrate a machine before trusting a comparison. `scripts/bench_ab.py`
 implements the timing side.
@@ -43,13 +43,36 @@ smaller than that cannot be distinguished from the clock.
    0.91x - a 9% "effect" between two arms running identical code.
 3. **One sample per arm per round, many rounds.** The minimum of a round's
    iterations is used as the round's sample; rounds supply the spread.
-4. **Report the noise floor next to the speedup.** It is the inter-quartile
-   spread of the slower-moving arm, floored at 3%:
+4. **Report the noise floor next to the speedup.** It uses inclusive 25th and
+   75th percentiles from at least four rounds, takes the larger relative spread
+   of the two arms, and floors it at 3%:
    `noise = max(iqr_baseline, iqr_candidate, 0.03)`.
-5. **A change counts only if it exceeds the noise floor.** Otherwise it is
-   reported as `within noise`, never as a small win.
+5. **A change counts only if it exceeds the noise floor.** Speedups and
+   slowdowns use the same multiplicative threshold:
+   `max(speedup, 1 / speedup) - 1 > noise`. Otherwise the result is
+   `within noise`.
 6. **Warm the GPU before the first sample.** An idle card starts at its lowest
    clock, and the first arm measured pays for the ramp.
+
+| Existing single-arm timing | A/B harness |
+| --- | --- |
+| `scripts/benchmark_gptq_block.py:20-25` times one call and reports its duration. Separate runs can see different clock states. | `scripts/bench_ab.py` warms once, alternates arm order each round, and compares medians against measured spread. |
+
+```mermaid
+flowchart TD
+    A["ab(baseline, candidate)"] --> B{"at least four rounds<br/>and valid counts?"}
+    B -- no --> X["raise ValueError"]
+    B -- yes --> C["_warm_gpu"]
+    C --> D["alternate arm order each round"]
+    D --> E["sample_ms per arm<br/>call provided synchronizer"]
+    E --> F["ArmStats: median and inclusive quartiles"]
+    F --> G["AbResult.noise_floor"]
+    G --> H{"multiplicative change<br/>exceeds noise?"}
+    H -- yes --> I["effect"]
+    H -- no --> J["within noise"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
 
 ```python
 from scripts.bench_ab import ab, format_result
@@ -58,6 +81,20 @@ result = ab(lambda: forward(baseline), lambda: forward(candidate), rounds=10)
 print(format_result("fused vs unfused", result))
 # fused vs unfused: baseline   142.0us  candidate   131.5us   1.08x  noise  6.1%  -> effect
 ```
+
+By default the sampler synchronizes PyTorch's current CUDA device. For work on
+another device, pass its synchronizer so the measurement includes the kernel:
+
+```python
+import torch
+
+device = torch.device("cuda:1")
+result = ab(baseline, candidate, warm_gpu_device=device,
+            sync=lambda: torch.cuda.synchronize(device))
+```
+
+For CPU work on a machine with a GPU, pass `sync=lambda: None` and
+`warm_gpu_seconds=0`. `self_check()` accepts the same options.
 
 ## Calibrate the machine first
 

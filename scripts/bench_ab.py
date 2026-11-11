@@ -25,6 +25,7 @@ protocol's bias, not an effect.
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import time
 from dataclasses import dataclass
@@ -42,6 +43,10 @@ DEFAULT_WARMUP = 20
 class ArmStats:
     samples: tuple[float, ...]
 
+    def __post_init__(self) -> None:
+        if len(self.samples) < 4 or any(not math.isfinite(x) or x <= 0 for x in self.samples):
+            raise ValueError("at least four positive, finite samples are required to estimate noise")
+
     @property
     def median(self) -> float:
         return statistics.median(self.samples)
@@ -52,17 +57,15 @@ class ArmStats:
 
     @property
     def p25(self) -> float:
-        ordered = sorted(self.samples)
-        return ordered[len(ordered) // 4]
+        return statistics.quantiles(self.samples, n=4, method="inclusive")[0]
 
     @property
     def p75(self) -> float:
-        ordered = sorted(self.samples)
-        return ordered[(3 * len(ordered)) // 4]
+        return statistics.quantiles(self.samples, n=4, method="inclusive")[2]
 
     @property
     def iqr_ratio(self) -> float:
-        return (self.p75 - self.p25) / self.median if self.median else float("inf")
+        return (self.p75 - self.p25) / self.median
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,8 @@ class AbResult:
 
     @property
     def is_effect(self) -> bool:
-        return abs(self.speedup - 1.0) > self.noise_floor
+        # Compare multiplicative changes in either direction on the same scale.
+        return max(self.speedup, 1.0 / self.speedup) - 1.0 > self.noise_floor
 
     def verdict(self) -> str:
         return "effect" if self.is_effect else "within noise"
@@ -104,7 +108,9 @@ def sample_ms(
     The minimum is used per round: the fastest run is the one least polluted by
     a scheduling or clock excursion, and rounds supply the spread estimate.
     """
-    synchronize = sync or _sync
+    if iters < 1 or warmup < 0:
+        raise ValueError("iters must be positive and warmup must be nonnegative")
+    synchronize = _sync if sync is None else sync
     for _ in range(warmup):
         fn()
     synchronize()
@@ -122,7 +128,7 @@ def _sync() -> None:
         torch.cuda.synchronize()
 
 
-def _warm_gpu(seconds: float = 1.5) -> None:
+def _warm_gpu(seconds: float = 1.5, device: torch.device | None = None) -> None:
     """Hold the GPU at its boost clock before the first sample.
 
     An idle GPU starts at its lowest clock, so the first arm measured would be
@@ -130,14 +136,15 @@ def _warm_gpu(seconds: float = 1.5) -> None:
     """
     if not torch.cuda.is_available() or seconds <= 0:
         return
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = device if device is not None else torch.device("cuda", torch.cuda.current_device())
     a = torch.randn(2048, 2048, dtype=torch.float16, device=device)
     b = torch.randn(2048, 2048, dtype=torch.float16, device=device)
+    out = torch.empty_like(a)
     deadline = time.perf_counter() + seconds
     while time.perf_counter() < deadline:
-        a @ b
-    torch.cuda.synchronize()
-    del a, b
+        torch.mm(a, b, out=out)
+        torch.cuda.synchronize(device)
+    del a, b, out
     torch.cuda.empty_cache()
 
 
@@ -149,18 +156,22 @@ def ab(
         iters: int = DEFAULT_ITERS,
         warmup: int = DEFAULT_WARMUP,
         warm_gpu_seconds: float = 1.5,
+        warm_gpu_device: torch.device | None = None,
+        sync: Callable[[], None] | None = None,
 ) -> AbResult:
     """Time both arms round by round, alternating which one runs first."""
-    _warm_gpu(warm_gpu_seconds)
+    if rounds < 4 or iters < 1 or warmup < 0 or warm_gpu_seconds < 0:
+        raise ValueError("rounds must be at least four; iters must be positive; warmup and GPU warmup must be nonnegative")
+    _warm_gpu(warm_gpu_seconds, warm_gpu_device)
     base_samples: list[float] = []
     cand_samples: list[float] = []
     for round_index in range(rounds):
         order: Sequence[str] = ("baseline", "candidate") if round_index % 2 == 0 else ("candidate", "baseline")
         for arm in order:
             if arm == "baseline":
-                base_samples.append(sample_ms(baseline, iters=iters, warmup=warmup))
+                base_samples.append(sample_ms(baseline, iters=iters, warmup=warmup, sync=sync))
             else:
-                cand_samples.append(sample_ms(candidate, iters=iters, warmup=warmup))
+                cand_samples.append(sample_ms(candidate, iters=iters, warmup=warmup, sync=sync))
     return AbResult(baseline=ArmStats(tuple(base_samples)), candidate=ArmStats(tuple(cand_samples)), rounds=rounds)
 
 
@@ -170,9 +181,13 @@ def self_check(
         rounds: int = DEFAULT_ROUNDS,
         iters: int = DEFAULT_ITERS,
         warmup: int = DEFAULT_WARMUP,
+        warm_gpu_seconds: float = 1.5,
+        warm_gpu_device: torch.device | None = None,
+        sync: Callable[[], None] | None = None,
 ) -> AbResult:
-    """Both arms run identical work; the reported speedup must land in the noise."""
-    return ab(work, work, rounds=rounds, iters=iters, warmup=warmup)
+    """Run identical work in both arms to check for measurement bias."""
+    return ab(work, work, rounds=rounds, iters=iters, warmup=warmup,
+              warm_gpu_seconds=warm_gpu_seconds, warm_gpu_device=warm_gpu_device, sync=sync)
 
 
 def format_result(label: str, result: AbResult) -> str:
@@ -207,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.self_check:
         parser.error("only --self-check is available from the command line; import ab() for a comparison")
+    if args.rounds < 4 or args.iters < 1 or args.size < 1:
+        parser.error("--rounds must be at least 4; --iters and --size must be positive")
 
     result = self_check(_self_check_work(args.size), rounds=args.rounds, iters=args.iters)
     print(format_result("A/A control", result))
