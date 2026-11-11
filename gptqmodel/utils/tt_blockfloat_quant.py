@@ -36,7 +36,7 @@ that report.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -281,4 +281,160 @@ def gptq_solve_blockfloat(
     return q
 
 
-__all__ += ["gptq_solve_blockfloat"]
+__all__ += [
+    "DEFAULT_CALIBRATION_TEXT",
+    "collect_layer_hessians",
+    "quantize_model_blockfloat",
+]
+
+
+# --- end-to-end: quantize a dense model onto the TT block-float grid ---------
+#
+# The grid quantizer above is per-layer. This is the pipeline that turns a dense
+# checkpoint into one whose weights are natively bfloat4_b/bfloat8_b, by
+# collecting per-layer Hessians over calibration text and running the GPTQ solve
+# against the grid. The result needs no inference-time dequant: the unpack stage
+# expands it in the data path.
+
+DEFAULT_CALIBRATION_TEXT = (
+    "The quick brown fox jumps over the lazy dog. "
+    "Tenstorrent accelerators pair many small RISC-V cores with a matrix engine. "
+    "Quantization reduces the number of bits needed to store model weights. "
+    "A transformer layer projects hidden states through attention and feed-forward blocks. "
+    "Numerical precision and memory bandwidth both bound inference throughput. "
+    "The model reads a sentence, predicts the next token, and repeats. "
+)
+
+
+def _decoder_blocks(model) -> list:
+    """Return the transformer blocks in order, for the common HF layouts."""
+
+    for path in ("model.decoder.layers", "model.layers", "transformer.h",
+                 "gpt_neox.layers", "model.encoder.layers"):
+        node = model
+        try:
+            for part in path.split("."):
+                node = getattr(node, part)
+        except AttributeError:
+            continue
+        return list(node)
+    raise ValueError(
+        "could not locate decoder blocks; expected one of model.decoder.layers, "
+        "model.layers, transformer.h, gpt_neox.layers, model.encoder.layers"
+    )
+
+
+def collect_layer_hessians(
+    model,
+    tokenizer,
+    *,
+    layers: Optional[list] = None,
+    text: str = DEFAULT_CALIBRATION_TEXT,
+    nsamples: int = 32,
+    seqlen: int = 256,
+) -> dict:
+    """Collect ``X^T X`` for every quantizable linear, by replaying calibration text.
+
+    Returns ``{layer_name: hessian}`` with one float32 Hessian per layer, plus the
+    total sample count under the key ``"__nsamples__"``. Hooks capture each
+    linear's input activations in order, so the Hessian lines up with the weights
+    the solve will quantize.
+    """
+
+    import torch.nn as nn
+
+    blocks = layers if layers is not None else _decoder_blocks(model)
+    targets: dict = {}
+    for index, block in enumerate(blocks):
+        for name, module in block.named_modules():
+            if isinstance(module, nn.Linear):
+                targets[f"{index}.{name}"] = module
+    if not targets:
+        raise ValueError("no nn.Linear modules found inside the decoder blocks")
+
+    hessians = dict.fromkeys(targets)
+    counts = dict.fromkeys(targets, 0)
+
+    def make_hook(name):
+        def hook(_module, inputs, _output):
+            x = inputs[0].detach().to(torch.float32)
+            if x.dim() > 2:
+                x = x.reshape(-1, x.shape[-1])
+            h = x.T @ x
+            hessians[name] = h if hessians[name] is None else hessians[name] + h
+            counts[name] += int(x.shape[0])
+        return hook
+
+    handles = [module.register_forward_hook(make_hook(name))
+               for name, module in targets.items()]
+    try:
+        ids = tokenizer(text, return_tensors="pt").input_ids
+        model.eval()
+        with torch.no_grad():
+            for i in range(nsamples):
+                window = ids[:, :seqlen]
+                if window.shape[1] < 8:
+                    window = ids
+                model(window)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    out = {name: h for name, h in hessians.items() if h is not None}
+    out["__nsamples__"] = nsamples
+    return out
+
+
+def quantize_model_blockfloat(
+    model,
+    tokenizer,
+    *,
+    bits: int = 4,
+    damp: float = 0.01,
+    nsamples: int = 32,
+    text: str = DEFAULT_CALIBRATION_TEXT,
+    verbose: bool = False,
+) -> dict:
+    """Quantize every decoder linear onto the TT block-float grid, in place.
+
+    Returns a report of ``{layer_name: {"norm_l1": ..., "on_grid": bool}}``. The
+    weights are replaced with grid-quantized values, so saving the model yields a
+    checkpoint that loads as native ``bfloat4_b``/``bfloat8_b`` with no dequant.
+    """
+
+    from .logger import setup_logger
+
+    log = setup_logger()
+    hessians = collect_layer_hessians(
+        model, tokenizer, nsamples=nsamples, text=text
+    )
+    hessians.pop("__nsamples__", None)
+
+    blocks = _decoder_blocks(model)
+    report = {}
+    for index, block in enumerate(blocks):
+        for name, module in block.named_modules():
+            key = f"{index}.{name}"
+            h = hessians.get(key)
+            if h is None:
+                continue
+            # Clone: ``detach()`` shares storage with the parameter, so copy_()
+            # below would mutate the reference and make the error metric read 0.
+            weight = module.weight.detach().clone()
+            try:
+                quantized = gptq_solve_blockfloat(
+                    weight, h, bits=bits, damp=damp, grid="blockfloat"
+                )
+            except Exception as exc:  # pragma: no cover - per-layer guard
+                log.warning(f"TTBlockFloat: skipping {key}: {exc}")
+                continue
+            with torch.no_grad():
+                module.weight.copy_(quantized.to(module.weight.dtype))
+            norm_l1 = relative_error(weight, quantized)
+            on_grid = torch.allclose(
+                quantized, quantize_blockfloat(quantized, bits)[0], atol=1e-6
+            )
+            report[key] = {"norm_l1": norm_l1, "on_grid": bool(on_grid)}
+            if verbose:
+                log.info(f"TTBlockFloat: {key} norm_l1={norm_l1:.4f} on_grid={on_grid}")
+    return report

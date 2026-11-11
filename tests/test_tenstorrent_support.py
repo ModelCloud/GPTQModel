@@ -1235,6 +1235,51 @@ def test_fused_matmul_matches_torch_on_device():
 
 
 
+def test_quantize_model_blockfloat_reports_true_weight_error():
+    """The error metric must compare against the ORIGINAL weight.
+
+    ``module.weight.detach()`` shares storage with the parameter, so measuring
+    after ``copy_()`` reported norm_l1 0.0000 for every layer -- a full-precision
+    model that looked perfectly quantized. The reference must be cloned.
+    """
+
+    import importlib
+    import types
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(2)
+    block = torch.nn.Module()
+    block.q_proj = torch.nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        block.q_proj.weight.copy_(torch.randn(64, 128) * 0.02)
+    original = block.q_proj.weight.detach().clone()
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+
+    hessian = torch.eye(128) * 10.0
+    fake = types.SimpleNamespace(
+        collect_layer_hessians=lambda *a, **k: {"0.q_proj": hessian},
+    )
+    orig = bq.collect_layer_hessians
+    bq.collect_layer_hessians = fake.collect_layer_hessians
+    try:
+        report = bq.quantize_model_blockfloat(model, tokenizer=None, bits=4)
+    finally:
+        bq.collect_layer_hessians = orig
+
+    assert "0.q_proj" in report
+    # A quantized layer must report a real, non-zero deviation.
+    assert report["0.q_proj"]["norm_l1"] > 0.01, report
+    # And the measured value must match the true change to the weights.
+    true_err = bq.relative_error(original, block.q_proj.weight.detach())
+    assert abs(report["0.q_proj"]["norm_l1"] - true_err) < 1e-4
+    assert not torch.equal(original, block.q_proj.weight.detach())
+
+
 def test_dequant_lut_is_exactly_rounded_bf16():
     """The 16-entry table must hold the exact BF16 values, not truncated ones."""
 
