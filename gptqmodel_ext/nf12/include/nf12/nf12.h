@@ -175,6 +175,13 @@ nf12_status_t nf12_embedding(const nf12_weight_t* w, const int32_t* ids, int64_t
 nf12_status_t nf12_embedding_i64(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
                                  int64_t ldo, cudaStream_t stream);
 
+/* Writes out[i, repeat, :] for repeat in [0,4) in one packed-weight lookup.
+ * ldo is the output stride between consecutive IDs, in BF16 elements. */
+nf12_status_t nf12_embedding_repeat4(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids, void* out_bf16,
+                                     int64_t ldo, cudaStream_t stream);
+nf12_status_t nf12_embedding_i64_repeat4(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
+                                         int64_t ldo, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

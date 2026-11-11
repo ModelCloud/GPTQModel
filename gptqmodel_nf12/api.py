@@ -193,6 +193,19 @@ def embedding(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
     return torch.ops.nf12.embedding(ids, weight.packed, weight.escapes, weight.exp_base)
 
 
+def embedding_repeat4(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
+    """Look up packed rows and write ``[*ids.shape, 4, K]`` in one CUDA launch.
+
+    Every repeated row preserves the BF16 bits of ``embedding(ids, weight)``.
+    IDs outside the table produce four ``+0.0`` rows.
+    """
+    _check_cuda(ids, "ids")
+    if ids.dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"nf12: ids must be int32 or int64, got {ids.dtype}")
+    load()
+    return torch.ops.nf12.embedding_repeat4(ids, weight.packed, weight.escapes, weight.exp_base)
+
+
 def pack_bf16t(w: torch.Tensor) -> torch.Tensor:
     """Packs ``[N, K]`` bf16 into the uncompressed bf16t twin layout, uint8 ``[N, 2K]`` (SPEC.md 4.4)."""
     _check_bf16_matrix(w, "weight")

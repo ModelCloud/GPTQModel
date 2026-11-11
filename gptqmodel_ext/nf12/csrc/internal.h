@@ -133,6 +133,6 @@ cudaError_t moe_grouped_operands(const __nv_bfloat16* x, int64_t ldx, const int3
 // Exactly one of ids32/ids64 is non-null (SPEC.md 10).
 cudaError_t embedding(const uint8_t* packed, const uint4* escapes, uint32_t num_escapes, uint32_t exp_base, int64_t n,
                       int64_t k, const int32_t* ids32, const int64_t* ids64, int64_t num_ids, __nv_bfloat16* out,
-                      int64_t ldo, cudaStream_t stream);
+                      int64_t ldo, int repeats, cudaStream_t stream);
 
 }

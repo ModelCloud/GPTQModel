@@ -99,6 +99,10 @@ def _register_fakes() -> None:
     def _embedding(ids, packed, escapes, exp_base):
         return packed.new_empty((*ids.shape, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
 
+    @torch.library.register_fake("nf12::embedding_repeat4")
+    def _embedding_repeat4(ids, packed, escapes, exp_base):
+        return packed.new_empty((*ids.shape, 4, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
+
     @torch.library.register_fake("nf12::encode_moe")
     def _encode_moe(w):
         ctx = torch.library.get_ctx()

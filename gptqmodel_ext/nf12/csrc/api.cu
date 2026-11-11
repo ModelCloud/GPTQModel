@@ -160,11 +160,13 @@ nf12_status_t run_moe_linear(const void* x, int64_t ldx, const int32_t* gather, 
 
 template <typename Id>
 nf12_status_t run_embedding(const nf12_weight_t* w, const Id* ids, int64_t num_ids, void* out, int64_t ldo,
-                            cudaStream_t stream) {
+                            int repeats, cudaStream_t stream) {
   if (!valid_weight(w) || num_ids < 0 || !aligned(ids, sizeof(Id))) return NF12_ERROR_INVALID_ARGUMENT;
   if (num_ids == 0) return NF12_OK;
   // Bound BF16 byte offsets to int64.
-  if (ids == nullptr || !valid_bf16_matrix(out, w->k, ldo) || num_ids > std::numeric_limits<int64_t>::max() / 2 / ldo) {
+  if (ids == nullptr || (repeats != 1 && repeats != 4) ||
+      !valid_bf16_matrix(out, w->k * repeats, ldo) ||
+      num_ids > std::numeric_limits<int64_t>::max() / 2 / ldo) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
   const DeviceInfo* dev = nullptr;
@@ -178,7 +180,7 @@ nf12_status_t run_embedding(const nf12_weight_t* w, const Id* ids, int64_t num_i
   }
   return from_codec(nf12::detail::embedding(static_cast<const uint8_t*>(w->packed),
                                             static_cast<const uint4*>(w->escapes), w->num_escapes, w->exp_base, w->n,
-                                            w->k, ids32, ids64, num_ids, static_cast<__nv_bfloat16*>(out), ldo,
+                                            w->k, ids32, ids64, num_ids, static_cast<__nv_bfloat16*>(out), ldo, repeats,
                                             stream));
 }
 
@@ -480,12 +482,22 @@ nf12_status_t nf12_moe_grouped_operands(const void* x_bf16, int64_t ldx, const i
 
 nf12_status_t nf12_embedding(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids, void* out_bf16, int64_t ldo,
                              cudaStream_t stream) {
-  return run_embedding(w, ids, num_ids, out_bf16, ldo, stream);
+  return run_embedding(w, ids, num_ids, out_bf16, ldo, 1, stream);
 }
 
 nf12_status_t nf12_embedding_i64(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
                                  int64_t ldo, cudaStream_t stream) {
-  return run_embedding(w, ids, num_ids, out_bf16, ldo, stream);
+  return run_embedding(w, ids, num_ids, out_bf16, ldo, 1, stream);
+}
+
+nf12_status_t nf12_embedding_repeat4(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids, void* out_bf16,
+                                     int64_t ldo, cudaStream_t stream) {
+  return run_embedding(w, ids, num_ids, out_bf16, ldo, 4, stream);
+}
+
+nf12_status_t nf12_embedding_i64_repeat4(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
+                                         int64_t ldo, cudaStream_t stream) {
+  return run_embedding(w, ids, num_ids, out_bf16, ldo, 4, stream);
 }
 
 }
