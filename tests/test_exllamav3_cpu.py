@@ -634,3 +634,31 @@ def test_exllamav3_torch_forward_matches_oracle_with_hadamard_matmul(dtype):
     assert actual.dtype == dtype
     assert _relative_l2(actual, expected) <= 2e-3
     assert _relative_l2(actual, expected.to(dtype)) <= 2e-3
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_exllamav3_wide_activations_stay_finite_through_torch_inner(dtype):
+    """End-to-end: BF16/FP32 inputs that overflow FP16 must round-trip finitely.
+
+    ``ExllamaV3Linear.forward`` routes non-FP16 activations through
+    ``ExllamaV3TorchLinear`` (#3731). The inner upcasts to FP32 for both the
+    Hadamard reconstruction and the bias epilogue, so a value above the FP16
+    maximum (65504) must stay finite and match the FP64 oracle.
+    """
+
+    in_features, out_features = 128, 128
+    module = _make_module(size=128, in_features=in_features, out_features=out_features)
+    # 1e10 and 1e-10 straddle FP16's representable range in both directions;
+    # a naive FP16 round-trip would turn the first into inf and the second to 0.
+    x = torch.tensor(
+        [[1e10, 1e-10] + [0.5] * (in_features - 2)], dtype=dtype
+    )
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+
+    expected = _oracle(module, x)
+    assert _relative_l2(actual, expected) <= 2e-3

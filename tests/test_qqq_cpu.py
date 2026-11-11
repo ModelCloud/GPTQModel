@@ -56,9 +56,13 @@ def oracle(module, activation, weight, channels):
     quantized = (flattened / scale).round().clamp(-128, 127).to(torch.int8)
     accum = quantized.float() @ weight
     raw = accum * scale * channels
-    visible = raw.to(activation.dtype).reshape(*activation.shape[:-1], module.out_features)
+    # The kernel keeps the INT8 reduction and its scales in FP32, adds the bias
+    # there, and rounds to the visible dtype once. Adding the bias after a
+    # narrowing cast would round twice and disagree by a full step on values
+    # near a tie.
     if module.bias is not None:
-        visible = visible + module.bias.to(activation.dtype)
+        raw = raw + module.bias.float()
+    visible = raw.to(activation.dtype).reshape(*activation.shape[:-1], module.out_features)
     return quantized, accum, raw, visible
 
 

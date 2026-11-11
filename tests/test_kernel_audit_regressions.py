@@ -462,32 +462,49 @@ def test_exllamav2_gptq_forward_compacts_noncontiguous_activations(monkeypatch):
     assert out.dtype == torch.float16
 
 
-def test_exllamav3_bf16_uses_fp32_native_input_and_output():
+def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
+    """Wide activations must not reach the FP16-only native EXL3 kernel.
+
+    #3717 pinned a native path that upcast wide inputs to FP32. #3731
+    (``86a59903e``) replaced it with the bounded Torch reconstruction path,
+    which receives the caller dtype as-is and upcasts internally inside
+    ``ExllamaV3TorchLinear._forward_eager``. Because that inner takes a single
+    ``x`` argument, the native ``(x, _params, out_dtype=...)`` call would still
+    be reached here under the stale contract and explode.
+    """
     seen = {}
 
-    class Inner:
-        def forward(self, x, _params, *, out_dtype=None):
+    class TorchInner:
+        def forward(self, x):
             seen["input_dtype"] = x.dtype
-            seen["out_dtype"] = out_dtype
-            return torch.ones(x.shape[:-1] + (4,), dtype=out_dtype)
+            return torch.ones(x.shape[:-1] + (4,), dtype=x.dtype)
 
-    layer = SimpleNamespace(_ensure_inner=lambda: Inner(), out_features=4)
+    class NativeInner:
+        def forward(self, x, _params, *, out_dtype=None):
+            seen["native"] = (x.dtype, out_dtype)
+            return torch.ones(x.shape[:-1] + (4,), dtype=out_dtype or x.dtype)
+
+    layer = SimpleNamespace(
+        _ensure_torch_inner=lambda: TorchInner(),
+        _ensure_inner=lambda: pytest.fail("wide inputs must not use the native kernel"),
+        out_features=4,
+    )
+    # 1e10 overflows FP16 (max 65504); routing through the FP32 Torch inner
+    # keeps the result finite.
     x = torch.tensor([[1e10, 1e-10]], dtype=torch.bfloat16)
 
     out = ExllamaV3Linear.forward(layer, x)
 
-    assert seen == {
-        "input_dtype": torch.float32,
-        "out_dtype": torch.float32,
-    }
+    # The Torch inner owns the FP32 upcast; the wrapper only sees the caller dtype.
+    assert seen == {"input_dtype": torch.bfloat16}
     assert out.dtype == torch.bfloat16
     assert torch.isfinite(out).all()
 
-    fp16 = torch.ones((1, 2), dtype=torch.float16)
-    out = ExllamaV3Linear.forward(layer, fp16)
+    # FP16 keeps the FP16 native kernel with an explicit out_dtype.
+    seen.clear()
+    layer._ensure_torch_inner = lambda: pytest.fail("FP16 must keep the native path")
+    layer._ensure_inner = lambda: NativeInner()
+    out = ExllamaV3Linear.forward(layer, torch.ones((1, 2), dtype=torch.float16))
 
-    assert seen == {
-        "input_dtype": torch.float16,
-        "out_dtype": torch.float16,
-    }
+    assert seen == {"native": (torch.float16, torch.float16)}
     assert out.dtype == torch.float16
