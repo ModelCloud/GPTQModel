@@ -467,8 +467,14 @@ shows where the time really is:
 | upload / readback | 0.16 ms | 11 % |
 
 The dequant is ~20x the GEMM it feeds, so **every forward re-expands the packed
-nibbles for nothing**. That, not transfer volume, is the optimisation target;
-see [the architecture page](../hw/tenstorrent.md#8-what-this-implies-for-gptq-alignment).
+nibbles into a dense BF16 tile that is then thrown away**. That, not transfer
+volume, is the optimisation target. The fix is *not* to cache the dense tile —
+that is an 8x memory regression — but to expand per tile inside the kernel,
+which needs a custom TT-Metalium op. Measured alternatives (block-float storage,
+including why `bfloat4_b` is too coarse at 9.8 % error) and the intended data
+flow are in
+[the architecture page](../hw/tenstorrent.md#9-design-fused-int4-gemm-not-a-dense-cache)
+and [what it implies](../hw/tenstorrent.md#8-what-this-implies-for-gptq-alignment).
 
 ### What this does not fix
 

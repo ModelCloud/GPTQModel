@@ -227,11 +227,12 @@ first calls, which include a one-off weight upload, and should be disregarded.
 
 Ordered by the measured payoff:
 
-1. **Stop dequantizing per forward.** Materialize the BF16 weight once (at load,
-   on device) and run the GEMM against it. For OPT-125M the expanded weights are
-   ~1.2 MB per `768x768` layer, ~85 MB for the model — trivial against ~32 GB of
-   DRAM, and it removes ~85 % of the per-layer cost. This trades the packed-only
-   invariant for speed, so it must be opt-in and documented as such.
+1. **Stop dequantizing per forward — but do not cache dense weights either.**
+   The expansion must happen per tile inside the kernel, not as a materialized
+   BF16 tensor. A dense cache is the obvious shortcut and it is the wrong one:
+   it turns 4-bit storage into 16-bit storage, an 8x memory regression, and a
+   7B model would need ~14 GB of expanded weights on device. Measured
+   alternatives and the chosen design are in section 9.
 2. **Pad `M` to the engine's granularity.** `M` below 8 wastes up to 8x of the
    matrix engine (`1/8` throughput at `1x16`); pad to 8 as a floor and 32 for
    full tiles. This is the single biggest lever for decode.
@@ -250,7 +251,83 @@ Ordered by the measured payoff:
    Section 3 is the support matrix; do not put `int32`/`uint32` on the compute
    path, only on the bit-manipulation path.
 
-## 9. Qualified host
+## 9. Design: fused int4 GEMM, not a dense cache
+
+The measured problem is that the packed weights are re-expanded into a dense
+BF16 tile on every forward: 1.27 ms of dequant against 0.06 ms of GEMM. The
+tempting fix is to keep that dense tile. That is rejected — it is an 8x memory
+regression (4-bit to 16-bit) and defeats the reason the checkpoint is quantized.
+
+The alternative the hardware actually offers is that **unpack is a data-path
+stage**. In the LLK flow, `L1 -> unpack -> source registers -> FPU` is
+performed by TRISC0 while TRISC1/2 drive math and pack. A storage format that
+the unpacker can expand costs nothing in the op graph, which is why a block
+float runs *faster* than BF16 here: there is simply less data to move.
+
+Measured on real OPT-125M `q_proj` weights (`768x768`, batch 8):
+
+| Weight storage | Latency | max abs err | normalized L1 | cosine | bytes/element |
+| --- | --- | --- | --- | --- | --- |
+| `bfloat16` (dequant then GEMM) | 0.101 ms | reference | — | — | 2 (transient) |
+| `bfloat8_b` (hardware unpack) | **0.071 ms** | 0.125 | 1.0 % | 0.99995 | ~1.06 |
+| `bfloat4_b` (hardware unpack) | 0.072 ms | 0.914 | **9.8 %** | 0.99519 | ~0.56 |
+
+Both block floats beat BF16 on time, confirming the unpack stage is doing the
+expansion. But neither is a drop-in replacement for GPTQ:
+
+- **`bfloat4_b` is not accurate enough.** 9.8 % normalized error is a
+  re-quantization on top of an already 4-bit weight; it discards GPTQ's
+  asymmetric zero point and per-group scale in favour of one shared exponent
+  per 16 values, and GPTQ's levels are uniform while block-float levels are
+  logarithmic.
+- **`bfloat8_b` is accurate (1.0 %) but costs 2x the memory of int4.** Viable as
+  a convenience mode, not as the default for a memory-bound quantizer.
+- **`bfloat4_b` / `bfloat8_b` also cannot express the zero point at all**, which
+  is not a tuning detail: it is half of what GPTQ computes.
+
+### The chosen design: expand nibbles inside the kernel
+
+Keep the checkpoint packed at 0.5 B/element and expand per tile in the compute
+path, so the dense tile is never a tensor:
+
+```
+DRAM: packed uint32 words | per-group scales | packed zeros | g_idx
+        │
+        ├── BRISC   : NoC read of the packed word tile + its group metadata into L1
+        ├── TRISC0  : unpack — nibble extraction and dequant straight into SrcA
+        ├── TRISC1  : FPU 16x16 multiplies (HiFi4, fp32 accumulate)
+        ├── TRISC2  : pack / accumulate the output tile
+        └── NCRISC  : NoC write of the finished output tile
+```
+
+Why this shape and not a generic op chain:
+
+- **It matches the engine's granularity.** Tiles are `32x32` of `16x16` faces and
+  the FPU multiplies `16x16` natively, so dequantizing exactly one face pair
+  before its multiply keeps the intermediate in registers — it is never a
+  `768x768` allocation.
+- **The group size already aligns.** GPTQ `group_size=128` is 4 tiles of `K`
+  (8 faces), so one group's scale/zero stays resident across the tile walk with
+  no re-fetch.
+- **`g_idx` stays a scalar lookup per `K` tile**, not a gather over the whole
+  matrix; the current TTNN path builds an expanded index tensor because a
+  general `embedding` op needs one.
+- **L1 is the constraint, and it is tight.** At 1464 KiB per core a `768x768`
+  BF16 layer is 1.18 MB, which does not fit, so weights *must* stream from DRAM
+  per tile. Sharding `N` across the 11x10 grid and keeping a tile pair in L1 is
+  the natural split; anything that assumes whole-layer L1 residency will not
+  scale.
+- **Integer work stays off the FPU.** Nibble extraction is SFPU work (section 3)
+  and is the unavoidable cost of 4-bit; the design minimises how often it runs
+  and how much it moves, rather than pretending it is free.
+
+Status: this is the design and its measured justification. It is **not yet
+implemented** — it needs a custom TT-Metalium op (LLK-level unpack), which is a
+larger build than the TTNN-level work in this repository. The interim state
+remains the TTNN dequant path, which is correct but pays 85 % of a layer in
+expansion.
+
+## 10. Qualified host
 
 | Item | Validated value |
 | --- | --- |
@@ -269,7 +346,7 @@ All four cards report operating DRAM, passing GDDR training and BIST, and zero
 corrected or uncorrected GDDR errors. `tt-smi 6.8.1` enumerates four p300c
 boards once PCIe bifurcation is set. No firmware update was required.
 
-## 10. Runtime identity
+## 11. Runtime identity
 
 ```text
 torch                    2.11.0+cpu
@@ -293,7 +370,7 @@ tree is `v0.83.0-dev20261108`, while the installed plugin bundles tt-metal from
 **2026-08-20**. Features present in the source tree (for example
 `TT_METAL_TDP_LIMIT_WATTS`) do not exist in the installed binaries.
 
-## 11. Verification
+## 12. Verification
 
 The opt-in hardware test executes the real `XLALinear` on each card and compares
 it with an independent CPU unpack/dequantize oracle:
@@ -322,7 +399,7 @@ opt-in hardware gate is enabled.
 Run them under the thermal watchdog, which kills at 88 °C:
 `TTWATCH_MAX_C=88 python /home/ttuser/tt-reboot/ttwatch.py -- python <script>`.
 
-## 12. Firmware tooling
+## 13. Firmware tooling
 
 `tt-flash` writes a board firmware bundle or SPI image. It belongs in the
 maintenance toolchain, not the inference loop. The p300c bundle format is
