@@ -774,8 +774,46 @@ it while the reference's does not to the same degree.
 
 Given that, the honest position on this path: correct, in the library, cached, and
 ~6x off `ttnn.linear` at K=768 after removing every host-side cost. Closing that
-needs the staging/multicast redesign, not more call-overhead work. Here the
-mesh open was failing for reasons that had nothing to do with the kernel.
+needs the staging/multicast redesign, not more call-overhead work.
+
+## End-to-end: quantizing a dense model to native bfloat4_b
+
+`quantize_model_blockfloat` runs the whole pipeline: hooks on every decoder
+`nn.Linear` accumulate `X^T X` over calibration text, then each weight is solved
+onto the block-float grid with GPTQ error feedback.
+
+Measured on **facebook/opt-125m**, 72 layers, 4 bits, 8 calibration samples:
+
+| | |
+| --- | --- |
+| quantization time (CPU) | **12.5 s** |
+| mean weight `norm_l1` | 0.1944 |
+| all weights on-grid | **True** |
+| next-token logits `norm_l1` | 0.0600 |
+| logits cosine | **0.99815** |
+| argmax | 16 -> 16, **matches** |
+
+And on device, with those grid-quantized weights stored as `bfloat4_b`:
+
+| | |
+| --- | --- |
+| storage drift (grid values through bf4) | **0.000000** |
+| `ttnn.linear` vs FP32 reference | `norm_l1` 0.00633 |
+
+That is the property this path exists for: the quantizer's output is **exactly**
+what the hardware stores, so inference needs no dequant step at all.
+
+### A measurement bug worth recording
+
+The first run reported `mean weight norm_l1 = 0.0000` for all 72 layers while
+still claiming `all_on_grid=True` -- a full-precision model that looked perfectly
+quantized. Cause: `module.weight.detach()` shares storage with the parameter, so
+`copy_()` mutated the reference and the error was measured *after* the write. A
+`.clone()` fixes it, and a test now asserts the reported error matches the true
+weight change and is non-zero.
+
+Stated plainly because the failure is silent and flattering: any quantization-error
+metric computed from a detached (not cloned) parameter measures nothing.
 
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
 attempt -- one applied to three functions instead of one -- which is why the
