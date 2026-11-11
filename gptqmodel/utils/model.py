@@ -2357,18 +2357,22 @@ def _collect_state_dict_with_offload(
 def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
     """Return in-place transformed CPU layers to their checkpoint layout.
 
-    ``clear_weight_cache`` is the kernels' documented restore hook: it puts the
-    captured checkpoint tensors back and drops derived metadata. Modules without
-    a snapshot (never transformed, or non-CPU backends) are untouched.
+    The snapshot is restored explicitly here; ``clear_weight_cache`` only drops
+    derived metadata and must keep the live packed buffers authoritative for
+    moves and explicit clears. Modules without a snapshot (never transformed,
+    or non-CPU backends) are untouched.
     """
+
+    from ..nn_modules.qlinear._fused_train_state import restore_fused_train_state
 
     restored = 0
     for module in model.modules():
         if getattr(module, "_fused_train_state", None) is None:
             continue
-        clear = getattr(module, "clear_weight_cache", None)
-        if callable(clear):
-            clear()
+        if restore_fused_train_state(module):
+            clear = getattr(module, "clear_weight_cache", None)
+            if callable(clear):
+                clear()
             restored += 1
     return restored
 

@@ -18,7 +18,11 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    refinalize_fused_state_after_apply,
+    restore_fused_train_state,
+)
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -203,13 +207,36 @@ class TorchAtenAwqLinear(AWQuantLinear):
     _refresh_fused_state = TorchAtenLinear._refresh_fused_state
 
     def clear_weight_cache(self):
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.scales_and_zeros = None
-            self._cpu_transformed = False
-            self._cpu_transform_dtype = None
         self._fused_state_key = None
         self._refresh_fused_state()
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the checkpoint layout after an invalidating move.
+
+        The AWQ affine offsets are scale-dtype coupled and the int4pack layout
+        is device-specific, so a cross-device or low-precision move must restore
+        the checkpoint snapshot instead of reinterpreting it in place. A
+        same-device move to FP32 keeps the live layout.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        if refinalize_fused_state_after_apply(self, scale_dtype, device):
+            return result
+        scales = getattr(self, "scales", None)
+        if (
+            transformed
+            and isinstance(scales, torch.Tensor)
+            and scales.dtype != scale_dtype
+            and scales.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # No exportable snapshot: keep the live layout usable at the new
+            # activation dtype. A later checkpoint load can re-finalize it.
+            self._cpu_transform_dtype = scales.dtype
+        return result
 
     def train(self, mode: bool = True):
         old_train = self.training
@@ -243,7 +270,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
-                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
             out = self._fused_op_forward(x).reshape(out_shape)

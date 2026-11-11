@@ -16,7 +16,11 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    refinalize_fused_state_after_apply,
+    restore_fused_train_state,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
@@ -168,18 +172,46 @@ class TorchAtenLinear(PackableQuantLinear):
         those in place and would otherwise leave the fused op on stale data.
         The packed ``qweight`` is already in the ATen layout, so the derived
         metadata is rebuilt from it rather than from dense weights.
-        """
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.scales_and_zeros = None
-            self._cpu_transformed = False
-            self._cpu_transform_dtype = None
 
+        The checkpoint snapshot is deliberately *not* restored here. This hook
+        also runs for moves and explicit cache clears, where the caller expects
+        the live packed buffers to stay authoritative. Only an explicit
+        checkpoint load, export, or training resume restores the snapshot.
+        """
         self.ret_idx = None
         self._ret_idx_identity = None
         self._ret_idx_key = None
         self._fused_state_key = None
         self._refresh_fused_state()
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the checkpoint layout after an invalidating move.
+
+        ``_apply`` moves or narrows the live runtime operands. The affine
+        offsets were built from the pre-move scale dtype and the int4pack
+        layout is device-specific, so a cross-device or low-precision move
+        restores the checkpoint snapshot and lets the next forward transform
+        the new target. A same-device move to FP32 keeps the live layout.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        if refinalize_fused_state_after_apply(self, scale_dtype, device):
+            return result
+        scales = getattr(self, "scales", None)
+        if (
+            transformed
+            and isinstance(scales, torch.Tensor)
+            and scales.dtype != scale_dtype
+            and scales.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # No exportable snapshot: keep the live layout usable at the new
+            # activation dtype. A later checkpoint load can re-finalize it.
+            self._cpu_transform_dtype = scales.dtype
+        return result
 
     def _refresh_fused_state(self) -> None:
         """Rebuild derived int4pack metadata after its sources changed."""
@@ -326,7 +358,7 @@ class TorchAtenLinear(PackableQuantLinear):
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
-                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
             out = self._fused_op_forward(x).reshape(out_shape)

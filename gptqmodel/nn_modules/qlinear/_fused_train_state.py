@@ -56,7 +56,12 @@ def _replace_tensor(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
 
 
 def restore_fused_train_state(module: nn.Module) -> bool:
-    """Restore checkpoint-packed tensors captured before a fused transform."""
+    """Restore checkpoint-packed tensors captured before a fused transform.
+
+    The live operands return to the checkpoint layout, so any state that
+    describes the inference-only runtime layout is discarded as well. The next
+    forward transforms the module again.
+    """
 
     if getattr(module, "_suspend_fused_train_restore", False):
         return False
@@ -73,7 +78,60 @@ def restore_fused_train_state(module: nn.Module) -> bool:
         if tensor is not None:
             _replace_tensor(module, name, tensor)
     discard_fused_train_state(module)
+    reset_fused_runtime_state(module)
     return True
+
+
+def reset_fused_runtime_state(module: nn.Module) -> None:
+    """Forget that the live operands are in a kernel's runtime layout.
+
+    This only drops derived state. The packed tensors themselves are left
+    untouched; a later checkpoint load or explicit restore decides their
+    layout.
+    """
+
+    for name, value in (
+        ("linear_mode", None),
+        ("torch_fused_op", None),
+        ("scales_and_zeros", None),
+        ("_cpu_transformed", False),
+        ("_cpu_transform_dtype", None),
+        ("_fused_state_key", None),
+    ):
+        if hasattr(module, name):
+            setattr(module, name, value)
+
+
+def refinalize_fused_state_after_apply(
+    module: nn.Module,
+    previous_scale_dtype,
+    previous_device,
+) -> bool:
+    """Re-finalize the checkpoint layout after a move invalidates the runtime one.
+
+    A runtime int4pack layout is only valid for the device that produced it:
+    the CPU packing is not the XPU packing, so a cross-device move must
+    re-transform instead of handing one backend's packed weight to another.
+    The runtime affine offsets are also computed from the scale dtype, so
+    narrowing ``scales``/``qzeros`` in place would pair the new scales with
+    offsets built from the old precision and silently change the decoded
+    weights. A same-device move to FP32 only widens those offsets, so it keeps
+    the live layout.
+
+    A modified runtime state has no valid checkpoint layout to re-finalize
+    from, so ``restore_fused_train_state`` raises the same error as export.
+    """
+
+    if previous_scale_dtype is None:
+        return False
+    scales = getattr(module, "scales", None)
+    if not isinstance(scales, torch.Tensor):
+        return False
+    if scales.device != previous_device:
+        return restore_fused_train_state(module)
+    if scales.dtype == previous_scale_dtype or scales.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    return restore_fused_train_state(module)
 
 
 def discard_fused_train_state(module: nn.Module) -> None:
@@ -200,6 +258,8 @@ __all__ = [
     "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",
+    "refinalize_fused_state_after_apply",
+    "reset_fused_runtime_state",
     "runtime_state_matches_live",
     "restore_fused_train_state",
     "state_dict_matches_checkpoint_layout",

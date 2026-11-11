@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -77,6 +78,9 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
         layer.scales = torch.zeros((1, 32), dtype=torch.float16)
         layer.qzeros = torch.zeros((1, 32), dtype=torch.float16)
         layer.scales_and_zeros = torch.zeros((1, 32, 2), dtype=torch.float16)
+        # Mirror the real CPU transform's runtime-layout markers.
+        layer._cpu_transformed = True
+        layer._cpu_transform_dtype = torch.float16
 
     monkeypatch.setattr(layer, "transform", fake_transform)
     monkeypatch.setattr(
@@ -104,16 +108,116 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     layer.__dict__.pop("_suspend_fused_train_restore")
 
     layer.to(dtype=torch.bfloat16)
+    # A low-precision move re-finalizes from the checkpoint snapshot because the
+    # affine offsets are scale-dtype coupled.
     assert tuple(layer.qweight.shape) == original_shape
     assert layer.scales.dtype == torch.bfloat16
 
     layer.train()
+    assert tuple(layer.qweight.shape) == original_shape
     x.requires_grad_(True)
     out = layer(x)
     assert str(getattr(layer.linear_mode, "name", layer.linear_mode)).upper() == "TRAIN"
     assert tuple(layer.qweight.shape) == original_shape
     assert out.requires_grad
     out.sum().backward()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
+)
+def test_cpu_layer_accepts_new_activation_dtype_after_move(
+    module_name,
+    class_name,
+    source_dtype,
+    target_dtype,
+):
+    """A low-precision move must re-finalize the fused affine layout.
+
+    The runtime ``qzeros`` holds offsets computed from the pre-move scale
+    dtype, so keeping the packed runtime layout would pair the narrowed scales
+    with stale offsets. Compare the moved layer with a checkpoint-layout copy
+    that is moved before its first forward, which finalizes the same operands
+    for the target dtype.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    if target_dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {target_dtype}")
+
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, source_dtype, "cpu")
+    fresh = copy.deepcopy(layer)
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=source_dtype))
+    layer.to(dtype=target_dtype)
+
+    fresh.to(dtype=target_dtype)
+    fresh.eval()
+    activation = torch.randn(2, 5, 256, dtype=target_dtype)
+    with torch.no_grad():
+        actual = layer(activation)
+        expected = fresh(activation)
+
+    assert actual.dtype == target_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+    ),
+)
+def test_device_move_restores_checkpoint_layout(module_name, class_name):
+    """A device move must not hand one backend's packed layout to another.
+
+    The CPU int4pack packing is not the XPU packing, so the runtime layout is
+    only valid for the device that produced it. ``meta`` is used as the move
+    target because the CPU backends have no second real device; the decision
+    under test is the device change, not the destination kernel.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.float16, "cpu")
+    checkpoint_shape = tuple(layer.qweight.shape)
+    checkpoint_dtype = layer.qweight.dtype
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=torch.float16))
+    runtime_shape = tuple(layer.qweight.shape)
+    assert (runtime_shape, layer.qweight.dtype) != (checkpoint_shape, checkpoint_dtype)
+
+    layer._apply(lambda tensor: tensor.to("meta") if isinstance(tensor, torch.Tensor) else tensor)
+
+    assert tuple(layer.qweight.shape) == checkpoint_shape
+    assert layer.qweight.dtype == checkpoint_dtype
+    assert layer.linear_mode is None
+    assert getattr(layer, "_cpu_transformed", False) is False
+    assert layer._fused_train_state is None
 
 
 def test_gemv_fast_rejects_unaligned_shapes_before_packing():
@@ -566,7 +670,7 @@ def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expe
     model = LlamaForCausalLM(config).to(dtype=expected_dtype).eval()
     parent = model.model.layers[0].mlp
     for name in ("gate_proj", "up_proj"):
-        projection, _weight, _bias = _projection(
+        projection, _weight, _bias, _checkpoint = _projection(
             cls, getattr(parent, name), expected_dtype, "cpu"
         )
         setattr(parent, name, projection)
@@ -628,7 +732,9 @@ def _transformed_layer(cls, *, seed=17):
     config._attn_implementation = "eager"
     torch.manual_seed(seed)
     model = LlamaForCausalLM(config).to(dtype).eval()
-    layer, _weight, _bias = _projection(cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu")
+    layer, _weight, _bias, _checkpoint = _projection(
+        cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu"
+    )
     x = torch.randn(2, 5, 256, dtype=dtype)
 
     class _Holder(torch.nn.Module):
@@ -932,7 +1038,9 @@ def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_pat
     parent = model.model.layers[0].mlp
     modules = []
     for name in ("gate_proj", "up_proj"):
-        projection, _weight, _bias = _projection(cls, getattr(parent, name), dtype, "cpu")
+        projection, _weight, _bias, _checkpoint = _projection(
+            cls, getattr(parent, name), dtype, "cpu"
+        )
         setattr(parent, name, projection)
         modules.append(projection)
 
