@@ -416,8 +416,17 @@ def _explicit_layerwise_devices(device) -> Optional[List[str]]:
     return [str(target) for target in requested] if requested is not None else None
 
 
-def _layerwise_device_count(device) -> int:
-    """Return the visible device count for layer-wise checkpoint placement."""
+def _layerwise_device_count(device, backend: Optional[BACKEND] = None) -> int:
+    """Return the visible device count for layer-wise checkpoint placement.
+
+    The XLA family needs an explicit opt-out for the native TTNN backend.
+    ``xla_device_count()`` initializes the PJRT plugin, and with
+    ``pjrt-plugin-tt`` that opens and claims every Tenstorrent chip. The native
+    TTNN backend owns those chips through TT-Metal instead, and TT-Metal allows
+    exactly one owner per chip, so probing PJRT here poisoned the very next
+    ``ttnn.open_device`` in ``post_init`` with a TT_FATAL ownership assert.
+    Reading the PCIe device count names the same chips without opening one.
+    """
     explicit = _explicit_layerwise_devices(device)
     if explicit is not None:
         return len(explicit)
@@ -430,12 +439,24 @@ def _layerwise_device_count(device) -> int:
     if family == DEVICE.NPU:
         return torch.npu.device_count()
     if family == DEVICE.XLA:
+        if _native_ttnn_backend(backend):
+            from ..utils.ttnn_runtime import ttnn_device_count
+
+            return ttnn_device_count()
         return xla_device_count()
     return 1
 
 
-def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
-    """Render layer-wise placement targets using the selected accelerator."""
+def _layerwise_device_strings(
+    device, num_gpus: int, backend: Optional[BACKEND] = None
+) -> list[str]:
+    """Render layer-wise placement targets using the selected accelerator.
+
+    Like :func:`_layerwise_device_count`, this must not initialize PJRT for the
+    native TTNN backend: ``xla_device_count()`` opens and claims every chip, and
+    the checkpoint would then be dispatched onto ``xla:N`` through a runtime
+    that cannot coexist with the TT-Metal mesh ``post_init`` opens.
+    """
     explicit = _explicit_layerwise_devices(device)
     if explicit is not None:
         return explicit[:num_gpus]
@@ -454,6 +475,12 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
             return [f"npu:{index}" for index in range(num_gpus)]
         raise RuntimeError("NPU is not available")
     if family == DEVICE.XLA:
+        if _native_ttnn_backend(backend):
+            from ..utils.ttnn_runtime import ttnn_device_count
+
+            if ttnn_device_count() >= num_gpus:
+                return [f"xla:{index}" for index in range(num_gpus)]
+            raise RuntimeError("no Tenstorrent devices are visible to TTNN")
         if xla_device_count() >= num_gpus:
             return [f"xla:{index}" for index in range(num_gpus)]
         raise RuntimeError("XLA is not available")
@@ -2113,7 +2140,7 @@ def ModelLoader(cls):
             """
 
             if num_gpus is None:
-                num_gpus = _layerwise_device_count(device)
+                num_gpus = _layerwise_device_count(device, backend)
             if num_gpus < 1:
                 family = selector_device_family(device) or DEVICE.CPU
                 raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
@@ -2122,7 +2149,7 @@ def ModelLoader(cls):
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
 
-            device_strs = _layerwise_device_strings(device, num_gpus)
+            device_strs = _layerwise_device_strings(device, num_gpus, backend)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -2265,9 +2292,21 @@ def ModelLoader(cls):
 
         log.info(f"Loader: device = {device}")
         if explicit_device_map is None:
-            layers, _ = get_layers_with_prefixes(model, extract_layers_node)
-            num_gpus = _layerwise_device_count(device)
-            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+            if _native_ttnn_backend(backend):
+                # The native TTNN kernel owns the chips through TT-Metal and
+                # uploads a layer's packed weights on demand in its forward, so
+                # its parameters stay on the host. A layer-wise ``xla:N`` map
+                # would instead dispatch the checkpoint through PJRT, which
+                # opens and claims every chip and therefore collides with the
+                # mesh ``post_init`` opens (TT-Metal allows one owner per chip).
+                # The collision surfaces as a TT_FATAL reading a stale device,
+                # so keep the whole model on CPU for this backend.
+                device_map = {"": "cpu"}
+                log.info("Loader: native TTNN backend keeps packed weights on CPU until forward upload.")
+            else:
+                layers, _ = get_layers_with_prefixes(model, extract_layers_node)
+                num_gpus = _layerwise_device_count(device, backend)
+                device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")

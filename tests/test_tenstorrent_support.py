@@ -764,6 +764,33 @@ def test_xla_device_count_marks_the_claim(monkeypatch):
     assert fake_xla._gptqmodel_device_claimed is True
 
 
+def test_layerwise_count_never_initializes_pjrt_for_native_ttnn(monkeypatch):
+    """The native TTNN backend must not probe PJRT while sizing a device map.
+
+    ``xla_device_count()`` initializes the PJRT plugin and claims every chip.
+    Calling it here used to poison the ``ttnn.open_device`` in ``post_init``
+    with a TT_Fatal ownership assert, because TT-Metal allows one owner.
+    """
+
+    import importlib
+
+    loader = importlib.import_module("gptqmodel.models.loader")
+    ttnn_runtime = importlib.import_module("gptqmodel.utils.ttnn_runtime")
+
+    calls = []
+    monkeypatch.setattr(loader, "xla_device_count", lambda: calls.append("xla") or 4)
+    monkeypatch.setattr(ttnn_runtime, "ttnn_device_count", lambda: calls.append("ttnn") or 4)
+
+    assert loader._layerwise_device_count(DEVICE.XLA, BACKEND.GPTQ_TTNN) == 4
+    assert calls == ["ttnn"], "native TTNN must count over PCIe, not by initializing PJRT"
+
+    # The XLA backend still resolves its count through PJRT, which is correct
+    # for that backend because PJRT is the runtime that will own the chips.
+    calls.clear()
+    assert loader._layerwise_device_count(DEVICE.XLA, BACKEND.GPTQ_TT_XLA) == 4
+    assert calls == ["xla"]
+
+
 def test_set_tdp_limit_drives_the_firmware_message(monkeypatch):
     """The installed plugin has no TT_METAL_TDP_LIMIT_WATTS, so we send the ARC message."""
 
