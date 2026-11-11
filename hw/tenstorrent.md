@@ -748,9 +748,33 @@ the `ProgramDescriptor` and runtime args, which embed the activation and output
 addresses and therefore cannot be cached across calls without a persistent output
 buffer.
 
-That is the next step if this path needs to go faster: hold a device output buffer
-across calls and update only the pointer-bearing runtime args, rather than
-constructing a fresh program each time. Here the
+### Correcting the per-call split: dispatch is not the residual
+
+The plan was to cache the output buffer and rebuild only runtime args. Measuring
+first showed that would not help:
+
+| component | time |
+| --- | --- |
+| `ProgramDescriptor` + 3 kernel descriptors + args | 0.113 ms |
+| 64-core dispatch floor (trivial kernel) | 0.026 ms |
+| bare `synchronize_device` | 0.006 ms |
+| activation upload | 0.077 ms |
+| output alloc + readback | 0.009 + 0.298 ms |
+| **residual attributed to the kernel** | **0.617 ms** |
+
+So at K=768 the kernel really is ~0.6 ms, and the 0.85 ms library call is roughly
+0.6 kernel + 0.3 readback. There is no hidden per-call overhead left to remove by
+caching descriptors.
+
+That also corrects an earlier figure: K=768 with the pair-LUT measures **~0.62 ms**,
+not 0.24 ms. The 0.25 ms number is the **K=256** shape (8 K tiles, not 24), where
+the records are 4x lighter. Both are real; they are different problems. Any
+comparison against TTNN must state K, because the fused kernel's cost scales with
+it while the reference's does not to the same degree.
+
+Given that, the honest position on this path: correct, in the library, cached, and
+~6x off `ttnn.linear` at K=768 after removing every host-side cost. Closing that
+needs the staging/multicast redesign, not more call-overhead work. Here the
 mesh open was failing for reasons that had nothing to do with the kernel.
 
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
