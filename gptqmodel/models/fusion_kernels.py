@@ -201,6 +201,7 @@ class FusionKernelSpec:
             fused.q_tensors.update({name: getattr(fused, name) for name in ("qweight", "qzeros", "scales")})
             fused.q_handle, _ = exllamav2_clone_q_matrix(fused, awq=not self.gptq)
             fused._fusion_native_view = False
+            self._set_exllamav2_handle_key(fused)
         if self.layout in ("cpu_aten", "cpu_legacy", "cpu_avx512"):
             if self.layout != "cpu_avx512":
                 fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
@@ -214,11 +215,19 @@ class FusionKernelSpec:
         if self.cpu:
             # g_idx/ret_idx are input-channel metadata and remain shared.
             fused.linear_mode = first.linear_mode
-        clear = getattr(fused, "clear_weight_cache", None)
-        if clear is not None:
-            clear()
-        self.rebind(fused)
+        if self.layout != "exllamav2":
+            clear = getattr(fused, "clear_weight_cache", None)
+            if clear is not None:
+                clear()
+            self.rebind(fused)
         return fused
+
+    def _set_exllamav2_handle_key(self, module):
+        from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+
+        tensors = (module.q_tensors.values() if self.gptq else
+                   (module.qweight, module.qzeros, module.scales))
+        module._q_handle_key = tuple(tensor_cache_key(tensor) for tensor in tensors)
 
     def rebind(self, module):
         if self.layout == "gptq_fp8":
@@ -234,6 +243,9 @@ class FusionKernelSpec:
             metadata = getattr(module, "q_tensors", None)
             if metadata is not None:
                 module.q_tensors = {**metadata, **{name: getattr(module, name) for name in ("qweight", "qzeros", "scales")}}
+            if module.q_handle is None:
+                module._fusion_native_view = False
+                module._ensure_q_handle()
             if module.qweight.is_contiguous():
                 from ..utils.exllamav2 import exllamav2_clone_q_matrix, exllamav2_free_q_matrix
 
@@ -241,8 +253,10 @@ class FusionKernelSpec:
                 module.q_handle, _ = exllamav2_clone_q_matrix(module, awq=not self.gptq)
                 exllamav2_free_q_matrix(old, awq=not self.gptq)
                 module._fusion_native_view = False
+                self._set_exllamav2_handle_key(module)
             else:
                 module._fusion_native_view = True
+                self._set_exllamav2_handle_key(module)
             return
         if self.layout != "cpu_legacy":
             return

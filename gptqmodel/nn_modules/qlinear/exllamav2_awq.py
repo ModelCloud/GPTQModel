@@ -84,6 +84,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
         self.q_handle = None
         self._awq_repacked = False
         self._q_handle_key = None
+        self._native_shuffled = False
 
     @classmethod
     def validate_once(cls):
@@ -98,7 +99,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             return False, ImportError(exllamav2_awq_runtime_error())
         return True, None
 
-    def ext_make_q_matrix_awq(self, qweight, qzeros, scales) -> int:
+    def ext_make_q_matrix_awq(self, qweight, qzeros, scales, *, already_shuffled=False) -> int:
         runtime_scales = scales if scales.dtype == torch.float16 else scales.to(dtype=torch.float16)
         return exllamav2_awq_make_q_matrix(
             qweight,
@@ -110,6 +111,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             qzeros,
             runtime_scales,
             None,
+            **({"already_shuffled": True} if already_shuffled else {}),
         )
 
     def post_init(self, scratch_space: ScratchSpace):
@@ -153,7 +155,54 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
         self._release_q_handle()
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        metadata = getattr(destination, "_metadata", None)
+        if metadata is not None:
+            metadata.setdefault(prefix[:-1], {})["exllamav2_native_shuffled"] = self._native_shuffled
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        state = args[0] if args else kwargs.get("state_dict", {})
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+        runtime_state = bool(local_metadata.get("exllamav2_native_shuffled", False))
+        weight = state.get(prefix + "qweight")
+        native_shape = (self.in_features // self.pack_factor, self.out_features)
+        if self._awq_repacked and not runtime_state:
+            if weight is not None and tuple(weight.shape) != native_shape and prefix + "qzeros" not in state:
+                raise RuntimeError("ExLlamaV2 AWQ checkpoint qweight also requires qzeros")
+            if weight is None and prefix + "qzeros" in state:
+                raise RuntimeError("ExLlamaV2 AWQ checkpoint qzeros also requires qweight")
+        if weight is not None:
+            self._release_q_handle()
+            if getattr(self, "_fusion_native_view", False):
+                for name in ("qweight", "qzeros", "scales", "bias"):
+                    tensor = getattr(self, name, None)
+                    if tensor is not None:
+                        self.register_buffer(name, tensor.clone(memory_format=torch.contiguous_format))
+                self._fusion_native_view = False
+            for name in ("qweight", "qzeros"):
+                incoming = state.get(prefix + name)
+                current = getattr(self, name)
+                if incoming is not None and current.shape != incoming.shape:
+                    self.register_buffer(name, torch.empty(incoming.shape, dtype=current.dtype, device=current.device))
+        super()._load_from_state_dict(*args, **kwargs)
+        if weight is not None:
+            self._awq_repacked = tuple(weight.shape) == native_shape
+            self._native_shuffled = self._awq_repacked
+
     def _ensure_q_handle(self) -> int:
+        if getattr(self, "_fusion_native_view", False):
+            if self.q_handle is None:
+                raise RuntimeError("ExLlamaV2 AWQ fusion view lost its native descriptor")
+            return self.q_handle
+        if self.scales.dtype != torch.float16:
+            self.scales = self.scales.to(dtype=torch.float16)
+        if not self._awq_repacked:
+            # A state-dict load restores checkpoint words. Finalize them before
+            # binding a new descriptor, just as post_init does on first load.
+            self.qweight, self.qzeros = unpack_reorder_pack(self.qweight, self.qzeros, self.bits)
+            self._awq_repacked = True
         key = (
             tensor_cache_key(self.qweight),
             tensor_cache_key(self.qzeros),
@@ -162,11 +211,12 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if self.q_handle is not None and self._q_handle_key != key:
             self._release_q_handle()
         if self.q_handle is None:
+            already_shuffled = getattr(self, "_native_shuffled", False)
             self.q_handle = self.ext_make_q_matrix_awq(
-                self.qweight,
-                self.qzeros,
-                self.scales,
+                self.qweight, self.qzeros, self.scales,
+                **({"already_shuffled": True} if already_shuffled else {}),
             )
+            self._native_shuffled = True
             self._q_handle_key = key
         return self.q_handle
 
