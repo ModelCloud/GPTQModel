@@ -99,6 +99,7 @@ def test_native_embedding_repeat4_matches_dense_torch_and_keeps_packed_weight(m,
     (256, torch.int64), (312, torch.int32), (313, torch.int64),
     (512, torch.int32), (513, torch.int64), (1536, torch.int64),
     (2048, torch.int32), (2049, torch.int64), (3072, torch.int32),
+    (3072, torch.int64), (4095, torch.int64),
 ])
 def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
     device = _cuda()

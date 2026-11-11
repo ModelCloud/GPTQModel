@@ -13,7 +13,9 @@ import argparse
 import ctypes
 import hashlib
 import json
+import os
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,8 +71,25 @@ def capture(calls, repeat: int) -> torch.cuda.CUDAGraph:
 def check_memory(initial_free: int, limit: int) -> int:
     free, _ = torch.cuda.mem_get_info()
     if initial_free - free > limit:
-        raise MemoryError(f"GPU1 added memory {initial_free - free:,} exceeds {limit:,}")
+        raise MemoryError(f"visible GPU added memory {initial_free - free:,} exceeds {limit:,}")
     return free
+
+
+def physical_process_memory_mib() -> int:
+    physical = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not physical.isdecimal():
+        raise RuntimeError("physical GPU memory accounting requires one numeric CUDA_VISIBLE_DEVICES")
+    result = subprocess.run(
+        ["nvidia-smi", "-i", physical, "--query-compute-apps=pid,used_gpu_memory",
+         "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
+    matches = []
+    for line in result.stdout.splitlines():
+        fields = [part.strip() for part in line.split(",")]
+        if fields[0] == str(os.getpid()):
+            matches.append(int(fields[1]))
+    if len(matches) != 1:
+        raise RuntimeError(f"nvidia-smi did not report this process on physical GPU {physical}")
+    return matches[0]
 
 
 def main() -> None:
@@ -88,20 +107,22 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=6)
     parser.add_argument("--random-seed", type=int, default=20261111)
     parser.add_argument("--rows", type=int, nargs="+", default=(312, 313, 1536, 3072))
+    parser.add_argument("--id-dtypes", nargs="+", choices=("int32", "int64"),
+                        default=("int32", "int64"))
     parser.add_argument("--max-added-gb", type=float, default=3.0)
     parser.add_argument("--profile-case", type=int, choices=(312, 1536, 3072))
     parser.add_argument("--profile-kind", choices=("fixture", "random"), default="fixture")
     args = parser.parse_args()
     if sys._is_gil_enabled() or torch.cuda.device_count() != 1:
         parser.error("requires PYTHON_GIL=0 and exactly one visible CUDA GPU")
-    if args.repeat < 1 or args.rounds < 1 or any(m < 1 or m > 3072 for m in args.rows):
+    if args.repeat < 1 or args.rounds < 1 or any(m < 1 or m > 4095 for m in args.rows):
         parser.error("invalid repeat, rounds, or rows")
     torch.cuda.set_per_process_memory_fraction(0.03)
     torch.cuda.init()
     initial_free, total = torch.cuda.mem_get_info()
     limit = int(args.max_added_gb * 1024**3)
     if initial_free < limit + 2 * 1024**3:
-        raise MemoryError(f"GPU1 has only {initial_free:,} bytes free")
+        raise MemoryError(f"visible GPU has only {initial_free:,} bytes free")
     torch.ops.load_library(str(args.candidate_lib.resolve()))
     torch.ops.load_library(str(args.torch_lib.resolve()))
     index = json.loads((args.checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
@@ -113,6 +134,20 @@ def main() -> None:
     packed = nf12.encode(dense)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
     check_memory(initial_free, limit)
+    if physical_process_memory_mib() * 1024**2 > limit:
+        raise MemoryError("physical GPU process memory exceeds the limit after packed encoding")
+    # Restore the entire released table in small, 16-row-aligned chunks so
+    # validation never holds a second full BF16 table on the device.
+    decode_chunk_rows = 128
+    for start in range(0, packed.shape[0], decode_chunk_rows):
+        length = min(decode_chunk_rows, packed.shape[0] - start)
+        assert length % 16 == 0
+        restored = packed.narrow_rows(start, length).decode()
+        assert torch.equal(restored.view(torch.int16), dense[start:start + length].view(torch.int16))
+        del restored
+    check_memory(initial_free, limit)
+    if physical_process_memory_mib() * 1024**2 > limit:
+        raise MemoryError("physical GPU process memory exceeds the limit after table restoration")
     native_weight = NativeWeight(packed.packed.data_ptr(), packed.escapes.data_ptr(),
                                  packed.num_escapes, *packed.shape, packed.exp_base)
     fixture = json.loads(args.ids_json.read_text())
@@ -156,6 +191,8 @@ def main() -> None:
         "shape_nk": list(packed.shape),
         "dense_weight_bytes": dense.nbytes,
         "packed_weight_bytes": packed.nbytes,
+        "packed_restoration_exact_bf16_bits": True,
+        "decode_chunk_rows": decode_chunk_rows,
         "module_weight_buffer_bytes": sum(buffer.nbytes for buffer in module_buffers.values()),
         "additional_packed_cache_bytes": 0,
         "inference_retained_expanded_weight_bytes": 0,
@@ -174,13 +211,18 @@ def main() -> None:
         "random_seed": args.random_seed,
         "initial_free_bytes": initial_free,
         "total_gpu_bytes": total,
+        "physical_gpu": os.environ["CUDA_VISIBLE_DEVICES"],
+        "physical_process_limit_bytes": limit,
+        "initial_process_used_mib": physical_process_memory_mib(),
         "cases": [],
     }
     for m in args.rows:
-        for dtype in (torch.int32, torch.int64):
+        for dtype in (torch.int32 if name == "int32" else torch.int64 for name in args.id_dtypes):
             baseline = native_embedding(args.baseline_lib, dtype, native_weight)
             candidate = native_embedding(args.candidate_lib, dtype, native_weight)
             for kind in ("fixture", "random"):
+                if kind == "fixture" and m > len(fixture):
+                    continue
                 if kind == "fixture":
                     ids = torch.tensor(fixture[:m], dtype=dtype, device="cuda:0")
                     id_calls = [ids] * args.repeat
@@ -193,12 +235,16 @@ def main() -> None:
                     ids = id_calls[0]
                 out_base = torch.empty((m, packed.shape[1]), dtype=torch.bfloat16, device="cuda:0")
                 out_cand = torch.empty_like(out_base)
-                baseline(ids, out_base)
-                candidate(ids, out_cand)
-                expected = F.embedding(ids, dense)
-                torch.cuda.synchronize()
-                assert torch.equal(out_base.view(torch.int16), expected.view(torch.int16))
-                assert torch.equal(out_cand.view(torch.int16), expected.view(torch.int16))
+                # Every distinct random tensor captured in the graph gets its
+                # own independent dense oracle check, not just the first.
+                for validation_ids in (id_calls if kind == "random" else id_calls[:1]):
+                    baseline(validation_ids, out_base)
+                    candidate(validation_ids, out_cand)
+                    expected = F.embedding(validation_ids, dense)
+                    torch.cuda.synchronize()
+                    assert torch.equal(out_base.view(torch.int16), expected.view(torch.int16))
+                    assert torch.equal(out_cand.view(torch.int16), expected.view(torch.int16))
+                    del expected
                 invalid = ids.clone()
                 invalid[0] = -1
                 invalid[-1] = packed.shape[0]
@@ -232,18 +278,24 @@ def main() -> None:
                 row = {
                     "m": m, "dtype": str(dtype), "ids_kind": kind,
                     "exact_bf16_bits": True, "invalid_ids_exact_zero_bits": True,
+                    "validated_distinct_id_tensors": args.repeat if kind == "random" else 1,
                     "samples_us": samples,
                     "median_us": {name: round(value, 4) for name, value in medians.items()},
                     "candidate_over_baseline": round(medians["baseline"] / medians["candidate"], 4),
                     "candidate_over_dense": round(medians["dense"] / medians["candidate"], 4),
                     "free_bytes_after": check_memory(initial_free, limit),
                     "torch_peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+                    "physical_process_used_mib": physical_process_memory_mib(),
                 }
+                if row["physical_process_used_mib"] * 1024**2 > limit:
+                    raise MemoryError("physical GPU process memory exceeds the limit")
                 report["cases"].append(row)
                 print(args.label, m, dtype, kind, row["median_us"], flush=True)
-                del expected, invalid, dense_graph, base_graph, cand_graph
+                del invalid, dense_graph, base_graph, cand_graph
                 del out_base, out_cand, ids, id_calls, dense_calls, base_calls, cand_calls
     report["max_added_bytes"] = initial_free - min(row["free_bytes_after"] for row in report["cases"])
+    report["max_physical_process_used_mib"] = max(
+        row["physical_process_used_mib"] for row in report["cases"])
     args.json_out.write_text(json.dumps(report, indent=2) + "\n")
 
 
