@@ -7,11 +7,14 @@ import os
 import socket
 import unittest
 
-import openai
 import pytest
 
 from gptqmodel import GPTQModel
 
+
+# The OpenAI client is only used to exercise the served API; the module is an
+# optional dependency and must not turn collection into an error.
+openai = pytest.importorskip("openai")
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
