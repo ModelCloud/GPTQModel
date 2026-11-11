@@ -229,7 +229,16 @@ sitting just under the throttle point.
 | Hook | When | Effect |
 | --- | --- | --- |
 | `before_device_open` | before a load claims a chip | wait for the GDDR to fall below the soft limit, then sleep the configured cooldown |
-| `after_device_close` | after the mesh is closed | sleep the cooldown, so the idle window is real idle |
+| `park_idle_clock` | immediately after the mesh closes | send the firmware `AICLK_GO_LONG_IDLE` (0x54) so the cards actually reach 800 MHz |
+| `after_device_close` | after the mesh is closed and parked | sleep the cooldown, so the idle window is real idle |
+
+`park_idle_clock` is not optional decoration. Closing the last `MeshDevice` does
+not stop the card dissipating heat: measured on a p300c, AICLK stayed at
+**1350 MHz and ~50 W per board** for more than 50 s after `close_device`, with
+GDDR still climbing, because the firmware only falls back to its 800 MHz
+long-idle clock when it is told to. After the message the same cards read
+800 MHz and ~40 W. Without it a "cooldown" sleeps while four cards keep
+burning about 80 W, which is why the cooldown alone measured as nearly useless.
 
 Both hooks are wired into the runtime: `open_mesh`/`close_mesh` in
 `gptqmodel/utils/ttnn_runtime.py` cover the native TTNN path, and
@@ -254,9 +263,36 @@ cooling 98 C to 80 C legitimately takes about 9 min. Set
 run, and prefer one long session over many reloads -- each load spends 20-34 C
 of thermal budget, and the budget refills at only 2 C/min.
 
-Use `model.release_device()` between models in a loop. Closing the mesh is what
-starts the idle window; leaving it to garbage collection keeps the chips owned
-and hot until the last reference dies.
+Use `model.release_device()` between models in a loop. It closes the mesh *and*
+parks the idle clock, which together are what start a real idle window; leaving
+it to garbage collection keeps the chips owned and hot until the last reference
+dies, and closing without parking leaves them at full clock.
+
+## Board power limit
+
+A p300c has a **125 W** per-board TDP limit (also its maximum; a larger request
+is clamped). The firmware throttles by inserting NOP cycles once that is
+reached, so board power, not temperature, is the sustained-throughput ceiling.
+
+Do not expect a TDP cap to control GDDR temperature. Measured on this host with
+a fixed 1x4 BF16 matmul load:
+
+| Cap | GDDR peak | ASIC peak | mean draw |
+| --- | --- | --- | --- |
+| 125 W (default) | 102 C | 97.5 C | 98.6 W |
+| 100 W | 102 C | 97.5 C | 96.9 W |
+| 70 W | **106 C** | 99.7 C | 84.1 W |
+
+The load's own draw is about 97 W, so the 125 W and 100 W caps never bind and
+give identical results. Forcing the cap below the natural draw made the peak
+*worse*: the throttler cuts the ASIC clock while GDDR traffic is untouched, so
+the same work takes longer and the card absorbs heat for longer. Leave the
+default in place.
+
+`tt_thermal.set_tdp_limit(watts)` / `tdp_limit_watts()` drive the firmware
+message directly (`SET_TDP_LIMIT`, 0x22, present since firmware 19.8.0), because
+the newer `TT_METAL_TDP_LIMIT_WATTS` variable is absent from the plugin build
+installed here (1.5.0.dev20260831).
 
 ## Multi-card mesh networking
 

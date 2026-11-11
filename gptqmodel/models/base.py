@@ -3039,10 +3039,16 @@ class BaseQModel(nn.Module):
     def release_device(self) -> bool:
         """Release Tenstorrent devices held by this model's kernels.
 
-        Closing the mesh is what starts the thermal idle window: the parts only
-        cool once TT-Metal no longer owns them. Call this between model loads in
-        a benchmark loop instead of relying on garbage collection, which leaves
-        the chips owned (and hot) until the interpreter drops the last reference.
+        Call this between model loads in a benchmark loop instead of relying on
+        garbage collection, which leaves the chips owned (and hot) until the
+        interpreter drops the last reference.
+
+        Closing the mesh alone does not make the cards idle: measured on a
+        p300c, AICLK stayed at 1350 MHz and ~50 W per board for more than 50 s
+        after ``close_device``. The mesh close path therefore also sends the
+        firmware ``AICLK_GO_LONG_IDLE`` message, which is what actually returns
+        the cards to 800 MHz and ~40 W, so the cooldown that follows is real
+        idle time.
 
         Returns ``True`` when a Tenstorrent device was actually released, and
         ``False`` for every other backend so the call is safe to make
