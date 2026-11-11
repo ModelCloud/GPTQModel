@@ -217,8 +217,11 @@ def open_mesh(
             if applied_fabric != "DISABLED":
                 try:
                     ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
-                except Exception:
-                    pass
+                except Exception as cleanup_exc:
+                    # The open already failed, so this cleanup must not mask the
+                    # real error. Record it and let the translated open failure
+                    # below reach the caller.
+                    log.debug(f"TTNN: fabric reset failed during cleanup: {cleanup_exc}")
             raise _translate_open_failure(exc) from exc
 
         _MESH = TTNNMesh(

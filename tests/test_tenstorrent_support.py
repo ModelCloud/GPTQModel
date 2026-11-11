@@ -191,12 +191,14 @@ def test_tt_dispatch_is_explicit_and_fail_closed(monkeypatch):
         def addressable_device_count():
             return 4
 
+    class _TorchXLA:
+        runtime = _Runtime
+
+    def _require_xla_runtime():
+        return _TorchXLA()
+
     tt_xla_module = importlib.import_module(XLALinear.__module__)
-    monkeypatch.setattr(
-        tt_xla_module,
-        "require_xla_runtime",
-        lambda: type("TorchXLA", (), {"runtime": _Runtime})(),
-    )
+    monkeypatch.setattr(tt_xla_module, "require_xla_runtime", _require_xla_runtime)
     assert XLALinear.validate_once() == (True, None)
     ok, error = XLALinear._validate(
         bits=4, group_size=128, desc_act=False, sym=True,

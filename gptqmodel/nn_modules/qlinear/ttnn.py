@@ -46,7 +46,6 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.logger import setup_logger
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
@@ -59,9 +58,6 @@ from ...utils.ttnn_runtime import (
 )
 from ...utils.tt_packing import TT_GPTQ_PACK_FACTOR, _require_4bit_gptq, _repack_zero_words
 from ._g_idx import validate_g_idx_bounds
-
-
-log = setup_logger()
 
 # Nibble lanes inside one int32/uint32 packed GPTQ word, low nibble first.
 _NIBBLE_SHIFTS = tuple(4 * lane for lane in range(TT_GPTQ_PACK_FACTOR))

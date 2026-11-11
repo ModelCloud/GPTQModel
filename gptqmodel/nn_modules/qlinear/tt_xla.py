@@ -16,7 +16,6 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.logger import setup_logger
 from ...utils.torch import require_xla_runtime
 from ...utils.tt_packing import (
     TTPackedGPTQLayout,
@@ -25,9 +24,6 @@ from ...utils.tt_packing import (
 )
 from ._g_idx import validate_g_idx_bounds
 from ._runtime_cache import tensor_cache_key
-
-
-log = setup_logger()
 
 
 class XLALinear(GPTQQuantLinear):
