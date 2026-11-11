@@ -2354,6 +2354,25 @@ def _collect_state_dict_with_offload(
     return state_dict
 
 
+def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
+    """Return in-place transformed CPU layers to their checkpoint layout.
+
+    ``clear_weight_cache`` is the kernels' documented restore hook: it puts the
+    captured checkpoint tensors back and drops derived metadata. Modules without
+    a snapshot (never transformed, or non-CPU backends) are untouched.
+    """
+
+    restored = 0
+    for module in model.modules():
+        if getattr(module, "_fused_train_state", None) is None:
+            continue
+        clear = getattr(module, "clear_weight_cache", None)
+        if callable(clear):
+            clear()
+            restored += 1
+    return restored
+
+
 def get_state_dict_for_save(
     model: nn.Module,
     offload_root: Optional[str] = None,
@@ -2366,6 +2385,14 @@ def get_state_dict_for_save(
 
     See https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2369
     """
+    # CPU kernels rewrite ``qweight``/``qzeros``/``scales`` (and widen
+    # ``bias``) into their int4pack runtime layout *in place* on the first
+    # inference forward. Serializing that layout writes checkpoint-incompatible
+    # shapes under the original keys, so every transformed module is first put
+    # back to the layout its checkpoint snapshot describes. This mutates only
+    # packed runtime views, never a dense weight; the next forward re-runs the
+    # same transform.
+    _restore_checkpoint_layout_for_export(model)
     if offload_root:
         state_dict = _collect_state_dict_with_offload(
             model,

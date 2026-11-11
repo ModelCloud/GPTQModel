@@ -317,17 +317,35 @@ class BaseQuantLinear(nn.Module):
             clear()
 
     def _load_from_state_dict(self, *args, **kwargs):
-        """Invalidate derived-weight caches after a state-dict load.
+        """Restore checkpoint layout, then load, then invalidate derived caches.
 
-        ``load_state_dict`` may copy into an existing buffer, which does not
-        replace the Python object. Cache keys catch versioned tensors, but an
-        inference tensor has no version counter, so clear unconditionally.
+        A CPU inference forward rewrites ``qweight``/``qzeros``/``scales`` into
+        the kernel's int4pack layout *in place*; the checkpoint shapes are only
+        kept in the ``_fused_train_state`` snapshot. A state dict that matches
+        that snapshot is a checkpoint, so the snapshot must be restored **before**
+        the copy or strict loading reports a size mismatch (and ``save()`` would
+        serialize runtime shapes). A state dict that instead matches the live
+        int4pack operands is the model's own ``state_dict()``; restoring would
+        make that previously valid self round-trip fail. Both cases are
+        distinguished by shape.
+
+        ``load_state_dict`` may also copy into an existing buffer, which does
+        not replace the Python object. Cache keys catch versioned tensors, but
+        an inference tensor has no version counter, so clear unconditionally.
         """
 
         if getattr(self, "_fused_train_state", None) is not None:
-            from ._fused_train_state import discard_fused_train_state
+            from ._fused_train_state import state_dict_matches_checkpoint_layout
 
-            discard_fused_train_state(self)
+            state_dict = args[0] if args else kwargs.get("state_dict")
+            prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+            if state_dict is not None and state_dict_matches_checkpoint_layout(
+                self, state_dict, prefix
+            ):
+                # ``clear_weight_cache`` is the kernels' full restore hook: it
+                # puts the checkpoint tensors back *and* retires the derived
+                # layout state (``_cpu_transformed``, ``scales_and_zeros``).
+                self._clear_runtime_weight_cache()
         super()._load_from_state_dict(*args, **kwargs)
         self._clear_runtime_weight_cache()
 

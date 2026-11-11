@@ -637,6 +637,12 @@ class _FusionGroup:
                     tensor = getattr(module, name)
                     if tensor is not None and tensor.numel():
                         _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+                # An export may have restored the checkpoint layout while the
+                # group was still installed. Rebuilding a CPU runtime descriptor
+                # from checkpoint-shaped operands would reinterpret GPTQ codes as
+                # int4pack storage; the next forward re-finalizes instead.
+                if self.kernel.cpu and not self.kernel.runtime_ready(module):
+                    continue
                 self.kernel.rebind(module)
             for clear in self.original_clears:
                 if clear is not None:

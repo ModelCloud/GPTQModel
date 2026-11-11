@@ -106,6 +106,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     QUANT_TYPE = "torch_cpu_avx512"
 
+    # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
+    # be restored before a checkpoint load or save.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
+
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
     _fused_op_handles_bias = True

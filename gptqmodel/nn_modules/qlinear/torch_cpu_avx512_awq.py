@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
 
@@ -28,6 +29,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_CPU_AVX512]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 120}
+
+    # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
+    # be restored before a checkpoint load or save.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128, 256, 512]
     SUPPORTS_DESC_ACT = [True, False]
@@ -190,6 +195,11 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         dtype needs re-establishing.
         """
 
+        if restore_fused_train_state(self):
+            self.linear_mode = None
+            self._cpu_transformed = False
+            self._cpu_transform_dtype = None
+
         if not getattr(self, "_cpu_transformed", False):
             return
         if self.scales.dtype != torch.float32:
@@ -268,6 +278,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             and x_flat.device.type == "cpu"
             and self._fused_input_dtype(x_flat)
         ):
+            capture_fused_train_state(self)
             self.transform("cpu")
             self.linear_mode = "inference"
         elif self.linear_mode is None:
