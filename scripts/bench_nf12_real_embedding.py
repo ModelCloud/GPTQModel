@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 import gptqmodel_nf12 as nf12
+from gptqmodel_nf12._jit import library_directory
 from scripts.bench_nf12_lite_observed_shapes import capture, graph_us
 
 
@@ -40,6 +41,7 @@ def main() -> None:
         "compute_capability": torch.cuda.get_device_capability(0),
         "torch": torch.__version__,
         "gil_enabled": sys._is_gil_enabled(),
+        "native_source_key": library_directory().parent.name,
         "checkpoint": str(args.checkpoint),
         "method": "same IDs and released BF16 weight; CUDA graph; paired ABBA rounds",
         "repeat": args.repeat,
@@ -47,7 +49,7 @@ def main() -> None:
         "families": [],
     }
     for name, key, rows in (
-        ("embedding", "embed.weight", (1, 6, 512, 1536, 3072)),
+        ("embedding", "embed.weight", (1, 6, 312, 313, 512, 1536, 3072)),
         ("markov-embedding", "mtp.2.markov_head.embed.weight", (1, 5)),
     ):
         with safe_open(args.checkpoint / index[key], framework="pt", device="cpu") as shard:

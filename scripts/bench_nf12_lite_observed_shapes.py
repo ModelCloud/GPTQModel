@@ -21,15 +21,16 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 import gptqmodel_nf12 as nf12
+from gptqmodel_nf12._jit import library_directory
 
 
 CASES = (
-    ("main-gate", "layers.20.ffn.gate.weight", "fp32", (1, 6, 312, 1536, 3072)),
-    ("compressor-kv-ratio1", "layers.20.attn.compressor.wkv.weight", "bf16", (1, 6, 312, 1536, 3072)),
-    ("compressor-kv-ratio2", "layers.2.attn.compressor.wkv.weight", "fp32", (1, 6, 312, 1536, 3072)),
-    ("indexer-score", "layers.20.attn.indexer.weights_proj.weight", "bf16", (1, 6, 312, 1536, 3072)),
-    ("indexer-key-ratio1", "layers.20.attn.indexer.wk.weight", "bf16", (1, 6, 312, 1536, 3072)),
-    ("indexer-key-ratio2", "layers.2.attn.indexer.wk.weight", "bf16", (1, 6, 312, 768, 1536)),
+    ("main-gate", "layers.20.ffn.gate.weight", "fp32", (1, 6, 312, 313, 1536, 3072)),
+    ("compressor-kv-ratio1", "layers.20.attn.compressor.wkv.weight", "bf16", (1, 6, 312, 313, 1536, 3072)),
+    ("compressor-kv-ratio2", "layers.2.attn.compressor.wkv.weight", "fp32", (1, 6, 312, 313, 1536, 3072)),
+    ("indexer-score", "layers.20.attn.indexer.weights_proj.weight", "bf16", (1, 6, 312, 313, 1536, 3072)),
+    ("indexer-key-ratio1", "layers.20.attn.indexer.wk.weight", "bf16", (1, 6, 312, 313, 1536, 3072)),
+    ("indexer-key-ratio2", "layers.2.attn.indexer.wk.weight", "bf16", (1, 6, 312, 313, 768, 1536)),
 )
 
 
@@ -76,6 +77,7 @@ def main() -> None:
         "compute_capability": torch.cuda.get_device_capability(0),
         "torch": torch.__version__,
         "gil_enabled": sys._is_gil_enabled(),
+        "native_source_key": library_directory().parent.name,
         "checkpoint": str(args.checkpoint),
         "method": "same checkpoint BF16 weight and activation dtype; CUDA graph; ABBA rounds; TF32 off",
         "repeat": args.repeat,

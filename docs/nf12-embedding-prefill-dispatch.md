@@ -74,3 +74,35 @@ uncontrolled; use the paired CUDA-graph timings above for latency comparisons.
 The test `test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed`
 covers both ID dtypes, the three prefill M values, invalid IDs, exact BF16
 output bits, repeated calls, and packed-only module buffers on actual CUDA.
+
+## Observed short tails and service result
+
+Lite's B1 wave counters also show short prefill tails at M=312/313. The same
+released-weight [CUDA graph benchmark](../scripts/bench_nf12_real_embedding.py)
+was repeated with those exact row counts on GPU 7. The
+[raw tail report](nf12-real-embedding-observed-mkn-tail-20261111.json) retains
+the shape medians and exact-output checks. The production BF16
+service was idle, but other host activity and GPU clocks were not controlled.
+
+| Main embedding M | Dense BF16 | NF12 | NF12 / dense | Exact BF16 bits |
+| ---: | ---: | ---: | ---: | --- |
+| 312 | 4.320 µs | 5.408 µs | 0.799× | yes |
+| 313 | 4.288 µs | 5.376 µs | 0.798× | yes |
+| 1536 | 12.288 µs | 24.256 µs | 0.507× | yes |
+| 3072 | 35.776 µs | 45.280 µs | 0.790× | yes |
+
+The accompanying [released projection benchmark](../scripts/bench_nf12_lite_observed_shapes.py)
+on GPU 5 covers the same tails for main gates, compressor KV, and indexer
+projections. Its [raw result](nf12-lite-observed-mkn-tails-20261111.json)
+shows that simply forcing the existing SM80 fused narrow route at M=312/313
+would worsen indexer score/key latency by about 2× versus the current
+decode-plus-GEMM dispatch. That experiment was reverted; the native source
+key and Lite's dependency pin still identify this document's retained kernel.
+
+In Lite's matched BF16 / selective NF12 / BF16 three-lane B1 trial, packed
+main and Markov embeddings saved 1,023,161,856 resident bytes across three
+core copies and matched all 36 candidate outputs to both controls. The 8K
+prefill endpoint reached only 0.882× the BF16 after-control, so Lite keeps
+NF12 opt-in. The service record in
+[Lite PR #1302](https://github.com/ModelCloud/Inference-Ultra/pull/1302)
+contains the exact controls and runtime fingerprints.
