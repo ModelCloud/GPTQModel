@@ -359,6 +359,114 @@ must start the process before claiming cards can set `USE_TORCH_XLA=0`, which
 disables Accelerate's probe; GPT-QModel then claims devices only when an
 explicit XLA operation needs `require_xla_runtime()`.
 
+## Gotchas: `DEVICE.XLA`, placement, and context ownership
+
+These three are easy to conflate and each one has already produced a real
+failure here. Read this before touching device selection.
+
+### 1. `DEVICE.XLA` is overloaded
+
+Both Tenstorrent kernels declare the **same** device family:
+
+```python
+# nn_modules/qlinear/ttnn.py:121   native — owns the mesh itself
+SUPPORTS_DEVICES = [DEVICE.XLA]
+# nn_modules/qlinear/tt_xla.py:50  XLA — PJRT owns the mesh
+SUPPORTS_DEVICES = [DEVICE.XLA]
+```
+
+So `device=DEVICE.XLA` cannot tell you *which runtime* runs the chips. It only
+names the family. The distinction lives in `backend`:
+
+| `backend` | Runtime that owns the chips | Where activations live |
+| --- | --- | --- |
+| `GPTQ_TTNN` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
+| `GPTQ_TT_XLA` | PJRT plugin (which wraps its own `MeshDevice`) | `xla:N` tensors |
+
+**Rule: decide with `backend`, never with `device`.** Resolving the *device*
+family by asking PJRT how many devices exist is what previously initialized the
+wrong runtime; see `_layerwise_device_count` and `_layerwise_device_strings`,
+which now take `backend` and count over PCIe for the native path.
+
+### 2. Placement is not the same as residency
+
+The native kernel uploads a layer's packed weights on demand in `forward`, so
+its parameters belong on the **host**. A layer-wise `xla:N` device map would
+send them through PJRT instead, which claims every chip and then collides with
+the mesh `post_init` opens. For `GPTQ_TTNN` the loader therefore pins
+`device_map = {"": "cpu"}`.
+
+This is also why `{"": "xla"}` is **not** a substitute: `simple_dispatch_model`
+would call `.to("xla")` and initialize PJRT anyway.
+
+### 3. Context ownership is one owner per chip, per process
+
+TT-Metal enforces a single runtime per chip. Consequences worth knowing:
+
+- **PJRT initializes on first query, not on import.** `addressable_device_count()`
+  is the claim. There is no read-only way to ask, which is why the loader must
+  never probe PJRT on behalf of a native backend.
+- **PJRT has no public shutdown.** In practice the first runtime to initialize
+  holds the chips until the process exits. That is a process-scoped limit, not
+  a hardware lock: a new process may use either path freely.
+- **Two runtimes in one process corrupt each other.** The loser reads a released
+  `Device`, and TT-Metal reports it as a nonsensical context id
+  (`context_id 82459424 is out of range (max 32)`), not as an ownership error.
+  `ttnn_runtime._reject_pjrt_owner` records the claim so that case is reported
+  as an ownership conflict instead of a stale-pointer assert.
+- **`close_device()` does not idle the card** — it stays at 1350 MHz until the
+  firmware is sent `AICLK_GO_LONG_IDLE`; the mesh close path does that now.
+
+### 4. The native forward costs two PCIe crossings per layer
+
+`TTNNLinear.forward` takes a CPU tensor and returns one, because every op
+between two quantized layers (attention matmuls, softmax, norms, residual adds)
+is ordinary PyTorch on the host. For OPT-125M that is ~144 crossings per token,
+and that — not Tensix throughput — is what a 0.3 s forward was paying for.
+
+## Resident activations: the optimal native flow
+
+`gptqmodel/utils/tt_resident.py` removes the crossings *inside* a chain. An
+activation is uploaded once, handed between layers as a device-resident handle
+(`TTDeviceTensor`), and read back once:
+
+```python
+from gptqmodel.utils.tt_resident import run_resident_host
+
+out = run_resident_host(chain, hidden, mesh=mesh)          # 1 upload, 1 readback
+out = run_resident_host(chain, hidden, mesh=mesh, activation_fn="gelu")
+```
+
+`TTNNLinear.forward` also accepts a `TTDeviceTensor` directly and returns one,
+so a chain can be built without the convenience wrapper. Device-side glue
+(`apply_activation`, `add_residual`) keeps the value resident; anything not in
+`DEVICE_ACTIVATIONS` raises rather than silently falling back to the host.
+
+Measured on `tt-quietbox`, four consecutive `768x768` GPTQ layers, batch 8:
+
+| Path | Time | Uploads | Readbacks | Output |
+| --- | --- | --- | --- | --- |
+| per-layer `forward` | 45.4 ms | 4 | 4 | reference |
+| resident chain | **5.3 ms** | **1** | **1** | identical (`allclose`, normalised L1 `0.0`) |
+
+That is **8.6x** from removing PCIe round trips alone.
+
+### What this does not fix
+
+A chain is broken wherever the graph needs a host op. `resident_boundaries`
+makes that measurable:
+
+```python
+resident_boundaries([True] * 6)        # 2  -> one upload, one readback
+resident_boundaries([True, False, True])  # 4 -> two runs, two readbacks
+```
+
+Because attention, softmax and the norms are still host-side, a decoder block
+still pays roughly four crossings rather than one. Reaching a true single
+upload for the whole model needs those ops on device too — that is a TT-native
+model runner, not a linear replacement, and it is the explicit next step rather
+than something this change claims to have delivered.
+
 ## GPTQ kernel conversion matrix
 
 `XLALinear` and `TTNNLinear` both declare `DEVICE.XLA`, because Tenstorrent

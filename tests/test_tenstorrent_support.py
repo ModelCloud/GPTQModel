@@ -824,6 +824,110 @@ def test_set_tdp_limit_drives_the_firmware_message(monkeypatch):
     assert thermal.tdp_limit_watts() == (90, 90)
 
 
+def _fake_ttnn():
+    """Minimal ttnn stand-in that records the transfer-relevant calls."""
+
+    class _FakeTensor:
+        def __init__(self, numel):
+            self._numel = numel
+
+        def numel(self):
+            return self._numel
+
+    class _FakeTTNN:
+        TILE_LAYOUT = "tile"
+        bfloat16 = "bf16"
+        calls = []
+
+        @staticmethod
+        def from_torch(tensor, dtype=None, layout=None):
+            return _FakeTensor(tensor.numel())
+
+        @staticmethod
+        def to_device(tensor, device):
+            _FakeTTNN.calls.append("to_device")
+            return tensor
+
+        @staticmethod
+        def to_torch(tensor):
+            _FakeTTNN.calls.append("to_torch")
+            return torch.zeros(2, 4, dtype=torch.bfloat16)
+
+        @staticmethod
+        def deallocate(tensor):
+            _FakeTTNN.calls.append("deallocate")
+
+        @staticmethod
+        def relu(tensor):
+            _FakeTTNN.calls.append("relu")
+            return tensor
+
+    return _FakeTTNN
+
+
+def test_resident_chain_pays_one_upload_and_one_readback(monkeypatch):
+    """A resident chain must not cross PCIe once per layer."""
+
+    import importlib
+
+    resident = importlib.import_module("gptqmodel.utils.tt_resident")
+    runtime = importlib.import_module("gptqmodel.utils.ttnn_runtime")
+
+    fake = _fake_ttnn()
+    monkeypatch.setattr(runtime, "import_ttnn", lambda: fake)
+    resident.reset_transfer_stats()
+
+    class _Mesh:
+        num_devices = 1
+        device = object()
+
+    class _Layer:
+        """Stands in for a resident-aware linear."""
+
+        def forward_resident(self, value):
+            return value
+
+    host = torch.zeros(2, 4, dtype=torch.bfloat16)
+    chain = [_Layer() for _ in range(6)]
+    activation = resident.upload(host, mesh=_Mesh())
+    out = resident.run_resident(chain, activation)
+    out.readback()
+
+    stats = resident.transfer_stats()
+    assert stats["uploads"] == 1
+    assert stats["readbacks"] == 1
+    # Six layers, but only one upload and one readback crossed PCIe.
+    assert fake.calls.count("to_device") == 1
+    assert fake.calls.count("to_torch") == 1
+
+
+def test_resident_boundaries_counts_chain_breaks():
+    """The crossing count makes the remaining host-op gap measurable."""
+
+    import importlib
+
+    resident = importlib.import_module("gptqmodel.utils.tt_resident")
+
+    # Six consecutive resident layers = one upload + one readback.
+    assert resident.resident_boundaries([True] * 6) == 2
+    # A host op between two resident runs costs two runs = four crossings.
+    assert resident.resident_boundaries([True, False, True]) == 4
+    assert resident.resident_boundaries([]) == 0
+    assert resident.resident_boundaries([False, False]) == 0
+
+
+def test_resident_rejects_host_tensor_and_unknown_activation(monkeypatch):
+    import importlib
+
+    resident = importlib.import_module("gptqmodel.utils.tt_resident")
+
+    value = resident.TTDeviceTensor(
+        tensor=object(), mesh=None, batch_shape=(2,), features=4
+    )
+    with pytest.raises(NotImplementedError):
+        resident.apply_activation(value, "tanh_approx")
+
+
 
 
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")

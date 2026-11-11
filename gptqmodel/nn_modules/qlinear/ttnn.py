@@ -451,7 +451,71 @@ class TTNNLinear(GPTQQuantLinear):
         weights = ttnn.multiply(ttnn.subtract(codes, group_zeros), group_scales)
         return ttnn.typecast(weights, ttnn.bfloat16)
 
+    def _compute_on_device(self, ttnn, layer: TTNNPackedLayer, activation):
+        """Run dequant + GEMM (+ all_gather) on a resident activation.
+
+        Returns the device output. The transient dequantized weight tile is
+        released here; the caller owns ``activation`` and the returned tensor.
+        """
+
+        weights = self._dequantize(ttnn, layer)
+        try:
+            output = ttnn.linear(
+                activation, weights, bias=layer.bias,
+                compute_kernel_config=layer.compute_config,
+            )
+        finally:
+            ttnn.deallocate(weights)
+
+        if layer.device_count > 1:
+            # all_gather returns a new tensor; release the per-chip partial so
+            # only one output allocation is live while it is consumed.
+            gathered = ttnn.all_gather(output, 1)
+            ttnn.deallocate(output)
+            output = gathered
+        return output
+
+    def forward_resident(self, x):
+        """Forward on an activation that is already resident on the device.
+
+        Returns another resident activation, so a chain of these layers moves
+        no activation bytes over PCIe between them. See
+        :mod:`gptqmodel.utils.tt_resident`.
+        """
+
+        from ...utils.tt_resident import TTDeviceTensor, is_device_tensor
+
+        if self.training:
+            raise NotImplementedError("TTNNLinear is inference-only.")
+        if not is_device_tensor(x):
+            raise TypeError(
+                "forward_resident expects a TTDeviceTensor from "
+                "gptqmodel.utils.tt_resident; use forward() for host activations."
+            )
+        if x.features != self.in_features:
+            raise ValueError(f"expected input width {self.in_features}, got {x.features}.")
+
+        ttnn = import_ttnn()
+        layer = self._build_layer()
+        mesh = x.mesh if x.mesh is not None else current_mesh()
+        if mesh is None:
+            raise RuntimeError("TTNNLinear has no open device; call post_init() first.")
+
+        output = self._compute_on_device(ttnn, layer, x.tensor)
+        return TTDeviceTensor(
+            tensor=output,
+            mesh=mesh,
+            batch_shape=tuple(x.batch_shape),
+            features=self.out_features,
+        )
+
     def forward(self, x: torch.Tensor):
+        from ...utils.tt_resident import is_device_tensor
+
+        if is_device_tensor(x):
+            # Resident chaining: skip both the upload and the readback.
+            return self.forward_resident(x)
+
         if self.training:
             raise NotImplementedError("TTNNLinear is inference-only.")
         if x.device.type != "cpu":
@@ -487,25 +551,12 @@ class TTNNLinear(GPTQQuantLinear):
                 dev,
             )
 
-        weights = self._dequantize(ttnn, layer)
-        output = ttnn.linear(
-            activation, weights, bias=layer.bias, compute_kernel_config=layer.compute_config,
-        )
-
-        gathered = None
-        if layer.device_count > 1:
-            # all_gather returns a new tensor; release the per-chip partial so
-            # only one output allocation is live while it is read back.
-            gathered = ttnn.all_gather(output, 1)
-            ttnn.deallocate(output)
-            output = gathered
-
+        output = self._compute_on_device(ttnn, layer, activation)
         try:
             host = self._to_host(ttnn, dev, output, layer)
         finally:
-            # Transient dequantized weights and device activations must not
-            # outlive this call, including when readback raises.
-            ttnn.deallocate(weights)
+            # The device activation must not outlive this call, including when
+            # the readback raises.
             ttnn.deallocate(activation)
             ttnn.deallocate(output)
         return host.reshape(out_shape)
