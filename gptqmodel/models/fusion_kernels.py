@@ -64,6 +64,14 @@ class FusionKernelSpec:
         axes.append(("bias", 0))
         return tuple(axes)
 
+    def runtime_ready(self, module):
+        """Report whether a source currently holds its finalized runtime layout."""
+        if self.layout == "cpu_legacy":
+            from ..looper.linear_mode import LinearMode
+
+            return module.linear_mode == LinearMode.INFERENCE
+        return bool(getattr(module, "_cpu_transformed", False))
+
     def input_dtype(self, module):
         if self.layout == "cpu_avx512":
             return torch.bfloat16
@@ -81,17 +89,23 @@ class FusionKernelSpec:
                 module._fusion_q_invperm = metadata.get("q_invperm")
         if not self.cpu:
             return
+        from ..nn_modules.qlinear._fused_train_state import capture_fused_train_state
+
         for module in modules:
             if self.layout == "cpu_legacy":
                 from ..looper.linear_mode import LinearMode
 
                 if module.linear_mode is None:
+                    # Fusion transforms sources outside their own ``forward``,
+                    # so the checkpoint layout must be captured here as well.
+                    capture_fused_train_state(module)
                     module.transform_cpu(dtype or module.scales.dtype)
                 module.linear_mode = LinearMode.INFERENCE
                 self.rebind(module)
                 continue
             if not getattr(module, "_cpu_transformed", False):
                 target = dtype or module.scales.dtype
+                capture_fused_train_state(module)
                 if self.layout == "cpu_avx512" and not self.gptq:
                     module.transform_cpu()
                 else:

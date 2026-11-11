@@ -508,3 +508,186 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
 
     assert seen == {"native": (torch.float16, torch.float16)}
     assert out.dtype == torch.float16
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected_dtype"),
+    (
+        ("TorchAtenLinear", torch.bfloat16),
+        ("TorchAtenAwqLinear", torch.bfloat16),
+        ("TorchFusedLinear", torch.bfloat16),
+        ("TorchFusedAwqLinear", torch.bfloat16),
+        ("TorchCpuAvx512Linear", torch.bfloat16),
+        ("TorchCpuAvx512AwqLinear", torch.bfloat16),
+    ),
+)
+def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expected_dtype):
+    """A plain inference forward must not corrupt what ``save()`` writes.
+
+    The CPU W4A16 kernels rewrite ``qweight``/``qzeros``/``scales`` into their
+    int4pack runtime layout *in place*. The checkpoint layout survives only in
+    ``_fused_train_state``, so the export path and ``load_state_dict`` must
+    both restore it first. Otherwise ``state_dict()``/``save()`` emit runtime
+    shapes under checkpoint keys and the written file cannot be loaded into a
+    fresh model.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    module = importlib.import_module(
+        {
+            "TorchAtenLinear": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+            "TorchAtenAwqLinear": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+            "TorchFusedLinear": "gptqmodel.nn_modules.qlinear.torch_fused",
+            "TorchFusedAwqLinear": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+            "TorchCpuAvx512Linear": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+            "TorchCpuAvx512AwqLinear": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+        }[class_name]
+    )
+    cls = getattr(module, class_name)
+    if not getattr(cls, "SUPPORTS_DTYPES", [expected_dtype]) or expected_dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {expected_dtype}")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    config = LlamaConfig(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype=expected_dtype).eval()
+    parent = model.model.layers[0].mlp
+    for name in ("gate_proj", "up_proj"):
+        projection, _weight, _bias = _projection(
+            cls, getattr(parent, name), expected_dtype, "cpu"
+        )
+        setattr(parent, name, projection)
+
+    def exported():
+        return {
+            name: (tuple(entry.shape), entry.torch_dtype)
+            for name, entry in get_state_dict_for_save(model).items()
+            if name.endswith(("gate_proj.qweight", "gate_proj.qzeros", "gate_proj.bias"))
+        }
+
+    pristine = exported()
+    x = torch.randn(2, 5, 256, dtype=expected_dtype)
+    with torch.inference_mode():
+        baseline = parent(x).clone()
+
+    # One inference forward moves the operands into the int4pack runtime layout.
+    assert tuple(parent.gate_proj.qweight.shape) != pristine[
+        "model.layers.0.mlp.gate_proj.qweight"
+    ][0]
+
+    # The export path restores the checkpoint layout before serializing.
+    assert exported() == pristine
+
+    # Loading that checkpoint back into the now-transformed model restores the
+    # layout first, so strict loading does not report a size mismatch.
+    checkpoint = {
+        name: tensor.clone() for name, tensor in model.state_dict().items()
+    }
+    with torch.inference_mode():
+        parent(x)
+    model.load_state_dict(checkpoint, strict=True)
+    assert exported() == pristine
+
+    # The round trip is numerically lossless.
+    with torch.inference_mode():
+        restored = parent(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_path):
+    """Fusing CPU projections must not corrupt what ``save()`` writes.
+
+    ``FusionKernelSpec.prepare()`` finalizes sources outside their own
+    ``forward``, so it never hit the ``capture_fused_train_state`` call that a
+    plain inference forward makes. The fused group then published int4pack
+    shapes under the source checkpoint keys and the export path had no snapshot
+    to restore, so a fused model serialized a checkpoint that no fresh model
+    could load. ``fuse(False)`` inherited the same gap.
+    """
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.models.fusion import FusionDecision, _FusionGroup
+    from gptqmodel.utils.model import get_state_dict_for_save
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    dtype = torch.bfloat16
+    if not getattr(cls, "SUPPORTS_DTYPES", [dtype]) or dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {dtype}")
+
+    torch.manual_seed(31)
+    config = LlamaConfig(
+        hidden_size=512,
+        intermediate_size=1024,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    parent = model.model.layers[0].mlp
+    modules = []
+    for name in ("gate_proj", "up_proj"):
+        projection, _weight, _bias = _projection(cls, getattr(parent, name), dtype, "cpu")
+        setattr(parent, name, projection)
+        modules.append(projection)
+
+    def exported():
+        return {
+            name: tuple(entry.shape)
+            for name, entry in get_state_dict_for_save(model).items()
+            if name.endswith(("gate_proj.qweight", "gate_proj.qzeros", "gate_proj.scales"))
+        }
+
+    pristine = exported()
+    x = torch.randn(2, 7, 512, dtype=dtype)
+    with torch.inference_mode():
+        baseline = parent(x).clone()
+
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    try:
+        group.install()
+        # Install finalizes the sources and publishes fused views; the export
+        # must still describe the checkpoint it replaced.
+        assert exported() == pristine
+        with torch.inference_mode():
+            fused = parent(x).clone()
+        torch.testing.assert_close(fused.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+        assert exported() == pristine
+    finally:
+        group.remove()
+
+    # Unfusing without an intervening export must land on checkpoint shapes too.
+    assert exported() == pristine
+    with torch.inference_mode():
+        restored = parent(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
