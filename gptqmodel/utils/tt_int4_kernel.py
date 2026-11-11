@@ -320,6 +320,8 @@ def verify_on_device(nwords: int, scale: float, zero: int, *, device, seed: int 
 
 __all__ = [
     "FUSED_COMPUTE_COPY",
+    "FUSED_GEMM_COMPUTE",
+    "FUSED_GEMM_READER",
     "FUSED_MATMUL_COMPUTE",
     "FUSED_MATMUL_READER",
     "FUSED_DEQUANT_READER",
@@ -331,6 +333,7 @@ __all__ = [
     "dequantize_tiled_on_device",
     "pack_codes_to_words",
     "permute_to_tile_order",
+    "run_fused_gemm",
     "run_fused_matmul",
     "run_fused_tile",
     "tile_order_indices",
@@ -673,6 +676,191 @@ def run_fused_matmul(
         ttnn.KernelDescriptor(kernel_source=FUSED_MATMUL_COMPUTE,
             source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=grid,
             compile_time_args=[], runtime_args=rt_c, config=ttnn.ComputeConfigDescriptor()),
+        ttnn.KernelDescriptor(kernel_source=FUSED_TILE_WRITER,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=grid,
+            compile_time_args=[], runtime_args=rt_w, config=ttnn.WriterConfigDescriptor()),
+    ]
+    ttnn.generic_op([inp, actd, out], ttnn.ProgramDescriptor(kernels=ks, semaphores=[], cbs=cbs))
+    ttnn.synchronize_device(device)
+    return ttnn.to_torch(out).reshape(32, 32).to(torch.float32)
+
+
+FUSED_GEMM_READER = r"""
+#include "api/dataflow/dataflow_api.h"
+void kernel_main() {
+    uint32_t w_addr     = get_arg_val<uint32_t>(0);
+    uint32_t act_addr   = get_arg_val<uint32_t>(1);
+    uint32_t nk         = get_arg_val<uint32_t>(2);
+    uint32_t scale_bits = get_arg_val<uint32_t>(3);
+    uint32_t zero       = get_arg_val<uint32_t>(4);
+
+    float scale;
+    __builtin_memcpy(&scale, &scale_bits, 4);
+    float fzero = (float)zero;
+
+    constexpr uint32_t ACT_CB = 0;
+    constexpr uint32_t W_CB   = 1;
+    constexpr uint32_t RAW_CB = 2;
+    constexpr uint32_t WORDS_PER_TILE = 128;
+
+    InterleavedAddrGen<true> ag = {.bank_base_address = act_addr, .page_size = 2048};
+    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WORDS_PER_TILE * 4u};
+
+    for (uint32_t k = 0; k < nk; ++k) {
+        cb_reserve_back(ACT_CB, 1);
+        uint32_t a_l1 = get_write_ptr(ACT_CB);
+        noc_async_read(ag.get_noc_addr(k), a_l1, 2048);
+        noc_async_read_barrier();
+        cb_push_back(ACT_CB, 1);
+
+        cb_reserve_back(RAW_CB, 1);
+        uint32_t wl1 = get_write_ptr(RAW_CB);
+        noc_async_read(wg.get_noc_addr(k), wl1, WORDS_PER_TILE * 4u);
+        noc_async_read_barrier();
+        cb_push_back(RAW_CB, 1);
+        cb_wait_front(RAW_CB, 1);
+
+        cb_reserve_back(W_CB, 1);
+        uint32_t tl1 = get_write_ptr(W_CB);
+        volatile tt_l1_ptr uint32_t* words = (volatile tt_l1_ptr uint32_t*)wl1;
+        volatile tt_l1_ptr uint16_t* out   = (volatile tt_l1_ptr uint16_t*)tl1;
+        for (uint32_t i = 0; i < WORDS_PER_TILE; ++i) {
+            uint32_t word = words[i];
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                uint32_t code = (word >> (4u * lane)) & 0xFu;
+                float v = scale * ((float)code - fzero);
+                uint32_t bits;
+                __builtin_memcpy(&bits, &v, 4);
+                out[i * 8u + lane] = (uint16_t)(bits >> 16);
+            }
+        }
+        cb_push_back(W_CB, 1);
+        cb_pop_front(RAW_CB, 1);
+    }
+}
+"""
+
+FUSED_GEMM_COMPUTE = r"""
+#include "api/compute/common.h"
+#include "api/compute/matmul.h"
+#include "api/compute/pack.h"
+#include "api/compute/compute_kernel_hw_startup.h"
+
+void kernel_main() {
+    uint32_t nk = get_arg_val<uint32_t>(0);
+    constexpr uint32_t ACT_CB = 0;
+    constexpr uint32_t W_CB   = 1;
+    constexpr uint32_t OUT_CB = 16;
+
+    compute_kernel_hw_startup<SrcOrder::Reverse>(ACT_CB, W_CB, OUT_CB);
+    matmul_init(ACT_CB, W_CB);
+
+    // tile_regs_acquire() also zeroes the destination, so the K loop accumulates
+    // from zero without a separate clear.
+    tile_regs_acquire();
+    for (uint32_t k = 0; k < nk; ++k) {
+        cb_wait_front(ACT_CB, 1);
+        cb_wait_front(W_CB, 1);
+        matmul_tiles(ACT_CB, W_CB, 0, 0, 0);
+        cb_pop_front(ACT_CB, 1);
+        cb_pop_front(W_CB, 1);
+    }
+    tile_regs_commit();
+    tile_regs_wait();
+    cb_reserve_back(OUT_CB, 1);
+    pack_tile(0, OUT_CB);
+    cb_push_back(OUT_CB, 1);
+    tile_regs_release();
+}
+"""
+
+
+def run_fused_gemm(
+    act: torch.Tensor,
+    codes: torch.Tensor,
+    scale: float,
+    zero: int,
+    *,
+    device,
+) -> torch.Tensor:
+    """Fused int4 GEMM for one output tile with the full K reduction on chip.
+
+    ``act`` is ``[32, K]`` and ``codes`` is ``K*32`` 4-bit codes laid out as
+    ``K/32`` weight tiles of ``32x32``. Returns ``[32, 32]`` equal to
+    ``act @ dequant(codes)``.
+
+    Verified on device: ``norm_l1`` 0.0047 at K=768, 0.0046 at K=256.
+
+    Performance, measured not extrapolated: **~3.4 ms per output tile at K=768**.
+    A dispatch of a trivial kernel costs 0.019 ms, so this is kernel time, and it
+    is dominated by dequantization running on BRISC, which is an RV32 core with no
+    FPU -- every `code -> float` conversion is software floating point. TTNN does
+    a whole 768x768 layer in ~1.33 ms, so this is far slower until the expansion
+    moves to the SFPU in the compute path, which is what the design intends.
+    """
+
+    from .ttnn_runtime import import_ttnn
+
+    ttnn = import_ttnn()
+    nk = codes.numel() // 1024
+    if codes.numel() != nk * 1024:
+        raise ValueError("codes must be a whole number of 32x32 tiles")
+    if act.shape != (32, nk * 32):
+        raise ValueError(f"act must be [32, {nk * 32}], got {tuple(act.shape)}")
+
+    words = torch.zeros(nk * 128, dtype=torch.int64)
+    tile_order = tile_order_indices()
+    for k in range(nk):
+        mem = codes[k * 1024:(k + 1) * 1024][tile_order]
+        for lane in range(8):
+            words[k * 128:(k + 1) * 128] |= (mem[lane::8] & 0xF) << (4 * lane)
+
+    inp = ttnn.to_device(
+        ttnn.from_torch(words.to(torch.int32).reshape(nk, 128), dtype=ttnn.uint32,
+                        layout=ttnn.ROW_MAJOR_LAYOUT),
+        device,
+    )
+    actd = ttnn.to_device(
+        ttnn.from_torch(act.to(torch.bfloat16).reshape(1, 32, nk * 32), dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT),
+        device,
+    )
+    out = ttnn.allocate_tensor_on_device(
+        ttnn.Shape([1, 1, 32, 32]), ttnn.bfloat16, ttnn.TILE_LAYOUT, device,
+        ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+    grid = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))])
+
+    def _cb(index, fmt, size):
+        return ttnn.CBDescriptor(
+            total_size=size, core_ranges=grid,
+            format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=fmt, page_size=size)],
+        )
+
+    cbs = [
+        _cb(0, ttnn.bfloat16, 2048),
+        _cb(1, ttnn.bfloat16, 2048),
+        _cb(2, ttnn.uint32, 512),
+        _cb(16, ttnn.bfloat16, 2048),
+    ]
+
+    scale_bits = struct.unpack("<I", struct.pack("<f", float(scale)))[0]
+    rt_r = ttnn.RuntimeArgs()
+    rt_r[0][0] = [inp.buffer_address(), actd.buffer_address(), nk, scale_bits, int(zero)]
+    rt_c = ttnn.RuntimeArgs()
+    rt_c[0][0] = [nk]
+    rt_w = ttnn.RuntimeArgs()
+    rt_w[0][0] = [out.buffer_address(), 2048]
+
+    ks = [
+        ttnn.KernelDescriptor(kernel_source=FUSED_GEMM_READER,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=grid,
+            compile_time_args=[], runtime_args=rt_r, config=ttnn.ReaderConfigDescriptor()),
+        ttnn.KernelDescriptor(kernel_source=FUSED_GEMM_COMPUTE,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=grid,
+            compile_time_args=[], runtime_args=rt_c,
+            config=ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=True)),
         ttnn.KernelDescriptor(kernel_source=FUSED_TILE_WRITER,
             source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=grid,
             compile_time_args=[], runtime_args=rt_w, config=ttnn.WriterConfigDescriptor()),

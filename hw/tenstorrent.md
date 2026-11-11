@@ -438,9 +438,36 @@ performance claim is made here — and none should be inferred from the earlier
 Widening to a full layer over the grid, with `K` accumulated across tiles, is what
 would make a speed comparison meaningful.
 
-Also worth stating plainly: correctness so far is per-tile BF16 accumulation, not
-the `HiFi4` + fp32-accumulate configuration the TTNN path uses for its accuracy
-floor. Matching that is part of the widening work.
+### Full K reduction works, and it is slow for a specific reason
+
+The `K` dimension now accumulates in the kernel: `tile_regs_acquire()` zeroes the
+destination and each `matmul_tiles` accumulates, so one output tile is produced
+from the entire reduction. Verified against torch at K=256 (`norm_l1` 0.0046) and
+K=768 (`norm_l1` 0.0047), with `fp32_dest_acc_en=True`.
+
+Performance, measured rather than extrapolated:
+
+| | |
+| --- | --- |
+| one output tile, K=768 | **~3.4 ms** |
+| dispatch of a trivial kernel (floor) | 0.019 ms |
+| TTNN, whole `768x768` layer | ~1.33 ms |
+
+So the 3.4 ms is kernel work, not launch overhead. The cause is the arithmetic
+unit: the nibble expansion runs on **BRISC**, an RV32 core with **no FPU**, so
+every `code -> float` conversion is software floating point -- 24,576 of them per
+output tile at K=768.
+
+This is the key architectural correction to the design. The intent was always for
+the expansion to happen in the compute path, where the SFPU does float work; the
+current kernel dequantizes in the data-movement stage because that is what was
+easy to prove. Functionally the fused GEMM is correct and complete for one tile;
+to be worth anything it must move the expansion to the SFPU, and it must spread
+output tiles across the grid -- a `768x768` layer is 576 output tiles.
+
+A staging attempt that read all K tiles in one `noc_async_read` per stream
+returned `inf`: a single transfer spanning many pages is not valid, so pages must
+be read individually (or with a per-page loop).
 
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores

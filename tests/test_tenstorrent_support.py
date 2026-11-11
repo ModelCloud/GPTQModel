@@ -1103,6 +1103,34 @@ def test_fused_matmul_matches_torch_on_device():
 
 
 
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_fused_gemm_accumulates_k_on_device():
+    """Full K reduction inside the kernel must equal act @ dequant(weights)."""
+
+    from gptqmodel.utils.tt_int4_kernel import run_fused_gemm
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    nk = 8
+    torch.manual_seed(11)
+    codes = torch.randint(0, 16, (nk * 1024,), dtype=torch.int64)
+    weight = (0.0173 * (codes.to(torch.float32) - 7.0)).to(torch.bfloat16).reshape(nk * 32, 32)
+    act = torch.randn(32, nk * 32, dtype=torch.bfloat16)
+    reference = act.float() @ weight.float()
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        got = run_fused_gemm(act, codes, 0.0173, 7, device=mesh.device)
+    finally:
+        close_mesh()
+
+    assert got.shape == (32, 32)
+    norm_l1 = float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
+    assert norm_l1 < 0.02, f"fused K accumulation deviates: norm_l1={norm_l1}"
+
+
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
 @pytest.mark.parametrize("device_count", [1, 4])
 def test_actual_ttnn_linear_matches_torch_oracle(device_count):
