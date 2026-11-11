@@ -369,12 +369,23 @@ Throughput, single core, RMW through DRAM:
 | 32,768 | 4.74 ms | 6.9 Mcodes/s |
 | 131,072 | 18.1 ms | 7.2 Mcodes/s |
 
-At 7.2 Mcodes/s a `768x768` layer (589,824 codes) extrapolates to **~0.082 ms on
-one core**, against **1.27 ms** for the TTNN op chain — roughly 15x, before
-spreading across the 11x10 grid. The comparison is like-for-like in the sense
-that both end with a BF16 tile, but the kernel number is an extrapolation from
-a smaller peak-rate sample, not a full-layer run, and a full layer (1.18 MB of
-output) does not fit in the 1464 KiB L1 in one page, so it needs tiling.
+A full `768x768` layer (589,824 codes) has now been dequantized end to end on
+**one core**, bit-exactly, in **80.98 ms**. That is 7.3 Mcodes/s, consistent with
+the table above.
+
+**Correction:** an earlier revision of this page stated the full-layer figure as
+"~0.082 ms", a 1000x arithmetic error (0.0819 **seconds**, not milliseconds). The
+comparison therefore inverts: against the TTNN op chain at 1.27 ms, the kernel
+is currently about **64x slower**, not faster. It is bit-exact and removes every
+intermediate tensor, but on one core it is latency-bound on the per-page DRAM
+round trip, while TTNN spreads work across the grid. Nothing here yet beats the
+path it is meant to replace.
+
+Multi-core is the obvious next lever and is **not working**: page-range args are
+passed per core, and that mechanism is verified correct for 2 cores but fails at
+4x4 with `Number of runtime args cannot be modified`, so the only verified
+configuration is a 1x1 grid looping over pages. The 1.18 MB output does not fit
+in 1464 KiB of L1 in one page, which is why the loop exists at all.
 
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores
