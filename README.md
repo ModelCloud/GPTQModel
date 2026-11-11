@@ -942,6 +942,8 @@ model.save(quant_path)
 The packed weight is saved as `nf12_packed` (uint8, `N x K*3/2`) with
 `nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
 checkpoint rather than a dense weight.
+The [four-copy embedding path](docs/nf12-embedding-repeat4.md) decodes one
+packed row and writes the initial hyper-connection activations in one launch.
 
 The [NF12 validation backend and performance flow](docs/nf12-validation-backends.md)
 explains device selection, native encoder measurements, and Torch fallback.

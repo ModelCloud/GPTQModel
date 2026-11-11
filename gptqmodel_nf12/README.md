@@ -17,6 +17,7 @@ import gptqmodel_nf12 as nf12
 
 packed = nf12.encode(bf16_cuda_weight)  # [N, K], N % 16 == 0, K % 64 == 0
 embeddings = nf12.embedding(token_ids, packed)
+hc_embeddings = nf12.embedding_repeat4(token_ids, packed)  # [*token_ids.shape, 4, K]
 bf16_logits = nf12.linear(bf16_hidden, packed)
 fp32_scores = nf12.linear_fp32(fp32_hidden, packed)
 shortlist = nf12.linear_fp32(fp32_hidden, packed, rows=selected_rows)

@@ -69,6 +69,32 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
+@pytest.mark.parametrize("m,id_dtype", [(6, torch.int32), (312, torch.int64),
+                                          (1536, torch.int64), (3072, torch.int64)])
+def test_native_embedding_repeat4_matches_dense_torch_and_keeps_packed_weight(m, id_dtype):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(14100 + m)
+    weight = torch.randn((512, 5120), generator=generator, device=device).bfloat16()
+    weight[0, 0] = -0.0
+    weight[0, 1] = 2.0**-20
+    ids = torch.randint(weight.shape[0], (m,), generator=generator, device=device, dtype=id_dtype)
+    ids[0] = 0
+    ids[-1] = weight.shape[0] - 1
+    packed = nf12.encode(weight)
+    expected = F.embedding(ids, weight).unsqueeze(1).repeat(1, 4, 1)
+    for _ in range(2):
+        actual = nf12.embedding_repeat4(ids, packed)
+        assert actual.shape == (m, 4, 5120)
+        assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+    invalid = ids.clone()
+    invalid[0], invalid[-1] = -1, weight.shape[0]
+    result = nf12.embedding_repeat4(invalid, packed)
+    assert torch.count_nonzero(result[0].view(torch.int16)) == 0
+    assert torch.count_nonzero(result[-1].view(torch.int16)) == 0
+    assert torch.equal(result[1:-1].view(torch.int16), expected[1:-1].view(torch.int16))
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
 @pytest.mark.parametrize("m,id_dtype", [
     (256, torch.int64), (312, torch.int32), (313, torch.int64),
     (512, torch.int32), (513, torch.int64), (1536, torch.int64),
