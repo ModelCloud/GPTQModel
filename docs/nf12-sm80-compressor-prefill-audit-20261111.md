@@ -34,7 +34,7 @@ splits, then a separate reduction kernel. The MMA image used 182 registers per
 thread, achieved 12.51% occupancy, and spent 69.92% of scheduler cycles with
 no eligible warp. The reduction also occupied a launch; the extra split-K
 sweep did not recover parity. A direct Triton per-element packed-gather
-prototype took at least 424 µs. Its gather pattern is an implementation
+prototype took at least 411 µs. Its gather pattern is an implementation
 bottleneck, not evidence that a vectorized fused design cannot work.
 
 The result leaves the 1.05× real-compressor gate open. Faster decode alone
