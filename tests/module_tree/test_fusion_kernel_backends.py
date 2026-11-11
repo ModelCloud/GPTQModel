@@ -7,6 +7,7 @@ Every registered GPTQ/AWQ backend is accounted for. Optional dependencies and
 architecture exclusions are explicit skips, never portable-kernel substitutions.
 """
 
+import copy
 import weakref
 
 import pytest
@@ -17,6 +18,8 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from gptqmodel.models._const import DEVICE
 from gptqmodel.models.fusion import FusionDecision, _FusionGroup, _incompatible
 from gptqmodel.models.fusion_kernels import kernel_specs
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
@@ -100,7 +103,7 @@ def _available(cls, family, dtype):
     return device
 
 
-def _projection(cls, linear, dtype, device, *, uniform_scales=False):
+def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_checkpoint=False):
     """Independent logical integer matrices, finalized by the actual backend."""
     spec = SPECS[cls]
     k, n = linear.in_features, linear.out_features
@@ -137,6 +140,7 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False):
     if spec.gptq:
         module.qzero_format(2)
     module.to(device).eval()
+    checkpoint = {name: value.clone() for name, value in module.state_dict().items()} if return_checkpoint else None
     if spec.layout == "exllamav2":
         module.post_init(None)
     else:
@@ -145,7 +149,8 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False):
         # This backend requantizes native eight-bit sources before fusion.
         # The inference oracle decodes its resulting native codes independently.
         weight = module.int8_weight_nk.float().t() * module.int8_channel_scale.float()
-    return module, weight.to(device), linear.bias.detach().to(device).clone()
+    result = module, weight.to(device), linear.bias.detach().to(device).clone()
+    return (*result, checkpoint) if return_checkpoint else result
 
 
 def _assert_no_dense_weights(module, spec):
@@ -181,6 +186,160 @@ def _oracle(x, weights, biases, spec):
     # to the visible dtype. Mirroring a kernel's intermediate BF16 rounding
     # can make the oracle itself differ by a full BF16 step near a bias tie.
     return torch.cat([(values @ w.float() + b.float()).to(x.dtype) for w, b in zip(weights, biases)], -1)
+
+
+@pytest.mark.parametrize("cls", [ExllamaV2Linear, AwqExllamaV2Linear])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav2_rebinds_shuffled_words_without_changing_output(cls, dtype):
+    device = _available(cls, DEVICE.CUDA, dtype)
+    torch.manual_seed(29)
+    linear = torch.nn.Linear(512, 1024, bias=True, dtype=dtype)
+    module, weight, bias, checkpoint = _projection(cls, linear, dtype, device, return_checkpoint=True)
+    spec = SPECS[cls]
+    x = torch.randn(8, 512, dtype=dtype, device=device)
+    expected = _oracle(x, [weight], [bias], spec)
+
+    def check(current_x, current_weight, current_bias):
+        actual = module(current_x)
+        torch.testing.assert_close(actual, _oracle(current_x, [current_weight], [current_bias], spec),
+                                   rtol=2e-3, atol=2e-3)
+        _assert_no_dense_weights(module, spec)
+
+    check(x, weight, bias)
+    module.clear_weight_cache()
+    check(x, weight, bias)
+    module.to(device)  # QuantLinear._apply clears a descriptor even for the same device.
+    check(x, weight, bias)
+    module.to(dtype=torch.bfloat16)
+    check(x, weight, module.bias)
+    module.to(dtype=torch.float16)
+    check(x, weight, module.bias)
+    module.post_init(None)
+    check(x, weight, bias)
+    if torch.cuda.device_count() > 1:
+        second = torch.device("cuda:1")
+        module.to(second)
+        check(x.to(second), weight.to(second), bias.to(second))
+        module.to(device)
+        check(x, weight, bias)
+
+    with torch.no_grad():
+        module.scales.mul_(0.5)
+    check(x, weight * 0.5, bias)
+    module.clear_weight_cache()
+    check(x, weight * 0.5, bias)
+    if cls is AwqExllamaV2Linear:
+        with pytest.raises(RuntimeError, match="also requires qzeros"):
+            module.load_state_dict({"qweight": checkpoint["qweight"]}, strict=False)
+        with pytest.raises(RuntimeError, match="also requires qweight"):
+            module.load_state_dict({"qzeros": checkpoint["qzeros"]}, strict=False)
+        runtime_zeros = copy.deepcopy(module.state_dict())
+        for name in tuple(runtime_zeros):
+            if name != "qzeros":
+                del runtime_zeros[name]
+        module.load_state_dict(runtime_zeros, strict=False)
+        check(x, weight * 0.5, bias)
+    module.load_state_dict(checkpoint)
+    check(x, weight, bias)
+    runtime_state = copy.deepcopy(module.state_dict())
+    module.load_state_dict(runtime_state)
+    check(x, weight, bias)
+    assert module._native_shuffled
+    assert torch.isfinite(expected).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav2_act_order_rebind_preserves_permutation(dtype):
+    device = _available(ExllamaV2Linear, DEVICE.CUDA, dtype)
+    torch.manual_seed(31)
+    k, n, group = 256, 256, 128
+    indices = (torch.arange(k, dtype=torch.int32) // group)[torch.randperm(k)]
+    codes = torch.randint(0, 16, (k, n), dtype=torch.int32)
+    zeros = torch.full((k // group, n), 8, dtype=torch.int32)
+    scales = (2.0 ** torch.randint(-2, 1, (k // group, n)).float() / 1024).to(dtype)
+    weight = ((codes - zeros[indices]) * scales[indices]).to(dtype)
+    linear = torch.nn.Linear(k, n, bias=True, dtype=dtype)
+    linear.weight.data.copy_(weight.T)
+    kwargs = {"bits": 4, "group_size": group, "sym": True, "desc_act": True, "in_features": k,
+              "out_features": n, "bias": True, "pack_dtype": torch.int32, "register_buffers": True,
+              "dtype": dtype, "format": FORMAT.GPTQ_V2}
+    source = TorchLinear(**kwargs)
+    source.pack_block(linear, scales.T, zeros.T.float(), indices)
+    module = ExllamaV2Linear(**kwargs)
+    for name in ("qweight", "qzeros", "scales", "bias", "g_idx"):
+        getattr(module, name).data.copy_(getattr(source, name))
+    module.qzero_format(2)
+    module.to(device).eval()
+    module.post_init(None)
+    x = torch.randn(33, k, dtype=dtype, device=device)
+    expected = (x.float() @ weight.to(device).float() + linear.bias.to(device).float()).to(dtype)
+    original_perm = module.q_tensors["q_perm"].clone()
+    original_invperm = module.q_tensors["q_invperm"].clone()
+
+    def check(current_x):
+        actual = module(current_x)
+        torch.testing.assert_close(actual, expected.to(current_x.device), rtol=2e-3, atol=2e-3)
+        assert torch.equal(module.q_tensors["q_perm"], original_perm.to(current_x.device))
+        assert torch.equal(module.q_tensors["q_invperm"], original_invperm.to(current_x.device))
+        _assert_no_dense_weights(module, SPECS[ExllamaV2Linear])
+
+    check(x)
+    module.clear_weight_cache()
+    check(x)
+    module.load_state_dict(copy.deepcopy(module.state_dict()))
+    check(x)
+    module.to(device)
+    check(x)
+    if torch.cuda.device_count() > 1:
+        module.to("cuda:1")
+        check(x.to("cuda:1"))
+        module.to(device)
+        check(x)
+
+
+@pytest.mark.parametrize("cls", [ExllamaV2Linear, AwqExllamaV2Linear])
+def test_exllamav2_fused_checkpoint_reload(cls):
+    dtype = torch.float16
+    device = _available(cls, DEVICE.CUDA, dtype)
+    torch.manual_seed(37)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8, vocab_size=64,
+                         attention_bias=True, mlp_bias=True)
+    parent = LlamaForCausalLM(config).to(dtype).model.layers[0].mlp.eval()
+    modules, checkpoints = [], []
+    for name in ("gate_proj", "up_proj"):
+        module, _, _, checkpoint = _projection(cls, getattr(parent, name), dtype, device, return_checkpoint=True)
+        setattr(parent, name, module)
+        modules.append(module)
+        checkpoints.append(checkpoint)
+    parent.to(device)
+    x = torch.randn(1, 8, 512, dtype=dtype, device=device)
+    baseline = parent(x)
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    bf16_output = None
+    try:
+        group.install()
+        torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        modules[0].load_state_dict(checkpoints[0])
+        for _ in range(2):
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        assert group.packed is not None
+        if torch.cuda.device_count() > 1:
+            parent.to("cuda:1")
+            moved = x.to("cuda:1")
+            for _ in range(2):
+                torch.testing.assert_close(parent(moved), baseline.to("cuda:1"), rtol=2e-3, atol=2e-3)
+            parent.to(device)
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        parent.to(dtype=torch.bfloat16)
+        x_bf16 = x.to(torch.bfloat16)
+        parent(x_bf16)
+        bf16_output = parent(x_bf16)
+        assert group.packed is not None
+    finally:
+        group.remove()
+    torch.testing.assert_close(parent(x_bf16), bf16_output, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("cls,family,dtype", list(_cases()))

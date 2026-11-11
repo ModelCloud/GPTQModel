@@ -402,7 +402,7 @@ def test_exllamav2_handle_tracks_replaced_packed_tensors(monkeypatch):
     freed = []
     made = []
 
-    def make_q_matrix(tensors):
+    def make_q_matrix(tensors, **_kwargs):
         made.append(tensors["qweight"].clone())
         return len(made)
 

@@ -57,6 +57,7 @@ def test_exllamav2_awq_make_q_matrix_uses_jit_op(monkeypatch):
 def test_exllamav2_awq_forward_uses_jit_gemm(monkeypatch):
     module = _build_module(monkeypatch)
     module.q_handle = 77
+    monkeypatch.setattr(module, "_ensure_q_handle", lambda: 77)
     calls = {}
 
     def fake_gemm(x, q_handle, output, force_cuda):

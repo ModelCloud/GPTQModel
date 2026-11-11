@@ -54,7 +54,8 @@ public:
 
         uint32_t* _gptq_qzeros,
         half* _gptq_scales,
-        uint32_t* _gptq_g_idx
+        uint32_t* _gptq_g_idx,
+        bool already_shuffled = false
     );
 
     ~QMatrix();
