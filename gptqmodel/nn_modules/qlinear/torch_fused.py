@@ -141,12 +141,14 @@ class TorchFusedLinear(PackableQuantLinear):
         packed ``qweight`` stays valid, so ``linear_mode`` is preserved and the
         op is simply rebuilt from the current packed weight and metadata; no
         dense weight is created.
-        """
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.torch_fused_op = None
-            self.scales_and_zeros = None
 
+        The checkpoint snapshot is deliberately *not* restored here. This hook
+        also runs for moves and explicit cache clears, where the caller expects
+        the live packed buffers to stay authoritative. Restoring the snapshot
+        would overwrite uncommitted metadata changes and put the checkpoint
+        layout back into the inference kernel. Only an explicit checkpoint load,
+        export, or training resume restores it.
+        """
         self.ret_idx = None
         self._ret_idx_key = None
         self._ret_idx_identity = None

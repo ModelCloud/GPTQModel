@@ -168,13 +168,12 @@ class TorchAtenLinear(PackableQuantLinear):
         those in place and would otherwise leave the fused op on stale data.
         The packed ``qweight`` is already in the ATen layout, so the derived
         metadata is rebuilt from it rather than from dense weights.
-        """
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.scales_and_zeros = None
-            self._cpu_transformed = False
-            self._cpu_transform_dtype = None
 
+        The checkpoint snapshot is deliberately *not* restored here. This hook
+        also runs for moves and explicit cache clears, where the caller expects
+        the live packed buffers to stay authoritative. Only an explicit
+        checkpoint load, export, or training resume restores the snapshot.
+        """
         self.ret_idx = None
         self._ret_idx_identity = None
         self._ret_idx_key = None

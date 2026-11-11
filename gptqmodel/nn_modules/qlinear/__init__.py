@@ -354,11 +354,16 @@ class BaseQuantLinear(nn.Module):
                     "operand shapes; supply one checkpoint or runtime layout."
                 )
             if layout == "checkpoint":
-                # ``clear_weight_cache`` is the kernels' full restore hook: it
-                # puts the checkpoint tensors back *and* retires the derived
-                # layout state (``_cpu_transformed``, ``scales_and_zeros``).
+                # Only a checkpoint load restores the snapshot. The cache clear
+                # hook keeps the live packed buffers authoritative for moves and
+                # explicit clears, so restore explicitly before the copy.
+                from ._fused_train_state import restore_fused_train_state
+
                 self._fused_train_state_exportable = True
-                self._clear_runtime_weight_cache()
+                if restore_fused_train_state(self):
+                    # ``restore_fused_train_state`` resets the runtime-layout
+                    # flags; clear the remaining derived caches (``ret_idx``).
+                    self._clear_runtime_weight_cache()
             elif layout == "runtime":
                 # The snapshot describes an older checkpoint layout the caller
                 # is deliberately replacing. Keep the live transformed tensors

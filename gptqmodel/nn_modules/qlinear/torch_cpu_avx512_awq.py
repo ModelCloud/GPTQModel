@@ -15,7 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import capture_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
 
@@ -192,13 +192,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         ``_apply`` above preserves the operands exactly, but a checkpoint load
         or an external caller may still install a narrower ``scales``/``bias``.
         The packed codes are already in the kernel layout, so only the affine
-        dtype needs re-establishing.
+        dtype needs re-establishing. The checkpoint snapshot is not restored
+        here; only an explicit checkpoint load, export, or training resume does
+        that.
         """
-
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self._cpu_transformed = False
-            self._cpu_transform_dtype = None
 
         if not getattr(self, "_cpu_transformed", False):
             return

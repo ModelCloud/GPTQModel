@@ -20,6 +20,7 @@ from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
 from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._runtime_cache import tensor_cache_key
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
@@ -262,10 +263,37 @@ class TorchFusedAwqLinear(AWQuantLinear):
             )
 
     def clear_weight_cache(self) -> None:
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.torch_fused_op = None
-            self.scales_and_zeros = None
+        """Rebuild the packed fused op from the live buffers.
+
+        The checkpoint snapshot is not restored here: a move or explicit clear
+        must keep the live packed weight authoritative. Only checkpoint loads,
+        export, and training resume restore the snapshot.
+        """
+        self._fused_state_key = None
+        self._refresh_fused_op()
+
+    def _refresh_fused_op(self) -> None:
+        if getattr(self, "linear_mode", None) != LinearMode.INFERENCE:
+            return
+        qweight = getattr(self, "qweight", None)
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if qweight is None or scales is None or qzeros is None:
+            return
+        if qweight.device.type != "cpu":
+            # The xpu path reads ``scales``/``qzeros`` directly; nothing derived.
+            return
+        key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
+        current = getattr(self, "scales_and_zeros", None)
+        dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
+        dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        self.torch_fused_op = Int4PackedOp(
+            self.qweight, self.scales_and_zeros, self.group_size
+        ).eval()
+        self._fused_state_key = key
 
     def train(self, mode: bool = True):
         old_train = self.training

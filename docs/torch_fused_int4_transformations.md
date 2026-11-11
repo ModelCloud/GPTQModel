@@ -205,7 +205,8 @@ flowchart TD
     K --> L["_cpu_int4pack_mm"]
     J -. Invalid int4pack geometry .-> X["ATen error"]
     L -. Unsupported matmul contract .-> X
-    M["train or clear_weight_cache"] --> N["restore_fused_train_state: packed checkpoint tensors"]
+    M["train / checkpoint load / export"] --> N["restore_fused_train_state: packed checkpoint tensors"]
+    O["clear_weight_cache / move"] --> P["_refresh_fused_op: rebuild from live packed buffers"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class X failure;
 ```
@@ -214,7 +215,7 @@ flowchart TD
 | --- | --- | --- |
 | GPTQ CPU zero points | `transform_cpu` replaced packed `qzeros` with `zeros_like(scales)` (`gptqmodel/nn_modules/qlinear/torch_fused.py:281` before this change). | It unpacks the checkpoint codes and stores `(8 - zero_code) * scale` offsets (`gptqmodel/nn_modules/qlinear/torch_fused.py:272-295`). |
 | Narrow offset range | `scales` were cast directly to the activation dtype. | `_cpu_int4pack_scale_dtype` chooses FP32 when low-precision offsets would be nonfinite or inexact (`gptqmodel/nn_modules/qlinear/torch_fused.py:277`). |
-| Eval-to-train | Packed checkpoint buffers were already snapshotted. | The same packed snapshot is restored on `train()` and `clear_weight_cache()`; the regression checks asymmetric codes survive both paths. |
+| Eval-to-train | Packed checkpoint buffers were already snapshotted. | The same packed snapshot is restored on `train()`, checkpoint load, and export. `clear_weight_cache()` rebuilds derived metadata from the live packed buffers instead. |
 
 On `origin/main` at `520809c8`, a two-group packed checkpoint with codes 12,
 zero codes 3 and 11, and scale 0.25 returned 64 instead of 80 for group size
@@ -271,6 +272,41 @@ live runtime layout. If those values changed, checkpoint export fails instead
 of writing the old snapshot. A dict with no local operands leaves the layout
 untouched.
 
+### Cache invalidation is not a checkpoint restore
+
+`clear_weight_cache()` is called from three different lifecycle events:
+explicit cache invalidation, `nn.Module._apply` device/dtype moves, and the
+post-load hook. None of those events means "the caller wants the checkpoint
+layout back". A clear therefore only drops derived state (`ret_idx`,
+`scales_and_zeros`, `torch_fused_op`, the transform flags) and rebuilds it from
+the live packed buffers. The checkpoint snapshot is restored only by an
+explicit checkpoint load, export, or `train()` resume.
+
+```mermaid
+flowchart TD
+    A["checkpoint layout<br/>qweight int32, snapshot present"] -->|"first eval forward<br/>capture_fused_train_state + transform"| B["runtime layout<br/>qweight int4pack uint8"]
+    B -->|"clear_weight_cache<br/>explicit clear or _apply move"| B
+    B -->|"train / checkpoint load / export<br/>restore_fused_train_state"| A
+    A -->|"clear_weight_cache<br/>invalidate derived state"| A
+    B -. "modified runtime state" .-> X["export raises RuntimeError"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+The old clear path ran `restore_fused_train_state()` unconditionally. Clearing
+after an in-place metadata change such as `scales.mul_(2)` therefore replaced
+the live scales with the snapshot's pre-change values and returned the
+checkpoint layout to the inference kernel. The measured effect was a 0.5x
+output (`max_abs 1.390625` against an expected `2.78125`) instead of a cache
+invalidation.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Explicit clear or move | `clear_weight_cache()` restored the snapshot (`gptqmodel/nn_modules/qlinear/torch_fused.py:145-148`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:172-176` before this change). | It drops derived state and rebuilds from the live packed buffers (`gptqmodel/nn_modules/qlinear/torch_fused.py:152-156`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:177-181`). |
+| Checkpoint load | Relied on the cache clear to restore before the copy (`gptqmodel/nn_modules/qlinear/__init__.py:357-366` before this change). | Calls `restore_fused_train_state()` explicitly before the copy and then invalidates derived caches (`gptqmodel/nn_modules/qlinear/__init__.py:356-366`). |
+| Checkpoint export | Relied on the cache clear to restore (`gptqmodel/utils/model.py:2369-2375` before this change). | Calls `restore_fused_train_state()` explicitly for each transformed module (`gptqmodel/utils/model.py:2372-2376`). |
+| Training resume | Restored in `train()` (`gptqmodel/nn_modules/qlinear/torch_fused.py:212-216`). | Unchanged. |
+
 ```mermaid
 flowchart TD
     A["BaseQuantLinear._load_from_state_dict(state_dict, prefix, ...)"] --> B{"_fused_train_state present?"}
@@ -278,8 +314,9 @@ flowchart TD
     B -- yes --> C["classify_fused_state_layout<br/>supplied shape-changing operands"]
     C --> D{"layout?"}
     D -- invalid --> X["raise RuntimeError<br/>mixed or invalid shapes"]
-    D -- checkpoint --> E["_clear_runtime_weight_cache<br/>restore snapshot"]
-    E --> S
+    D -- checkpoint --> E["restore_fused_train_state<br/>reset runtime layout"]
+    E --> E2["_clear_runtime_weight_cache<br/>invalidate derived caches"]
+    E2 --> S
     D -- runtime --> R["runtime_state_matches_live<br/>set exportable flag"]
     R --> I{"assign_to_params_buffers?"}
     I -- no --> J["materialize_fused_runtime_state"]
@@ -287,14 +324,14 @@ flowchart TD
     J --> S
     D -- empty --> S
     S --> P{"layout after copy?"}
-    P -- runtime --> L["_clear_runtime_weight_cache<br/>suspend snapshot restore"]
-    P -- checkpoint or no snapshot --> Q["_clear_runtime_weight_cache"]
+    P -- runtime --> L["_clear_runtime_weight_cache<br/>keep live layout"]
+    P -- checkpoint or no snapshot --> Q["_clear_runtime_weight_cache<br/>invalidate derived caches"]
     P -- empty --> M["load complete"]
     L --> M
     Q --> M
     M --> Y{"later export<br/>snapshot exportable?"}
     Y -- no --> Z["raise RuntimeError<br/>changed runtime state"]
-    Y -- yes --> T["save checkpoint layout"]
+    Y -- yes --> T["_restore_checkpoint_layout_for_export<br/>restore + reset + clear"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class X,Z failure;
 ```
@@ -310,7 +347,8 @@ outright and skips the clone.
 | Layout verdict | `state_dict_matches_checkpoint_layout()` returned `True` on the **first** snapshot operand whose shape matched (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:81-105` before PR #3769). `scales` is shape-identical in both layouts, so a runtime dict was classified as a checkpoint. | PR #3769 required all shape-changing operands to match. `classify_fused_state_layout()` now requires only the **supplied** shape-changing operands to agree, so partial loads work. |
 | Runtime-layout load | The snapshot was restored before the copy, then `super()._load_from_state_dict()` copied `(64, 64)` `qweight` into the restored `(16, 64)` buffer: `RuntimeError: size mismatch for qweight`. | `state_dict_matches_runtime_layout()` keeps the live `int4pack` layout and rebuilds derived metadata. An unchanged self-load retains the checkpoint snapshot for save. |
 | `assign=False` on a transformed layer | Copying into inference tensors raised `Inplace update to inference tensor outside InferenceMode is not allowed`. | `materialize_fused_runtime_state()` clones inference-tensor operands into normal tensors before the copy. |
-| Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | A runtime-layout load suppresses snapshot restoration during its cache clear. A later save restores an unchanged snapshot; a modified runtime state raises instead of writing stale weights. |
+| Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | The clear only invalidates derived state and rebuilds from the live buffers. A later save restores an unchanged snapshot explicitly; a modified runtime state raises instead of writing stale weights. |
+| Explicit clear or move | A clear restored the snapshot, overwriting uncommitted metadata and returning the checkpoint layout to the inference kernel. | A clear keeps the live packed buffers and rebuilds derived metadata from them. Only a checkpoint load, export, or training resume restores the snapshot. |
 | Partial checkpoint load | The all-operand check (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:168-190` in PR #3769) missed a lone checkpoint `qweight`, then copying into the runtime shape raised even with `strict=False`. | One supplied checkpoint discriminator restores the snapshot before the copy. |
 | Partial runtime or shared-shape load | Missing discriminators fell through to the unconditional cache clear (`gptqmodel/nn_modules/qlinear/__init__.py:399-406` in PR #3769), discarding updated values. | A supplied runtime discriminator, or only shared-shape keys, keeps the live layout and invalidates derived metadata. Empty loads do nothing. |
 | Mixed layouts | A mixed dict reached the copy and could mutate some buffers before a size error. | Conflicting discriminator shapes raise before any local buffer is touched. |

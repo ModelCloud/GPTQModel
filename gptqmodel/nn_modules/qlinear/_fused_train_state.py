@@ -56,7 +56,12 @@ def _replace_tensor(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
 
 
 def restore_fused_train_state(module: nn.Module) -> bool:
-    """Restore checkpoint-packed tensors captured before a fused transform."""
+    """Restore checkpoint-packed tensors captured before a fused transform.
+
+    The live operands return to the checkpoint layout, so any state that
+    describes the inference-only runtime layout is discarded as well. The next
+    forward transforms the module again.
+    """
 
     if getattr(module, "_suspend_fused_train_restore", False):
         return False
@@ -73,7 +78,28 @@ def restore_fused_train_state(module: nn.Module) -> bool:
         if tensor is not None:
             _replace_tensor(module, name, tensor)
     discard_fused_train_state(module)
+    reset_fused_runtime_state(module)
     return True
+
+
+def reset_fused_runtime_state(module: nn.Module) -> None:
+    """Forget that the live operands are in a kernel's runtime layout.
+
+    This only drops derived state. The packed tensors themselves are left
+    untouched; a later checkpoint load or explicit restore decides their
+    layout.
+    """
+
+    for name, value in (
+        ("linear_mode", None),
+        ("torch_fused_op", None),
+        ("scales_and_zeros", None),
+        ("_cpu_transformed", False),
+        ("_cpu_transform_dtype", None),
+        ("_fused_state_key", None),
+    ):
+        if hasattr(module, name):
+            setattr(module, name, value)
 
 
 def discard_fused_train_state(module: nn.Module) -> None:
@@ -200,6 +226,7 @@ __all__ = [
     "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",
+    "reset_fused_runtime_state",
     "runtime_state_matches_live",
     "restore_fused_train_state",
     "state_dict_matches_checkpoint_layout",

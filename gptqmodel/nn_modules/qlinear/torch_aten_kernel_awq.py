@@ -203,11 +203,6 @@ class TorchAtenAwqLinear(AWQuantLinear):
     _refresh_fused_state = TorchAtenLinear._refresh_fused_state
 
     def clear_weight_cache(self):
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.scales_and_zeros = None
-            self._cpu_transformed = False
-            self._cpu_transform_dtype = None
         self._fused_state_key = None
         self._refresh_fused_state()
 

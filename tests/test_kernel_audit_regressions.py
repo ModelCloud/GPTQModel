@@ -104,10 +104,13 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     layer.__dict__.pop("_suspend_fused_train_restore")
 
     layer.to(dtype=torch.bfloat16)
-    assert tuple(layer.qweight.shape) == original_shape
+    # A move invalidates derived state but keeps the live runtime layout; only
+    # the explicit training resume restores the checkpoint snapshot.
+    assert tuple(layer.qweight.shape) == (16, 16)
     assert layer.scales.dtype == torch.bfloat16
 
     layer.train()
+    assert tuple(layer.qweight.shape) == original_shape
     x.requires_grad_(True)
     out = layer(x)
     assert str(getattr(layer.linear_mode, "name", layer.linear_mode)).upper() == "TRAIN"
