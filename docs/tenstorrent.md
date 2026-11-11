@@ -468,7 +468,7 @@ shows where the time really is:
 
 The dequant is ~20x the GEMM it feeds, so **every forward re-expands the packed
 nibbles for nothing**. That, not transfer volume, is the optimisation target;
-see [the architecture page](../hw/tenstorrent.md#7-what-this-implies-for-gptq-alignment).
+see [the architecture page](../hw/tenstorrent.md#8-what-this-implies-for-gptq-alignment).
 
 ### What this does not fix
 

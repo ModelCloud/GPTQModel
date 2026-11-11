@@ -79,7 +79,52 @@ Two consequences that shape kernel design:
   GPTQ kernel chooses HiFi4 only because measurement showed it removes a real
   accuracy floor; it is not free.
 
-## 3. Memory hierarchy
+## 3. Native dtypes on the p300c
+
+Only the FPU formats are multiply-accelerated. Measured on this card
+(`ttnn.linear` on a `256x256` tile tensor, plus elementwise multiply):
+
+| dtype | tile alloc | matrix engine (`ttnn.linear`) | elementwise mul |
+| --- | --- | --- | --- |
+| `bfloat16` | ok | **yes** (0.085 ms) | yes |
+| `bfloat8_b` | ok | **yes** (0.111 ms) | yes |
+| `bfloat4_b` | ok | **yes** (0.095 ms) | yes |
+| `float32` | ok | **yes** (0.086 ms) | yes |
+| `int32` | ok | **no** | yes |
+| `uint32` | ok | **no** | yes |
+| `uint16` | ok | **no** | yes |
+| `uint8` | ok | **no** | **no** |
+
+What that means, and where the trap is:
+
+- **The FPU computes on `bfloat16` (Float16_b) or `float32`** (**documented**,
+  `tech_reports/matrix_engine`). `float32` accumulation is opt-in via
+  `fp32_dest_acc_en` and halves destination-register capacity, so it costs tile
+  throughput.
+- **`bfloat8_b` / `bfloat4_b` are storage formats, not compute formats.** The
+  matrix engine does not multiply them natively; they are unpacked to BF16 by
+  TRISC0 before math (**documented**, `tech_reports/data_formats`). `ttnn.linear`
+  accepting them means the conversion happens for you, not that the multiply is
+  free. They halve/quarter memory traffic and L1 footprint at a precision cost.
+- **Integer dtypes cannot use the matrix engine at all.** `int32`, `uint32`,
+  `uint16` and `uint8` allocate as tiles and support elementwise work, but
+  `ttnn.linear` fails outright. Integer work runs on the **SFPU**, which is a
+  vector unit, not the wide multiply array.
+- **`uint8` is the weakest**: even elementwise multiply fails.
+
+This is the mechanism behind the GPTQ dequant cost measured in section 7. The
+packed weight words are `uint32`, and extracting nibbles
+(`logical_right_shift` + `bitwise_and`, both measured `ok`) is inherently SFPU
+work. So the dequant is not merely "many ops" -- it is many **integer** ops on
+a unit that is not the fast path, followed by a BF16 GEMM that is dwarfed by
+them. Doing that expansion once per load instead of once per forward removes
+~85 % of a layer's cost; doing it in `uint32` on every token is the worst case.
+
+Rule for TT kernels here: **keep hot compute in `bfloat16`.** Use block floats
+only to cut memory traffic, use integer tiles only for bit manipulation, and
+never put an integer dtype on the multiply path.
+
+## 4. Memory hierarchy
 
 | Level | Size | Notes |
 | --- | --- | --- |
@@ -99,7 +144,7 @@ Allocation rules that leak into correctness and performance (**documented**,
   places chosen shards in chosen banks. Sharding is how a tensor is kept in
   L1 across the core grid instead of streaming from DRAM.
 
-## 4. NoC (network-on-chip)
+## 5. NoC (network-on-chip)
 
 (**documented**, `BlackholeBringUpProgrammingGuide.md`, `tt-isa-documentation`)
 
@@ -118,7 +163,7 @@ that is not a multiple of 64 B pays extra transactions. Multicast is what lets a
 weight tile reach many cores without re-reading DRAM per core, and strided /
 L-shaped patterns exist to match how a tensor is actually sharded.
 
-## 5. Chip topology and mesh
+## 6. Chip topology and mesh
 
 Tensix, Ethernet, DRAM and PCIe tiles are arranged on a 2D grid with a torus-like
 NoC. Tiles are addressable by coordinate, so "put this shard on that core" is a
@@ -128,7 +173,7 @@ Multiple chips form a **mesh**; `TT-Fabric` programs the inter-chip links and
 collectives (`tech_reports/TT-Fabric/`). For GPTQ this is what makes tensor
 parallelism possible: `all_gather` across a `1x4` mesh.
 
-## 6. Measured on this host
+## 7. Measured on this host
 
 `tt-quietbox`: 4x p300c, firmware 19.17.1, KMD 2.12.0, TT-Metal plugin
 `1.5.0.dev20260831`.
@@ -178,7 +223,7 @@ Consequence for the residency work: keeping activations on device removes the
 5.26 ms, identical output). An earlier 8.6x figure was an artefact of timing
 first calls, which include a one-off weight upload, and should be disregarded.
 
-## 7. What this implies for GPTQ alignment
+## 8. What this implies for GPTQ alignment
 
 Ordered by the measured payoff:
 
@@ -200,8 +245,12 @@ Ordered by the measured payoff:
    native kernel pays it to remove a measured accuracy floor on real data.
 6. **Batch beats round trips.** Since a crossing is 0.12 ms and a dequant is
    1.27 ms, reducing round trips buys far less than removing the dequant.
+7. **Keep the hot path in `bfloat16`.** Integer tiles have no matrix engine, so
+   an integer op between two GEMMs costs a format change and runs on the SFPU.
+   Section 3 is the support matrix; do not put `int32`/`uint32` on the compute
+   path, only on the bit-manipulation path.
 
-## 8. Qualified host
+## 9. Qualified host
 
 | Item | Validated value |
 | --- | --- |
@@ -220,7 +269,7 @@ All four cards report operating DRAM, passing GDDR training and BIST, and zero
 corrected or uncorrected GDDR errors. `tt-smi 6.8.1` enumerates four p300c
 boards once PCIe bifurcation is set. No firmware update was required.
 
-## 9. Runtime identity
+## 10. Runtime identity
 
 ```text
 torch                    2.11.0+cpu
@@ -244,7 +293,7 @@ tree is `v0.83.0-dev20261108`, while the installed plugin bundles tt-metal from
 **2026-08-20**. Features present in the source tree (for example
 `TT_METAL_TDP_LIMIT_WATTS`) do not exist in the installed binaries.
 
-## 10. Verification
+## 11. Verification
 
 The opt-in hardware test executes the real `XLALinear` on each card and compares
 it with an independent CPU unpack/dequantize oracle:
@@ -273,7 +322,7 @@ opt-in hardware gate is enabled.
 Run them under the thermal watchdog, which kills at 88 °C:
 `TTWATCH_MAX_C=88 python /home/ttuser/tt-reboot/ttwatch.py -- python <script>`.
 
-## 11. Firmware tooling
+## 12. Firmware tooling
 
 `tt-flash` writes a board firmware bundle or SPI image. It belongs in the
 maintenance toolchain, not the inference loop. The p300c bundle format is
