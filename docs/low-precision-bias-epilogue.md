@@ -40,6 +40,50 @@ flowchart TD
     class N failure
 ```
 
+Two control flows decide whether the wide path is available at all, and each
+needs its own view.
+
+```mermaid
+flowchart TD
+    A["Checkpoint load"] --> B["named_modules scan for bias names"]
+    B --> C{"bias present and module is FP8, GGUF or VPTQ?"}
+    C -- "No" --> P["FP4 decoder path"]
+    C -- "Yes" --> E["keep_in_fp32_modules: FP16 load keeps FP32"]
+    E --> F{"FP8, GGUF or VPTQ?"}
+    F -- "Yes" --> G["fp32_bf16_buffer_names: re-read as FP32 after a BF16 load"]
+    F -- "No" --> H["FP16 preservation only"]
+    G --> I["Forward sees the stored FP32 value"]
+    H --> I
+    P --> Q{"_build_fp4_forward_module: checkpoint bias tensor?"}
+    Q -- "Yes" --> R["register the bias at its stored width, no dtype cast"]
+    Q -- "No" --> S["bias=None"]
+    R --> I
+    D["Accelerate narrows an unlisted buffer to the requested dtype"] --> J["Failure path: VPTQ bias -65537 becomes FP16 -inf or BF16 -65536"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class D,J failure
+```
+
+FP4 does not use those loader lists. `_build_fp4_forward_module`
+(`models/base.py:3831`) registers the checkpoint bias at its stored width when
+it builds `TorchFP4Linear` (`models/base.py:3871`), so the forward can still
+choose the wide epilogue. The loader lists cover the quantized-module path only.
+
+```mermaid
+flowchart TD
+    A["bias_narrows_losslessly(bias, dtype)"] --> B{"bias.dtype == dtype?"}
+    B -- "Yes" --> C["True: exact by construction"]
+    B -- "No" --> D{"torch.compiler.is_compiling()?"}
+    D -- "Yes" --> E["False: trace the wide epilogue"]
+    D -- "No" --> F{"bias on cuda and stream capturing?"}
+    F -- "Yes" --> E
+    F -- "No" --> G["torch.equal on FP64 casts: read live values"]
+    G --> H{"Values identical?"}
+    H -- "Yes" --> C
+    H -- "No" --> E
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class E failure
+```
+
 `linear_wide_bias` keeps the multiply and the bias in FP32 and rounds once.
 On NVIDIA CUDA it requests an FP32 output from `torch.mm` (`out_dtype`), so the
 tensor-core operands stay FP16/BF16 and no expanded FP32 weight copy is
@@ -56,7 +100,8 @@ FP32-output CUDA ops have no autograd derivative.
 ## Before and after
 
 The line references below point at the mechanism's location in the shipped code
-on this branch; the "Before" column quotes what that location did on `main`.
+on this branch; the "Before" column quotes what that location did before
+PR #3753.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
@@ -68,7 +113,7 @@ on this branch; the "Before" column quotes what that location did on `main`.
 | VPTQ bias buffer, `nn_modules/qlinear/vptq_torch.py:264-276` | Allocated at `codebook_dtype` | Allocated FP32 so the checkpoint range survives |
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:463-474` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
 | VPTQ checkpoint reload, `models/loader.py` | Requested FP16/BF16 dtype could narrow the saved FP32 bias | Keep the bias FP32 during load and restore it from the checkpoint if Accelerate narrows BF16 buffers |
-| FP4 checkpoint decoder, `models/base.py:3795-3802` | Bias narrowed to `target_dtype` when the wrapper is built | Bias kept at its stored width, so the forward can still go wide |
+| FP4 checkpoint decoder (`_build_fp4_forward_module`), `models/base.py:3871` | `bias.to(device=device, dtype=target_dtype)` before PR #3753 | Bias kept at its stored width, so the forward can still go wide |
 
 ## Dtype promotion contract
 
@@ -89,6 +134,7 @@ contains the other: BF16 has the exponent range and FP16 has the mantissa.
 | In-place bias write (`.data.copy_`, `.data.fill_`) | The representability check is recomputed per call; version counters do not see `.data` writes, so a cached answer would go stale |
 | VPTQ CUDA representability gate | Recomputed per forward; it compares live device values, so `.data` writes are always honoured |
 | CUDA graph capture or `torch.compile` | The value check would synchronize or create a data-dependent graph break; use the wide epilogue, which reads the live bias on every replay |
+| Captured/compiled layer with a representable FP32 bias | The gate cannot prove exactness while capturing or tracing, so it stays wide even though eager would take the cheap epilogue. The result is bitwise identical to eager; only the kernel changes (torchao NVFP4 becomes a per-call dequantize plus `linear_wide_bias`). Measured on a 4096x4096 layer: `2.02 ms` eager NVFP4 against `2.11 ms` wide, with a `1.99 ms` graph replay, and an eight-layer capture held `7.5 MiB` more private-pool memory per layer |
 | Autocast active | The wide helper disables autocast for its own GEMM so the product is not re-narrowed |
 | Bias needs broadcasting beyond the flattened output | `_fuse_bias_epilogue` declines; `linear_wide_bias` reshapes before adding, so type promotion and the broadcast shape are preserved |
 | Bias cannot be stored exactly in the FP32 buffer | `load_quant_result` raises instead of rounding silently |
@@ -103,6 +149,17 @@ paths return zero for FP16 and BF16, and a bias one unit below the cancelling
 value (which neither dtype can hold) is proven to leave the VPTQ CUDA fused
 kernel. Tests live in `tests/kernels/test_fp4_cpu.py`,
 `tests/kernels/test_linear_fp32_reduce.py`, and `tests/test_vptq.py`.
+
+The same gate is shared by the FP4 accelerator wrapper, which is covered with an
+FP32 `0.1` bias: that value is inexact in both FP16 and BF16, so both
+parameterizations take the wide epilogue and the capture/`fullgraph=True`
+escape hatch is pinned for each. A `-65536` fixture would not have tested BF16,
+because BF16 holds that value exactly and the forward would use the stock
+torchao `F.linear` instead. The replay also rewrites the bias through `.data`
+between replays, so a graph that baked in the captured value — or cached the
+representability answer, which the version counter cannot see — is caught. FP4
+is deliberately not advertised on ROCm, so that test exercises the portable
+dequantize-plus-`linear_wide_bias` branch on HIP.
 
 A 4096x4096 layer with a representable FP32 bias was measured with resident
 inputs. Keying the epilogue off the buffer dtype alone opened the FP32 path for
