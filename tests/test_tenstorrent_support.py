@@ -1021,6 +1021,55 @@ def test_int4_dequant_kernel_is_bit_exact_on_device():
 
 
 
+def test_tile_order_is_face_major():
+    """A 32x32 tile is four row-major 16x16 faces; memory order must reflect it."""
+
+    import importlib
+
+    kern = importlib.import_module("gptqmodel.utils.tt_int4_kernel")
+
+    order = kern.tile_order_indices()
+    assert order.numel() == 1024
+    # Face 0 is rows 0-15 x cols 0-15, row-major: the first row is 0..15.
+    assert order[:16].tolist() == list(range(16))
+    # Face 1 starts at memory offset 256 and is cols 16-31 of row 0.
+    assert order[256].item() == 16
+    # Faces are contiguous 256-element blocks, and the mapping is a permutation.
+    assert sorted(order.tolist()) == list(range(1024))
+
+    values = torch.arange(1024)
+    permuted = kern.permute_to_tile_order(values)
+    # Inverting the permutation recovers the logical order.
+    recovered = torch.empty_like(permuted)
+    recovered[order] = permuted
+    assert torch.equal(recovered, values)
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_fused_tile_path_is_bit_exact_on_device():
+    """BRISC dequant into an L1 CB, TRISC consume, no dense tile in DRAM."""
+
+    from gptqmodel.utils.tt_int4_kernel import (
+        bf16_truncate,
+        run_fused_tile,
+    )
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    torch.manual_seed(6)
+    codes = torch.randint(0, 16, (1024,), dtype=torch.int64)
+    expected = bf16_truncate(0.0173 * (codes.to(torch.float32) - 7.0))
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        got = run_fused_tile(codes, 0.0173, 7, device=mesh.device)
+        assert torch.equal(got, expected), "fused tile path is not bit-exact"
+    finally:
+        close_mesh()
+
+
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
 @pytest.mark.parametrize("device_count", [1, 4])
 def test_actual_ttnn_linear_matches_torch_oracle(device_count):

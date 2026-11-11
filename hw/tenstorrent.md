@@ -387,6 +387,31 @@ passed per core, and that mechanism is verified correct for 2 cores but fails at
 configuration is a 1x1 grid looping over pages. The 1.18 MB output does not fit
 in 1464 KiB of L1 in one page, which is why the loop exists at all.
 
+### Fused data path now works (matmul still outstanding)
+
+The point of fusion is that the dense tile never reaches DRAM. That pipeline now
+exists and is bit-exact: the BRISC reads packed words, dequantizes them straight
+into an L1 circular buffer, the TRISC compute stage consumes that buffer through
+`copy_tile`/`pack_tile`, and only the finished tile is written out. Verified
+`torch.equal` true on a 32x32 tile.
+
+Two things had to be right, and both were learned the hard way:
+
+- **Tile memory order.** A `32x32` tile is four row-major `16x16` faces, so codes
+  must be permuted into `face0..face3` order before packing. Writing them
+  linearly gave `maxerr 0.2588` with every value in the wrong logical position;
+  after the permutation it is bit-exact. `tile_order_indices()` encodes it.
+- **Compute kernels need format init.** A TRISC kernel silently produced NaN
+  without `init_sfpu(in_cb, out_cb)`; the include is
+  `api/compute/eltwise_unary/eltwise_unary.h`.
+
+Dispatch gate cleared for the compute path: `ComputeConfigDescriptor` works from
+`generic_op`, so reader/compute/writer triples can be launched from Python.
+
+Remaining for the objective: replace the copy with the FPU matmul
+(`copy_tile` the activation, `mm_init`/`matmul_tiles` against the dequantized
+weight tile in `SrcA`), then widen to a full layer over the grid.
+
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores
 and pages. What exists today is the dequant stage on one core.
