@@ -69,7 +69,11 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
-@pytest.mark.parametrize("m,id_dtype", [(512, torch.int32), (1536, torch.int64), (3072, torch.int32)])
+@pytest.mark.parametrize("m,id_dtype", [
+    (256, torch.int64), (312, torch.int32), (313, torch.int64),
+    (512, torch.int32), (513, torch.int64), (1536, torch.int64),
+    (2048, torch.int32), (2049, torch.int64), (3072, torch.int32),
+])
 def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
     device = _cuda()
     generator = torch.Generator(device=device).manual_seed(10101 + m)

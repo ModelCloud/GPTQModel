@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--json-out", type=Path, required=True)
     parser.add_argument("--repeat", type=int, default=16)
     parser.add_argument("--rounds", type=int, default=4)
+    parser.add_argument("--ids-json", type=Path,
+                        help="Optional JSON array of token IDs from a real prompt, at least 3072 entries")
     args = parser.parse_args()
     if args.repeat < 1 or args.rounds < 1:
         parser.error("repeat and rounds must be positive")
@@ -34,6 +36,12 @@ def main() -> None:
         parser.error("use PYTHON_GIL=0 with exactly one visible CUDA GPU")
     if torch.cuda.get_device_capability(0)[0] < 8:
         parser.error("SM80 or newer is required")
+    sampled_ids = None
+    if args.ids_json is not None:
+        sampled_ids = json.loads(args.ids_json.read_text())
+        if (not isinstance(sampled_ids, list) or len(sampled_ids) < 3072
+                or any(type(value) is not int or value < 0 for value in sampled_ids)):
+            parser.error("--ids-json must be a nonnegative integer array of at least 3072 IDs")
     nf12.load()
     index = json.loads((args.checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
     report = {
@@ -42,6 +50,9 @@ def main() -> None:
         "torch": torch.__version__,
         "gil_enabled": sys._is_gil_enabled(),
         "native_source_key": library_directory().parent.name,
+        "ids_kind": "prompt_prefix" if sampled_ids is not None else "uniform_random",
+        "ids_sha256": (hashlib.sha256(json.dumps(sampled_ids, separators=(",", ":")).encode()).hexdigest()
+                       if sampled_ids is not None else None),
         "checkpoint": str(args.checkpoint),
         "method": "same IDs and released BF16 weight; CUDA graph; paired ABBA rounds",
         "repeat": args.repeat,
@@ -66,9 +77,15 @@ def main() -> None:
             "dense_weight_bytes": weight.nbytes, "packed_weight_bytes": packed.nbytes,
             "cases": [],
         }
+        if sampled_ids is not None and any(value >= weight.shape[0] for value in sampled_ids[:3072]):
+            parser.error("--ids-json contains an ID outside the embedding vocabulary")
         for m in rows:
-            generator = torch.Generator(device="cuda:0").manual_seed(30911 + m)
-            ids = torch.randint(weight.shape[0], (m,), device="cuda:0", dtype=torch.int32, generator=generator)
+            if sampled_ids is None:
+                generator = torch.Generator(device="cuda:0").manual_seed(30911 + m)
+                ids = torch.randint(weight.shape[0], (m,), device="cuda:0", dtype=torch.int32,
+                                    generator=generator)
+            else:
+                ids = torch.tensor(sampled_ids[:m], device="cuda:0", dtype=torch.int32)
             dense_fn = partial(F.embedding, ids, weight)
             nf12_fn = partial(nf12.embedding, ids, packed)
             expected, actual = dense_fn(), nf12_fn()

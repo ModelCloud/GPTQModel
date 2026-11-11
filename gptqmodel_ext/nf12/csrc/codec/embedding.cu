@@ -64,15 +64,18 @@ __device__ __forceinline__ uint2 decode_row_half(const Group& g, uint32_t base_x
   return upper ? make_uint2(r[1], r[3]) : make_uint2(r[0], r[2]);
 }
 
-template <int Quads, bool Grid2D, typename Id>
+template <int Quads, bool Grid2D, int IdsPerCTA, typename Id>
 __global__ void __launch_bounds__(4 * Quads) embedding_kernel(EmbeddingParams p, const Id* __restrict__ ids) {
   const int lane = threadIdx.x & 31;
   const uint32_t quad = threadIdx.x >> 2;
   const uint32_t id_block = Grid2D ? blockIdx.x : blockIdx.x / p.kb_chunks;
   const uint32_t chunk = Grid2D ? blockIdx.y : blockIdx.x - id_block * p.kb_chunks;
-  const uint32_t local = Grid2D ? 0u : quad / p.kb_span;
-  const int64_t kb = int64_t(chunk) * Quads + (quad - local * p.kb_span);
-  const int64_t i = Grid2D ? id_block : int64_t(id_block) * p.ids_per_block + local;
+  constexpr int kQuadsPerId = Quads / IdsPerCTA;
+  const uint32_t local = Grid2D ? quad / kQuadsPerId : quad / p.kb_span;
+  const int64_t kb = Grid2D ? int64_t(chunk) * kQuadsPerId + (quad % kQuadsPerId)
+                            : int64_t(chunk) * Quads + (quad - local * p.kb_span);
+  const int64_t i = Grid2D ? int64_t(id_block) * IdsPerCTA + local
+                           : int64_t(id_block) * p.ids_per_block + local;
   const bool active = (Grid2D || local < p.ids_per_block) && kb < p.k_blocks && i < p.num_ids;
 
   // v0: column pairs t of output chunks 0-3, v1: of chunks 4-7 (8 columns each).
@@ -115,17 +118,18 @@ cudaError_t launch_embedding(EmbeddingParams p, const Id* ids, cudaStream_t stre
   if (kb_chunks > codec::kMaxGridX / id_blocks) return cudaErrorInvalidValue;
   p.kb_chunks = static_cast<uint32_t>(kb_chunks);
   const dim3 grid(static_cast<unsigned>(id_blocks * kb_chunks));
-  embedding_kernel<Quads, false><<<grid, 4 * Quads, 0, stream>>>(p, ids);
+  embedding_kernel<Quads, false, 1><<<grid, 4 * Quads, 0, stream>>>(p, ids);
   return cudaGetLastError();
 }
 
-template <int Quads, typename Id>
+template <int Quads, int IdsPerCTA, typename Id>
 cudaError_t launch_embedding_prefill(EmbeddingParams p, const Id* ids, cudaStream_t stream) {
-  // Here K=5120 and IDs are 256..4095, so every CTA owns one ID and
-  // grid.y spans only ceil(80/Quads) column blocks. The compiler can then
-  // remove both runtime divisions from the common prefill path.
-  const dim3 grid(static_cast<unsigned>(p.num_ids), static_cast<unsigned>((p.k_blocks + Quads - 1) / Quads));
-  embedding_kernel<Quads, true><<<grid, 4 * Quads, 0, stream>>>(p, ids);
+  // K=5120 has 80 column blocks. Pack multiple IDs into a CTA where useful
+  // while retaining the two-dimensional grid and exact BF16 row bits.
+  constexpr int kQuadsPerId = Quads / IdsPerCTA;
+  const dim3 grid(static_cast<unsigned>((p.num_ids + IdsPerCTA - 1) / IdsPerCTA),
+                  static_cast<unsigned>((p.k_blocks + kQuadsPerId - 1) / kQuadsPerId));
+  embedding_kernel<Quads, true, IdsPerCTA><<<grid, 4 * Quads, 0, stream>>>(p, ids);
   return cudaGetLastError();
 }
 
@@ -152,11 +156,14 @@ cudaError_t embedding(const uint8_t* packed, const uint4* escapes, uint32_t num_
     int device = 0;
     if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
     if (device_info(device).sm_arch == 80) {
-      if (num_ids <= 1024)
-        return ids32 != nullptr ? launch_embedding_prefill<32>(p, ids32, stream)
-                                : launch_embedding_prefill<32>(p, ids64, stream);
-      return ids32 != nullptr ? launch_embedding_prefill<16>(p, ids32, stream)
-                              : launch_embedding_prefill<16>(p, ids64, stream);
+      if (num_ids <= 512)
+        return ids32 != nullptr ? launch_embedding_prefill<32, 8>(p, ids32, stream)
+                                : launch_embedding_prefill<32, 8>(p, ids64, stream);
+      if (num_ids <= 2048)
+        return ids32 != nullptr ? launch_embedding_prefill<32, 16>(p, ids32, stream)
+                                : launch_embedding_prefill<32, 16>(p, ids64, stream);
+      return ids32 != nullptr ? launch_embedding_prefill<16, 1>(p, ids32, stream)
+                              : launch_embedding_prefill<16, 1>(p, ids64, stream);
     }
   }
   // Larger CTAs improve cold, many-ID lookups on SM80 and SM100. Keep the

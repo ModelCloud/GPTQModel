@@ -1,0 +1,117 @@
+{
+  "gpu": "NVIDIA PG506-230",
+  "compute_capability": [
+    8,
+    0
+  ],
+  "torch": "2.15.0+cu132",
+  "gil_enabled": false,
+  "native_source_key": "57f012675277782c45e14b4fc1032effbf7ebf2e84ef471c467825dead8b82a4",
+  "ids_kind": "prompt_prefix",
+  "ids_sha256": "42a0ef9ee24e9b4ef75ee58b80a40cfdd597cbf1dd75a94b3d502eaa5cd4730e",
+  "checkpoint": "/fast/model/DeepSeek-V4.1-Flash-1017",
+  "method": "same IDs and released BF16 weight; CUDA graph; paired ABBA rounds",
+  "repeat": 16,
+  "rounds": 4,
+  "families": [
+    {
+      "name": "embedding",
+      "weight_key": "embed.weight",
+      "weight_sha256": "aa1ac979edab508950a871c370fa645a875203a1a35c20ba9c1d45bb1ed46e3c",
+      "shape_nk": [
+        129280,
+        5120
+      ],
+      "dense_weight_bytes": 1323827200,
+      "packed_weight_bytes": 995314416,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.88,
+          "nf12_us": 2.752,
+          "speedup": 1.0465,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 6,
+          "dense_us": 5.952,
+          "nf12_us": 2.816,
+          "speedup": 2.1136,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 312,
+          "dense_us": 4.416,
+          "nf12_us": 5.632,
+          "speedup": 0.7841,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 313,
+          "dense_us": 4.416,
+          "nf12_us": 5.568,
+          "speedup": 0.7931,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 512,
+          "dense_us": 5.504,
+          "nf12_us": 7.072,
+          "speedup": 0.7783,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 1536,
+          "dense_us": 10.784,
+          "nf12_us": 14.816,
+          "speedup": 0.7279,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 3072,
+          "dense_us": 20.288,
+          "nf12_us": 26.4,
+          "speedup": 0.7685,
+          "exact_bf16_bits": true
+        }
+      ]
+    },
+    {
+      "name": "markov-embedding",
+      "weight_key": "mtp.2.markov_head.embed.weight",
+      "weight_sha256": "af4448e3d7360d955b38316c7d0fde55d791eb39ad59eb09e67c3faeb0b4ad9b",
+      "shape_nk": [
+        129280,
+        256
+      ],
+      "dense_weight_bytes": 66191360,
+      "packed_weight_bytes": 49772928,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.688,
+          "nf12_us": 2.624,
+          "speedup": 1.0244,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 5,
+          "dense_us": 5.056,
+          "nf12_us": 2.688,
+          "speedup": 1.881,
+          "exact_bf16_bits": true
+        }
+      ]
+    }
+  ],
+  "ids_fixture": {
+    "source_suite": "Inference-Ultra lite/datasets/code_b1_b12_256k",
+    "fixture": "b10_r0",
+    "source_sha256": "3d201da0967be4869199ae8d913aea179336fe77704436d76046bb092016069c",
+    "token_prefix_length": 3072,
+    "distinct_ids": 413,
+    "ids_file_sha256": "9b847720d81444bc7ca32b0db32ab939bc40350ac700f93c10242f85566937af",
+    "note": "First 3072 source-code token IDs before service request header; not exact served prompt IDs",
+    "ids_file": "nf12-lite-cuda-token-ids-20261111.json"
+  }
+}
