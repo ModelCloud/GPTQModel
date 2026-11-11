@@ -1105,6 +1105,8 @@ Only add `:in=` tags after verifying them against a real (tiny, CPU) model with 
 
 ### Pair with Evaluation for post-quantization LLM Benchmarks 📊
 
+For kernel timing claims, follow the [A/B benchmark methodology](docs/benchmark-methodology.md).
+
 GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a benchmarking toolkit with 153 benchmark suites.
 Use Evalution to measure post-quantization accuracy recovery instead of relying only on narrow regression language-model metrics.
 
