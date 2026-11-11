@@ -24,7 +24,7 @@ from safetensors import safe_open
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM = Path("/root/nf12-fused-embed-gpu7")
+UPSTREAM = Path(os.environ.get("NF12_TUNED_CHECKOUT", "/root/nf12-fused-embed-gpu7")).resolve()
 # Import the actual tuned public op from the other checkout, then extend only
 # package search with this worktree's explicitly experimental helper. No source
 # file or package state in the upstream checkout is modified.

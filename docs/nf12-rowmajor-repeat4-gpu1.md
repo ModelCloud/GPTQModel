@@ -118,6 +118,8 @@ CUDA_VISIBLE_DEVICES=3 PYTHON_GIL=0 PYTHONPATH=/root/nf12-next-gpu1 \
 The command loads the tuned public HC4 operator from the GPU7 checkout in the
 same process and writes its report in this worktree. Its SM80 and one-visible-
 GPU guards reject a wrong assignment.
+On another host, set `NF12_TUNED_CHECKOUT` to a checkout of GPTQModel
+PR #3777 before running the command.
 
 Source: [experimental API](../gptqmodel_nf12/experimental_rowmajor.py),
 [native kernel](../gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu),
