@@ -566,7 +566,7 @@ def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expe
     model = LlamaForCausalLM(config).to(dtype=expected_dtype).eval()
     parent = model.model.layers[0].mlp
     for name in ("gate_proj", "up_proj"):
-        projection, _weight, _bias = _projection(
+        projection, _weight, _bias, _checkpoint = _projection(
             cls, getattr(parent, name), expected_dtype, "cpu"
         )
         setattr(parent, name, projection)
@@ -628,7 +628,9 @@ def _transformed_layer(cls, *, seed=17):
     config._attn_implementation = "eager"
     torch.manual_seed(seed)
     model = LlamaForCausalLM(config).to(dtype).eval()
-    layer, _weight, _bias = _projection(cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu")
+    layer, _weight, _bias, _checkpoint = _projection(
+        cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu"
+    )
     x = torch.randn(2, 5, 256, dtype=dtype)
 
     class _Holder(torch.nn.Module):
@@ -932,7 +934,9 @@ def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_pat
     parent = model.model.layers[0].mlp
     modules = []
     for name in ("gate_proj", "up_proj"):
-        projection, _weight, _bias = _projection(cls, getattr(parent, name), dtype, "cpu")
+        projection, _weight, _bias, _checkpoint = _projection(
+            cls, getattr(parent, name), dtype, "cpu"
+        )
         setattr(parent, name, projection)
         modules.append(projection)
 
