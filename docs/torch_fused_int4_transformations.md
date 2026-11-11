@@ -321,7 +321,8 @@ The regression is pinned by
 `::test_checkpoint_layout_gate_uses_discriminating_operands`, plus partial-load,
 save, and inference-buffer regressions. The load path was introduced in
 [PR #3765](https://github.com/ModelCloud/GPTQModel/pull/3765), then refined in
-[PR #3769](https://github.com/ModelCloud/GPTQModel/pull/3769).
+[PR #3769](https://github.com/ModelCloud/GPTQModel/pull/3769). Partial-load
+classification was added in [PR #3770](https://github.com/ModelCloud/GPTQModel/pull/3770).
 
 ## Activation permutation and fused matmul
 
