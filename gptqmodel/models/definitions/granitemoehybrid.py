@@ -37,7 +37,7 @@ class GraniteMoeHybridQModel(BaseQModel):
                 },
             },
             "shared_mlp": ("input_linear:0", "output_linear:1"),
-        }
+        },
     ]
 
     def monkey_patch(self):
@@ -45,7 +45,12 @@ class GraniteMoeHybridQModel(BaseQModel):
 
         mamba_layer_cls = type(self.model.model.layers[0].mamba)
         original_forward = mamba_layer_cls.forward
-        torch_forward_params = frozenset(signature(mamba_layer_cls.torch_forward).parameters)
+        # Older Transformers releases exposed a separate eager `torch_forward`
+        # next to the fast `forward`. Newer releases folded the eager
+        # implementation into `forward` and removed the symbol, so probe the
+        # installed class instead of assuming either layout.
+        torch_forward = getattr(mamba_layer_cls, "torch_forward", original_forward)
+        torch_forward_params = frozenset(signature(torch_forward).parameters)
 
         def granitemoehybrid_mamba_forward(
             layer_self,
@@ -64,9 +69,9 @@ class GraniteMoeHybridQModel(BaseQModel):
                 dtype = hidden_states.dtype
                 if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
                     hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-                # GraniteMoeHybridMambaLayer.torch_forward() dropped cache_position in
-                # newer Transformers releases, so only pass kwargs the installed class
-                # explicitly supports.
+                # The eager forward dropped cache_position in newer Transformers
+                # releases, so only pass kwargs the installed callable explicitly
+                # supports.
                 torch_forward_kwargs = {}
                 if "cache_params" in torch_forward_params:
                     torch_forward_kwargs["cache_params"] = cache_params
@@ -74,7 +79,7 @@ class GraniteMoeHybridQModel(BaseQModel):
                     torch_forward_kwargs["cache_position"] = cache_position
                 if "attention_mask" in torch_forward_params:
                     torch_forward_kwargs["attention_mask"] = attention_mask
-                return layer_self.torch_forward(hidden_states, **torch_forward_kwargs)
+                return torch_forward(layer_self, hidden_states, **torch_forward_kwargs)
 
             return original_forward(
                 layer_self,
