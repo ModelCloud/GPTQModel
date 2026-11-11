@@ -10,8 +10,13 @@ there. The native TTNN backend cannot do that implicitly, because only the
 quantized linear layers run on the Tensix cores: everything between them
 (attention matmuls, softmax, norms, residual adds) is ordinary PyTorch on the
 host. A ``forward`` that takes a CPU tensor and returns a CPU tensor therefore
-crosses PCIe **twice per layer**, and for OPT-125M that is ~144 crossings per
-token, which is what the measured 0.3 s forward is actually paying for.
+crosses PCIe **twice per layer** — ~144 crossings per token for OPT-125M.
+
+Measure carefully before optimising those crossings: on a p300c one is about
+0.12 ms at decode sizes, while re-expanding the packed weights costs ~1.27 ms
+per layer. Residency removes the former (measured 1.13x on a warmed chain), so
+it is worth having for the contract and the upload count, but the dequant is
+where the time is.
 
 This module gives the native path the missing piece: an activation that lives
 on the device across several layers. :class:`TTDeviceTensor` is an opaque

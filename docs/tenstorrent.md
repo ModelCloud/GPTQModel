@@ -421,8 +421,11 @@ TT-Metal enforces a single runtime per chip. Consequences worth knowing:
 
 `TTNNLinear.forward` takes a CPU tensor and returns one, because every op
 between two quantized layers (attention matmuls, softmax, norms, residual adds)
-is ordinary PyTorch on the host. For OPT-125M that is ~144 crossings per token,
-and that — not Tensix throughput — is what a 0.3 s forward was paying for.
+is ordinary PyTorch on the host. For OPT-125M that is ~144 crossings per token.
+
+A crossing is cheap though — measured 0.12 ms for a decode-sized activation — so
+the round trips are **not** the dominant cost. The measured per-layer cost is
+dominated by dequantization; see the resident-activation section below.
 
 ## Resident activations: the optimal native flow
 
@@ -442,14 +445,30 @@ so a chain can be built without the convenience wrapper. Device-side glue
 (`apply_activation`, `add_residual`) keeps the value resident; anything not in
 `DEVICE_ACTIVATIONS` raises rather than silently falling back to the host.
 
-Measured on `tt-quietbox`, four consecutive `768x768` GPTQ layers, batch 8:
+Measured on `tt-quietbox`, four consecutive `768x768` GPTQ layers, batch 8,
+**with both paths warmed** (warm-up matters: a first call also uploads the
+layer's packed weights, and counting that as "host path" cost produced a
+misleading 8.6x in an earlier revision of this page):
 
-| Path | Time | Uploads | Readbacks | Output |
-| --- | --- | --- | --- | --- |
-| per-layer `forward` | 45.4 ms | 4 | 4 | reference |
-| resident chain | **5.3 ms** | **1** | **1** | identical (`allclose`, normalised L1 `0.0`) |
+| Path | Time | Per layer | Uploads | Readbacks | Output |
+| --- | --- | --- | --- | --- | --- |
+| per-layer `forward` | 5.93 ms | 1.48 ms | 4 | 4 | reference |
+| resident chain | **5.26 ms** | 1.31 ms | **1** | **1** | identical (`allclose`, normalised L1 `0.0`) |
 
-That is **8.6x** from removing PCIe round trips alone.
+That is **1.13x**. Residency is worth having — one upload instead of four, and a
+cleaner contract — but it is not the main cost. A PCIe crossing on this part is
+only ~0.12 ms for a decode-sized activation, and a per-layer phase breakdown
+shows where the time really is:
+
+| Phase | Time | Share |
+| --- | --- | --- |
+| **dequant (nibble planes to BF16)** | **1.27 ms** | **85 %** |
+| `ttnn.linear` | 0.06 ms | 4 % |
+| upload / readback | 0.16 ms | 11 % |
+
+The dequant is ~20x the GEMM it feeds, so **every forward re-expands the packed
+nibbles for nothing**. That, not transfer volume, is the optimisation target;
+see [the architecture page](../hw/tenstorrent.md#7-what-this-implies-for-gptq-alignment).
 
 ### What this does not fix
 
