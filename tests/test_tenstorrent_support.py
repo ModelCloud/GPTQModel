@@ -451,6 +451,51 @@ def test_ttnn_dispatch_is_registered_and_kept_out_of_auto():
     assert ordered[:2] == [BACKEND.GPTQ_TT_XLA, BACKEND.GPTQ_TTNN][: len(ordered)]
 
 
+def test_native_ttnn_device_resolution_never_initializes_pjrt(monkeypatch):
+    """The native backend must not probe the XLA runtime during device selection.
+
+    ``expand_selector_device_family`` asks PJRT for an addressable device count,
+    which initializes the Tenstorrent PJRT plugin and claims every chip. TT-Metal
+    then cannot open its own mesh and ``GPTQ_TTNN`` is unusable through
+    ``GPTQModel.load``. Pin the failure closed without touching hardware.
+    """
+    from gptqmodel.models import loader as loader_module
+    from gptqmodel.utils import importer as importer_module
+    from gptqmodel.utils import torch as torch_module
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("the native TTNN path must not initialize PJRT")
+
+    calls = []
+
+    def _record(device):
+        calls.append(device)
+        return device
+
+    monkeypatch.setattr(loader_module, "expand_selector_device_family", _record)
+    monkeypatch.setattr(torch_module, "require_xla_runtime", _explode)
+    monkeypatch.setattr(importer_module, "require_xla_runtime", _explode, raising=False)
+
+    resolved = loader_module._resolve_default_layerwise_device(DEVICE.XLA, BACKEND.GPTQ_TTNN)
+    assert resolved == DEVICE.XLA, resolved
+    assert calls == [], "the native TTNN path must not expand through PJRT"
+
+    # The XLA backend still expands through the PJRT-owned ordinal list.
+    expanded = loader_module._resolve_default_layerwise_device(DEVICE.XLA, BACKEND.GPTQ_TT_XLA)
+    assert calls == [DEVICE.XLA], calls
+    assert expanded == DEVICE.XLA, expanded
+
+
+def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch):
+    from gptqmodel.utils import importer as importer_module
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("auto_select_device must not probe XLA for GPTQ_TTNN")
+
+    monkeypatch.setattr(importer_module, "is_xla_available", _explode)
+    assert importer_module.auto_select_device(None, BACKEND.GPTQ_TTNN) == DEVICE.XLA
+
+
 def test_ttnn_rejects_non_8_aligned_widths():
     from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
 

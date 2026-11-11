@@ -460,6 +460,11 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
     return ["cpu"] * num_gpus
 
 
+def _native_ttnn_backend(backend: BACKEND) -> bool:
+    """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
+    return backend in (BACKEND.GPTQ_TTNN,)
+
+
 def _resolve_default_layerwise_device(device, backend: BACKEND):
     """Keep explicit device sequences intact instead of collapsing singletons."""
     requested = _explicit_requested_devices(device)
@@ -467,6 +472,12 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         return tuple(requested)
     normalized = normalize_device_device_map(device, None)
     selected = auto_select_device(normalized, backend)
+    if _native_ttnn_backend(backend):
+        # ``expand_selector_device_family`` asks PJRT for an addressable device
+        # count, which initializes the Tenstorrent PJRT plugin and claims every
+        # chip. The native TTNN backend opens its own mesh and never consumes an
+        # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
+        return selected
     return expand_selector_device_family(selected)
 
 
