@@ -248,6 +248,64 @@ def test_fp32_prefill_crossover_matches_dense_torch_without_retained_weight(shap
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
+@pytest.mark.parametrize("m", (256, 384, 512, 3072))
+def test_fp32_main_gate_prefill_tensor_core_matches_torch_and_keeps_weight_packed(m):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(41591 + m)
+    weight = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    weight[0, 0] = -0.0
+    weight[0, 7] = 2.0**10
+    weight[-1, -1] = -(2.0**-20)
+    packed = nf12.encode(weight)
+    assert packed.num_escapes > 0
+    x = torch.randn((m, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((384,), generator=generator, device=device) * 0.01
+    expected = F.linear(x, weight.float(), bias)
+    actual = nf12.linear_fp32(x, packed, bias)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+    assert torch.equal(actual.topk(8, dim=-1).indices, expected.topk(8, dim=-1).indices)
+    sample_rows = torch.tensor((0, 1, m // 2, m - 1), device=device)
+    oracle = F.linear(x.index_select(0, sample_rows).double(), weight.double(), bias.double())
+    torch.testing.assert_close(actual.index_select(0, sample_rows).double(), oracle,
+                               rtol=2e-3, atol=2e-3)
+    changed = x.clone()
+    changed[m // 2].mul_(1.7)
+    changed_out = nf12.linear_fp32(changed, packed, bias)
+    torch.testing.assert_close(changed_out[m // 2],
+                               F.linear(changed[m // 2], weight.float(), bias),
+                               rtol=2e-3, atol=2e-3)
+    assert not torch.equal(changed_out[m // 2], actual[m // 2])
+    assert torch.equal(nf12.decode(packed).view(torch.int16), weight.view(torch.int16))
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    torch.cuda.current_stream().synchronize()
+    retained_before = torch.cuda.memory_allocated(device)
+    repeated = nf12.linear_fp32(x, packed, bias)
+    torch.cuda.current_stream().synchronize()
+    retained_after = torch.cuda.memory_allocated(device)
+    assert retained_after - retained_before <= repeated.nbytes + 1_048_576
+    del repeated
+    assert torch.cuda.memory_allocated(device) <= retained_before + 1_048_576
+
+
+def test_fp32_main_gate_prefill_tensor_core_graph_and_3d_input():
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(41599)
+    weight = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    packed = nf12.encode(weight)
+    x = torch.randn((2, 256, 5120), generator=generator, device=device) * 0.05
+    reference = F.linear(x, weight.float())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = nf12.linear_fp32(x, packed)
+    graph.replay()
+    torch.testing.assert_close(captured, reference, rtol=2e-3, atol=2e-3)
+    x.mul_(0.5)
+    graph.replay()
+    torch.testing.assert_close(captured, F.linear(x, weight.float()), rtol=2e-3, atol=2e-3)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
 def _moe_oracle(x, w13, w2, topk_weights, topk_ids):
     """Dense Torch arithmetic with the documented BF16 stage boundaries."""
     result = torch.zeros((x.shape[0], w2.shape[1]), dtype=torch.float32, device=x.device)

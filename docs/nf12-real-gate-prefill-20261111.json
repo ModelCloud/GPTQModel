@@ -1,0 +1,271 @@
+{
+  "schema": "gptqmodel-nf12-real-gate-prefill-v1",
+  "date_utc": "2026-11-11",
+  "checkpoint": "/fast/model/DeepSeek-V4.1-Flash-1017",
+  "hardware": "NVIDIA PG506-230 SM80, CUDA 13.2, PyTorch 2.15.0, PYTHON_GIL=0",
+  "benchmark": "40 real 384x5120 BF16 gates; GPU-resident Gaussian FP32 activations, sigma=0.05; 40 calls per captured CUDA graph, eight alternating-order timed replays; median microseconds per gate; cuBLAS TF32 disabled",
+  "results": [
+    {
+      "m": 256,
+      "gates": 40,
+      "times_us_per_gate": {
+        "candidate": 93.82399916648865,
+        "old_nf12": 93.82399916648865,
+        "dense_bf16_control": 86.31040155887604
+      },
+      "candidate_vs_old": 1.0,
+      "candidate_vs_dense": 0.9199181693984297,
+      "top8_mismatch_rows": 0,
+      "mismatch_details": [],
+      "total_route_rows": 10240,
+      "max_abs_vs_dense": 0.0,
+      "fp64_sample_candidate_mae": 2.4588710163816552e-08,
+      "fp64_sample_dense_mae": 2.4588710163816552e-08,
+      "fp64_closer_candidate": 0,
+      "fp64_closer_dense": 0,
+      "fp64_ties": 61440
+    },
+    {
+      "m": 384,
+      "gates": 40,
+      "times_us_per_gate": {
+        "candidate": 123.17439913749695,
+        "old_nf12": 128.5375952720642,
+        "dense_bf16_control": 121.02400064468384
+      },
+      "candidate_vs_old": 1.0435414840431285,
+      "candidate_vs_dense": 0.9825418389870718,
+      "top8_mismatch_rows": 1,
+      "mismatch_details": [
+        {
+          "key": "layers.22.ffn.gate.weight",
+          "row": 13,
+          "candidate_ids": [
+            159,
+            357,
+            250,
+            42,
+            327,
+            303,
+            151,
+            47
+          ],
+          "dense_ids": [
+            159,
+            357,
+            250,
+            42,
+            303,
+            327,
+            151,
+            47
+          ],
+          "fp64_ids": [
+            159,
+            357,
+            250,
+            42,
+            327,
+            303,
+            151,
+            47
+          ],
+          "candidate_max_abs_vs_fp64": 1.324938994073932e-07,
+          "dense_max_abs_vs_fp64": 1.4808563120194407e-07
+        }
+      ],
+      "total_route_rows": 15360,
+      "max_abs_vs_dense": 8.344650268554688e-07,
+      "fp64_sample_candidate_mae": 2.5133380285304522e-08,
+      "fp64_sample_dense_mae": 2.9110717778883615e-08,
+      "fp64_closer_candidate": 32171,
+      "fp64_closer_dense": 24791,
+      "fp64_ties": 4478
+    },
+    {
+      "m": 512,
+      "gates": 40,
+      "times_us_per_gate": {
+        "candidate": 106.63679838180542,
+        "old_nf12": 147.40480184555054,
+        "dense_bf16_control": 139.4432008266449
+      },
+      "candidate_vs_old": 1.3823070842560201,
+      "candidate_vs_dense": 1.3076461685147232,
+      "top8_mismatch_rows": 0,
+      "mismatch_details": [],
+      "total_route_rows": 20480,
+      "max_abs_vs_dense": 5.960464477539062e-07,
+      "fp64_sample_candidate_mae": 2.4711522699926816e-08,
+      "fp64_sample_dense_mae": 2.734821037405753e-08,
+      "fp64_closer_candidate": 31286,
+      "fp64_closer_dense": 25459,
+      "fp64_ties": 4695
+    },
+    {
+      "m": 3072,
+      "gates": 40,
+      "times_us_per_gate": {
+        "candidate": 449.61280822753906,
+        "old_nf12": 743.1423902511597,
+        "dense_bf16_control": 740.4543876647949
+      },
+      "candidate_vs_old": 1.652849689004126,
+      "candidate_vs_dense": 1.646871205880032,
+      "top8_mismatch_rows": 4,
+      "mismatch_details": [
+        {
+          "key": "layers.2.ffn.gate.weight",
+          "row": 2041,
+          "candidate_ids": [
+            355,
+            173,
+            348,
+            287,
+            149,
+            153,
+            188,
+            164
+          ],
+          "dense_ids": [
+            355,
+            173,
+            287,
+            348,
+            149,
+            153,
+            188,
+            164
+          ],
+          "fp64_ids": [
+            355,
+            173,
+            348,
+            287,
+            149,
+            153,
+            188,
+            164
+          ],
+          "candidate_max_abs_vs_fp64": 1.4964489347679688e-07,
+          "dense_max_abs_vs_fp64": 2.975810711181026e-07
+        },
+        {
+          "key": "layers.3.ffn.gate.weight",
+          "row": 1377,
+          "candidate_ids": [
+            110,
+            112,
+            332,
+            174,
+            60,
+            304,
+            145,
+            214
+          ],
+          "dense_ids": [
+            110,
+            112,
+            332,
+            174,
+            60,
+            304,
+            145,
+            360
+          ],
+          "fp64_ids": [
+            110,
+            112,
+            332,
+            174,
+            60,
+            304,
+            145,
+            214
+          ],
+          "candidate_max_abs_vs_fp64": 1.2885805211748647e-07,
+          "dense_max_abs_vs_fp64": 3.010305276718306e-07
+        },
+        {
+          "key": "layers.17.ffn.gate.weight",
+          "row": 1817,
+          "candidate_ids": [
+            311,
+            181,
+            95,
+            318,
+            132,
+            63,
+            6,
+            276
+          ],
+          "dense_ids": [
+            311,
+            181,
+            95,
+            132,
+            318,
+            63,
+            6,
+            276
+          ],
+          "fp64_ids": [
+            311,
+            181,
+            95,
+            318,
+            132,
+            63,
+            6,
+            276
+          ],
+          "candidate_max_abs_vs_fp64": 1.435161457452594e-07,
+          "dense_max_abs_vs_fp64": 3.9934476353531423e-07
+        },
+        {
+          "key": "layers.28.ffn.gate.weight",
+          "row": 2156,
+          "candidate_ids": [
+            284,
+            233,
+            228,
+            265,
+            132,
+            89,
+            274,
+            283
+          ],
+          "dense_ids": [
+            284,
+            233,
+            228,
+            265,
+            89,
+            132,
+            274,
+            283
+          ],
+          "fp64_ids": [
+            284,
+            233,
+            228,
+            265,
+            132,
+            89,
+            274,
+            283
+          ],
+          "candidate_max_abs_vs_fp64": 1.663232191972952e-07,
+          "dense_max_abs_vs_fp64": 3.9992090616891574e-07
+        }
+      ],
+      "total_route_rows": 122880,
+      "max_abs_vs_dense": 1.5124678611755371e-06,
+      "fp64_sample_candidate_mae": 2.498645359724596e-08,
+      "fp64_sample_dense_mae": 6.728918634939537e-08,
+      "fp64_closer_candidate": 45858,
+      "fp64_closer_dense": 12992,
+      "fp64_ties": 2590
+    }
+  ]
+}

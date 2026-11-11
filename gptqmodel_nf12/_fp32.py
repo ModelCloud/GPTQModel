@@ -362,6 +362,54 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
     return out
 
 
+@triton.jit
+def _linear_fp32_prefill_gate_tc(
+    x_ptr, weight_ptr, bias_ptr, out_ptr,
+    m: tl.constexpr, n: tl.constexpr, k: tl.constexpr,
+    has_bias: tl.constexpr,
+    block_m: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+):
+    """Use Ampere Tensor Cores with FP32 inputs and exact BF16 weight values."""
+    input_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)
+    output_rows = tl.program_id(1) * block_n + tl.arange(0, block_n)
+    depth = tl.arange(0, block_k)
+    acc = tl.full((block_m, block_n), 0, tl.float32)
+    for block in range(tl.cdiv(k, block_k)):
+        col = block * block_k + depth
+        activation = tl.load(
+            x_ptr + input_rows[:, None] * k + col[None, :],
+            (input_rows[:, None] < m) & (col[None, :] < k), other=0,
+        )
+        weight = tl.load(
+            weight_ptr + output_rows[:, None] * k + col[None, :],
+            (output_rows[:, None] < n) & (col[None, :] < k), other=0,
+        )
+        acc = tl.dot(activation, tl.trans(weight).to(tl.float32), acc,
+                     input_precision="tf32x3")
+    if has_bias:
+        acc += tl.load(bias_ptr + output_rows, output_rows < n, other=0)[None, :]
+    tl.store(out_ptr + input_rows[:, None] * n + output_rows[None, :], acc,
+             (input_rows[:, None] < m) & (output_rows[None, :] < n))
+
+
+def _linear_fp32_prefill_gate(x: torch.Tensor, weight: NF12Weight,
+                              bias: torch.Tensor | None) -> torch.Tensor:
+    """Decode one BF16 gate only for this call, then run FP32 Tensor Core GEMM."""
+    n, k = weight.shape
+    m = x.numel() // k
+    out = torch.empty((*x.shape[:-1], n), dtype=torch.float32, device=x.device)
+    dense = weight.decode()
+    try:
+        _linear_fp32_prefill_gate_tc[(triton.cdiv(m, 32), triton.cdiv(n, 64))](
+            x, dense, bias if bias is not None else x, out,
+            m, n, k, bias is not None, 32, 64, 64,
+            num_warps=4, num_stages=3,
+        )
+    finally:
+        del dense
+    return out
+
+
 def linear_fp32(x: torch.Tensor, weight: NF12Weight,
                 bias: torch.Tensor | None = None,
                 rows: torch.Tensor | None = None, *, _staged_b1: bool = False) -> torch.Tensor:
@@ -389,10 +437,14 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
     if _staged_b1 and (rows is not None or not 1 <= m <= 8 or
                        (k <= 512 and output_n >= 1024)):
         raise ValueError("linear_fp32_staged_b1 requires 1..8 full rows on the ordinary long-K B1 path")
-    # The per-output-row packed kernel wins at decode sizes. For prefill,
-    # cuBLAS amortizes a call-local decode across many input rows. Keep the
-    # model weight packed between calls; this dense tensor dies with this call.
+    # The per-output-row packed kernel wins at decode sizes. On Ampere, the
+    # main router uses a call-local BF16 decode and accurate TF32x3 Tensor Core
+    # GEMM for prefill. Other prefill shapes use a call-local FP32 cuBLAS GEMM.
+    # Neither path retains a dense weight between calls.
     if not _staged_b1 and rows is None and m and (m >= 256 or (m >= 16 and n * k >= 1_000_000)):
+        if (n, k) == (384, 5120) and m >= 384 and torch.version.hip is None and (
+                torch.cuda.get_device_capability(x.device)[0] >= 8):
+            return _linear_fp32_prefill_gate(x2, weight, bias).view(*x.shape[:-1], n)
         dense = weight.decode().float()
         result = F.linear(x, dense, bias)
         del dense

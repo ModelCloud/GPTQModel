@@ -322,6 +322,36 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent NF12 gate preparation or B1 projection changed values")
         return True
 
+    nf12_prefill_ready = [False]
+    nf12_prefill_weights = {}
+
+    def nf12_prefill_gate() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        with nf12_lock:
+            if not nf12_prefill_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        weight = torch.full((384, 5120), 0.015625,
+                                            dtype=torch.bfloat16, device="cuda")
+                        packed = nf12.encode(weight)
+                        x = torch.full((256, 5120), 0.125, device="cuda")
+                        nf12.linear_fp32(x, packed)
+                        nf12_prefill_weights[device] = packed
+                nf12_prefill_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        x = torch.full((256, 5120), 0.125, device="cuda")
+        bias = torch.full((384,), 0.25, device="cuda")
+        output = nf12.linear_fp32(x, nf12_prefill_weights[nf12_thread.device], bias)
+        torch.cuda.current_stream().synchronize()
+        if not bool(torch.all(output == 10.25)):
+            raise AssertionError("concurrent NF12 prefill gate returned wrong values")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -332,6 +362,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12.gate": nf12_gate,
+        "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
         "torch.cuda.stream (context manager)": lambda: str(torch.cuda.stream(torch.cuda.Stream())),

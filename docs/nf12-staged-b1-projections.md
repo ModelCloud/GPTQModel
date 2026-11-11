@@ -1,4 +1,4 @@
-# NF12 staged B1 projections
+# NF12 staged B1 and prefill projections
 
 Speculative verification can present six physical rows for one logical B1
 request. Its numerical reference is six ordinary one-row projections. The
@@ -6,6 +6,11 @@ small-M BF16 kernel already computes an eight-row MMA tile for M=1, so a
 single launch can consume the six inputs while retaining the M=1 kernel
 configuration and reduction order. The packed weight remains the only
 persistent weight representation.
+
+For the 384x5120 FP32 main router, a separate Ampere prefill path decodes the
+NF12 weight to BF16 for the current call and uses TF32x3 Tensor Cores. The
+activation and result remain FP32. The decoded weight is released after the
+launch, while the original NF12 weight remains the persistent representation.
 
 ## Dispatch
 
@@ -151,6 +156,65 @@ therefore uses the tiled MTP gate path in its proposed serving profile while
 retaining this explicit `prepare_fp32_gate` API for controlled experiments.
 The [Lite trial record](https://github.com/ModelCloud/Inference-Ultra/blob/deploy/nf12-online-merged-20261110/lite/results/nf12_gate_128_matched_8k_20261111.json)
 contains exact commands, runtime identities, affinity, and group timings.
+
+## FP32 main-router prefill
+
+```mermaid
+flowchart TD
+    A["linear_fp32"] --> B{"FP32 CUDA activation,<br/>matching packed weight and bias?"}
+    B -->|no| X["ValueError"]
+    B -->|yes| C{"unindexed, ordinary prefill<br/>M >= 256 or wide M >= 16?"}
+    C -->|no| P["packed small-M kernel"]
+    C -->|yes| D{"384x5120, M >= 384,<br/>NVIDIA SM80+?"}
+    D -->|yes| E["_linear_fp32_prefill_gate"]
+    E --> F["NF12Weight.decode: call-local BF16"]
+    F --> G["_linear_fp32_prefill_gate_tc: TF32x3"]
+    G --> H["release BF16 scratch; return FP32"]
+    D -->|no| I["NF12Weight.decode to call-local FP32"]
+    I --> J["F.linear; release FP32 scratch"]
+    X:::error
+    classDef error fill:#fdd,stroke:#b33
+```
+
+| Before | After |
+| --- | --- |
+| Every unindexed FP32 prefill decoded BF16, cast the entire matrix to FP32, and called `F.linear` (`gptqmodel_nf12/_fp32.py:linear_fp32`). | On NVIDIA SM80+ with a 384x5120 gate and at least 384 input rows, `linear_fp32` calls `_linear_fp32_prefill_gate`, which decodes only BF16 scratch and runs `_linear_fp32_prefill_gate_tc`. Other shapes and devices keep the existing fallback. |
+| The prefill call briefly owned both BF16 and FP32 decoded matrices. | The new branch owns one 3,932,160-byte BF16 scratch matrix until its Tensor Core launch. Neither branch retains a decoded matrix across calls. |
+
+The kernel loads BF16 weight tiles, converts those exact weight values to FP32,
+and uses Triton's `tf32x3` multiplication for the FP32 activations. It adds
+optional FP32 bias in the output tile. The launch uses 32x64x64 tiles, four
+warps and three stages. NVIDIA SM80 is checked on the activation's actual
+device; HIP does not enter this path.
+
+The [real-checkpoint sweep](nf12-real-gate-prefill-20261111.json) rotated all
+40 released 384x5120 gate matrices on a PG506-230 SM80 GPU with PyTorch 2.15,
+CUDA 13.2, GIL disabled, resident Gaussian FP32 activations and CUDA graph
+timing. Each graph replay made 40 calls; medians use eight alternating-order
+replays. Dense control is `F.linear(x, checkpoint_bf16.float())` with cuBLAS
+TF32 disabled. The old NF12 control decodes BF16, casts FP32, then calls
+`F.linear`. These are projection timings, not Lite service throughput.
+
+| Input rows | Selected NF12 path, us/gate | Old NF12, us/gate | Dense control, us/gate | NF12 / dense |
+| ---: | ---: | ---: | ---: | ---: |
+| 256 | 93.82 (old fallback) | 93.82 | 86.31 | 0.920x |
+| 384 | 123.17 | 128.54 | 121.02 | 0.983x |
+| 512 | 106.64 | 147.40 | 139.44 | 1.308x |
+| 3072 | 449.61 | 743.14 | 740.45 | 1.647x |
+
+The dispatched path restored every checkpoint BF16 bit from NF12. Sampled
+FP64 mean absolute error at 3,072 rows was 2.50e-8 for the candidate and
+6.73e-8 for dense Torch. At 384 and 3,072 rows, one and four rows respectively
+had a different top-eight ordering across all 40 gates; independent FP64
+agreed with NF12 in all five. One difference changed the eighth member.
+The largest score difference from dense Torch was 1.51e-6. These random
+activation probes do not establish exact serving route or output identity.
+The 40 benchmark weights held 118,176,704 packed bytes versus 157,286,400
+checkpoint BF16 bytes, with no retained decoded matrix. Lite also retains its
+separate compressed B1 router view; that additional storage is documented
+above. Repeated forwards and CUDA graph replay passed the packed-only storage
+and independent Torch tests for 256, 384, 512, and 3,072 rows. The free-threaded
+prefill probe passed three processes of eight workers on two GPUs.
 
 ## SM80 measurements
 

@@ -948,7 +948,7 @@ The [NF12 fallback epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype
 bias handling and BF16 weight-range preservation before output rounding.
 The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
 how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
-The [NF12 staged B1 projection flow](docs/nf12-staged-b1-projections.md) explains
+The [NF12 staged B1 and prefill projection flow](docs/nf12-staged-b1-projections.md) explains
 the verifier-row fusion, prepared compressed FP32 router view, and Ampere profile.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
