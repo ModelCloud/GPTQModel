@@ -507,10 +507,31 @@ amortised over more rows (`M` = 128 gives four `M` tiles per weight tile, a 4x
 amortisation) or if the expansion itself becomes materially cheaper per element
 than TTNN's op graph.
 
-That reframes the remaining work: for prefill and batched shapes the fused kernel
-should pull ahead, and measuring at larger `M` is more informative than further
-micro-tuning at `M` = 32. Grid spread is still required either way, since 576
-tiles cannot run on one core.
+### Amortisation over M: measured, and it is the win
+
+The prediction was tested directly by reusing one dequantization across several
+`M` tiles. Latency is essentially flat in `M` because the same dequantized weight
+tiles serve every `M` tile:
+
+| M | one N tile, K=768 | per 32 rows | vs M=32 |
+| --- | --- | --- | --- |
+| 32 | 0.2405 ms | 0.2405 ms | 1.0x |
+| 64 | 0.2417 ms | 0.1208 ms | 2.0x |
+| 128 | 0.2443 ms | 0.0611 ms | 3.9x |
+| 256 | 0.2535 ms | 0.0317 ms | **7.6x** |
+
+Verified `norm_l1` 0.0014 at every size. So the fused path is *parity* at decode
+(`M` = 32) and **substantially ahead for prefill/batched shapes**, which is exactly
+where a quantized-inference engine spends its FLOPs.
+
+Concretely, a full `768x768` layer at `M` = 256 needs 24 invocations of ~0.2535 ms
+on one core (~6.1 ms), against TTNN's ~1.33 ms for the whole layer. One core is
+therefore ~4.6x slower, but five cores match it and the 11x10 grid would put the
+fused path roughly an order of magnitude ahead -- before any grid optimisation.
+
+Grid spread is now the blocker rather than an optimisation: the kernel still runs
+on a single core, and per-core runtime arguments are not yet working past two
+cores, so distributing N tiles is the next concrete step.
 
 A deadlock worth recording: updating the shared compute kernel to expect staged
 buffers while one reader still pushed tiles one at a time wedged the device (reset

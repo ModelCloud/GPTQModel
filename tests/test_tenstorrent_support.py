@@ -1129,6 +1129,35 @@ def test_dequant_lut_is_exactly_rounded_bf16():
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+@pytest.mark.parametrize("nm", [2, 4])
+def test_fused_gemm_amortises_dequant_over_m(nm):
+    """More M tiles must reuse the same dequantized weights, not redo them."""
+
+    from gptqmodel.utils.tt_int4_kernel import run_fused_gemm_m
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    nk = 8
+    torch.manual_seed(11)
+    codes = torch.randint(0, 16, (nk * 1024,), dtype=torch.int64)
+    weight = (0.0173 * (codes.to(torch.float32) - 7.0)).to(torch.bfloat16).reshape(nk * 32, 32)
+    act = torch.randn(nm * 32, nk * 32, dtype=torch.bfloat16)
+    reference = act.float() @ weight.float()
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        got = run_fused_gemm_m(act, codes, 0.0173, 7, device=mesh.device)
+    finally:
+        close_mesh()
+
+    assert got.shape == (nm * 32, 32)
+    norm_l1 = float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
+    assert norm_l1 < 0.02, f"M-amortised GEMM deviates: norm_l1={norm_l1} (nm={nm})"
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
 def test_fused_gemm_accumulates_k_on_device():
     """Full K reduction inside the kernel must equal act @ dequant(weights)."""
 
