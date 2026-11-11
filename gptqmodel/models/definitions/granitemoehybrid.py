@@ -44,6 +44,8 @@ class GraniteMoeHybridQModel(BaseQModel):
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
         mamba_layer_cls = type(self.model.model.layers[0].mamba)
+        if getattr(mamba_layer_cls.forward, "_gptqmodel_granite_patch", False):
+            return
         original_forward = mamba_layer_cls.forward
         # Older Transformers releases exposed a separate eager `torch_forward`
         # next to the fast `forward`. Newer releases folded the eager
@@ -91,4 +93,5 @@ class GraniteMoeHybridQModel(BaseQModel):
                 **kwargs,
             )
 
+        granitemoehybrid_mamba_forward._gptqmodel_granite_patch = True
         mamba_layer_cls.forward = granitemoehybrid_mamba_forward

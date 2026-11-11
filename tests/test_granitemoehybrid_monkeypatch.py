@@ -99,6 +99,21 @@ def test_granitemoehybrid_quantized_mamba_uses_torch_forward_when_present():
     _assert_quantized_forward_uses_eager(_LegacyTorchForwardMamba())
 
 
+def test_granitemoehybrid_monkey_patch_is_idempotent():
+    class Mamba(_QuantMambaBase):
+        def forward(self, input_states, cache_params=None, attention_mask=None):
+            return self._record_eager(input_states, cache_params, attention_mask)
+
+    mamba = Mamba()
+    qmodel = _qmodel_with_mamba(mamba)
+    qmodel.monkey_patch()
+    patched_forward = Mamba.forward
+    qmodel.monkey_patch()
+
+    assert Mamba.forward is patched_forward
+    assert mamba(torch.zeros(1, 2, 64)) == "eager"
+
+
 def test_real_granitemoehybrid_layer_installs_monkey_patch():
     pytest.importorskip("transformers")
     from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
