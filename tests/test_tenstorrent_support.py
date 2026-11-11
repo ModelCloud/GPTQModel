@@ -928,6 +928,37 @@ def test_resident_rejects_host_tensor_and_unknown_activation(monkeypatch):
         resident.apply_activation(value, "tanh_approx")
 
 
+def test_dequant_pair_lut_decodes_two_codes_per_word():
+    """The 256-entry table must reproduce the 16-entry table byte for byte."""
+
+    import importlib
+
+    kern = importlib.import_module("gptqmodel.utils.tt_int4_kernel")
+
+    scale, zero = 0.0173, 7
+    single = kern.build_dequant_lut(scale, zero)          # 16 BF16, 2 per word
+    pair = kern.build_dequant_pair_lut(scale, zero)       # 256 packed pairs
+    assert pair.shape == (1, 256)
+
+    bits = single.reshape(-1).to(torch.int64) & 0xFFFFFFFF
+    vals = torch.stack([(bits & 0xFFFF).to(torch.int16),
+                        ((bits >> 16) & 0xFFFF).to(torch.int16)], dim=1)
+    bf16 = vals.reshape(-1).view(torch.bfloat16)
+
+    got = pair.reshape(-1).to(torch.int64) & 0xFFFFFFFF
+    lo = (got & 0xFFFF).to(torch.int16)
+    hi = ((got >> 16) & 0xFFFF).to(torch.int16)
+    decoded = torch.stack([lo, hi], dim=1).reshape(-1).view(torch.bfloat16)
+
+    # Index is (low nibble | high nibble << 4), and each entry stores [low, high].
+    expected = torch.empty(512, dtype=torch.bfloat16)
+    for low in range(16):
+        for high in range(16):
+            expected[(low | (high << 4)) * 2] = bf16[low]
+            expected[(low | (high << 4)) * 2 + 1] = bf16[high]
+    assert torch.equal(decoded, expected)
+
+
 def test_blockfloat_grid_rounds_on_shared_exponent():
     """A block-float block shares one exponent and keeps a fixed mantissa width."""
 

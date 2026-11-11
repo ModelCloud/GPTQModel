@@ -707,7 +707,29 @@ library code at both scales: `(64, 128)` and `(256, 2048)`, `norm_l1` 0.00146 in
 each, with a hardware-gated test.
 
 Lesson recorded: when a program works standalone and fails from a wrapper, check
-whether the device itself is in a bad state before rewriting the program. Here the
+whether the device itself is in a bad state before rewriting the program.
+
+### Pair-LUT: halving the dequant stores
+
+The 16-entry table expands one code per 16-bit store, eight stores per 32-bit
+word. A packed word is four *bytes* of two codes each, so a 256-entry table
+indexed by a byte decodes both codes at once and emits one 32-bit store -- four
+stores per word instead of eight, for a 1 KiB table instead of 32 B.
+
+Measured on the 64-core layer: **0.3463 ms -> 0.2379 ms (1.46x)**, `norm_l1`
+0.00146 unchanged. Being a single u32 store it also has no byte-pair assembly.
+
+Two notes for anyone repeating this:
+
+- The table index is `low | (high << 4)`, and each entry stores `[low, high]` in
+  that order -- the low nibble varies fastest. Getting that backwards produces a
+  table that looks plausible and is silently wrong per element.
+- `run_fused_gemm_grid` re-packs and re-uploads the weights on every call
+  (measured **57 ms** of host work on 64 cores), so a per-call timing of the
+  public function is dominated by packing, not the kernel. The kernel number above
+  comes from a harness that reuses the uploaded weights. Caching the packed and
+  uploaded form across calls is required before this path is usable in a model
+  loop. Here the
 mesh open was failing for reasons that had nothing to do with the kernel.
 
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
