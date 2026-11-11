@@ -149,8 +149,7 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_chec
         # This backend requantizes native eight-bit sources before fusion.
         # The inference oracle decodes its resulting native codes independently.
         weight = module.int8_weight_nk.float().t() * module.int8_channel_scale.float()
-    result = module, weight.to(device), linear.bias.detach().to(device).clone()
-    return (*result, checkpoint) if return_checkpoint else result
+    return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
 
 
 def _assert_no_dense_weights(module, spec):
@@ -369,7 +368,7 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
     names = ("gate_proj", "up_proj") if profile == "gate_up" else ("q_proj", "k_proj", "v_proj")
     modules, weights, biases = [], [], []
     for name in names:
-        module, weight, bias = _projection(cls, getattr(parent, name), dtype, device, uniform_scales=uniform_scales)
+        module, weight, bias, _ = _projection(cls, getattr(parent, name), dtype, device, uniform_scales=uniform_scales)
         setattr(parent, name, module)
         modules.append(module)
         weights.append(weight)
@@ -502,7 +501,7 @@ def test_avx512_fusion_does_not_restore_source_checkpoint_state():
     parent = model.model.layers[0].mlp
     modules = []
     for name in ("gate_proj", "up_proj"):
-        module, _w, _b = _projection(TorchCpuAvx512Linear, getattr(parent, name), torch.bfloat16, "cpu")
+        module, _w, _b, _ = _projection(TorchCpuAvx512Linear, getattr(parent, name), torch.bfloat16, "cpu")
         setattr(parent, name, module)
         modules.append(module)
     parent.to("cpu")
