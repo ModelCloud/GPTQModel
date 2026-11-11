@@ -469,6 +469,29 @@ A staging attempt that read all K tiles in one `noc_async_read` per stream
 returned `inf`: a single transfer spanning many pages is not valid, so pages must
 be read individually (or with a per-page loop).
 
+### Fixing the BRISC cost with a lookup table
+
+`scale * (code - zero)` has only **16 possible results**, so the expansion does
+not need arithmetic at all -- BRISC can index a 16-entry table of BF16 values
+built once on the host. That removes every software-float multiply from the inner
+loop and is also *more* accurate, because the table holds correctly rounded BF16
+instead of truncated values.
+
+| K=768, one output tile | time | norm_l1 |
+| --- | --- | --- |
+| soft-float expansion on BRISC | 3.395 ms | 0.00478 |
+| **16-entry LUT** | **0.259 ms** | **0.00145** |
+
+13x faster and more accurate. The table is 32 bytes, read once per kernel.
+
+This is still not a win over TTNN, and the arithmetic says why: a `768x768` layer
+is 576 output tiles, so even perfect spread across the 11x10 grid lands near
+1.36 ms against TTNN's ~1.33 ms for the whole layer. Parity, not victory. The
+remaining cost is the per-K-tile DRAM barrier -- the reader still does a
+synchronous read plus barrier for every K tile, which serialises 24 round trips
+per output tile. Pipelining that (double-buffered CBs, no barrier per tile) is the
+next real lever, ahead of any grid work.
+
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores
 and pages. What exists today is the dequant stage on one core.

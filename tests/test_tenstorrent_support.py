@@ -1103,6 +1103,28 @@ def test_fused_matmul_matches_torch_on_device():
 
 
 
+def test_dequant_lut_is_exactly_rounded_bf16():
+    """The 16-entry table must hold the exact BF16 values, not truncated ones."""
+
+    import importlib
+
+    kern = importlib.import_module("gptqmodel.utils.tt_int4_kernel")
+
+    scale, zero = 0.0173, 7
+    packed = kern.build_dequant_lut(scale, zero)
+    assert packed.shape == (1, 8)
+
+    bits = packed.reshape(-1).to(torch.int64) & 0xFFFFFFFF
+    lo = (bits & 0xFFFF).to(torch.int16)
+    hi = ((bits >> 16) & 0xFFFF).to(torch.int16)
+    lut = torch.stack([lo, hi], dim=1).reshape(-1).view(torch.bfloat16)
+
+    expected = (scale * (torch.arange(16, dtype=torch.float32) - zero)).to(torch.bfloat16)
+    assert torch.equal(lut, expected)
+    # The extremes bracket zero as GPTQ's code range implies.
+    assert lut[0] < 0 < lut[15]
+
+
 @pytest.mark.skipif(
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
@@ -1129,6 +1151,38 @@ def test_fused_gemm_accumulates_k_on_device():
     assert got.shape == (32, 32)
     norm_l1 = float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
     assert norm_l1 < 0.02, f"fused K accumulation deviates: norm_l1={norm_l1}"
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_fused_gemm_lut_is_at_least_as_accurate_as_soft_float():
+    """The LUT path must reproduce the fused GEMM without regressing accuracy."""
+
+    from gptqmodel.utils.tt_int4_kernel import run_fused_gemm, run_fused_gemm_lut
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    nk = 8
+    torch.manual_seed(11)
+    codes = torch.randint(0, 16, (nk * 1024,), dtype=torch.int64)
+    weight = (0.0173 * (codes.to(torch.float32) - 7.0)).to(torch.bfloat16).reshape(nk * 32, 32)
+    act = torch.randn(32, nk * 32, dtype=torch.bfloat16)
+    reference = act.float() @ weight.float()
+
+    def _err(got):
+        return float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        lut_err = _err(run_fused_gemm_lut(act, codes, 0.0173, 7, device=mesh.device))
+        soft_err = _err(run_fused_gemm(act, codes, 0.0173, 7, device=mesh.device))
+    finally:
+        close_mesh()
+
+    assert lut_err < 0.02, f"LUT path deviates: norm_l1={lut_err}"
+    assert lut_err <= soft_err, f"LUT ({lut_err}) should not be worse than soft-float ({soft_err})"
+
 
 
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
