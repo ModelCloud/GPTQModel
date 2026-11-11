@@ -607,8 +607,43 @@ means this path needs roughly **38 cores to reach parity** at M=256, and the p30
 has 110. So the single-core result is a correctness milestone, not a performance
 one, and grid spread remains the gate on any real claim.
 
-Honest status: the fused int4 GEMM is **correct and complete for a full layer on
-one core**; it is **not fast**, and multi-core execution is **unproven**.
+### Multi-core grid works
+
+The deadlock was not CB synchronisation or per-core arguments. Bisecting with a
+reader-only program, then reader+compute+writer, showed both working on 2, 4 and
+8 cores. The actual bug was the **output tensor layout**: the kernel pushes raw
+tile bytes, so the destination must be a `TILE_LAYOUT` tensor. Writing into a
+row-major buffer and reading it back as packed tiles corrupted every face except
+the first, which presents as `bad_frac 0.986` with row 0 correct to column 15 --
+easy to mistake for a compute error.
+
+With that fixed, the full grid path runs:
+
+| config | M | K | N | cores | norm_l1 | time |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2x2 | 64 | 128 | 128 | 4 | 0.00146 | 0.067 ms |
+| 4x4 | 256 | 256 | 512 | 16 | 0.00146 | 0.117 ms |
+| 8x8 | 256 | 768 | 2048 | 64 | 0.00146 | 0.346 ms |
+
+Bit-consistent accuracy throughout (`norm_l1` 0.00146, `bad_frac` 0.000).
+
+### Against TTNN, measured
+
+Same layer shape, one device:
+
+| path | M=32 | M=256 |
+| --- | --- | --- |
+| `ttnn.linear` BF16 (dequant + GEMM) | 0.0567 ms | 0.0949 ms |
+| fused int4, 64 cores | -- | 0.346 ms |
+
+So the fused kernel is now **3.6x slower** than TTNN at M=256, down from the ~38x
+implied by the single-core number. The remaining gap is honest work, not
+structure: the kernel still stages every weight and activation tile through L1
+with a full barrier, and dequantizes on BRISC.
+
+Status: the fused int4 GEMM is **correct for a full multi-core layer** and within
+4x of the reference implementation. It is not yet faster, and it needs a
+checkpoint that is already int4 -- which is exactly what path 1 exists for.
 
 A deadlock worth recording: updating the shared compute kernel to expect staged
 buffers while one reader still pushed tiles one at a time wedged the device (reset
