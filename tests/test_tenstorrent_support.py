@@ -186,19 +186,10 @@ def test_tt_dispatch_is_explicit_and_fail_closed(monkeypatch):
         BACKEND.GPTQ_TT_XLA, fmt=FORMAT.GPTQ, quant_method=METHOD.GPTQ
     ) is XLALinear
 
-    class _Runtime:
-        @staticmethod
-        def addressable_device_count():
-            return 4
-
-    class _TorchXLA:
-        runtime = _Runtime
-
-    def _require_xla_runtime():
-        return _TorchXLA()
-
     tt_xla_module = importlib.import_module(XLALinear.__module__)
-    monkeypatch.setattr(tt_xla_module, "require_xla_runtime", _require_xla_runtime)
+    # ``validate_once`` now probes through ``xla_device_count``, which is the
+    # only call that both reads the count and records that PJRT took ownership.
+    monkeypatch.setattr(tt_xla_module, "xla_device_count", lambda: 4)
     assert XLALinear.validate_once() == (True, None)
     ok, error = XLALinear._validate(
         bits=4, group_size=128, desc_act=False, sym=True,
@@ -722,6 +713,90 @@ def test_mesh_lifecycle_applies_cooldown(monkeypatch):
     finally:
         runtime.close_mesh()
     assert calls == [("open", "unit-test"), ("close", "unit-test")]
+
+
+def test_pjrt_owner_guard_trips_once_the_chips_are_claimed(monkeypatch):
+    """The old guard tested an attribute nothing ever set, so it never fired.
+
+    ``xla_device_count`` is the call that initializes PJRT and claims every
+    chip, and it records that fact. ``_reject_pjrt_owner`` must then stop the
+    native TTNN path instead of letting TT-Metal fail with a bare assert.
+    """
+
+    import importlib
+    import sys
+    import types
+
+    runtime = importlib.import_module("gptqmodel.utils.ttnn_runtime")
+
+    fake_xla = types.ModuleType("torch_xla")
+    fake_xla._gptqmodel_device_claimed = False
+    monkeypatch.setitem(sys.modules, "torch_xla", fake_xla)
+
+    # Unclaimed: the native path is allowed through.
+    runtime._reject_pjrt_owner()
+
+    fake_xla._gptqmodel_device_claimed = True
+    with pytest.raises(runtime.TTNNUnavailable, match="already claimed"):
+        runtime._reject_pjrt_owner()
+
+
+def test_xla_device_count_marks_the_claim(monkeypatch):
+    """Reading the count must record ownership, since that read is the claim."""
+
+    import importlib
+    import sys
+    import types
+
+    torch_utils = importlib.import_module("gptqmodel.utils.torch")
+
+    class _Runtime:
+        @staticmethod
+        def addressable_device_count():
+            return 4
+
+    fake_xla = types.ModuleType("torch_xla")
+    fake_xla.runtime = _Runtime
+    monkeypatch.setitem(sys.modules, "torch_xla", fake_xla)
+    monkeypatch.setattr(torch_utils, "require_xla_runtime", lambda: fake_xla)
+
+    assert torch_utils.xla_device_count() == 4
+    assert fake_xla._gptqmodel_device_claimed is True
+
+
+def test_set_tdp_limit_drives_the_firmware_message(monkeypatch):
+    """The installed plugin has no TT_METAL_TDP_LIMIT_WATTS, so we send the ARC message."""
+
+    import importlib
+    import types
+
+    thermal = importlib.import_module("gptqmodel.utils.tt_thermal")
+
+    sent = []
+    limits = [125]
+
+    class _FakeBH:
+        def arc_msg(self, msg, arg0=0, arg1=0):
+            sent.append((msg, arg0, arg1))
+            if msg == thermal.BLACKHOLE_ARC_SET_TDP_LIMIT:
+                limits[0] = arg0 or 125
+            return (0, 0)
+
+        def get_telemetry(self):
+            return types.SimpleNamespace(tdp_limit_max=limits[0])
+
+    monkeypatch.setattr(
+        thermal, "_blackhole_chips", lambda: [_FakeBH(), _FakeBH()]
+    )
+
+    thermal.set_tdp_limit(90)
+    assert sent == [
+        (thermal.BLACKHOLE_ARC_SET_TDP_LIMIT, 90, 0),
+        (thermal.BLACKHOLE_ARC_SET_TDP_LIMIT, 90, 0),
+    ]
+    assert thermal.tdp_limit_watts() == (90, 90)
+
+
 
 
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")

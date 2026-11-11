@@ -146,6 +146,128 @@ def gddr_peak() -> Optional[int]:
     return max(temps) if temps else None
 
 
+# --- board power and idle clock ------------------------------------------
+#
+# A p300c ships with a 125 W per-board TDP limit and the firmware THROTTLES BY
+# INSERTING NOP CYCLES once that limit is reached, so power, not temperature, is
+# what actually caps sustained throughput. Two levers reach the firmware
+# directly, and neither needs a specific tt-metal build:
+#
+#   SET_TDP_LIMIT = 0x22   arg0 = watts, arg1 = bit 0 restores the default
+#   AICLK_GO_LONG_IDLE = 0x54
+#
+# Both are documented in tt-umd's ``blackhole_arc.hpp``; ``SET_TDP_LIMIT`` has
+# been in the firmware since 19.8.0 and this host runs 19.17.1. The newer
+# ``TT_METAL_TDP_LIMIT_WATTS`` environment variable is *not* present in every
+# release (it is absent from the 1.5.0 plugin build installed here), which is
+# why this module drives the message itself.
+
+BLACKHOLE_ARC_SET_TDP_LIMIT = 0x22
+BLACKHOLE_ARC_AICLK_GO_LONG_IDLE = 0x54
+
+
+def _blackhole_chips():
+    """Return the local Blackhole chips, or ``None`` when telemetry is unavailable."""
+
+    try:
+        from pyluwen import detect_chips_fallible
+    except Exception:
+        return None
+    try:
+        chips = detect_chips_fallible(
+            local_only=True, continue_on_failure=False, noc_safe=True
+        )
+    except Exception as exc:  # pragma: no cover - depends on host driver state
+        log.debug(f"TTThermal: chip enumeration failed: {exc}")
+        return None
+
+    out = []
+    for chip in chips:
+        try:
+            out.append(chip.force_upgrade().as_bh())
+        except Exception as exc:  # pragma: no cover - non-Blackhole or dead card
+            log.debug(f"TTThermal: skipping a card that is not a live Blackhole: {exc}")
+    return out or None
+
+
+def tdp_limit_watts() -> Optional[Sequence[int]]:
+    """Return the effective per-board TDP limit of every visible card, in watts."""
+
+    chips = _blackhole_chips()
+    if chips is None:
+        return None
+    out = []
+    for chip in chips:
+        try:
+            out.append(int(chip.get_telemetry().tdp_limit_max))
+        except Exception:  # pragma: no cover - per-chip driver hiccup
+            pass
+    return tuple(out) if out else None
+
+
+def set_tdp_limit(watts: int, *, restore_default: bool = False) -> Optional[Sequence[int]]:
+    """Set the per-board TDP limit on every local card; return the new limits.
+
+    ``restore_default`` asks the firmware for the board default instead of a
+    specific wattage. The limit is a firmware state, so it outlives this
+    process until the chip is reset or something else writes it -- callers that
+    only want a temporary cap must restore it themselves.
+    """
+
+    if not restore_default and watts <= 0:
+        raise ValueError(f"tdp limit must be a positive wattage, got {watts}")
+
+    chips = _blackhole_chips()
+    if chips is None:
+        return None
+
+    for index, chip in enumerate(chips):
+        try:
+            rc = chip.arc_msg(
+                BLACKHOLE_ARC_SET_TDP_LIMIT,
+                arg0=0 if restore_default else int(watts),
+                arg1=1 if restore_default else 0,
+            )
+        except Exception as exc:  # pragma: no cover - firmware rejected the message
+            log.warning(f"TTThermal: card {index} rejected SET_TDP_LIMIT: {exc}")
+            continue
+        if isinstance(rc, tuple) and rc and rc[0] != 0:
+            log.warning(f"TTThermal: card {index} returned exit code {rc[0]} for SET_TDP_LIMIT.")
+
+    after = tdp_limit_watts()
+    if after is not None:
+        requested = "board default" if restore_default else f"{watts} W"
+        log.info(f"TTThermal: requested TDP limit {requested}; effective limits now {list(after)} W.")
+    return after
+
+
+def park_idle_clock() -> bool:
+    """Return the cards to their 800 MHz long-idle clock after a device closes.
+
+    Closing the last ``MeshDevice`` does *not* drop AICLK: measured on this
+    host, the cards stayed at 1350 MHz and ~50 W per board for more than 50 s
+    after ``close_device``, and GDDR kept climbing the whole time. The clock
+    only falls back when the firmware is told to, so a cooldown that merely
+    closes the device is not actually idle.
+
+    Returns ``True`` when at least one card accepted the message.
+    """
+
+    chips = _blackhole_chips()
+    if chips is None:
+        return False
+    sent = 0
+    for index, chip in enumerate(chips):
+        try:
+            chip.arc_msg(BLACKHOLE_ARC_AICLK_GO_LONG_IDLE)
+            sent += 1
+        except Exception as exc:  # pragma: no cover - firmware rejected the message
+            log.debug(f"TTThermal: card {index} rejected AICLK_GO_LONG_IDLE: {exc}")
+    if sent:
+        log.info(f"TTThermal: asked {sent} card(s) to return to the long-idle clock after close.")
+    return sent > 0
+
+
 def _default_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
@@ -284,7 +406,10 @@ __all__ = [
     "gddr_peak",
     "gddr_temps",
     "max_wait_secs",
+    "park_idle_clock",
     "reset_cooldown_state",
+    "set_tdp_limit",
     "soft_limit_c",
+    "tdp_limit_watts",
     "wait_for_cooldown",
 ]

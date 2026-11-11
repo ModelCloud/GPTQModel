@@ -26,7 +26,7 @@ from ..utils.logger import setup_logger
 from . import BACKEND
 from .backend import normalize_backend
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available, require_xla_runtime
+from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available, xla_device_count
 
 
 ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
@@ -337,7 +337,7 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
         return family
 
     if family == DEVICE.XLA:
-        count = int(require_xla_runtime().runtime.addressable_device_count())
+        count = xla_device_count()
         devices = tuple(torch.device(f"xla:{index}") for index in range(count))
         _validate_selector_device_families(devices)
         return devices[0] if len(devices) == 1 else devices

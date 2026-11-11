@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .logger import setup_logger
-from .tt_thermal import after_device_close, before_device_open
+from .tt_thermal import after_device_close, before_device_open, park_idle_clock
 
 
 log = setup_logger()
@@ -252,6 +252,15 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
             )
         mesh, _MESH = _MESH, None
         mesh.close()
+        # Closing the device does not stop the card generating heat: measured on
+        # a p300c, AICLK stayed at 1350 MHz and ~50 W per board for over 50 s
+        # after ``close_device``, with GDDR still climbing. The firmware drops
+        # to its 800 MHz long-idle clock only when told to, so ask for it before
+        # the idle window or the cooldown is not actually idle.
+        try:
+            park_idle_clock()
+        except Exception as exc:  # pragma: no cover - teardown must not mask errors
+            log.debug(f"TTNN: could not park the idle clock on close: {exc}")
         # Pace the next open only after the device is genuinely closed, so the
         # idle window is not spent with the chips still running.
         after_device_close(owner=mesh.owner)

@@ -106,7 +106,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import require_xla_runtime
+from ..utils.torch import xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -430,7 +430,7 @@ def _layerwise_device_count(device) -> int:
     if family == DEVICE.NPU:
         return torch.npu.device_count()
     if family == DEVICE.XLA:
-        return int(require_xla_runtime().runtime.addressable_device_count())
+        return xla_device_count()
     return 1
 
 
@@ -454,7 +454,7 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
             return [f"npu:{index}" for index in range(num_gpus)]
         raise RuntimeError("NPU is not available")
     if family == DEVICE.XLA:
-        if int(require_xla_runtime().runtime.addressable_device_count()) >= num_gpus:
+        if xla_device_count() >= num_gpus:
             return [f"xla:{index}" for index in range(num_gpus)]
         raise RuntimeError("XLA is not available")
     return ["cpu"] * num_gpus

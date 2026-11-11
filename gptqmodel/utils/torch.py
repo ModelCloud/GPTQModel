@@ -173,12 +173,34 @@ def require_xla_runtime():
     return module
 
 
+def xla_device_count() -> int:
+    """Return the addressable XLA device count, recording that PJRT now owns them.
+
+    ``addressable_device_count()`` is the call that actually initializes the
+    PJRT plugin, and with ``pjrt-plugin-tt`` that opens every Tenstorrent chip.
+    TT-Metal allows a single owner per chip, so the whole process becomes
+    unable to use the native TTNN path from this point on. The flag recorded
+    here is the only reliable signal of that state -- importing ``torch_xla``
+    alone is inert, so a bare ``sys.modules`` check cannot tell the two apart.
+    """
+
+    runtime = require_xla_runtime()
+    count = int(runtime.runtime.addressable_device_count())
+    # Mark the claim only after the runtime answered, so a failed probe does not
+    # leave a lingering "claimed" flag that blocks a later native TTNN attempt.
+    try:
+        runtime._gptqmodel_device_claimed = True
+    except Exception:  # pragma: no cover - module objects always accept attributes
+        pass
+    return count
+
+
 def is_xla_available() -> bool:
     """Probe XLA availability without initializing hardware at import time."""
     if not _xla_package_installed():
         return False
     try:
-        return int(require_xla_runtime().runtime.addressable_device_count()) > 0
+        return xla_device_count() > 0
     except Exception:
         return False
 
@@ -397,7 +419,7 @@ def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[t
             return torch.device("xpu", device)
         if HAS_NPU and torch.npu.device_count() > device:
             return torch.device("npu", device)
-        if is_xla_available() and require_xla_runtime().runtime.addressable_device_count() > device:
+        if is_xla_available() and xla_device_count() > device:
             return torch.device("xla", device)
         raise ValueError(f"Unable to map integer `{device}` to a known accelerator device.")
     raise TypeError(f"Unsupported device specifier type: {type(device)}")
@@ -594,8 +616,7 @@ def auto_select_torch_device(index: int = 0):
             index = 0
         device = torch.device(f"npu:{index}")
     elif is_xla_available():
-        runtime = require_xla_runtime()
-        count = int(runtime.runtime.addressable_device_count())
+        count = xla_device_count()
         if index >= count:
             index = 0
         device = torch.device(f"xla:{index}")
@@ -636,7 +657,7 @@ def torch_devices() -> List[torch.device]:
     elif HAS_NPU:
         return [torch.device(f"npu:{i}") for i in range(torch.npu.device_count())]
     elif is_xla_available():
-        count = int(require_xla_runtime().runtime.addressable_device_count())
+        count = xla_device_count()
         return [torch.device(f"xla:{i}") for i in range(count)]
     elif HAS_MPS:
         return [torch.device("mps")]

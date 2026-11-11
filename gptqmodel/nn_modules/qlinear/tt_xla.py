@@ -16,7 +16,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.torch import require_xla_runtime
+from ...utils.torch import xla_device_count
 from ...utils.tt_packing import (
     TTPackedGPTQLayout,
     repack_gptq_for_tt,
@@ -101,8 +101,7 @@ class XLALinear(GPTQQuantLinear):
     @classmethod
     def validate_once(cls):
         try:
-            runtime = require_xla_runtime()
-            count = int(runtime.runtime.addressable_device_count())
+            count = xla_device_count()
         except Exception as exc:
             error = RuntimeError(
                 "XLALinear requires an initialized Tenstorrent PJRT runtime."
