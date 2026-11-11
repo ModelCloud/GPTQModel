@@ -484,13 +484,38 @@ instead of truncated values.
 
 13x faster and more accurate. The table is 32 bytes, read once per kernel.
 
-This is still not a win over TTNN, and the arithmetic says why: a `768x768` layer
-is 576 output tiles, so even perfect spread across the 11x10 grid lands near
-1.36 ms against TTNN's ~1.33 ms for the whole layer. Parity, not victory. The
-remaining cost is the per-K-tile DRAM barrier -- the reader still does a
-synchronous read plus barrier for every K tile, which serialises 24 round trips
-per output tile. Pipelining that (double-buffered CBs, no barrier per tile) is the
-next real lever, ahead of any grid work.
+### Staging all K tiles: the barrier was not the bottleneck
+
+Issuing every activation and word read back to back and taking a single barrier
+(per-page reads, because one transfer spanning pages is invalid) improved the
+single output tile from 0.259 ms to **0.2405 ms** -- about 7 %. So the per-K
+barrier was a real but minor cost; the time is spread across the LUT expansion's
+stores, the matmuls and the transfers rather than concentrated anywhere one
+tweak removes.
+
+That leaves the fused approach at **parity** with TTNN, not ahead of it, and the
+arithmetic is the reason: a `768x768` layer is 576 output tiles, so perfect spread
+over the 11x10 grid lands near 1.36 ms against TTNN's ~1.33 ms for the whole
+layer.
+
+### The structural limit, stated plainly
+
+With one `M` tile, every weight tile is dequantized once and used for 32 rows. TTNN
+pays the same order of cost. So the fused path cannot win at decode shapes by
+being cleverer about the *same* expansion -- it wins only if the expansion is
+amortised over more rows (`M` = 128 gives four `M` tiles per weight tile, a 4x
+amortisation) or if the expansion itself becomes materially cheaper per element
+than TTNN's op graph.
+
+That reframes the remaining work: for prefill and batched shapes the fused kernel
+should pull ahead, and measuring at larger `M` is more informative than further
+micro-tuning at `M` = 32. Grid spread is still required either way, since 576
+tiles cannot run on one core.
+
+A deadlock worth recording: updating the shared compute kernel to expect staged
+buffers while one reader still pushed tiles one at a time wedged the device (reset
+with `tt-smi -r`). The compute stage and every reader that feeds it must agree on
+whether the buffer is staged or streamed.
 
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores

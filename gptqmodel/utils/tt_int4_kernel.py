@@ -705,28 +705,30 @@ void kernel_main() {
     constexpr uint32_t W_CB   = 1;
     constexpr uint32_t RAW_CB = 2;
     constexpr uint32_t WORDS_PER_TILE = 128;
+    constexpr uint32_t WORD_BYTES = WORDS_PER_TILE * 4u;
 
+    // Staged like the LUT reader: all tiles in flight, one barrier. This variant
+    // keeps the software-float expansion so the two can be compared honestly.
+    cb_reserve_back(ACT_CB, nk);
+    uint32_t a_base = get_write_ptr(ACT_CB);
     InterleavedAddrGen<true> ag = {.bank_base_address = act_addr, .page_size = 2048};
-    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WORDS_PER_TILE * 4u};
+    cb_reserve_back(RAW_CB, nk);
+    uint32_t r_base = get_write_ptr(RAW_CB);
+    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WORD_BYTES};
 
     for (uint32_t k = 0; k < nk; ++k) {
-        cb_reserve_back(ACT_CB, 1);
-        uint32_t a_l1 = get_write_ptr(ACT_CB);
-        noc_async_read(ag.get_noc_addr(k), a_l1, 2048);
-        noc_async_read_barrier();
-        cb_push_back(ACT_CB, 1);
+        noc_async_read(ag.get_noc_addr(k), a_base + k * 2048u, 2048);
+        noc_async_read(wg.get_noc_addr(k), r_base + k * WORD_BYTES, WORD_BYTES);
+    }
+    noc_async_read_barrier();
 
-        cb_reserve_back(RAW_CB, 1);
-        uint32_t wl1 = get_write_ptr(RAW_CB);
-        noc_async_read(wg.get_noc_addr(k), wl1, WORDS_PER_TILE * 4u);
-        noc_async_read_barrier();
-        cb_push_back(RAW_CB, 1);
-        cb_wait_front(RAW_CB, 1);
-
-        cb_reserve_back(W_CB, 1);
-        uint32_t tl1 = get_write_ptr(W_CB);
-        volatile tt_l1_ptr uint32_t* words = (volatile tt_l1_ptr uint32_t*)wl1;
-        volatile tt_l1_ptr uint16_t* out   = (volatile tt_l1_ptr uint16_t*)tl1;
+    cb_reserve_back(W_CB, nk);
+    uint32_t w_base = get_write_ptr(W_CB);
+    for (uint32_t k = 0; k < nk; ++k) {
+        volatile tt_l1_ptr uint32_t* words =
+            (volatile tt_l1_ptr uint32_t*)(r_base + k * WORD_BYTES);
+        volatile tt_l1_ptr uint16_t* out =
+            (volatile tt_l1_ptr uint16_t*)(w_base + k * 2048u);
         for (uint32_t i = 0; i < WORDS_PER_TILE; ++i) {
             uint32_t word = words[i];
             for (uint32_t lane = 0; lane < 8; ++lane) {
@@ -737,9 +739,9 @@ void kernel_main() {
                 out[i * 8u + lane] = (uint16_t)(bits >> 16);
             }
         }
-        cb_push_back(W_CB, 1);
-        cb_pop_front(RAW_CB, 1);
     }
+    cb_push_back(ACT_CB, nk);
+    cb_push_back(W_CB, nk);
 }
 """
 
@@ -762,11 +764,9 @@ void kernel_main() {
     // from zero without a separate clear.
     tile_regs_acquire();
     for (uint32_t k = 0; k < nk; ++k) {
-        cb_wait_front(ACT_CB, 1);
-        cb_wait_front(W_CB, 1);
-        matmul_tiles(ACT_CB, W_CB, 0, 0, 0);
-        cb_pop_front(ACT_CB, 1);
-        cb_pop_front(W_CB, 1);
+        cb_wait_front(ACT_CB, nk);
+        cb_wait_front(W_CB, nk);
+        matmul_tiles(ACT_CB, W_CB, k, k, 0);
     }
     tile_regs_commit();
     tile_regs_wait();
@@ -835,16 +835,18 @@ def run_fused_gemm(
 
     grid = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))])
 
-    def _cb(index, fmt, size):
+    def _cb(index, fmt, page_size, pages=1):
         return ttnn.CBDescriptor(
-            total_size=size, core_ranges=grid,
-            format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=fmt, page_size=size)],
+            total_size=page_size * pages, core_ranges=grid,
+            format_descriptors=[
+                ttnn.CBFormatDescriptor(buffer_index=index, data_format=fmt, page_size=page_size)
+            ],
         )
 
     cbs = [
-        _cb(0, ttnn.bfloat16, 2048),
-        _cb(1, ttnn.bfloat16, 2048),
-        _cb(2, ttnn.uint32, 512),
+        _cb(0, ttnn.bfloat16, 2048, nk),
+        _cb(1, ttnn.bfloat16, 2048, nk),
+        _cb(2, ttnn.uint32, 512, nk),
         _cb(16, ttnn.bfloat16, 2048),
     ]
 
@@ -876,47 +878,48 @@ def run_fused_gemm(
 FUSED_GEMM_LUT_READER = r"""
 #include "api/dataflow/dataflow_api.h"
 void kernel_main() {
-    uint32_t w_addr     = get_arg_val<uint32_t>(0);
-    uint32_t act_addr   = get_arg_val<uint32_t>(1);
-    uint32_t lut_addr   = get_arg_val<uint32_t>(2);
-    uint32_t nk         = get_arg_val<uint32_t>(3);
+    uint32_t w_addr   = get_arg_val<uint32_t>(0);
+    uint32_t act_addr = get_arg_val<uint32_t>(1);
+    uint32_t lut_addr = get_arg_val<uint32_t>(2);
+    uint32_t nk       = get_arg_val<uint32_t>(3);
 
     constexpr uint32_t ACT_CB = 0;
     constexpr uint32_t W_CB   = 1;
     constexpr uint32_t RAW_CB = 2;
     constexpr uint32_t LUT_CB = 3;
     constexpr uint32_t WORDS_PER_TILE = 128;
+    constexpr uint32_t WORD_BYTES = WORDS_PER_TILE * 4u;
 
-    // 16 BF16 values = 32 bytes, fetched once.
     cb_reserve_back(LUT_CB, 1);
     uint32_t lut_l1 = get_write_ptr(LUT_CB);
     InterleavedAddrGen<true> lg = {.bank_base_address = lut_addr, .page_size = 32};
     noc_async_read(lg.get_noc_addr(0), lut_l1, 32);
-    noc_async_read_barrier();
-    cb_push_back(LUT_CB, 1);
 
+    // Every activation tile and every packed word, issued back to back. Reads are
+    // async, so one barrier covers the whole batch instead of one per K tile.
+    // (A single noc_async_read spanning many pages is invalid; issue per page.)
+    cb_reserve_back(ACT_CB, nk);
+    uint32_t a_base = get_write_ptr(ACT_CB);
     InterleavedAddrGen<true> ag = {.bank_base_address = act_addr, .page_size = 2048};
-    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WORDS_PER_TILE * 4u};
+    cb_reserve_back(RAW_CB, nk);
+    uint32_t r_base = get_write_ptr(RAW_CB);
+    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WORD_BYTES};
 
     for (uint32_t k = 0; k < nk; ++k) {
-        cb_reserve_back(ACT_CB, 1);
-        uint32_t a_l1 = get_write_ptr(ACT_CB);
-        noc_async_read(ag.get_noc_addr(k), a_l1, 2048);
-        noc_async_read_barrier();
-        cb_push_back(ACT_CB, 1);
+        noc_async_read(ag.get_noc_addr(k), a_base + k * 2048u, 2048);
+        noc_async_read(wg.get_noc_addr(k), r_base + k * WORD_BYTES, WORD_BYTES);
+    }
+    noc_async_read_barrier();
 
-        cb_reserve_back(RAW_CB, 1);
-        uint32_t wl1 = get_write_ptr(RAW_CB);
-        noc_async_read(wg.get_noc_addr(k), wl1, WORDS_PER_TILE * 4u);
-        noc_async_read_barrier();
-        cb_push_back(RAW_CB, 1);
-        cb_wait_front(RAW_CB, 1);
-
-        cb_reserve_back(W_CB, 1);
-        uint32_t tl1 = get_write_ptr(W_CB);
-        volatile tt_l1_ptr uint32_t* words = (volatile tt_l1_ptr uint32_t*)wl1;
-        volatile tt_l1_ptr uint16_t* out   = (volatile tt_l1_ptr uint16_t*)tl1;
-        volatile tt_l1_ptr uint16_t* lut   = (volatile tt_l1_ptr uint16_t*)lut_l1;
+    // Expand every weight tile into its own page via the 16-entry table.
+    cb_reserve_back(W_CB, nk);
+    uint32_t w_base = get_write_ptr(W_CB);
+    volatile tt_l1_ptr uint16_t* lut = (volatile tt_l1_ptr uint16_t*)lut_l1;
+    for (uint32_t k = 0; k < nk; ++k) {
+        volatile tt_l1_ptr uint32_t* words =
+            (volatile tt_l1_ptr uint32_t*)(r_base + k * WORD_BYTES);
+        volatile tt_l1_ptr uint16_t* out =
+            (volatile tt_l1_ptr uint16_t*)(w_base + k * 2048u);
         for (uint32_t i = 0; i < WORDS_PER_TILE; ++i) {
             uint32_t word = words[i];
             out[i * 8u + 0] = lut[(word      ) & 0xFu];
@@ -928,9 +931,9 @@ void kernel_main() {
             out[i * 8u + 6] = lut[(word >> 24) & 0xFu];
             out[i * 8u + 7] = lut[(word >> 28) & 0xFu];
         }
-        cb_push_back(W_CB, 1);
-        cb_pop_front(RAW_CB, 1);
     }
+    cb_push_back(ACT_CB, nk);
+    cb_push_back(W_CB, nk);
 }
 """
 
@@ -1002,16 +1005,20 @@ def run_fused_gemm_lut(
 
     grid = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))])
 
-    def _cb(index, fmt, size):
+    def _cb(index, fmt, page_size, pages=1):
         return ttnn.CBDescriptor(
-            total_size=size, core_ranges=grid,
-            format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=fmt, page_size=size)],
+            total_size=page_size * pages, core_ranges=grid,
+            format_descriptors=[
+                ttnn.CBFormatDescriptor(buffer_index=index, data_format=fmt, page_size=page_size)
+            ],
         )
 
+    # All K activation and weight tiles are staged at once, so both buffers hold
+    # nk pages and the kernel needs a single barrier rather than one per tile.
     cbs = [
-        _cb(0, ttnn.bfloat16, 2048),
-        _cb(1, ttnn.bfloat16, 2048),
-        _cb(2, ttnn.uint32, 512),
+        _cb(0, ttnn.bfloat16, 2048, nk),
+        _cb(1, ttnn.bfloat16, 2048, nk),
+        _cb(2, ttnn.uint32, 512, nk),
         _cb(3, ttnn.uint32, 32),
         _cb(16, ttnn.bfloat16, 2048),
     ]
