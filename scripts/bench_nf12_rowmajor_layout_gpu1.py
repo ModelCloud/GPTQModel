@@ -23,7 +23,8 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 import gptqmodel_nf12 as nf12
-from gptqmodel_nf12.experimental_rowmajor import _native, embedding as row_embedding, from_nf12
+from gptqmodel_nf12.experimental_rowmajor import _native, from_nf12
+from gptqmodel_nf12.experimental_rowmajor import embedding as row_embedding
 from scripts.bench_nf12_lite_observed_shapes import capture, graph_us
 
 
@@ -96,10 +97,10 @@ def main() -> None:
     canonical, canonical_encode_seconds = timed(lambda: nf12.encode(dense))
     del dense
     torch.cuda.empty_cache()
-    gpu_row, gpu_repack_seconds = timed(lambda: from_nf12(canonical, backend="cuda"))
+    gpu_row, gpu_repack_seconds = timed(lambda source=canonical: from_nf12(source, backend="cuda"))
     assert gpu_row.selected_half_collisions == 0
     assert gpu_row.nbytes == canonical.nbytes == 995_314_416
-    canonical_cpu, canonical_d2h_seconds = timed(lambda: canonical.to("cpu"))
+    canonical_cpu, canonical_d2h_seconds = timed(lambda source=canonical: source.to("cpu"))
     cpu_pack_start = time.perf_counter()
     cpu_row = from_nf12(canonical_cpu, backend="cpu")
     cpu_repack_seconds = time.perf_counter() - cpu_pack_start
@@ -155,8 +156,8 @@ def main() -> None:
             exact(row_embedding(ids, gpu_row, **selected), expected)
             exact(nf12.embedding(ids, canonical), expected)
             base_samples, row_samples = paired(
-                lambda: nf12.embedding(ids, canonical),
-                lambda: row_embedding(ids, gpu_row, **selected), args.repeat, args.rounds)
+                lambda chosen_ids=ids, source=canonical: nf12.embedding(chosen_ids, source),
+                lambda chosen_ids=ids: row_embedding(chosen_ids, gpu_row, **selected), args.repeat, args.rounds)
             case = {"kind": "code", "id_dtype": str(dtype).split(".")[-1], "m": m,
                     "geometry": selected, "exact_bf16_bits": True,
                     "canonical_pair_samples_us": {"canonical": base_samples, "row": row_samples},
@@ -207,8 +208,8 @@ def main() -> None:
         expected = F.embedding(ids, dense)
         exact(row_embedding(ids, gpu_row, **selected), expected)
         dense_samples, row_samples = paired(
-            lambda: F.embedding(ids, dense),
-            lambda: row_embedding(ids, gpu_row, **selected), args.repeat, args.rounds)
+            lambda chosen_ids=ids: F.embedding(chosen_ids, dense),
+            lambda chosen_ids=ids: row_embedding(chosen_ids, gpu_row, **selected), args.repeat, args.rounds)
         case["dense_pair_samples_us"] = {"dense": dense_samples, "row": row_samples}
         case["dense_us"] = statistics.median(dense_samples)
         case["row_vs_dense_us"] = statistics.median(row_samples)
