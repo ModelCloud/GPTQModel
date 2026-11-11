@@ -116,3 +116,20 @@ zero retained expanded-weight bytes, and zero dequantization scratch bytes.
 physical GPU 2**, below the **3072 MiB** limit. The final benchmark's
 post-init free-memory delta peaked at 2536 MiB. After it exited, GPU 2 returned
 to the original 84,515 MiB used and 12,949 MiB free.
+
+## Rebase onto fused HC4 main
+
+After GPTQModel merged fused HC4 embedding, the store branch was rebased onto
+main. The merge resolution applies `__stcs` only to `Repeats=1` one-ID CTAs;
+the four-copy `Repeats=4` store policy and launch routes remain as shipped by
+the fused HC4 change. Sixteen targeted CUDA embedding cases passed on physical
+GPU 2, covering single-copy and four-copy outputs, Lite prefill boundaries,
+and exact BF16 bits.
+
+A fresh full-table, same-pointer paired run against the fused HC4 baseline
+used 32-call CUDA graphs and 16 ABBA rounds. M=3072 int64 Lite code IDs
+measured 26.368 → 25.344 µs (1.040×) for NF12, with dense BF16 at
+19.808 µs. Random IDs measured 45.280 → 45.248 µs, effectively flat.
+The [raw rebase run](nf12-embedding-cache-policy-rebased-gpu2-20261111.json)
+records each sample, exact valid and invalid ID checks, and a maximum physical
+process use of 2936 MiB. Inference still retains only packed bytes and escapes.
