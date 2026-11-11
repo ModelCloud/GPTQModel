@@ -928,6 +928,59 @@ def test_resident_rejects_host_tensor_and_unknown_activation(monkeypatch):
         resident.apply_activation(value, "tanh_approx")
 
 
+def test_blockfloat_grid_rounds_on_shared_exponent():
+    """A block-float block shares one exponent and keeps a fixed mantissa width."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(3)
+    weight = torch.randn(64, 128) * 0.05
+
+    out8, exp8 = bq.quantize_blockfloat(weight, 8)
+    assert out8.shape == weight.shape
+    # One shared exponent per block of 16 along the last dimension.
+    assert exp8.shape[-1] == 128 // bq.BLOCKFLOAT_BLOCK
+
+    # 8-bit storage must beat 4-bit storage on the same data.
+    out4, _ = bq.quantize_blockfloat(weight, 4)
+    assert bq.relative_error(weight, out8) < bq.relative_error(weight, out4)
+
+    # Rounding is to a grid: every value must be an exact multiple of 2^exp
+    # scaled unit, i.e. re-quantizing the output changes nothing.
+    again, _ = bq.quantize_blockfloat(out8, 8)
+    assert torch.allclose(out8, again, rtol=0, atol=1e-6)
+
+
+def test_blockfloat_mantissa_widths():
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    assert bq.BLOCKFLOAT_BITS == {"bfloat8_b": 8, "bfloat4_b": 4}
+    # One sign bit and one implicit mantissa bit are not stored.
+    assert bq.stored_mantissa_bits(8) == 6
+    assert bq.stored_mantissa_bits(4) == 2
+
+
+def test_blockfloat_beats_uniform_int4_for_heavy_tails():
+    """Block-float should win where a per-group int4 scale clips an outlier."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(11)
+    weight = torch.randn(64, 128) * 0.01
+    # One large value per group compresses every other value under a shared
+    # int4 scale; block-float re-scales per 16 values instead.
+    weight[:, ::128] = 8.0
+
+    int4_err = bq.relative_error(weight, bq.quantize_uniform_int4(weight))
+    bf4_err = bq.relative_error(weight, bq.quantize_bfloat4_b(weight))
+    assert bf4_err < int4_err
+
+
 
 
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
