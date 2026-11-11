@@ -380,6 +380,29 @@ Outstanding for the fused design: consume the dequantized tile inside the comput
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores
 and pages. What exists today is the dequant stage on one core.
 
+### Tiling attempt: hangs, and what that rules out
+
+A multi-core, page-tiled variant (2D grid, one page per chunk, page-based
+`InterleavedAddrGen` addressing) was written to cover a full `768x768` layer and
+**deadlocked on device**: the kernel spun at 100 % CPU with telemetry
+unreadable, `tt-smi` then reported "Error in detecting devices", and recovery
+required `tt-smi -r` (all four boards came back, 0 thermal trips). That variant
+is not in the tree.
+
+Two things it did establish before hanging, both of which matter:
+
+- A **single 1.18 MB page does not work**: addressing a large byte offset inside
+  one page produced numerically wrong output even when the kernel returned. DRAM
+  bank rotation is per *page*, so a layer has to be stored one page per chunk.
+- The single-core kernel is the only measured-correct configuration so far, and
+  its 0.082 ms/layer figure remains an extrapolation, not a full-layer result.
+
+The likely cause is circular-buffer synchronisation across the page loop (reserve
+/ push / pop against a compute-less program) rather than the arithmetic, which is
+already proven bit-exact. Whoever picks this up should first bring up a 2-core,
+2-page case with `cb_wait_front`/`cb_pop_front` discipline made explicit, before
+scaling to the grid -- and should expect a device reset if it wedges.
+
 ### Dispatching a custom kernel on this install
 
 Four things are required and none are documented for the wheel:
