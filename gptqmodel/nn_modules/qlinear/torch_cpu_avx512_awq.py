@@ -145,6 +145,58 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         )
         self._cpu_transformed = True
 
+    def _apply(self, fn, recurse: bool = True):
+        """Keep the FP32 affine operands exact across dtype/device moves.
+
+        ``transform_cpu`` packs the weight once and promotes ``scales``/``bias``
+        to FP32 because the shared AVX512 kernel requires an FP32 ``absmax`` and
+        accumulates in FP32. ``nn.Module._apply`` applies ``fn`` to every
+        registered floating buffer, so ``model.to(torch.bfloat16)``/``.float()``/
+        ``.half()`` used to round those operands through BF16 before restoring
+        the dtype. BF16 keeps 8 explicit mantissa bits against the checkpoint's
+        10, so the round trip lost scale precision permanently and the next
+        forward raised ``absmax must be float32`` once the dtype was restored.
+
+        Hold the exact tensors across ``super()._apply`` and reinstall them at
+        the resulting device. Scales and zero points are quantization metadata,
+        not expanded weights, so retaining them is allowed; the packed integer
+        codes are untouched by a move and are never repacked here.
+        """
+
+        if not getattr(self, "_cpu_transformed", False):
+            return super()._apply(fn, recurse=recurse)
+
+        kept = {
+            name: getattr(self, name)
+            for name in ("scales", "bias")
+            if isinstance(getattr(self, name, None), torch.Tensor)
+        }
+        result = super()._apply(fn, recurse=recurse)
+        for name, value in kept.items():
+            current = getattr(self, name, None)
+            device = current.device if isinstance(current, torch.Tensor) else value.device
+            restored = value.to(device=device, dtype=torch.float32).contiguous()
+            if name in self._parameters:
+                restored = torch.nn.Parameter(restored, requires_grad=False)
+            setattr(self, name, restored)
+        return result
+
+    def clear_weight_cache(self) -> None:
+        """Restore the FP32 kernel ABI after a load or explicit cache clear.
+
+        ``_apply`` above preserves the operands exactly, but a checkpoint load
+        or an external caller may still install a narrower ``scales``/``bias``.
+        The packed codes are already in the kernel layout, so only the affine
+        dtype needs re-establishing.
+        """
+
+        if not getattr(self, "_cpu_transformed", False):
+            return
+        if self.scales.dtype != torch.float32:
+            self.scales = self.scales.to(torch.float32).contiguous()
+        if self.bias is not None and self.bias.dtype != torch.float32:
+            self.bias = self.bias.to(torch.float32).contiguous()
+
     def transform(self, device):
         if device == "cpu":
             self.transform_cpu()
