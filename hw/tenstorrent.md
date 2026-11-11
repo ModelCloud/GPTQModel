@@ -667,6 +667,13 @@ activation set for its M tiles, so 64 cores read the same activations 64 times -
 24 MiB of redundant traffic for a 0.38 MiB activation. That is the cost
 `ttnn.linear` avoids by letting the framework shard and multicast.
 
+Cutting the activation reads 8x confirms the split. Reading one M tile instead
+of eight (wrong result, `bad_frac` 0.025, used only for cost) dropped the layer
+from 0.3463 ms to 0.2844 ms -- **18%**, not the 93% the traffic ratio would
+suggest. So activation redundancy accounts for roughly 40% of the staging time;
+the rest is weight and output traffic plus per-round barrier latency. Removing the
+redundancy is worth doing, but it alone does not close the gap.
+
 So the remaining 3.6x is not one bug. It is:
 1. redundant activation reads that multicast would remove,
 2. a full barrier per staging round rather than pipelining,
