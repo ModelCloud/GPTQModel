@@ -69,6 +69,37 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
+@pytest.mark.parametrize("m,id_dtype", [
+    (256, torch.int64), (312, torch.int32), (313, torch.int64),
+    (512, torch.int32), (513, torch.int64), (1536, torch.int64),
+    (2048, torch.int32), (2049, torch.int64), (3072, torch.int32),
+])
+def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(10101 + m)
+    weight = (torch.randn((512, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    weight[0, 0] = -0.0
+    weight[-1, -1] = 2.0**-20
+    ids = torch.randint(weight.shape[0], (m,), generator=generator, device=device, dtype=id_dtype)
+    ids[0], ids[-1] = 0, weight.shape[0] - 1
+    packed = nf12.encode(weight)
+    module = nf12.NF12Embedding.from_weight(packed)
+    oracle = F.embedding(ids, weight)
+    for _ in range(2):
+        actual = module(ids)
+        assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
+    if m == 512:
+        invalid = ids.clone()
+        invalid[1], invalid[2] = -1, weight.shape[0]
+        actual = module(invalid)
+        assert torch.equal(actual[1:3].view(torch.int16), torch.zeros_like(actual[1:3]).view(torch.int16))
+        assert torch.equal(actual[3:].view(torch.int16), oracle[3:].view(torch.int16))
+    assert packed.nbytes < weight.nbytes
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    assert {name for name, _ in module.named_buffers()} == {"nf12_packed", "nf12_escapes"}
+    assert all(buffer.dtype != torch.bfloat16 for _, buffer in module.named_buffers())
+
+
 @pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])
 def test_native_linear_prefill_matches_torch_oracle(n, m):
     device = _cuda()
@@ -125,6 +156,79 @@ def test_native_full_vocabulary_head_matches_dense_torch():
                        F.embedding(ids, weight).view(torch.int16))
 
 
+@pytest.mark.parametrize("n,k", [(384, 5120), (512, 5120), (5120, 5120), (129280, 5120)])
+def test_staged_b1_matches_independent_rows_and_torch(n, k):
+    device = _cuda()
+    if n >= 129280 and torch.cuda.mem_get_info(device)[0] < 4_000_000_000:
+        pytest.skip("full vocabulary head needs at least 4 GB free GPU memory")
+    generator = torch.Generator(device=device).manual_seed(851 + n)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0] = -0.0
+    dense[-1, -1] = 2.0**-20  # exercise escape decoding without a large outlier
+    packed = nf12.encode(dense)
+    assert torch.equal(nf12.decode(packed).view(torch.int16), dense.view(torch.int16))
+    for m in (1, 2, 6, 8):
+        x = (torch.randn((m, k), generator=generator, device=device) * 0.05).bfloat16()
+        bias = (torch.randn((n,), generator=generator, device=device) * 0.01).bfloat16()
+        expected = torch.cat([nf12.linear(x[i:i + 1], packed, bias) for i in range(m)])
+        actual = nf12.linear_staged_b1(x, packed, bias)
+        assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+        torch.testing.assert_close(actual.float(), F.linear(x.float(), dense.float(), bias.float()),
+                                   rtol=2e-3, atol=2e-3)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    with pytest.raises(ValueError, match="requires a BF16"):
+        nf12.linear_staged_b1(torch.empty((9, k), device=device, dtype=torch.bfloat16), packed)
+
+
+@pytest.mark.parametrize("n", [128, 384, 512, 5120])
+@pytest.mark.parametrize("m", [2, 6, 8])
+def test_fp32_staged_b1_matches_independent_rows_and_torch(n, m):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(859 + n + m)
+    dense = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0] = 2.0**10
+    packed = nf12.encode(dense)
+    x = torch.randn((m, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((n,), generator=generator, device=device) * 0.01
+    expected = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(m)])
+    actual = nf12.linear_fp32_staged_b1(x, packed, bias)
+    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual, F.linear(x, dense.float(), bias), rtol=2e-3, atol=2e-3)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("n", (128, 384))
+def test_prepared_fp32_gate_matches_b1_and_fp64_oracle(n):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(20261111)
+    dense = (torch.randn((n, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0] = -0.0
+    dense[0, 7] = 2.0**10
+    dense[-1, -1] = -(2.0**-20)
+    packed = nf12.encode(dense)
+    nf12.prepare_fp32_gate(packed)
+    nf12.prepare_fp32_gate(packed)
+    from gptqmodel_nf12._fp32 import _get_gate_view
+    meta, low, escapes = _get_gate_view(packed)
+    assert meta.dtype == torch.int32 and low.dtype == torch.uint8
+    assert escapes.dtype == torch.int16
+    assert meta.nbytes + low.nbytes == dense.nbytes * 3 // 4
+    assert meta.nbytes + low.nbytes + escapes.nbytes < dense.nbytes
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    x = torch.randn((6, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((n,), generator=generator, device=device) * 0.01
+    staged = nf12.linear_fp32_staged_b1(x, packed, bias)
+    singles = torch.cat([nf12.linear_fp32(x[i:i + 1], packed, bias) for i in range(6)])
+    assert torch.equal(staged, singles)
+    fp64 = F.linear(x.double(), dense.double(), bias.double()).float()
+    torch.testing.assert_close(staged, fp64, rtol=2e-3, atol=2e-3)
+    assert torch.equal(staged.topk(8, -1).indices, fp64.topk(8, -1).indices)
+    changed = x.clone()
+    changed[2].mul_(1.7)
+    assert torch.equal(nf12.linear_fp32_staged_b1(changed, packed, bias)[2],
+                       nf12.linear_fp32(changed[2:3], packed, bias)[0])
+
+
 @pytest.mark.parametrize("shape", [
     (32, 512), (32, 5120), (128, 5120), (384, 5120), (512, 5120),
 ])
@@ -172,6 +276,64 @@ def test_fp32_prefill_crossover_matches_dense_torch_without_retained_weight(shap
     actual = nf12.linear_fp32(x, packed)
     oracle = F.linear(x, weight.float())
     assert torch.equal(actual, oracle)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("m", (256, 384, 512, 3072))
+def test_fp32_main_gate_prefill_tensor_core_matches_torch_and_keeps_weight_packed(m):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(41591 + m)
+    weight = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    weight[0, 0] = -0.0
+    weight[0, 7] = 2.0**10
+    weight[-1, -1] = -(2.0**-20)
+    packed = nf12.encode(weight)
+    assert packed.num_escapes > 0
+    x = torch.randn((m, 5120), generator=generator, device=device) * 0.05
+    bias = torch.randn((384,), generator=generator, device=device) * 0.01
+    expected = F.linear(x, weight.float(), bias)
+    actual = nf12.linear_fp32(x, packed, bias)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+    assert torch.equal(actual.topk(8, dim=-1).indices, expected.topk(8, dim=-1).indices)
+    sample_rows = torch.tensor((0, 1, m // 2, m - 1), device=device)
+    oracle = F.linear(x.index_select(0, sample_rows).double(), weight.double(), bias.double())
+    torch.testing.assert_close(actual.index_select(0, sample_rows).double(), oracle,
+                               rtol=2e-3, atol=2e-3)
+    changed = x.clone()
+    changed[m // 2].mul_(1.7)
+    changed_out = nf12.linear_fp32(changed, packed, bias)
+    torch.testing.assert_close(changed_out[m // 2],
+                               F.linear(changed[m // 2], weight.float(), bias),
+                               rtol=2e-3, atol=2e-3)
+    assert not torch.equal(changed_out[m // 2], actual[m // 2])
+    assert torch.equal(nf12.decode(packed).view(torch.int16), weight.view(torch.int16))
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+    torch.cuda.current_stream().synchronize()
+    retained_before = torch.cuda.memory_allocated(device)
+    repeated = nf12.linear_fp32(x, packed, bias)
+    torch.cuda.current_stream().synchronize()
+    retained_after = torch.cuda.memory_allocated(device)
+    assert retained_after - retained_before <= repeated.nbytes + 1_048_576
+    del repeated
+    assert torch.cuda.memory_allocated(device) <= retained_before + 1_048_576
+
+
+def test_fp32_main_gate_prefill_tensor_core_graph_and_3d_input():
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(41599)
+    weight = (torch.randn((384, 5120), generator=generator, device=device) * 0.02).bfloat16()
+    packed = nf12.encode(weight)
+    x = torch.randn((2, 256, 5120), generator=generator, device=device) * 0.05
+    reference = F.linear(x, weight.float())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = nf12.linear_fp32(x, packed)
+    graph.replay()
+    torch.testing.assert_close(captured, reference, rtol=2e-3, atol=2e-3)
+    x.mul_(0.5)
+    graph.replay()
+    torch.testing.assert_close(captured, F.linear(x, weight.float()), rtol=2e-3, atol=2e-3)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 

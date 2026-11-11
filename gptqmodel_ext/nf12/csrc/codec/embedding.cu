@@ -64,16 +64,19 @@ __device__ __forceinline__ uint2 decode_row_half(const Group& g, uint32_t base_x
   return upper ? make_uint2(r[1], r[3]) : make_uint2(r[0], r[2]);
 }
 
-template <int Quads, typename Id>
+template <int Quads, bool Grid2D, int IdsPerCTA, typename Id>
 __global__ void __launch_bounds__(4 * Quads) embedding_kernel(EmbeddingParams p, const Id* __restrict__ ids) {
   const int lane = threadIdx.x & 31;
   const uint32_t quad = threadIdx.x >> 2;
-  const uint32_t id_block = blockIdx.x / p.kb_chunks;
-  const uint32_t chunk = blockIdx.x - id_block * p.kb_chunks;
-  const uint32_t local = quad / p.kb_span;
-  const int64_t kb = int64_t(chunk) * Quads + (quad - local * p.kb_span);
-  const int64_t i = int64_t(id_block) * p.ids_per_block + local;
-  const bool active = local < p.ids_per_block && kb < p.k_blocks && i < p.num_ids;
+  const uint32_t id_block = Grid2D ? blockIdx.x : blockIdx.x / p.kb_chunks;
+  const uint32_t chunk = Grid2D ? blockIdx.y : blockIdx.x - id_block * p.kb_chunks;
+  constexpr int kQuadsPerId = Quads / IdsPerCTA;
+  const uint32_t local = Grid2D ? quad / kQuadsPerId : quad / p.kb_span;
+  const int64_t kb = Grid2D ? int64_t(chunk) * kQuadsPerId + (quad % kQuadsPerId)
+                            : int64_t(chunk) * Quads + (quad - local * p.kb_span);
+  const int64_t i = Grid2D ? int64_t(id_block) * IdsPerCTA + local
+                           : int64_t(id_block) * p.ids_per_block + local;
+  const bool active = (Grid2D || local < p.ids_per_block) && kb < p.k_blocks && i < p.num_ids;
 
   // v0: column pairs t of output chunks 0-3, v1: of chunks 4-7 (8 columns each).
   uint4 v0 = make_uint4(0u, 0u, 0u, 0u);
@@ -115,7 +118,18 @@ cudaError_t launch_embedding(EmbeddingParams p, const Id* ids, cudaStream_t stre
   if (kb_chunks > codec::kMaxGridX / id_blocks) return cudaErrorInvalidValue;
   p.kb_chunks = static_cast<uint32_t>(kb_chunks);
   const dim3 grid(static_cast<unsigned>(id_blocks * kb_chunks));
-  embedding_kernel<Quads><<<grid, 4 * Quads, 0, stream>>>(p, ids);
+  embedding_kernel<Quads, false, 1><<<grid, 4 * Quads, 0, stream>>>(p, ids);
+  return cudaGetLastError();
+}
+
+template <int Quads, int IdsPerCTA, typename Id>
+cudaError_t launch_embedding_prefill(EmbeddingParams p, const Id* ids, cudaStream_t stream) {
+  // K=5120 has 80 column blocks. Pack multiple IDs into a CTA where useful
+  // while retaining the two-dimensional grid and exact BF16 row bits.
+  constexpr int kQuadsPerId = Quads / IdsPerCTA;
+  const dim3 grid(static_cast<unsigned>((p.num_ids + IdsPerCTA - 1) / IdsPerCTA),
+                  static_cast<unsigned>((p.k_blocks + kQuadsPerId - 1) / kQuadsPerId));
+  embedding_kernel<Quads, true, IdsPerCTA><<<grid, 4 * Quads, 0, stream>>>(p, ids);
   return cudaGetLastError();
 }
 
@@ -136,6 +150,22 @@ cudaError_t embedding(const uint8_t* packed, const uint4* escapes, uint32_t num_
   p.num_ids = num_ids;
   p.out = out;
   p.ldo = ldo;
+  // At Lite's SM80 prefill width K=5120, 8-quads CTAs split each ID into ten
+  // blocks. More quads cut that grid while retaining exact BF16 row bits.
+  if (num_ids >= 256 && num_ids < 4096 && k == 5120) {
+    int device = 0;
+    if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
+    if (device_info(device).sm_arch == 80) {
+      if (num_ids <= 512)
+        return ids32 != nullptr ? launch_embedding_prefill<32, 8>(p, ids32, stream)
+                                : launch_embedding_prefill<32, 8>(p, ids64, stream);
+      if (num_ids <= 2048)
+        return ids32 != nullptr ? launch_embedding_prefill<32, 16>(p, ids32, stream)
+                                : launch_embedding_prefill<32, 16>(p, ids64, stream);
+      return ids32 != nullptr ? launch_embedding_prefill<16, 1>(p, ids32, stream)
+                              : launch_embedding_prefill<16, 1>(p, ids64, stream);
+    }
+  }
   // Larger CTAs improve cold, many-ID lookups on SM80 and SM100. Keep the
   // original geometry for small lookups and outside the measured width band.
   if (num_ids >= 4096 && k >= 1024 && k <= 4096) {

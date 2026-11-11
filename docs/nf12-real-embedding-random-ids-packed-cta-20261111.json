@@ -1,0 +1,107 @@
+{
+  "gpu": "NVIDIA PG506-230",
+  "compute_capability": [
+    8,
+    0
+  ],
+  "torch": "2.15.0+cu132",
+  "gil_enabled": false,
+  "native_source_key": "f9f7155c973fcc8c1dfae32efa39d243baa4230f50ff93f103f1c8d5f663f8c5",
+  "ids_kind": "uniform_random",
+  "ids_sha256": null,
+  "checkpoint": "/fast/model/DeepSeek-V4.1-Flash-1017",
+  "method": "same IDs and released BF16 weight; CUDA graph; paired ABBA rounds",
+  "repeat": 16,
+  "rounds": 6,
+  "families": [
+    {
+      "name": "embedding",
+      "weight_key": "embed.weight",
+      "weight_sha256": "aa1ac979edab508950a871c370fa645a875203a1a35c20ba9c1d45bb1ed46e3c",
+      "shape_nk": [
+        129280,
+        5120
+      ],
+      "dense_weight_bytes": 1323827200,
+      "packed_weight_bytes": 995314416,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.88,
+          "nf12_us": 2.72,
+          "speedup": 1.0588,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 6,
+          "dense_us": 6.016,
+          "nf12_us": 2.816,
+          "speedup": 2.1364,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 312,
+          "dense_us": 4.48,
+          "nf12_us": 5.312,
+          "speedup": 0.8434,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 313,
+          "dense_us": 4.416,
+          "nf12_us": 5.44,
+          "speedup": 0.8118,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 512,
+          "dense_us": 5.632,
+          "nf12_us": 6.976,
+          "speedup": 0.8073,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 1536,
+          "dense_us": 12.704,
+          "nf12_us": 24.608,
+          "speedup": 0.5163,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 3072,
+          "dense_us": 35.584,
+          "nf12_us": 45.248,
+          "speedup": 0.7864,
+          "exact_bf16_bits": true
+        }
+      ]
+    },
+    {
+      "name": "markov-embedding",
+      "weight_key": "mtp.2.markov_head.embed.weight",
+      "weight_sha256": "af4448e3d7360d955b38316c7d0fde55d791eb39ad59eb09e67c3faeb0b4ad9b",
+      "shape_nk": [
+        129280,
+        256
+      ],
+      "dense_weight_bytes": 66191360,
+      "packed_weight_bytes": 49772928,
+      "cases": [
+        {
+          "m": 1,
+          "dense_us": 2.688,
+          "nf12_us": 2.432,
+          "speedup": 1.1053,
+          "exact_bf16_bits": true
+        },
+        {
+          "m": 5,
+          "dense_us": 5.056,
+          "nf12_us": 2.56,
+          "speedup": 1.975,
+          "exact_bf16_bits": true
+        }
+      ]
+    }
+  ]
+}

@@ -82,6 +82,10 @@ def _register_fakes() -> None:
     def _linear(x, packed, escapes, exp_base, bias=None):
         return x.new_empty((*x.shape[:-1], packed.shape[0]))
 
+    @torch.library.register_fake("nf12::linear_staged_b1")
+    def _linear_staged_b1(x, packed, escapes, exp_base, bias=None):
+        return x.new_empty((x.shape[0], packed.shape[0]))
+
     @torch.library.register_fake("nf12::pack_bf16t")
     def _pack_bf16t(w):
         n, k = w.shape

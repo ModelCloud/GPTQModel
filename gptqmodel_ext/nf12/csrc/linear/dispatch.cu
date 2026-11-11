@@ -207,6 +207,15 @@ size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo&
   return rows > 0 ? sliced_workspace_bytes(m, n, k, rows, dev) : linear_large_m_workspace_bytes(m, n, k, dev);
 }
 
+size_t linear_staged_b1_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
+  if (m < 1 || m > 8 || use_narrow(1, n, k, dev) || !use_small_m(1, n, k, dev)) return 0;
+  SmallMConfig cfg = small_m_heuristic(1, n, k, dev);
+  cfg.slice = small_m_heuristic_slice(cfg, m, n, k, dev);
+  return cfg.slice >= 0 && small_m_config_supported(cfg, m, n, k, dev)
+             ? small_m_workspace_bytes(cfg, m, n, dev)
+             : 0;
+}
+
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   // SM86 2K gates: cuBLAS 13.1 selection cliffs bound the measured fused-MMA win.
   if (dev.sm_arch == 86 && k == 2048 && (n == 64 || n == 128) && m >= 2932 && m <= 4779) return 0;
@@ -224,7 +233,7 @@ int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInf
   return route ? slice_rows(n, k, kExternalSliceBytes) : 0;
 }
 
-cudaError_t linear(const LinearArgs& a) {
+cudaError_t linear_impl(const LinearArgs& a, bool staged_b1) {
   if (a.dev == nullptr) return cudaErrorInvalidValue;
   if (a.dev->sm_arch < 80) return cudaErrorNotSupported;
   if (a.m < 1 || a.n <= 0 || a.k <= 0 || a.n % 16 != 0 || a.k % 64 != 0) return cudaErrorInvalidValue;
@@ -239,8 +248,19 @@ cudaError_t linear(const LinearArgs& a) {
                                           (a.num_escapes > 0 && a.escapes == nullptr)))
     return cudaErrorInvalidValue;
   const DeviceInfo& dev = *a.dev;
-  const size_t ws = linear_workspace_bytes(a.m, a.n, a.k, dev);
+  const size_t ws = staged_b1 ? linear_staged_b1_workspace_bytes(a.m, a.n, a.k, dev)
+                              : linear_workspace_bytes(a.m, a.n, a.k, dev);
   if (a.workspace_bytes < ws || (ws > 0 && a.workspace == nullptr)) return cudaErrorInvalidValue;
+
+  if (staged_b1) {
+    if (a.m > 8 || use_narrow(1, a.n, a.k, dev) || !use_small_m(1, a.n, a.k, dev))
+      return cudaErrorNotSupported;
+    SmallMConfig cfg = small_m_heuristic(1, a.n, a.k, dev);
+    cfg.slice = small_m_heuristic_slice(cfg, a.m, a.n, a.k, dev);
+    return cfg.slice >= 0 && small_m_config_supported(cfg, a.m, a.n, a.k, dev)
+               ? linear_small_m(a, cfg)
+               : cudaErrorNotSupported;
+  }
 
   if (use_narrow(a.m, a.n, a.k, dev))
     return narrow_sm8x_supported(dev) ? linear_large_m_sm8x_narrow(a) : linear_narrow_sm120(a, -1);
@@ -251,5 +271,9 @@ cudaError_t linear(const LinearArgs& a) {
   const int64_t rows = internal_slice_rows(a.m, a.n, a.k, dev);
   return rows > 0 ? linear_sliced(a, rows) : linear_large_m(a);
 }
+
+cudaError_t linear(const LinearArgs& a) { return linear_impl(a, false); }
+
+cudaError_t linear_staged_b1(const LinearArgs& a) { return linear_impl(a, true); }
 
 }  // namespace nf12::detail
