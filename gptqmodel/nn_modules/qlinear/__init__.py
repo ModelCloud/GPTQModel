@@ -326,28 +326,81 @@ class BaseQuantLinear(nn.Module):
         the copy or strict loading reports a size mismatch (and ``save()`` would
         serialize runtime shapes). A state dict that instead matches the live
         int4pack operands is the model's own ``state_dict()``; restoring would
-        make that previously valid self round-trip fail. Both cases are
-        distinguished by shape.
+        make that previously valid self round-trip fail.
+
+        The two layouts are told apart by the operands whose shape the
+        transform actually changes (``qweight``/``qzeros``); see
+        :func:`state_dict_matches_checkpoint_layout`. A runtime-layout load
+        keeps the live tensors and the checkpoint snapshot. Its post-copy cache
+        clear must not restore that snapshot. A changed runtime state cannot
+        always be converted back to checkpoint format, so export rejects it.
 
         ``load_state_dict`` may also copy into an existing buffer, which does
         not replace the Python object. Cache keys catch versioned tensors, but
         an inference tensor has no version counter, so clear unconditionally.
         """
 
+        restore_layout = False
+        runtime_layout = False
         if getattr(self, "_fused_train_state", None) is not None:
-            from ._fused_train_state import state_dict_matches_checkpoint_layout
+            from ._fused_train_state import (
+                state_dict_matches_checkpoint_layout,
+                state_dict_matches_runtime_layout,
+            )
 
             state_dict = args[0] if args else kwargs.get("state_dict")
             prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
-            if state_dict is not None and state_dict_matches_checkpoint_layout(
-                self, state_dict, prefix
-            ):
+            if state_dict is not None:
+                restore_layout = state_dict_matches_checkpoint_layout(
+                    self, state_dict, prefix
+                )
+                runtime_layout = not restore_layout and state_dict_matches_runtime_layout(
+                    self, state_dict, prefix
+                )
+            if restore_layout:
                 # ``clear_weight_cache`` is the kernels' full restore hook: it
                 # puts the checkpoint tensors back *and* retires the derived
                 # layout state (``_cpu_transformed``, ``scales_and_zeros``).
+                self._fused_train_state_exportable = True
                 self._clear_runtime_weight_cache()
+            elif runtime_layout:
+                # The snapshot describes an older checkpoint layout the caller
+                # is deliberately replacing. Keep the live transformed tensors
+                # the load is about to write, and let the clear below rebuild
+                # derived metadata from them.
+                from ._fused_train_state import (
+                    materialize_fused_runtime_state,
+                    runtime_state_matches_live,
+                )
+
+                # Keep the checkpoint snapshot for a true self round-trip.
+                # A modified runtime layout has no guaranteed inverse back to
+                # checkpoint zero codes, so export must fail explicitly.
+                self._fused_train_state_exportable = (
+                    getattr(self, "_fused_train_state_exportable", True)
+                    and runtime_state_matches_live(self, state_dict, prefix)
+                )
+                local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+                assign = isinstance(local_metadata, dict) and bool(
+                    local_metadata.get("assign_to_params_buffers", False)
+                )
+                if not assign:
+                    # A forward ran the transform inside ``inference_mode``;
+                    # copying into inference tensors outside it is rejected.
+                    materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
-        self._clear_runtime_weight_cache()
+        if runtime_layout:
+            # Invalidate derived metadata without restoring the snapshot that
+            # a later checkpoint export still needs.
+            was_suspended = getattr(self, "_suspend_fused_train_restore", False)
+            self._suspend_fused_train_restore = True
+            try:
+                self._clear_runtime_weight_cache()
+            finally:
+                if not was_suspended:
+                    self.__dict__.pop("_suspend_fused_train_restore", None)
+        else:
+            self._clear_runtime_weight_cache()
 
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
