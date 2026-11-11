@@ -1315,6 +1315,43 @@ def test_fused_gemm_lut_is_at_least_as_accurate_as_soft_float():
 
 
 
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_fused_grid_gemm_matches_torch_on_device():
+    """Multi-core fused int4 GEMM: one N tile per core, full K reduction.
+
+    Verified on device at 2x2 (4 cores) and 8x8 (64 cores). Guards three things
+    that were each found the hard way: rt[x][y] per-core arg indexing, a
+    TILE_LAYOUT output (the writer pushes raw tile bytes), and every weight buffer
+    appearing in io_tensors.
+    """
+
+    from gptqmodel.utils.tt_int4_kernel import run_fused_gemm_grid
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    gw, gh, nk, nm = 2, 2, 4, 2
+    cores = gw * gh
+    torch.manual_seed(13)
+    codes = torch.randint(0, 16, (cores, nk, 1024), dtype=torch.int64)
+    weight = (0.0173 * (codes.to(torch.float32) - 7.0)).to(torch.bfloat16)
+    # Column block c comes from core c, so build W by blocks, not a flat reshape.
+    w = weight.reshape(cores, nk, 32, 32).permute(1, 2, 0, 3).reshape(nk * 32, cores * 32)
+    act = torch.randn(nm * 32, nk * 32, dtype=torch.bfloat16)
+    reference = act.float() @ w.float()
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        got = run_fused_gemm_grid(act, codes, 0.0173, 7, device=mesh.device, grid=(gw, gh))
+    finally:
+        close_mesh()
+
+    assert got.shape == (nm * 32, cores * 32)
+    norm_l1 = float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
+    assert norm_l1 < 0.02, f"grid GEMM deviates: norm_l1={norm_l1}"
+
+
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
 @pytest.mark.parametrize("device_count", [1, 4])
 def test_actual_ttnn_linear_matches_torch_oracle(device_count):

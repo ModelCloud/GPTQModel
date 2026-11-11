@@ -317,6 +317,217 @@ def verify_on_device(nwords: int, scale: float, zero: int, *, device, seed: int 
     expected = reference_dequant(words, scale, zero)
     return bool(torch.equal(got, expected)), float((got - expected).abs().max())
 
+# --- multi-core grid fused GEMM --------------------------------------------
+#
+# One N tile per core, whole K reduction, dequant to L1, exact GPTQ. Validated at
+# 64 cores (8x8): norm_l1 0.00146, bad_frac 0.000.
+#
+#   nk/nm/grid     M      K      N    cores   time
+#   4/2  2x2      64    128    128       4   0.067 ms
+#   8/8  4x4     256    256    512      16   0.117 ms
+#   24/8 8x8     256    768   2048      64   0.346 ms
+#
+# ~3.6x slower than ttnn.linear on the same shape (0.0949 ms). Ablation puts the
+# gap in data movement, not arithmetic: staging 45%, BRISC LUT dequant 53%,
+# matmul 2%.
+#
+# Three layout facts are load-bearing, all found the hard way:
+#   * per-core runtime args are indexed rt[x][y] by logical coordinate, not a
+#     linear index (that fails with "Number of runtime args cannot be modified");
+#   * the output tensor must be TILE_LAYOUT: the writer pushes raw tile bytes, so
+#     a row-major destination corrupts every face but the first (bad_frac 0.986,
+#     row 0 correct to column 15 -- looks like a compute bug);
+#   * io_tensors must include every weight buffer, or the kernel reads addresses
+#     the program does not track.
+
+FUSED_GRID_READER = r"""
+#include "api/dataflow/dataflow_api.h"
+void kernel_main() {
+    uint32_t w_addr   = get_arg_val<uint32_t>(0);
+    uint32_t act_addr = get_arg_val<uint32_t>(1);
+    uint32_t lut_addr = get_arg_val<uint32_t>(2);
+    uint32_t out_addr = get_arg_val<uint32_t>(3);
+    uint32_t nk       = get_arg_val<uint32_t>(4);
+    uint32_t nact     = get_arg_val<uint32_t>(5);
+    uint32_t out_page = get_arg_val<uint32_t>(6);
+    uint32_t nm       = get_arg_val<uint32_t>(7);
+    (void)out_addr; (void)out_page; (void)nm;
+    constexpr uint32_t ACT_CB=0, W_CB=1, RAW_CB=2, LUT_CB=3;
+    constexpr uint32_t WPT = 128, WB = WPT*4u;
+
+    cb_reserve_back(LUT_CB, 1);
+    uint32_t lut_l1 = get_write_ptr(LUT_CB);
+    InterleavedAddrGen<true> lg = {.bank_base_address = lut_addr, .page_size = 32};
+    noc_async_read(lg.get_noc_addr(0), lut_l1, 32);
+
+    cb_reserve_back(ACT_CB, nact);
+    uint32_t a_base = get_write_ptr(ACT_CB);
+    InterleavedAddrGen<true> ag = {.bank_base_address = act_addr, .page_size = 2048};
+    cb_reserve_back(RAW_CB, nk);
+    uint32_t r_base = get_write_ptr(RAW_CB);
+    InterleavedAddrGen<true> wg = {.bank_base_address = w_addr, .page_size = WB};
+
+    for (uint32_t t = 0; t < nact; ++t) noc_async_read(ag.get_noc_addr(t), a_base + t*2048u, 2048);
+    for (uint32_t k = 0; k < nk; ++k) noc_async_read(wg.get_noc_addr(k), r_base + k*WB, WB);
+    noc_async_read_barrier();
+
+    cb_reserve_back(W_CB, nk);
+    uint32_t w_base = get_write_ptr(W_CB);
+    volatile tt_l1_ptr uint16_t* lut = (volatile tt_l1_ptr uint16_t*)lut_l1;
+    for (uint32_t k = 0; k < nk; ++k) {
+        volatile tt_l1_ptr uint32_t* w = (volatile tt_l1_ptr uint32_t*)(r_base + k*WB);
+        volatile tt_l1_ptr uint16_t* o = (volatile tt_l1_ptr uint16_t*)(w_base + k*2048u);
+        for (uint32_t i = 0; i < WPT; ++i) {
+            uint32_t x = w[i];
+            o[i*8u+0]=lut[(x)&0xF]; o[i*8u+1]=lut[(x>>4)&0xF];
+            o[i*8u+2]=lut[(x>>8)&0xF]; o[i*8u+3]=lut[(x>>12)&0xF];
+            o[i*8u+4]=lut[(x>>16)&0xF]; o[i*8u+5]=lut[(x>>20)&0xF];
+            o[i*8u+6]=lut[(x>>24)&0xF]; o[i*8u+7]=lut[(x>>28)&0xF];
+        }
+    }
+    cb_push_back(ACT_CB, nact);
+    cb_push_back(W_CB, nk);
+
+}
+"""
+
+FUSED_GRID_COMPUTE = r"""
+#include "api/compute/common.h"
+#include "api/compute/matmul.h"
+#include "api/compute/pack.h"
+#include "api/compute/compute_kernel_hw_startup.h"
+void kernel_main() {
+    uint32_t nk = get_arg_val<uint32_t>(0);
+    uint32_t nm = get_arg_val<uint32_t>(1);
+    constexpr uint32_t ACT_CB=0, W_CB=1, OUT_CB=16;
+    compute_kernel_hw_startup<SrcOrder::Reverse>(ACT_CB, W_CB, OUT_CB);
+    matmul_init(ACT_CB, W_CB);
+    cb_wait_front(ACT_CB, nm*nk);
+    cb_wait_front(W_CB, nk);
+    for (uint32_t mi = 0; mi < nm; ++mi) {
+        tile_regs_acquire();
+        for (uint32_t k = 0; k < nk; ++k) matmul_tiles(ACT_CB, W_CB, mi*nk + k, k, 0);
+        tile_regs_commit(); tile_regs_wait();
+        cb_reserve_back(OUT_CB, 1);
+        pack_tile(0, OUT_CB);
+        cb_push_back(OUT_CB, 1);
+        tile_regs_release();
+    }
+}
+"""
+
+FUSED_GRID_WRITER = r"""
+#include "api/dataflow/dataflow_api.h"
+void kernel_main() {
+    uint32_t out_addr = get_arg_val<uint32_t>(0);
+    uint32_t out_page = get_arg_val<uint32_t>(1);
+    uint32_t nm       = get_arg_val<uint32_t>(2);
+    constexpr uint32_t CB = 16;
+    InterleavedAddrGen<true> og = {.bank_base_address = out_addr, .page_size = 2048};
+    for (uint32_t i = 0; i < nm; ++i) {
+        cb_wait_front(CB, 1);
+        noc_async_write(get_read_ptr(CB), og.get_noc_addr(out_page + i), 2048);
+        noc_async_write_barrier();
+        cb_pop_front(CB, 1);
+    }
+}
+"""
+
+
+def run_fused_gemm_grid(act, codes, scale, zero, *, device, grid=(8, 8)):
+    """Fused int4 GEMM across a 2D core grid: one N tile per core, full K.
+
+    `act` is [M, K] with M a multiple of 32; `codes` is [cores, nk, 1024] (or a
+    flattened [cores, nk*1024]) -- one 32x32 weight tile set per core, becoming a
+    column block of the output. Returns [M, cores*32].
+
+    Validated on a p300c at 64 cores: norm_l1 0.00146, bad_frac 0.000.
+    """
+    from .ttnn_runtime import import_ttnn
+
+    ttnn = import_ttnn()
+    gw, gh = int(grid[0]), int(grid[1])
+    cores = gw * gh
+    if codes.dim() == 2:
+        codes = codes.reshape(cores, -1, 1024)
+    nk = codes.numel() // (cores * 1024)
+    if codes.numel() != cores * nk * 1024:
+        raise ValueError(f"codes must be [cores={cores}, nk, 1024]; got {codes.numel()}")
+    if act.dim() != 2 or act.shape[1] != nk * 32:
+        raise ValueError(f"act must be [M, {nk * 32}], got {tuple(act.shape)}")
+    m = int(act.shape[0])
+    if m % 32:
+        raise ValueError(f"M={m} must be a multiple of 32")
+    nm, nt = m // 32, cores
+
+    order_t = tile_order_indices()
+    wd = []
+    for n in range(nt):
+        rows = torch.stack([
+            pack_codes_to_words(codes[n, k][order_t]) for k in range(nk)
+        ]).to(torch.int32)
+        wd.append(ttnn.to_device(ttnn.from_torch(rows, dtype=ttnn.uint32,
+                                                layout=ttnn.ROW_MAJOR_LAYOUT), device))
+    actd = ttnn.to_device(ttnn.from_torch(act.to(torch.bfloat16).reshape(1, m, nk * 32),
+                                          dtype=ttnn.bfloat16,
+                                          layout=ttnn.TILE_LAYOUT), device)
+    lutd = ttnn.to_device(ttnn.from_torch(build_dequant_lut(scale, zero),
+                                          dtype=ttnn.uint32,
+                                          layout=ttnn.ROW_MAJOR_LAYOUT), device)
+    # TILE_LAYOUT is required: the writer pushes raw tile bytes.
+    out = ttnn.allocate_tensor_on_device(ttnn.Shape([nt, nm, 32, 32]), ttnn.bfloat16,
+                                         ttnn.TILE_LAYOUT, device, ttnn.DRAM_MEMORY_CONFIG)
+
+    core_range = ttnn.CoreRangeSet([
+        ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(gw - 1, gh - 1))
+    ])
+
+    def _cb(i, fmt, page, pages):
+        return ttnn.CBDescriptor(
+            total_size=page * pages, core_ranges=core_range,
+            format_descriptors=[
+                ttnn.CBFormatDescriptor(buffer_index=i, data_format=fmt, page_size=page)
+            ],
+        )
+
+    cbs = [
+        _cb(0, ttnn.bfloat16, 2048, nm * nk),
+        _cb(1, ttnn.bfloat16, 2048, nk),
+        _cb(2, ttnn.uint32, 512, nk),
+        _cb(3, ttnn.uint32, 32, 1),
+        _cb(16, ttnn.bfloat16, 2048, 1),
+    ]
+
+    rt_r, rt_c, rt_w = ttnn.RuntimeArgs(), ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
+    for n in range(nt):
+        # Logical-coordinate indexing, not a linear index.
+        x, y = n % gw, n // gw
+        rt_r[x][y] = [wd[n].buffer_address(), actd.buffer_address(),
+                      lutd.buffer_address(), out.buffer_address(),
+                      nk, nm * nk, n * nm, nm]
+        rt_c[x][y] = [nk, nm]
+        rt_w[x][y] = [out.buffer_address(), n * nm, nm]
+
+    ks = [
+        ttnn.KernelDescriptor(kernel_source=FUSED_GRID_READER,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=core_range,
+            compile_time_args=[], runtime_args=rt_r, config=ttnn.ReaderConfigDescriptor()),
+        ttnn.KernelDescriptor(kernel_source=FUSED_GRID_COMPUTE,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=core_range,
+            compile_time_args=[], runtime_args=rt_c,
+            config=ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=True)),
+        ttnn.KernelDescriptor(kernel_source=FUSED_GRID_WRITER,
+            source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=core_range,
+            compile_time_args=[], runtime_args=rt_w, config=ttnn.WriterConfigDescriptor()),
+    ]
+    prog = ttnn.ProgramDescriptor(kernels=ks, semaphores=[], cbs=cbs)
+    io = [actd, lutd] + wd + [out]
+    ttnn.generic_op(io, prog)
+    ttnn.synchronize_device(device)
+
+    pages = ttnn.to_torch(out).reshape(nt, nm, 32, 32)
+    return pages.permute(1, 2, 0, 3).reshape(nm * 32, nt * 32).to(torch.float32)
+
 
 __all__ = [
     "FUSED_COMPUTE_COPY",
@@ -325,6 +536,9 @@ __all__ = [
     "FUSED_GEMM_M_COMPUTE",
     "FUSED_GEMM_M_READER",
     "FUSED_GEMM_M_WRITER",
+    "FUSED_GRID_COMPUTE",
+    "FUSED_GRID_READER",
+    "FUSED_GRID_WRITER",
     "FUSED_GEMM_READER",
     "FUSED_MATMUL_COMPUTE",
     "FUSED_MATMUL_READER",
@@ -340,6 +554,7 @@ __all__ = [
     "permute_to_tile_order",
     "run_fused_gemm",
     "run_fused_gemm_lut",
+    "run_fused_gemm_grid",
     "run_fused_gemm_m",
     "run_fused_matmul",
     "run_fused_tile",

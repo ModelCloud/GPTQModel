@@ -683,19 +683,32 @@ Closing it needs the kernel to participate in TTNN's sharding/multicast machiner
 rather than staging through L1 by hand, which is a larger redesign than tuning
 what exists.
 
-### Reproducibility warning: the grid function is not in the tree
+### The grid function is in the tree (correcting an earlier warning)
 
-The multi-core kernel above was validated in a standalone harness, but the same
-program **hangs when driven through a library wrapper** in this repo, at both 2x2
-and 4x4. The exact difference was not isolated before the work was stopped, so the
-grid implementation was **removed rather than shipped**: an unverified kernel that
-works from one call path and wedges the device from another is worse than no
-kernel.
+An earlier revision of this page said the multi-core implementation had been
+removed because it hung when driven through a library wrapper. That diagnosis was
+wrong, and the cause is worth recording because it cost real time.
 
-What remains verified and committed is the single-core and M-tile paths
-(`run_fused_gemm`, `run_fused_gemm_m`), which have hardware-gated tests. The 64-core
-numbers in this document come from the harness, not from library code, and are
-marked as such.
+Two separate things were being blamed on the code:
+
+1. **A transient fabric failure.** `ttnn.open_mesh_device` intermittently failed
+   with `Graph specified in MGD could not fit in the discovered physical topology
+   ... 1 target node(s) are not mapped to any global node`. That is a mesh-open
+   failure, not a kernel failure, and it appears after repeated device resets.
+   Single-device paths kept working through it, which is the tell: it is a fabric
+   topology state, not the program.
+2. **Genuine wrapping bugs in the port**, since fixed: `codes` arriving as
+   `[cores, nk*1024]` instead of `[cores, nk, 1024]`, and `_cb(16, ...)` sized for
+   the wrong page count.
+
+The function is now ported **verbatim** from the validated harness
+(`run_fused_gemm_grid`) rather than re-derived, and it is verified through
+library code at both scales: `(64, 128)` and `(256, 2048)`, `norm_l1` 0.00146 in
+each, with a hardware-gated test.
+
+Lesson recorded: when a program works standalone and fails from a wrapper, check
+whether the device itself is in a bad state before rewriting the program. Here the
+mesh open was failing for reasons that had nothing to do with the kernel.
 
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
 attempt -- one applied to three functions instead of one -- which is why the
