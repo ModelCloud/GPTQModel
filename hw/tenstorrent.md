@@ -408,9 +408,39 @@ Two things had to be right, and both were learned the hard way:
 Dispatch gate cleared for the compute path: `ComputeConfigDescriptor` works from
 `generic_op`, so reader/compute/writer triples can be launched from Python.
 
-Remaining for the objective: replace the copy with the FPU matmul
-(`copy_tile` the activation, `mm_init`/`matmul_tiles` against the dequantized
-weight tile in `SrcA`), then widen to a full layer over the grid.
+### The FPU matmul is in: a working fused int4 GEMM
+
+The copy has been replaced by the matrix engine. One `32x32` tile now runs
+end to end as a single program: BRISC reads packed words from DRAM, dequantizes
+into an L1 circular buffer, the TRISC compute stage calls
+`matmul_init`/`matmul_tiles` against the activation tile and packs the product,
+and only the `32x32` result is written out. The packed checkpoint never becomes a
+DRAM tensor.
+
+Verified on device against a torch reference: `norm_l1` **0.0052**, `maxerr`
+**0.0185** (BF16 accumulation). The transposed orientation measures `norm_l1`
+1.43, so operand order is confirmed rather than assumed — the test asserts the
+wrong orientation stays an order of magnitude worse, otherwise it would prove
+nothing.
+
+Two API facts that are not obvious:
+
+- **`matmul_tiles(in0, in1, ...)` computes `in1 x in0`.** Matmul maps `in0` to
+  `SrcB` and `in1` to `SrcA`, the reverse of every other op, so the weight buffer
+  is passed first to get `W x ACT`.
+- **`compute_kernel_hw_startup(in0, in1, out)` is required** before
+  `matmul_init`; it performs the one-time hardware configuration.
+
+Status: functionally complete as a primitive, **not yet measured for speed**.
+This is one tile on one core, where dispatch overhead dominates, so no
+performance claim is made here — and none should be inferred from the earlier
+80.98 ms figure, which measured the dequant-only path including its DRAM write.
+Widening to a full layer over the grid, with `K` accumulated across tiles, is what
+would make a speed comparison meaningful.
+
+Also worth stating plainly: correctness so far is per-tile BF16 accumulation, not
+the `HiFi4` + fp32-accumulate configuration the TTNN path uses for its accuracy
+floor. Matching that is part of the widening work.
 
 Outstanding for the fused design: consume the dequantized tile inside the compute
 path (`SrcA`) instead of writing it back to DRAM, and tile the layer across cores

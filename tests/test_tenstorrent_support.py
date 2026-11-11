@@ -1070,6 +1070,39 @@ def test_fused_tile_path_is_bit_exact_on_device():
         close_mesh()
 
 
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_fused_matmul_matches_torch_on_device():
+    """The fused kernel must compute W x ACT, with the dequant staying in L1."""
+
+    from gptqmodel.utils.tt_int4_kernel import run_fused_matmul
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, open_mesh
+
+    torch.manual_seed(8)
+    codes = torch.randint(0, 16, (1024,), dtype=torch.int64)
+    weight = (0.0173 * (codes.to(torch.float32) - 7.0)).to(torch.bfloat16).reshape(32, 32)
+    act = torch.randn(32, 32, dtype=torch.bfloat16)
+    reference = weight.float() @ act.float()
+
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        got = run_fused_matmul(act, codes, 0.0173, 7, device=mesh.device)
+    finally:
+        close_mesh()
+
+    assert got.shape == (32, 32)
+    norm_l1 = float((got - reference).abs().sum() / reference.abs().sum().clamp_min(1e-6))
+    assert norm_l1 < 0.02, f"fused matmul deviates from torch: norm_l1={norm_l1}"
+    # The reverse orientation must NOT match, otherwise the test proves nothing
+    # about operand order.
+    transposed = float((got - (act.float() @ weight.float())).abs().sum()
+                       / reference.abs().sum().clamp_min(1e-6))
+    assert transposed > norm_l1 * 10
+
+
+
 @pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
 @pytest.mark.parametrize("device_count", [1, 4])
 def test_actual_ttnn_linear_matches_torch_oracle(device_count):
