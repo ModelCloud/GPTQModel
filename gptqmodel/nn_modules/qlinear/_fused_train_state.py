@@ -78,6 +78,49 @@ def discard_fused_train_state(module: nn.Module) -> None:
     module._fused_train_state = None
 
 
+def materialize_fused_runtime_state(module: nn.Module) -> bool:
+    """Replace inference-tensor operands with normal tensors in place.
+
+    The CPU inference transform runs inside ``inference_mode``, so the live
+    ``qweight``/``qzeros``/``scales`` (and a widened ``bias``) are inference
+    tensors. ``load_state_dict(assign=False)`` copies into them outside
+    inference mode, which Torch rejects. Cloning them into normal tensors keeps
+    the runtime layout while allowing that copy; ``assign=True`` does not need
+    it because the load replaces the tensors outright.
+    """
+
+    snapshot = getattr(module, "_fused_train_state", None)
+    if not snapshot:
+        return False
+    materialized = False
+    with torch.inference_mode(False):
+        for name in snapshot:
+            live = getattr(module, name, None)
+            if isinstance(live, torch.Tensor) and torch.is_inference(live):
+                _replace_tensor(module, name, live.detach().clone())
+                materialized = True
+    return materialized
+
+
+def _discriminating_operands(module: nn.Module):
+    """Operands whose snapshot shape differs from the live transformed shape.
+
+    These, and only these, can tell a checkpoint-shaped state dict apart from
+    the model's own runtime ``state_dict()``. The CPU int4pack transform keeps
+    ``scales`` at its checkpoint shape and the AVX512 transform keeps ``bias``
+    at its checkpoint shape (only the dtype widens), so neither is decisive.
+    """
+
+    snapshot = getattr(module, "_fused_train_state", None) or {}
+    for name, buffer_name in snapshot.items():
+        expected = module._buffers.get(buffer_name)
+        live = getattr(module, name, None)
+        if not isinstance(expected, torch.Tensor) or not isinstance(live, torch.Tensor):
+            continue
+        if tuple(expected.shape) != tuple(live.shape):
+            yield name, buffer_name
+
+
 def state_dict_matches_checkpoint_layout(module: nn.Module, state_dict, prefix: str = "") -> bool:
     """Report whether an incoming state dict describes the checkpoint layout.
 
@@ -91,24 +134,56 @@ def state_dict_matches_checkpoint_layout(module: nn.Module, state_dict, prefix: 
 
     Only the first must be restored into the snapshot layout; restoring for the
     second would reject a self round-trip that must keep working.
+
+    The decision uses every operand whose shape actually changed. A single
+    coincidentally equal operand - notably ``scales``, which the int4pack
+    transform leaves at its checkpoint shape - must never carry the verdict on
+    its own, and requiring all discriminating operands to agree is what keeps
+    the model's own runtime dict from being mistaken for a checkpoint.
+
+    When no operand changed shape (nothing to discriminate on), or any
+    discriminating operand does not match the snapshot, this returns ``False``
+    so the load proceeds against the live layout.
     """
 
-    snapshot = getattr(module, "_fused_train_state", None)
-    if not snapshot:
-        return False
-    for name, buffer_name in snapshot.items():
+    matched = 0
+    for name, buffer_name in _discriminating_operands(module):
         incoming = state_dict.get(f"{prefix}{name}")
         expected = module._buffers.get(buffer_name)
-        if not isinstance(incoming, torch.Tensor) or expected is None:
-            continue
-        if tuple(incoming.shape) == tuple(expected.shape):
-            return True
-    return False
+        if not isinstance(incoming, torch.Tensor):
+            return False
+        if tuple(incoming.shape) != tuple(expected.shape):
+            return False
+        matched += 1
+    return matched > 0
+
+
+def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str = "") -> bool:
+    """Report whether an incoming state dict matches the live transformed layout.
+
+    This identifies the model's own ``state_dict()``. Such a load must copy
+    into the live int4pack tensors and then rebuild derived caches *without*
+    restoring the checkpoint snapshot, which would rewrite the shapes the
+    caller just supplied.
+    """
+
+    matched = 0
+    for name, _buffer_name in _discriminating_operands(module):
+        incoming = state_dict.get(f"{prefix}{name}")
+        live = getattr(module, name, None)
+        if not isinstance(incoming, torch.Tensor) or not isinstance(live, torch.Tensor):
+            return False
+        if tuple(incoming.shape) != tuple(live.shape):
+            return False
+        matched += 1
+    return matched > 0
 
 
 __all__ = [
     "capture_fused_train_state",
     "discard_fused_train_state",
+    "materialize_fused_runtime_state",
     "restore_fused_train_state",
     "state_dict_matches_checkpoint_layout",
+    "state_dict_matches_runtime_layout",
 ]

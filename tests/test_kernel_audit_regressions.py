@@ -607,6 +607,140 @@ def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expe
     torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
 
 
+def _transformed_layer(cls, *, seed=17):
+    """Build a finalized CPU layer and drive one inference forward."""
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    dtype = torch.bfloat16
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(seed)
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    layer, _weight, _bias = _projection(cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu")
+    x = torch.randn(2, 5, 256, dtype=dtype)
+
+    class _Holder(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.proj = module
+
+        def forward(self, x):
+            return self.proj(x)
+
+    holder = _Holder(layer).eval()
+    with torch.inference_mode():
+        baseline = holder(x).clone()
+    return holder, x, baseline
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module_path, assign):
+    """A transformed layer must accept its own runtime ``state_dict()`` back.
+
+    After a CPU inference forward the live operands are in the int4pack layout.
+    Taking ``state_dict()`` in that state and loading it back is a self
+    round-trip: the incoming ``qweight``/``qzeros`` describe the *runtime*
+    layout, not the checkpoint held in ``_fused_train_state``.
+
+    ``scales`` keeps its checkpoint shape in both layouts, so a gate that
+    accepted any single matching operand mistook this dict for a checkpoint,
+    restored the snapshot, and then failed strict loading with a size mismatch
+    (``qweight`` 64x64 into 16x64). The load must instead keep the live layout
+    and remain numerically lossless.
+    """
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support {torch.bfloat16}")
+
+    holder, x, baseline = _transformed_layer(cls)
+    layer = holder.proj
+    assert layer._fused_train_state, "the forward must have captured a snapshot"
+    # ``scales`` is shape-identical across both layouts; it must never be the
+    # operand that decides the load.
+    live_qweight = tuple(layer.qweight.shape)
+    snapshot_qweight = tuple(layer._buffers[layer._fused_train_state["qweight"]].shape)
+    assert live_qweight != snapshot_qweight
+    assert tuple(layer.scales.shape) == tuple(
+        layer._buffers[layer._fused_train_state["scales"]].shape
+    )
+
+    state = {name: value.clone() for name, value in layer.state_dict().items()}
+    layer.load_state_dict(state, assign=assign)
+
+    # The load kept the live layout instead of restoring the checkpoint shapes.
+    assert tuple(layer.qweight.shape) == live_qweight
+
+    with torch.inference_mode():
+        restored = holder(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_path):
+    """The layout gate must not be fooled by a shape the transform preserves.
+
+    This pins the gate itself: given a runtime dict, only the operands whose
+    shape actually changed decide. A load that supplies changes only in the
+    shape-preserving ``scales`` operand must still be classified as runtime.
+    """
+
+    from gptqmodel.nn_modules.qlinear._fused_train_state import (
+        state_dict_matches_checkpoint_layout,
+        state_dict_matches_runtime_layout,
+    )
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support {torch.bfloat16}")
+
+    holder, _x, _baseline = _transformed_layer(cls)
+    layer = holder.proj
+    runtime = {name: value.clone() for name, value in layer.state_dict().items()}
+    assert state_dict_matches_runtime_layout(layer, runtime)
+    assert not state_dict_matches_checkpoint_layout(layer, runtime)
+
+    checkpoint = {
+        name: layer._buffers[buffer_name].clone()
+        for name, buffer_name in layer._fused_train_state.items()
+    }
+    assert state_dict_matches_checkpoint_layout(layer, checkpoint)
+    assert not state_dict_matches_runtime_layout(layer, checkpoint)
+
+
 @pytest.mark.parametrize(
     ("class_name", "module_path"),
     (
