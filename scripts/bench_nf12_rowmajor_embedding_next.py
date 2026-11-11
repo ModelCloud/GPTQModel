@@ -18,6 +18,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -242,8 +243,8 @@ def main() -> None:
                                            row.exp_base, threads, ids_per_cta, mode)
                     mismatch = check_bits(actual, expected)
                     assert mismatch == 0, (dtype_name, m, mode, threads, ids_per_cta, mismatch)
-                    fn = lambda t=threads, p=ids_per_cta, v=mode: kernel.lookup(
-                        ids, row.packed, row.escapes, n, k, row.exp_base, t, p, v)
+                    fn = partial(kernel.lookup, ids, row.packed, row.escapes, n, k,
+                                 row.exp_base, threads, ids_per_cta, mode)
                     graph = capture(fn, args.repeat)
                     timings = [graph_us(graph, args.repeat) for _ in range(args.sweep_rounds)]
                     sweep[f"{mode}:{threads}x{ids_per_cta}"] = timings
@@ -270,14 +271,14 @@ def main() -> None:
                 selected = best_by_dtype_shape[dtype_name, m]
                 mode, geometry = selected.split(":")
                 threads, ids_per_cta = map(int, geometry.split("x"))
-                fn = lambda: kernel.lookup(ids, row.packed, row.escapes, n, k,
-                                           row.exp_base, threads, ids_per_cta, int(mode))
+                fn = partial(kernel.lookup, ids, row.packed, row.escapes, n, k,
+                             row.exp_base, threads, ids_per_cta, int(mode))
                 expected = nf12.embedding(ids, original)
                 actual = fn()
                 mismatch = check_bits(actual, expected)
                 assert mismatch == 0, (kind, dtype_name, m, mismatch)
                 base_times, candidate_times = paired_samples(
-                    lambda: nf12.embedding(ids, original), fn, args.repeat, args.rounds)
+                    partial(nf12.embedding, ids, original), fn, args.repeat, args.rounds)
                 case = by_case.get((kind, m, dtype_name))
                 if case is None:
                     case = {"kind": kind, "m": m, "id_dtype": dtype_name,
@@ -292,9 +293,8 @@ def main() -> None:
                     old = old_by_dtype_shape[dtype_name, m]
                     old_mode, old_geometry = old.split(":")
                     old_threads, old_ids_per_cta = map(int, old_geometry.split("x"))
-                    old_fn = lambda: kernel.lookup(ids, row.packed, row.escapes, n, k,
-                                                   row.exp_base, old_threads, old_ids_per_cta,
-                                                   int(old_mode))
+                    old_fn = partial(kernel.lookup, ids, row.packed, row.escapes, n, k,
+                                     row.exp_base, old_threads, old_ids_per_cta, int(old_mode))
                     old_times, optimized_times = paired_samples(old_fn, fn, args.repeat, args.rounds)
                     case["previous_row_pair_samples_us"] = {
                         "previous_row": old_times, "candidate": optimized_times}
@@ -316,14 +316,14 @@ def main() -> None:
         ids = case_ids(kind, m, n, ids_fixture, dtype)
         mode, geometry = case["selected"].split(":")
         threads, ids_per_cta = map(int, geometry.split("x"))
-        fn = lambda: kernel.lookup(ids, row.packed, row.escapes, n, k,
-                                   row.exp_base, threads, ids_per_cta, int(mode))
+        fn = partial(kernel.lookup, ids, row.packed, row.escapes, n, k,
+                     row.exp_base, threads, ids_per_cta, int(mode))
         expected = F.embedding(ids, weight)
         actual = fn()
         mismatch = check_bits(actual, expected)
         assert mismatch == 0, (kind, dtype_name, m, mismatch)
         dense_times, candidate_times = paired_samples(
-            lambda: F.embedding(ids, weight), fn, args.repeat, args.rounds)
+            partial(F.embedding, ids, weight), fn, args.repeat, args.rounds)
         case["dense_pair_samples_us"] = {"dense": dense_times, "candidate": candidate_times}
         case["dense_us"] = statistics.median(dense_times)
         case["candidate_vs_dense_us"] = statistics.median(candidate_times)
