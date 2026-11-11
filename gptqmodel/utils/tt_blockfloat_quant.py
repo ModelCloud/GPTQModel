@@ -154,3 +154,131 @@ __all__ = [
     "relative_error",
     "stored_mantissa_bits",
 ]
+
+
+def _block_exponents(weight: torch.Tensor, block: int = BLOCKFLOAT_BLOCK) -> torch.Tensor:
+    """Shared exponent per 16-wide block along the storage axis.
+
+    The hardware groups 16 consecutive values of a row, so the exponent must be
+    fixed from that grouping -- not per output channel -- or the solve produces
+    values the format cannot store.
+    """
+
+    w = weight.to(torch.float32)
+    pad = (-w.shape[-1]) % block
+    if pad:
+        w = torch.nn.functional.pad(w, (0, pad))
+    blocks = w.reshape(*w.shape[:-1], -1, block)
+    safe = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+    return torch.floor(torch.log2(safe)).squeeze(-1)
+
+
+def _round_with_exponents(
+    x: torch.Tensor, exponents: torch.Tensor, bits: int, block: int = BLOCKFLOAT_BLOCK
+) -> torch.Tensor:
+    """Round ``x`` onto a *fixed* set of block exponents."""
+
+    w = x.to(torch.float32)
+    last = w.shape[-1]
+    pad = (-last) % block
+    if pad:
+        w = torch.nn.functional.pad(w, (0, pad))
+    blocks = w.reshape(*w.shape[:-1], -1, block)
+    scale = torch.pow(2.0, exponents)
+    levels = float(1 << stored_mantissa_bits(bits))
+    q = torch.round(blocks / scale * levels) / levels
+    q = q.clamp(min=-(2.0 - 1.0 / levels), max=(2.0 - 1.0 / levels))
+    out = (q * scale).reshape(*w.shape[:-1], w.shape[-1])
+    return (out[..., :last] if pad else out).contiguous()
+
+
+def gptq_solve_blockfloat(
+    weight: torch.Tensor,
+    hessian: torch.Tensor,
+    *,
+    bits: int = 4,
+    damp: float = 0.01,
+    block: int = BLOCKFLOAT_BLOCK,
+    grid: str = "blockfloat",
+) -> torch.Tensor:
+    """GPTQ error-feedback solve whose quantizer is the block-float grid.
+
+    GPTQ'"'s algorithm is grid-agnostic: it needs a quantizer `Q(w)` and its error,
+    then solves column by column minimising Hessian-weighted error. Nothing in the
+    derivation requires a uniform grid -- that is only what GPTQ implementations
+    conventionally use because it packs cleanly into nibbles.
+
+    Substituting a Tenstorrent block-float grid therefore produces weights that are
+    **natively `bfloat4_b`/`bfloat8_b` as stored**, so inference needs no dequant
+    step at all: the unpack stage expands the checkpoint in the data path.
+
+    `hessian` is `[in_features, in_features]` (``X^T X`` over calibration data).
+    Returns the quantized weights with the same shape as `weight`
+    (`[out_features, in_features]`), using GPTQ'"'s usual ordering: the reduction
+    dimension is the *last* axis and `hessian` indexes it.
+
+    This is the honest form of "GPTQ for bf4". Re-encoding an int4 checkpoint onto
+    this grid is not the same thing and measures far worse.
+    """
+
+    w = weight.detach().to(torch.float32).clone()
+    if w.dim() != 2:
+        raise ValueError(f"weight must be 2-D, got {tuple(w.shape)}")
+    out_features, in_features = w.shape
+    if tuple(hessian.shape) != (in_features, in_features):
+        raise ValueError(
+            f"hessian must be [{in_features}, {in_features}], got {tuple(hessian.shape)}"
+        )
+    if bits not in (4, 8):
+        raise ValueError(f"bits must be 4 or 8, got {bits}")
+    if grid not in ("blockfloat", "uniform"):
+        raise ValueError(f"grid must be 'blockfloat' or 'uniform', got {grid!r}")
+    use_blockfloat = grid == "blockfloat"
+
+    h = hessian.detach().to(torch.float32).clone()
+    # Damp as GPTQ does, so a rank-deficient Hessian still inverts.
+    dead = torch.diag(h) == 0
+    h[dead, dead] = 1.0
+    w[:, dead] = 0.0
+    mean = torch.mean(torch.diag(h))
+    h += torch.eye(in_features, dtype=h.dtype) * (damp * mean)
+
+    # GPTQ needs the full inverse here. Taking ``triu`` of a lower-triangular
+    # Cholesky factor leaves only the diagonal, which silently disables error
+    # feedback (measured: the solve then matched plain rounding exactly).
+    try:
+        hinv = torch.linalg.inv(h)
+    except Exception:  # pragma: no cover - singular Hessian
+        hinv = torch.linalg.pinv(h)
+
+    # The hardware fixes one exponent per 16-wide block of a row, so derive those
+    # exponents from the *original* weights before the solve starts. Recomputing
+    # them per column would let them drift and would make the result un-storable.
+    fixed_exponents = _block_exponents(w, block) if use_blockfloat else None
+
+    q = torch.zeros_like(w)
+    for i in range(in_features):
+        col = w[:, i]
+        if use_blockfloat:
+            # Exponent is fixed per row-block from the current (error-feedback)
+            # weights, and the element is snapped onto that grid.
+            block_idx = i // block
+            exp = fixed_exponents[:, block_idx:block_idx + 1]
+            levels = float(1 << stored_mantissa_bits(bits))
+            scale = torch.pow(2.0, exp)
+            unit = torch.round(col.unsqueeze(-1) / scale * levels) / levels
+            unit = unit.clamp(min=-(2.0 - 1.0 / levels), max=(2.0 - 1.0 / levels))
+            quant = (unit * scale).squeeze(-1)
+        else:
+            # Symmetric uniform grid with a per-column scale: GPTQ's usual choice.
+            levels = float((1 << (bits - 1)) - 1)
+            scale = col.abs().max().clamp_min(torch.finfo(torch.float32).tiny) / levels
+            quant = torch.round(col / scale).clamp(-levels - 1, levels) * scale
+        q[:, i] = quant
+        err = (col - quant) / hinv[i, i]
+        if i + 1 < in_features:
+            w[:, i + 1:] -= err.unsqueeze(-1) @ hinv[i, i + 1:].unsqueeze(0)
+    return q
+
+
+__all__ += ["gptq_solve_blockfloat"]

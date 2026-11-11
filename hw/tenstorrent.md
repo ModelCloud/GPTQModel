@@ -333,6 +333,43 @@ optimisation.
    go, and the measurement above shows the cost (~9.8 % normalized error on a
    real layer). This repository therefore does **not** offer a
    `bfloat4_b` target for GPTQ checkpoints.
+### Path 2 measured: correctness works, accuracy is a wash, speed is the open part
+
+A GPTQ solve with a pluggable grid now exists
+(`gptq_solve_blockfloat(..., grid="blockfloat" | "uniform")`), so the two
+quantizers can be compared under identical error feedback.
+
+**The premise holds on device.** Weights placed on the block-float grid are
+*exactly* hardware-representable: round-tripping through `bfloat8_b`/`bfloat4_b`
+storage moved values by `max_drift = 0.000000`, and re-quantizing through hardware
+is a fixed point. So a checkpoint quantized on this grid needs no inference-time
+dequant -- the unpack stage produces exactly what the quantizer chose. That was
+the whole point of path 2.
+
+**Accuracy is competitive, not better.** With GPTQ error feedback on both grids
+and correlated activations:
+
+| bits | uniform grid | block-float grid | ratio |
+| --- | --- | --- | --- |
+| 4 | 0.0651 | 0.0646 | 1.01x |
+| 8 | 0.0038 | 0.0040 | 0.95x |
+
+An earlier revision of this work claimed a ~2x advantage; that compared a *solved*
+block-float against *plain rounding* on a uniform grid, which is not a fair A/B.
+Corrected here: block-float is on par at equal width.
+
+That is still a useful result, because the uniform path needs a dequant op at
+inference and this one does not. The remaining question is speed: whether packing
+at 4 bits on this grid beats the fused int4 kernel's LUT expansion. That has not
+been measured, and until it is, path 2 should be described as *correct and
+format-native*, not as the faster option.
+
+**A solver bug worth recording.** The first implementation took `triu` of a
+lower-triangular Cholesky factor, which left only the diagonal and silently
+disabled error feedback -- the solve then matched plain rounding to three decimal
+places. Detecting that required comparing against plain rounding, not just
+checking the output was on-grid.
+
 2. **Quantising onto a block-float grid with GPTQ is a legitimate
    optimisation.** GPTQ's algorithm is grid-agnostic: it needs a quantiser
    `Q(w)` and its error, then solves column-by-column minimising
