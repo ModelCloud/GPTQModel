@@ -522,8 +522,8 @@ def test_ttnn_rejects_non_8_aligned_widths():
 
 
 def test_ttnn_arch_lookup_never_assumes_blackhole():
-    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
     from gptqmodel.nn_modules.qlinear.ttnn import _ttnn_arch
+    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
 
     class _TTNN:
         Arch = type("Arch", (), {"BLACKHOLE": "blackhole-enum", "WORMHOLE_B0": "wormhole-enum"})
