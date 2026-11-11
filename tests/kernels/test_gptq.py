@@ -83,9 +83,16 @@ def _kernel_skip_reason(kernel_cls, device: torch.device) -> str | None:
         try:
             kernel_cls.validate_device(device)
         except NotImplementedError as exc:
-            return str(exc)
+            return str(exc) or f"{kernel_cls.__name__} rejected device {device}"
 
-    ok, err = kernel_cls.cached_validate_once()
+    # ``validate_once`` is documented to return ``(ok, error)``, but a kernel
+    # that imports its optional runtime lazily can raise instead (Triton does
+    # when the package is absent). This gate exists to skip, never to error,
+    # so an exception is just another reason the kernel is unavailable.
+    try:
+        ok, err = kernel_cls.cached_validate_once()
+    except Exception as exc:
+        return f"{kernel_cls.__name__} unavailable: {exc}"
     if not ok:
         return f"{kernel_cls.__name__} unavailable: {err}"
     return None
@@ -93,6 +100,68 @@ def _kernel_skip_reason(kernel_cls, device: torch.device) -> str | None:
 
 def test_input_shape_plan_expands_each_sample_once():
     assert _expand_input_dims([(1, 2), (16, 3)]) == [1, 1, 16, 16, 16]
+
+
+class _AvailableKernel:
+    SUPPORTS_DEVICES = [DEVICE_FAMILY.ALL]
+
+    @classmethod
+    def cached_validate_once(cls):
+        return True, None
+
+
+class _UnavailableKernel:
+    SUPPORTS_DEVICES = [DEVICE_FAMILY.ALL]
+
+    @classmethod
+    def cached_validate_once(cls):
+        return False, NotImplementedError("kernel runtime missing")
+
+
+class _RaisingKernel:
+    SUPPORTS_DEVICES = [DEVICE_FAMILY.ALL]
+
+    @classmethod
+    def cached_validate_once(cls):
+        raise ImportError("optional runtime missing")
+
+
+class _CudaOnlyKernel:
+    SUPPORTS_DEVICES = [DEVICE_FAMILY.CUDA]
+
+    @classmethod
+    def cached_validate_once(cls):  # pragma: no cover - must not be reached
+        raise AssertionError("family mismatch must skip before the runtime probe")
+
+
+class _DeviceRejectingKernel:
+    SUPPORTS_DEVICES = [DEVICE_FAMILY.CPU]
+
+    @classmethod
+    def validate_device(cls, device):
+        raise NotImplementedError("compute capability too low")
+
+    @classmethod
+    def cached_validate_once(cls):  # pragma: no cover - must not be reached
+        raise AssertionError("device rejection must skip before the runtime probe")
+
+
+def test_kernel_skip_reason_uses_kernel_declarations():
+    cpu = torch.device("cpu")
+
+    assert _kernel_skip_reason(_AvailableKernel, cpu) is None
+    assert "kernel runtime missing" in _kernel_skip_reason(_UnavailableKernel, cpu)
+    assert "optional runtime missing" in _kernel_skip_reason(_RaisingKernel, cpu)
+
+    # A kernel that declares a single family must be skipped on any other
+    # family instead of loading and failing inside the kernel.
+    reason = _kernel_skip_reason(_CudaOnlyKernel, cpu)
+    assert reason is not None and "cuda" in reason
+
+    # A family match is necessary but not sufficient: the kernel's own device
+    # rules (compute capability, architecture) still decide.
+    reason = _kernel_skip_reason(_DeviceRejectingKernel, cpu)
+    assert reason == "compute capability too low"
 
 
 class Data:

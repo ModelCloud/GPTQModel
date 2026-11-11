@@ -15,13 +15,14 @@ import inspect
 import time
 import warnings
 
-import httpx
 import pytest
 import torch
 
 
-# FastAPI (and its Starlette test client) is an optional server dependency.
-# Skip the module instead of failing collection when it is not installed.
+# FastAPI, its Starlette test client and httpx are optional server
+# dependencies. Skip the module instead of failing collection when one of
+# them is not installed.
+httpx = pytest.importorskip("httpx")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 Headers = pytest.importorskip("starlette.datastructures").Headers
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
