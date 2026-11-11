@@ -529,9 +529,28 @@ on one core (~6.1 ms), against TTNN's ~1.33 ms for the whole layer. One core is
 therefore ~4.6x slower, but five cores match it and the 11x10 grid would put the
 fused path roughly an order of magnitude ahead -- before any grid optimisation.
 
-Grid spread is now the blocker rather than an optimisation: the kernel still runs
-on a single core, and per-core runtime arguments are not yet working past two
-cores, so distributing N tiles is the next concrete step.
+A **full `768x768` layer** now runs end to end through the fused kernel at
+M=256, K=768, N=768: `norm_l1` **0.00146**, **50.4 ms on one core**. That is the
+first complete-layer number from this path rather than a per-tile projection.
+
+### Grid spread: still not working, and why it matters
+
+Per-core runtime arguments do work on a full grid -- the correct form is
+`rt[x][y]`, indexed by logical coordinate, not a linear index. That was the bug in
+the earlier 4x4 failure.
+
+Despite that, a multi-core version of the layer deadlocks, including at 2x2 with
+4 K tiles, so it is not a scale problem. Merging the output write into the reader
+and using the standard reader/compute/writer shape both hung, each requiring
+`tt-smi -r` to recover. Not committed.
+
+The arithmetic of why it matters: 50.4 ms on one core against TTNN's ~1.33 ms
+means this path needs roughly **38 cores to reach parity** at M=256, and the p300c
+has 110. So the single-core result is a correctness milestone, not a performance
+one, and grid spread remains the gate on any real claim.
+
+Honest status: the fused int4 GEMM is **correct and complete for a full layer on
+one core**; it is **not fast**, and multi-core execution is **unproven**.
 
 A deadlock worth recording: updating the shared compute kernel to expect staged
 buffers while one reader still pushed tiles one at a time wedged the device (reset
