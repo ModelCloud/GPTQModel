@@ -206,7 +206,8 @@ flowchart TD
     J -. Invalid int4pack geometry .-> X["ATen error"]
     L -. Unsupported matmul contract .-> X
     M["train / checkpoint load / export"] --> N["restore_fused_train_state: packed checkpoint tensors"]
-    O["clear_weight_cache / move"] --> P["_refresh_fused_op: rebuild from live packed buffers"]
+    O["clear_weight_cache / same-device move"] --> P["_refresh_fused_op: rebuild from live packed buffers"]
+    Q["cross-device move"] --> N
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class X failure;
 ```
@@ -277,16 +278,18 @@ untouched.
 `clear_weight_cache()` is called from three different lifecycle events:
 explicit cache invalidation, `nn.Module._apply` device/dtype moves, and the
 post-load hook. The clear itself only drops derived state (`ret_idx`,
-`scales_and_zeros`, `torch_fused_op`, the transform flags) and rebuilds it from
-the live packed buffers. The checkpoint snapshot is restored only by an
-explicit checkpoint load, export, `train()` resume, or a low-precision dtype
-move (decided by `_apply`, not by the clear).
+`scales_and_zeros`, `torch_fused_op`) and rebuilds it from the live packed
+buffers; it deliberately keeps the runtime-layout flags (`linear_mode`,
+`_cpu_transformed`, `_cpu_transform_dtype`) live. The checkpoint snapshot is
+restored only by an explicit checkpoint load, export, `train()` resume, or an
+invalidating move (decided by `_apply`, not by the clear).
 
 ```mermaid
 flowchart TD
     A["checkpoint layout<br/>qweight int32, snapshot present"] -->|"first eval forward<br/>capture_fused_train_state + transform"| B["runtime layout<br/>qweight int4pack uint8"]
-    B -->|"clear_weight_cache<br/>explicit clear or device move"| B
+    B -->|"clear_weight_cache<br/>explicit clear or same-device move"| B
     B -->|"low-precision dtype move<br/>restore_fused_train_state"| A
+    B -->|"cross-device move<br/>restore_fused_train_state"| A
     B -->|"train / checkpoint load / export<br/>restore_fused_train_state"| A
     A -->|"clear_weight_cache<br/>invalidate derived state"| A
     B -. "modified runtime state" .-> X["export raises RuntimeError"]
@@ -301,18 +304,22 @@ checkpoint layout to the inference kernel. The measured effect was a 0.5x
 output (`max_abs 1.390625` against an expected `2.78125`) instead of a cache
 invalidation.
 
-A low-precision dtype move is not a device move. The runtime `qzeros` holds
-affine offsets computed from the pre-move scale dtype; narrowing them in place
-would decode different weights, and `_cpu_transform_dtype` would still name the
-old activation dtype. `TorchAtenLinear`, `TorchAtenAwqLinear`,
-`TorchFusedLinear`, and `TorchFusedAwqLinear` therefore restore the checkpoint
-snapshot after a move to FP16 or BF16 and let the next forward re-transform.
-Device moves and moves to FP32 keep the live layout because they do not narrow
-the offsets.
+The runtime layout is coupled to both the scale dtype and the device. The
+runtime `qzeros` holds affine offsets computed from the pre-move scale dtype;
+narrowing them in place would decode different weights, and
+`_cpu_transform_dtype` would still name the old activation dtype. The packed
+`qweight` is also device-specific: the CPU `_convert_weight_to_int4pack_for_cpu`
+layout is not the XPU packing, so a cross-device move that kept the live
+buffers fed the CPU kernel an int32 XPU tensor (`RuntimeError:
+_weight_int4pack_mm_cpu : expect B to be uint8 tensor`). `TorchAtenLinear`,
+`TorchAtenAwqLinear`, `TorchFusedLinear`, and `TorchFusedAwqLinear` therefore
+restore the checkpoint snapshot after a move to FP16/BF16 or to another device
+and let the next forward re-transform. A same-device move to FP32 keeps the
+live layout because it only widens the offsets.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Explicit clear or device move | `clear_weight_cache()` restored the snapshot (`gptqmodel/nn_modules/qlinear/torch_fused.py:145-148`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:172-176` before this change). | It drops derived state and rebuilds from the live packed buffers (`gptqmodel/nn_modules/qlinear/torch_fused.py:152-156`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:177-181`). |
+| Explicit clear or same-device move | `clear_weight_cache()` restored the snapshot (`gptqmodel/nn_modules/qlinear/torch_fused.py:145-148`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:172-176` before this change). | It drops derived state and rebuilds from the live packed buffers (`gptqmodel/nn_modules/qlinear/torch_fused.py:152-156`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:177-181`). |
 | Checkpoint load | Relied on the cache clear to restore before the copy (`gptqmodel/nn_modules/qlinear/__init__.py:357-366` before this change). | Calls `restore_fused_train_state()` explicitly before the copy and then invalidates derived caches (`gptqmodel/nn_modules/qlinear/__init__.py:356-366`). |
 | Checkpoint export | Relied on the cache clear to restore (`gptqmodel/utils/model.py:2369-2375` before this change). | Calls `restore_fused_train_state()` explicitly for each transformed module (`gptqmodel/utils/model.py:2372-2376`). |
 | Training resume | Restored in `train()` (`gptqmodel/nn_modules/qlinear/torch_fused.py:212-216`). | Unchanged. |

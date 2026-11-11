@@ -18,8 +18,8 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ._fused_train_state import (
     capture_fused_train_state,
+    refinalize_fused_state_after_apply,
     restore_fused_train_state,
-    restore_fused_train_state_after_dtype_move,
 )
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
@@ -185,20 +185,21 @@ class TorchAtenLinear(PackableQuantLinear):
         self._refresh_fused_state()
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the affine layout after a low-precision move.
+        """Re-finalize the checkpoint layout after an invalidating move.
 
-        ``_apply`` narrows the live runtime operands. The affine offsets were
-        built from the pre-move scale dtype, so keeping them would change the
-        decoded weights; restore the checkpoint snapshot and let the next
-        forward transform the new dtype. Device moves and moves to FP32 keep
-        the live layout.
+        ``_apply`` moves or narrows the live runtime operands. The affine
+        offsets were built from the pre-move scale dtype and the int4pack
+        layout is device-specific, so a cross-device or low-precision move
+        restores the checkpoint snapshot and lets the next forward transform
+        the new target. A same-device move to FP32 keeps the live layout.
         """
 
         scales = getattr(self, "scales", None)
         transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
         scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        if restore_fused_train_state_after_dtype_move(self, scale_dtype):
+        if refinalize_fused_state_after_apply(self, scale_dtype, device):
             return result
         scales = getattr(self, "scales", None)
         if (
@@ -357,7 +358,7 @@ class TorchAtenLinear(PackableQuantLinear):
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
-                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
             out = self._fused_op_forward(x).reshape(out_shape)

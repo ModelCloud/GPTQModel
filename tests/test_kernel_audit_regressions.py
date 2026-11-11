@@ -128,25 +128,27 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     (
         ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
         ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
     ),
 )
 @pytest.mark.parametrize(
     ("source_dtype", "target_dtype"),
     ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
 )
-def test_aten_cpu_layer_accepts_new_activation_dtype_after_move(
+def test_cpu_layer_accepts_new_activation_dtype_after_move(
     module_name,
     class_name,
     source_dtype,
     target_dtype,
 ):
-    """A dtype move must update the finalized activation dtype.
+    """A low-precision move must re-finalize the fused affine layout.
 
-    The cache clear that ``nn.Module._apply`` triggers keeps the packed runtime
-    layout, so ``_cpu_transform_dtype`` still described the pre-move activation.
-    ``TorchAtenLinear`` then rejected its own moved model with a RuntimeError.
-    Compare the moved layer with a checkpoint-layout copy that is moved before
-    its first forward, which finalizes the same operands for the target dtype.
+    The runtime ``qzeros`` holds offsets computed from the pre-move scale
+    dtype, so keeping the packed runtime layout would pair the narrowed scales
+    with stale offsets. Compare the moved layer with a checkpoint-layout copy
+    that is moved before its first forward, which finalizes the same operands
+    for the target dtype.
     """
 
     from tests.module_tree.test_fusion_kernel_backends import _projection
@@ -174,6 +176,48 @@ def test_aten_cpu_layer_accepts_new_activation_dtype_after_move(
 
     assert actual.dtype == target_dtype
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+    ),
+)
+def test_device_move_restores_checkpoint_layout(module_name, class_name):
+    """A device move must not hand one backend's packed layout to another.
+
+    The CPU int4pack packing is not the XPU packing, so the runtime layout is
+    only valid for the device that produced it. ``meta`` is used as the move
+    target because the CPU backends have no second real device; the decision
+    under test is the device change, not the destination kernel.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.float16, "cpu")
+    checkpoint_shape = tuple(layer.qweight.shape)
+    checkpoint_dtype = layer.qweight.dtype
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=torch.float16))
+    runtime_shape = tuple(layer.qweight.shape)
+    assert (runtime_shape, layer.qweight.dtype) != (checkpoint_shape, checkpoint_dtype)
+
+    layer._apply(lambda tensor: tensor.to("meta") if isinstance(tensor, torch.Tensor) else tensor)
+
+    assert tuple(layer.qweight.shape) == checkpoint_shape
+    assert layer.qweight.dtype == checkpoint_dtype
+    assert layer.linear_mode is None
+    assert getattr(layer, "_cpu_transformed", False) is False
+    assert layer._fused_train_state is None
 
 
 def test_gemv_fast_rejects_unaligned_shapes_before_packing():

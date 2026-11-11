@@ -21,8 +21,8 @@ from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
 from ._fused_train_state import (
     capture_fused_train_state,
+    refinalize_fused_state_after_apply,
     restore_fused_train_state,
-    restore_fused_train_state_after_dtype_move,
 )
 from ._runtime_cache import tensor_cache_key
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
@@ -300,18 +300,20 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self._fused_state_key = key
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the affine layout after a low-precision move.
+        """Re-finalize the checkpoint layout after an invalidating move.
 
-        The AWQ affine pair is scale-dtype coupled, so a low-precision move
-        restores the checkpoint snapshot instead of narrowing it in place.
-        Device moves and moves to FP32 keep the live layout.
+        The runtime int4pack layout is device- and scale-dtype-coupled, so a
+        cross-device or low-precision move restores the checkpoint snapshot
+        instead of reinterpreting it in place. A same-device move to FP32 keeps
+        the live layout because it only widens the offsets.
         """
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
         scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        restore_fused_train_state_after_dtype_move(self, scale_dtype)
+        refinalize_fused_state_after_apply(self, scale_dtype, device)
         return result
 
     def train(self, mode: bool = True):

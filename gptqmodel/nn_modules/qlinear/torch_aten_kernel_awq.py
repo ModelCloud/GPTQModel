@@ -20,8 +20,8 @@ from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._fused_train_state import (
     capture_fused_train_state,
+    refinalize_fused_state_after_apply,
     restore_fused_train_state,
-    restore_fused_train_state_after_dtype_move,
 )
 from .torch_aten_kernel import (
     TorchAtenLinear,
@@ -211,18 +211,20 @@ class TorchAtenAwqLinear(AWQuantLinear):
         self._refresh_fused_state()
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the affine layout after a low-precision move.
+        """Re-finalize the checkpoint layout after an invalidating move.
 
-        The AWQ affine offsets are scale-dtype coupled, so a low-precision move
-        must restore the checkpoint snapshot instead of narrowing them in
-        place. Device moves and moves to FP32 keep the live layout.
+        The AWQ affine offsets are scale-dtype coupled and the int4pack layout
+        is device-specific, so a cross-device or low-precision move must restore
+        the checkpoint snapshot instead of reinterpreting it in place. A
+        same-device move to FP32 keeps the live layout.
         """
 
         scales = getattr(self, "scales", None)
         transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
         scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        if restore_fused_train_state_after_dtype_move(self, scale_dtype):
+        if refinalize_fused_state_after_apply(self, scale_dtype, device):
             return result
         scales = getattr(self, "scales", None)
         if (
@@ -268,7 +270,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
-                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
             out = self._fused_op_forward(x).reshape(out_shape)

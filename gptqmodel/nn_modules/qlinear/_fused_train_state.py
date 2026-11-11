@@ -102,16 +102,24 @@ def reset_fused_runtime_state(module: nn.Module) -> None:
             setattr(module, name, value)
 
 
-def restore_fused_train_state_after_dtype_move(module: nn.Module, previous_scale_dtype) -> bool:
-    """Re-finalize the checkpoint layout after a low-precision dtype move.
+def refinalize_fused_state_after_apply(
+    module: nn.Module,
+    previous_scale_dtype,
+    previous_device,
+) -> bool:
+    """Re-finalize the checkpoint layout after a move invalidates the runtime one.
 
-    The runtime affine offsets are computed from the scale dtype, so narrowing
-    ``scales``/``qzeros`` in place would pair the new scales with offsets built
-    from the old precision and silently change the decoded weights. Restore the
-    snapshot and let the next forward transform the new dtype instead. A device
-    move or a move to FP32 keeps the live layout: neither narrows those offsets.
-    A modified runtime state has no valid checkpoint layout to re-finalize from,
-    so ``restore_fused_train_state`` raises the same error as export.
+    A runtime int4pack layout is only valid for the device that produced it:
+    the CPU packing is not the XPU packing, so a cross-device move must
+    re-transform instead of handing one backend's packed weight to another.
+    The runtime affine offsets are also computed from the scale dtype, so
+    narrowing ``scales``/``qzeros`` in place would pair the new scales with
+    offsets built from the old precision and silently change the decoded
+    weights. A same-device move to FP32 only widens those offsets, so it keeps
+    the live layout.
+
+    A modified runtime state has no valid checkpoint layout to re-finalize
+    from, so ``restore_fused_train_state`` raises the same error as export.
     """
 
     if previous_scale_dtype is None:
@@ -119,6 +127,8 @@ def restore_fused_train_state_after_dtype_move(module: nn.Module, previous_scale
     scales = getattr(module, "scales", None)
     if not isinstance(scales, torch.Tensor):
         return False
+    if scales.device != previous_device:
+        return restore_fused_train_state(module)
     if scales.dtype == previous_scale_dtype or scales.dtype not in (torch.float16, torch.bfloat16):
         return False
     return restore_fused_train_state(module)
@@ -248,10 +258,10 @@ __all__ = [
     "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",
+    "refinalize_fused_state_after_apply",
     "reset_fused_runtime_state",
     "runtime_state_matches_live",
     "restore_fused_train_state",
-    "restore_fused_train_state_after_dtype_move",
     "state_dict_matches_checkpoint_layout",
     "state_dict_matches_runtime_layout",
 ]
