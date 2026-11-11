@@ -168,6 +168,13 @@ def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
     return impl(x, weight, bias)
 
 
+def prepare_fp32_gate(weight: NF12Weight) -> None:
+    """Prepare a lossless compressed view for the 384x5120 FP32 B1 router."""
+    from ._fp32 import prepare_fp32_gate as impl
+
+    impl(weight)
+
+
 def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
                      bias: torch.Tensor | None = None) -> torch.Tensor:
     """BF16 activation and packed weight, with FP32 accumulation and output."""

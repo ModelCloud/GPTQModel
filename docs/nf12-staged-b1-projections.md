@@ -22,11 +22,18 @@ flowchart TD
     X:::error
     I["linear_fp32_staged_b1: FP32 rows 1..8"] --> J["linear_fp32: _staged_b1 true"]
     J --> K{"full long-K B1 path?"}
-    K -->|yes| L{"M = 6?"}
-    L -->|yes| M["_linear_fp32_six_b1: one packed decode, six independent accumulators"]
-    L -->|no| N["_linear_fp32 with block_m 1 and M grid rows"]
+    T["linear_fp32: ordinary M1"] --> L
+    K -->|yes| L{"prepared 384x5120 gate<br/>and M = 1 or 6?"}
+    L -->|yes| P["_linear_fp32_gate_planes: K-contiguous 12-bit view"]
+    L -->|no| Q{"M = 6?"}
+    Q -->|yes| M["_linear_fp32_six_b1: original tiled NF12"]
+    Q -->|no| N["_linear_fp32 with block_m 1 and M grid rows"]
     K -->|no| Y["ValueError"]
+    R["prepare_fp32_gate: CUDA NF12 384x5120"] --> S["temporary BF16 decode; repack 12-bit planes; release dense"]
+    S --> L
+    R -->|wrong shape or device| Z["ValueError"]
     Y:::error
+    Z:::error
     classDef error fill:#fdd,stroke:#b33
 ```
 
@@ -34,11 +41,49 @@ flowchart TD
 | --- | --- |
 | Each physical row called `nf12.linear` and selected `small_m_heuristic(1,n,k)` separately (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). | `linear_staged_b1` selects the same one-row configuration once and passes all staged rows to `linear_small_m` (`gptqmodel_nf12/api.py`, `linear/dispatch.cu`). |
 | Each FP32 row launched `_linear_fp32` separately (`gptqmodel_nf12/_fp32.py`). | Six rows use `_linear_fp32_six_b1`, decoding a packed tile once while retaining six independent one-row reduction trees. Other staged row counts use one grid with `block_m=1` (`gptqmodel_nf12/_fp32.py`). |
+| FP32 B1 reads the original tiled NF12 layout for every 384x5120 router (`gptqmodel_nf12/_fp32.py:_linear_fp32_six_b1`). | `prepare_fp32_gate` keeps a second compressed K-contiguous 12-bit view. `linear_fp32` uses `_linear_fp32_gate_planes` for ordinary M1 and staged M6 when prepared, retaining the tiled path otherwise (`gptqmodel_nf12/_fp32.py`). |
 
 The BF16 API rejects more than eight rows and returns an unsupported CUDA
 status when the one-row route or staged configuration is unavailable. The FP32
 API rejects indexed or short-K full-head paths that use a different B1 kernel.
 Callers requiring those shapes keep their existing per-row path.
+
+## Prepared FP32 router view
+
+`prepare_fp32_gate` accepts only a CUDA NF12 384x5120 weight. At load time it
+temporarily decodes BF16, repacks each row into a 32-bit metadata word and
+eight low bytes per eight values, compacts exceptional groups, and releases
+the dense tensor. A weak map keyed by `NF12Weight` owns this view, so it dies
+with the model weight. The original tiled NF12 tensor remains available for
+other shapes and kernels. Both views are 12-bit compressed; no BF16 weight
+matrix remains resident. The view uses 2,949,120 bytes plus its exceptional
+table per gate, in addition to the original packed view.
+
+```mermaid
+flowchart LR
+    A["NF12Weight"] --> B["prepare_fp32_gate"]
+    B --> C["temporary BF16 decode"]
+    C --> D["K-contiguous meta, low, escapes"]
+    D --> E["weak packed-view cache"]
+    E --> F["linear_fp32 M1"]
+    E --> G["linear_fp32_staged_b1 M6"]
+    F --> H["_linear_fp32_gate_planes BK1024, 4 warps"]
+    G --> H
+    B -->|invalid geometry or device| X["ValueError"]
+    X:::error
+    classDef error fill:#fdd,stroke:#b33
+```
+
+On NVIDIA PG506-230, PyTorch 2.15 CUDA 13.2 with GIL disabled, a CUDA graph
+rotating the 40 actual checkpoint gate matrices measured 13.158 microseconds
+per gate for Lite's BF16 pair kernel and 11.878 microseconds for the prepared
+NF12 kernel (1.108x). Six verifier rows used the same FP32 activations. The
+top-eight route IDs agreed on all 240 rows; the largest score difference was
+2.384e-7. These are projection measurements, not full serving throughput.
+Ordinary M1 and staged M6 share the same BK1024 reduction. The actual-device
+test checks bitwise agreement between them, FP64 Torch arithmetic, escaped
+groups, changed inputs, and packed-only persistent storage. The free-threaded
+probe exercised eight threads across two GPUs in three processes.
 
 ## SM80 measurements
 

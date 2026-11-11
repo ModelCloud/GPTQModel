@@ -10,12 +10,122 @@ FP32 multiply-accumulate without materializing a dense weight matrix.
 
 from __future__ import annotations
 
+import threading
+import weakref
+
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 
 from .api import NF12Weight
+
+
+_gate_views: weakref.WeakKeyDictionary[NF12Weight, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = (
+    weakref.WeakKeyDictionary()
+)
+_gate_lock = threading.Lock()
+
+
+def prepare_fp32_gate(weight: NF12Weight) -> None:
+    """Prepare compressed K-contiguous planes for the 384x5120 B1 router.
+
+    This is a load-time operation. The temporary BF16 decode dies before
+    inference; the weakly owned cache retains only 12-bit packed planes and
+    escaped BF16 groups. The ordinary tiled NF12 layout remains available for
+    all other projection geometries.
+    """
+    if weight.shape != (384, 5120) or weight.device.type != "cuda":
+        raise ValueError("prepare_fp32_gate requires a CUDA NF12 [384,5120] weight")
+    with _gate_lock:
+        if weight in _gate_views:
+            return
+        dense = weight.decode()
+        bits = (dense.view(torch.int16).to(torch.int32) & 65535).view(384, 640, 8)
+        exponent = (bits >> 7) & 255
+        sign = bits >> 15
+        offset = (exponent - 2 * weight.exp_base) >> 1
+        meta_bytes = ((sign[:, :, 0::2] << 7) | offset[:, :, 0::2] |
+                      (sign[:, :, 1::2] << 6) | (offset[:, :, 1::2] << 3))
+        meta = (meta_bytes[:, :, 0] | (meta_bytes[:, :, 1] << 8) |
+                (meta_bytes[:, :, 2] << 16) | (meta_bytes[:, :, 3] << 24)).contiguous()
+        low = (bits & 255).to(torch.uint8).view(384, 5120).contiguous()
+        valid = (((exponent >= 2 * weight.exp_base) &
+                  (exponent <= 2 * weight.exp_base + 15)).all(-1) & (meta != 0))
+        escaped_groups = ~valid
+        escapes = bits[escaped_groups].to(torch.int16).contiguous()
+        escaped_count = escapes.shape[0]
+        if escaped_count:
+            low_words = low.view(torch.int32).view(384, 640, 2)
+            low_words[:, :, 0][escaped_groups] = torch.arange(
+                escaped_count, dtype=torch.int32, device=weight.device)
+            low_words[:, :, 1][escaped_groups] = 0
+            meta[escaped_groups] = 0
+        del dense, bits, exponent, sign, offset, meta_bytes, valid, escaped_groups
+        _gate_views[weight] = (meta, low, escapes)
+
+
+def _get_gate_view(weight: NF12Weight):
+    with _gate_lock:
+        return _gate_views.get(weight)
+
+
+@triton.jit
+def _linear_fp32_gate_planes(
+    x_ptr, meta_ptr, low_ptr, escapes_ptr, bias_ptr, out_ptr,
+    exp_base: tl.constexpr, has_bias: tl.constexpr, m: tl.constexpr,
+    block_k: tl.constexpr,
+):
+    """One router row per CTA; share its packed decode across six inputs."""
+    output_row = tl.program_id(0)
+    cols = tl.arange(0, block_k)
+    acc0 = tl.full((block_k,), 0, tl.float32)
+    if m == 6:
+        acc1 = tl.full((block_k,), 0, tl.float32)
+        acc2 = tl.full((block_k,), 0, tl.float32)
+        acc3 = tl.full((block_k,), 0, tl.float32)
+        acc4 = tl.full((block_k,), 0, tl.float32)
+        acc5 = tl.full((block_k,), 0, tl.float32)
+    low_u32 = low_ptr.to(tl.pointer_type(tl.uint32))
+
+    for block in range(tl.cdiv(5120, block_k)):
+        col = block * block_k + cols
+        valid = col < 5120
+        meta = tl.load(meta_ptr + output_row * 640 + col // 8, valid, other=0).to(tl.uint32)
+        low = tl.load(low_ptr + output_row * 5120 + col, valid, other=0).to(tl.uint32)
+        slot = col % 8
+        meta_byte = (meta >> (8 * (slot // 2))) & 255
+        high_even = (meta_byte & 0x87) + exp_base
+        high_odd = (((meta_byte << 1) & 0x80) | ((meta_byte >> 3) & 7)) + exp_base
+        high = tl.where(slot % 2 == 0, high_even, high_odd)
+        index = tl.load(low_u32 + (output_row * 5120 + (col // 8) * 8) // 4,
+                        valid & (meta == 0), other=0)
+        escaped = tl.load(escapes_ptr + index * 8 + slot, valid & (meta == 0),
+                          other=0).to(tl.uint16, bitcast=True)
+        bits = tl.where(meta == 0, escaped.to(tl.uint32), (high << 8) | low)
+        w = (bits << 16).to(tl.float32, bitcast=True)
+        x0 = tl.load(x_ptr + col, valid, other=0)
+        acc0 = tl.fma(x0, w, acc0)
+        if m == 6:
+            x1 = tl.load(x_ptr + 5120 + col, valid, other=0)
+            x2 = tl.load(x_ptr + 10240 + col, valid, other=0)
+            x3 = tl.load(x_ptr + 15360 + col, valid, other=0)
+            x4 = tl.load(x_ptr + 20480 + col, valid, other=0)
+            x5 = tl.load(x_ptr + 25600 + col, valid, other=0)
+            acc1 = tl.fma(x1, w, acc1)
+            acc2 = tl.fma(x2, w, acc2)
+            acc3 = tl.fma(x3, w, acc3)
+            acc4 = tl.fma(x4, w, acc4)
+            acc5 = tl.fma(x5, w, acc5)
+
+    bias = tl.load(bias_ptr + output_row) if has_bias else 0.0
+    tl.store(out_ptr + output_row, tl.sum(acc0, 0) + bias)
+    if m == 6:
+        tl.store(out_ptr + 384 + output_row, tl.sum(acc1, 0) + bias)
+        tl.store(out_ptr + 768 + output_row, tl.sum(acc2, 0) + bias)
+        tl.store(out_ptr + 1152 + output_row, tl.sum(acc3, 0) + bias)
+        tl.store(out_ptr + 1536 + output_row, tl.sum(acc4, 0) + bias)
+        tl.store(out_ptr + 1920 + output_row, tl.sum(acc5, 0) + bias)
 
 
 @triton.jit
@@ -288,7 +398,15 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
         return result
     out = torch.empty((*x.shape[:-1], output_n), dtype=torch.float32, device=x.device)
     if m and output_n:
-        if k <= 512 and output_n >= 1024 and m == 1:
+        gate_view = (_get_gate_view(weight) if rows is None and n == 384 and k == 5120
+                     and (m == 1 or (m == 6 and _staged_b1)) else None)
+        if gate_view is not None:
+            meta, low, escapes = gate_view
+            _linear_fp32_gate_planes[(384,)](
+                x2, meta, low, escapes, bias if bias is not None else x2,
+                out, weight.exp_base, bias is not None, m, 1024, num_warps=4,
+            )
+        elif k <= 512 and output_n >= 1024 and m == 1:
             # Full short-K heads benefit from eight output rows per CTA;
             # indexed shortlists retain four to limit irregular gathers.
             block_n = 4 if rows is not None else 8

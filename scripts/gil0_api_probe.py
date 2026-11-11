@@ -285,6 +285,43 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
         return True
 
+    nf12_gate_ready = [False]
+
+    def nf12_gate() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        with nf12_lock:
+            if not nf12_gate_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        weight = torch.full((384, 5120), 0.015625,
+                                            dtype=torch.bfloat16, device="cuda")
+                        weight[0, 0] = -0.0
+                        packed = nf12.encode(weight)
+                        nf12.prepare_fp32_gate(packed)
+                        x = torch.full((6, 5120), 0.125, device="cuda")
+                        nf12.linear_fp32_staged_b1(x, packed)
+                        nf12.linear_fp32(x[:1], packed)
+                nf12_gate_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        weight = torch.full((384, 5120), 0.015625,
+                            dtype=torch.bfloat16, device="cuda")
+        weight[0, 0] = -0.0
+        packed = nf12.encode(weight)
+        nf12.prepare_fp32_gate(packed)
+        x = torch.full((6, 5120), 0.125, device="cuda")
+        staged = nf12.linear_fp32_staged_b1(x, packed)
+        ordinary = nf12.linear_fp32(x[:1], packed)
+        torch.cuda.current_stream().synchronize()
+        if not (torch.equal(staged[0:1], ordinary)
+                and bool(torch.all((staged - torch.nn.functional.linear(x, weight.float())).abs() < 1e-4))):
+            raise AssertionError("concurrent NF12 gate preparation or B1 projection changed values")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -294,6 +331,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.current_device": torch.cuda.current_device,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
+        "gptqmodel_nf12.gate": nf12_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
         "torch.cuda.stream (context manager)": lambda: str(torch.cuda.stream(torch.cuda.Stream())),
@@ -382,7 +420,7 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
-            or name.endswith("can_device_access_peer") or name == "gptqmodel_nf12.ops")
+            or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12."))
 
 
 def run_child(name: str) -> int:
@@ -393,7 +431,7 @@ def run_child(name: str) -> int:
     if _requires_two_gpus(name) and _gpu_count() < 2:
         print(json.dumps({"status": "SKIP", "detail": "needs >= 2 GPUs"}))
         return 0
-    if name == "gptqmodel_nf12.ops" and torch.version.hip is not None:
+    if name.startswith("gptqmodel_nf12.") and torch.version.hip is not None:
         print(json.dumps({"status": "SKIP", "detail": "native NF12 operator is NVIDIA-only"}))
         return 0
     try:

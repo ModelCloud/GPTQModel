@@ -20,6 +20,7 @@ from .api import (
     linear_fp32_staged_b1,
     linear_staged_b1,
     pack_bf16t,
+    prepare_fp32_gate,
 )
 from .moe import (
     NF12MoEWeight,
@@ -62,4 +63,5 @@ __all__ = [
     "moe_silu_mul",
     "pack_bf16t",
     "pack_bf16t_moe",
+    "prepare_fp32_gate",
 ]
