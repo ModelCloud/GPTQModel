@@ -683,6 +683,24 @@ Closing it needs the kernel to participate in TTNN's sharding/multicast machiner
 rather than staging through L1 by hand, which is a larger redesign than tuning
 what exists.
 
+### Reproducibility warning: the grid function is not in the tree
+
+The multi-core kernel above was validated in a standalone harness, but the same
+program **hangs when driven through a library wrapper** in this repo, at both 2x2
+and 4x4. The exact difference was not isolated before the work was stopped, so the
+grid implementation was **removed rather than shipped**: an unverified kernel that
+works from one call path and wedges the device from another is worse than no
+kernel.
+
+What remains verified and committed is the single-core and M-tile paths
+(`run_fused_gemm`, `run_fused_gemm_m`), which have hardware-gated tests. The 64-core
+numbers in this document come from the harness, not from library code, and are
+marked as such.
+
+Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
+attempt -- one applied to three functions instead of one -- which is why the
+single-source-of-truth CB helper matters more than it looks.
+
 A deadlock worth recording: updating the shared compute kernel to expect staged
 buffers while one reader still pushed tiles one at a time wedged the device (reset
 with `tt-smi -r`). The compute stage and every reader that feeds it must agree on
