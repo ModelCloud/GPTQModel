@@ -190,6 +190,7 @@ from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # 
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
+from .definitions.olmo2 import Olmo2QModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
 from .definitions.openvla import OpenVLAQModel  # noqa: E402
@@ -395,7 +396,7 @@ MODEL_MAP = {
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)
-    "olmo2": LlamaQModel, # 100% llama clone
+    "olmo2": Olmo2QModel,
     "olmo3": Olmo3QModel,
     "helium": LlamaQModel, # 100% llama clone (HeliumModel == LlamaModel module layout)
     "olmoe": OlmoeQModel,

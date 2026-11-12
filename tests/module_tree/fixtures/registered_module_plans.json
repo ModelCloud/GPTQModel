@@ -139,7 +139,7 @@
     "nemotron_labs_diffusion": "NemotronLabsDiffusionQModel",
     "nemotronh_nano_omni_reasoning_v3": "NemotronOmniQModel",
     "olmo": "LlamaQModel",
-    "olmo2": "LlamaQModel",
+    "olmo2": "Olmo2QModel",
     "olmo3": "Olmo3QModel",
     "olmoe": "OlmoeQModel",
     "openvla": "OpenVLAQModel",
@@ -347,6 +347,18 @@
         ["mlp.fc_out"]
       ]
     },
+    "Olmo2QModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
+      ]
+    },
+
     "LlamaQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
@@ -701,30 +713,36 @@
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"]
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
       ]
     },
     "Gemma3ForConditionalGenerationGPTQ/gptq": {
       "layers": ["model.language_model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"]
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
       ]
     },
     "Gemma3QModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"]
+        ["mlp.down_proj"],
+        ["post_feedforward_layernorm:!"]
       ]
     },
     "Gemma3nForConditionalGenerationGPTQ/gptq": {

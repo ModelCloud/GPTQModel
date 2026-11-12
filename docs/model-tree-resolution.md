@@ -336,8 +336,8 @@ committed `fixtures/registered_module_plans.json` records reviewed decoder
 prefixes and ordered quantization/capture/exclusion blocks. A new registered
 model without an explicit case fails the suite.
 
-The tested registry contains 198 model-type entries, 173 definition classes,
-and 175 definition/method cases. Original `dbrx` is a documented unsupported
+The tested registry contains 202 model-type entries, 177 definition classes,
+and 179 definition/method cases. Original `dbrx` is a documented unsupported
 sentinel and receives a rejection test; `dbrx_converted` receives a positive
 contract test. This suite validates definitions and compiler/consumer agreement.
 Real model layout and checkpoint weight ownership are verified separately by
@@ -421,6 +421,18 @@ real model shells, not full checkpoint provenance audits):
 | MiniMax-M3.1-Flash | 60 | 394 | 20 |
 | DeepSeek-V4-Flash | 43 | 775 | 29 |
 | Ripple | 5 (fixture) | 8 | 15 |
+| Gemma 2 | 26 | 7 | 11 |
+| Gemma 3 text / multimodal | 26 | 7 | 13 |
+| OLMo 2 | 32 | 7 | 11 |
+
+The Gemma and OLMo 2 rows come from
+`test_gemma_olmo_family_plan_coverage.py`, which builds the stock Transformers
+configs on `meta` and asserts every decoder weight owner resolves through
+`plan.find()`. Their extra checkpoint norms
+(`pre_feedforward_layernorm`, `post_feedforward_layernorm`, and per-head
+`self_attn.q_norm`/`k_norm`) are why those definitions own explicit trees
+instead of inheriting `LlamaQModel.module_tree`. On the unpatched tree the same
+test fails 13 cases with undeclared owners; on the patched tree it passes 21.
 
 DeepSeek-V4.1-Flash is not included: its checkpoint declares
 `model_type=deepseek_v41`, but the verified Transformers 5.22.1 environment and
