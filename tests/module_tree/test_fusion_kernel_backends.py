@@ -26,6 +26,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import _dequantize_group_layout
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
@@ -63,8 +64,14 @@ def test_zero_free_kernel_contracts_never_include_a_zero_operand():
     for cls, spec in SPECS.items():
         if spec.zero_name is None:
             # Padding these collections would make source rebinding consume
-            # zero tensors that this finalized native layout does not own.
-            assert set(dict(spec.axes)) == {spec.weight_name, spec.scale_name, "bias"}, cls.__name__
+            # zero tensors that this finalized native layout does not own. The
+            # INT8 group layout is the one exception: its zero-free contract
+            # still concatenates an optional per-group residual offset, which is
+            # ``None`` for symmetric checkpoints and never a packed zero tensor.
+            expected = {spec.weight_name, spec.scale_name, "bias"}
+            if spec.layout == "int8":
+                expected.add("int8_group_offset")
+            assert set(dict(spec.axes)) == expected, cls.__name__
 
 
 def _cases():
@@ -146,9 +153,17 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_chec
     else:
         module.post_init()
     if spec.layout == "int8":
-        # This backend requantizes native eight-bit sources before fusion.
-        # The inference oracle decodes its resulting native codes independently.
-        weight = module.int8_weight_nk.float().t() * module.int8_channel_scale.float()
+        # This backend repacks native eight-bit sources into per-group runtime
+        # codes before fusion. The oracle reconstructs the checkpoint matrix
+        # from those derived buffers independently of the kernel forward.
+        weight = _dequantize_group_layout(
+            int8_weight=module.int8_weight_gnk,
+            group_scale=module.int8_group_scale,
+            group_offset=module.int8_group_offset,
+            input_perm=module.int8_input_perm,
+            group_lengths=module._int8_group_lengths,
+            in_features=module.in_features,
+        )
     return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
 
 

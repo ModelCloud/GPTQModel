@@ -43,13 +43,28 @@ class FusionKernelSpec:
         names = ("scales_and_zeros",) if self.layout in ("cpu_aten", "cpu_legacy") else ()
         if self.layout == "exllamav2":
             names = ("_fusion_q_perm", "_fusion_q_invperm")
+        if self.layout == "int8":
+            # Group codes, per-group affine metadata, and the shared
+            # activation-order permutation all take part in the runtime layout.
+            names = (
+                "int8_weight_gnk",
+                "int8_group_scale",
+                "int8_group_offset",
+                "int8_input_perm",
+            )
         return tuple(dict.fromkeys((*names, self.weight_name, self.scale_name,
                                     *((self.zero_name,) if self.zero_name is not None else ()))))
 
     @property
     def axes(self) -> tuple[tuple[str, int], ...]:
         """Variable-length operand/axis collection; absent zero points stay absent."""
-        if self.layout in ("allspark", "int8"):
+        if self.layout == "int8":
+            # Group-preserving INT8 codes are [group, out_features, group_width]
+            # and the per-group affine metadata is [group, out_features]; only
+            # the output axis concatenates. The activation-order permutation is
+            # input-channel metadata shared by every fused source.
+            axes = [("int8_weight_gnk", 1), ("int8_group_scale", 1), ("int8_group_offset", 1)]
+        elif self.layout == "allspark":
             axes = [(self.weight_name, 0), (self.scale_name, 0)]
             if self.zero_name is not None:
                 axes.append((self.zero_name, 0))
@@ -177,8 +192,19 @@ class FusionKernelSpec:
             if self.zero_name is not None and module.zeros_packed.numel() != n:
                 return "AllSpark native zero-point layout differs"
         elif self.layout == "int8":
-            if tuple(module.int8_weight_nk.shape) != (n, k) or module.int8_channel_scale.numel() != n:
-                return "CPU INT8 fusion requires native N-by-K codes and per-channel scales"
+            weight = getattr(module, "int8_weight_gnk", None)
+            scale = getattr(module, "int8_group_scale", None)
+            if (not isinstance(weight, torch.Tensor) or weight.dim() != 3
+                    or int(weight.shape[1]) != n
+                    or not isinstance(scale, torch.Tensor)
+                    or tuple(scale.shape) != (int(weight.shape[0]), n)):
+                return "CPU INT8 fusion requires native group-by-output-by-width codes and per-group scales"
+            zero = getattr(module, "int8_group_offset", None)
+            if zero is not None and tuple(zero.shape) != tuple(scale.shape):
+                return "CPU INT8 group offset metadata does not match the per-group scale layout"
+            perm = getattr(module, "int8_input_perm", None)
+            if not isinstance(perm, torch.Tensor):
+                return "CPU INT8 fusion requires an explicit activation-order permutation"
         return ""
 
     def combined_shape_error(self, modules, dtype=None):
@@ -259,10 +285,7 @@ class FusionKernelSpec:
             module.post_init()
             return
         if self.layout == "int8":
-            from ..nn_modules.qlinear.torch_int8 import Int8PackedModule
-
-            module.int8_module = Int8PackedModule(module.int8_weight_nk, module.int8_channel_scale).eval()
-            module._int8_source_signature = module._source_signature()
+            module._bind_int8_runtime()
             return
         if self.layout == "allspark":
             # ``_share_operands``/``combine`` just installed the finalized
@@ -366,8 +389,11 @@ def kernel_specs():
         AllSparkAwqLinear: FusionKernelSpec("allspark", zero_name="zeros_packed",
                                            weight_name="qweight_packed", scale_name="scales_packed",
                                            fields=("_hip", "_repacked")),
-        TorchInt8Linear: FusionKernelSpec("int8", gptq=True, zero_name=None,
-                                         weight_name="int8_weight_nk", scale_name="int8_channel_scale"),
+        TorchInt8Linear: FusionKernelSpec(
+            "int8", gptq=True, zero_name=None,
+            weight_name="int8_weight_gnk", scale_name="int8_group_scale",
+            fields=("_int8_group_lengths",),
+        ),
     }
 
 

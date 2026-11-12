@@ -133,10 +133,13 @@ and CUDA GGML outputs add FP32 bias before low-precision rounding.
 representation is no longer supported. `AWQ_TORCH_INT8` / `TORCH_INT8_AWQ`
 are retired and fail with migration guidance. Use `BACKEND.AUTO` to select a
 compatible packed kernel or `BACKEND.TORCH` for a portable fallback. Native
-8-bit GPTQ still uses the existing per-channel INT8 requantizer; it is not a
-lossless repacking of arbitrary grouped/asymmetric GPTQ weights.
+8-bit GPTQ keeps the checkpoint's own per-group scales and zero points, so the
+runtime layout is a lossless repack of grouped/asymmetric GPTQ weights rather
+than a second quantization: a group whose scale is far smaller than its
+sibling's no longer collapses to zero.
 See [Torch INT8 checkpoint lifecycle](docs/torch-int8-checkpoint-lifecycle.md)
-for save/reload ownership and runtime cache invalidation.
+for save/reload ownership, the group-preserving layout, and runtime cache
+invalidation.
 
 ## Quantization Support 🛠️
 
