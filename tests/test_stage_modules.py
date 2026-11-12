@@ -2208,6 +2208,7 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
     pb = run(DummyPB(range(2)), normal_plan, cursor=1)
     assert published == [normal_plan.steps[1]]
     assert calls == [1]
+    assert pb.close_calls == 1
 
     # A truncated plan is authoritative: trailing excluded layers never run.
     excluded_plan = LoopPlan((LoopStep("layer", 0, "model.layers.0"),))
