@@ -177,10 +177,21 @@ class AwqTorchLinear(AWQuantLinear):
         *,
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        # `dequantize_gemm` multiplies the integer codes by the scales, so the
+        # dequantized weight follows the scale dtype. This reference kernel
+        # contracts for a half-precision weight; a non-half activation (for
+        # example the ParoQuant dense fallback) must still dequantize at the
+        # stored half precision and only then widen the finished weight,
+        # instead of dequantizing at FP32 and tripping the check below.
+        dequant_dtype = dtype
+        if dequant_dtype not in (torch.float16, torch.bfloat16):
+            dequant_dtype = self.scales.dtype
+            if dequant_dtype not in (torch.float16, torch.bfloat16):
+                dequant_dtype = torch.float16
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self._scales_for_compute(device=x_flat.device, dtype=dtype),
+            scales=self._scales_for_compute(device=x_flat.device, dtype=dequant_dtype),
             bits=self.bits,
             group_size=self.group_size,
         )
