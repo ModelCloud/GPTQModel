@@ -15,6 +15,7 @@ from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
 from .loop_processor import (
     ExecutionConfig,
+    ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
     bind_effective_module_config,
@@ -37,7 +38,9 @@ class FP8GSQProcessor(WeightOnlyProcessor):
             prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.with_execution(ExecutionConfig(require_fwd=True)),
+            lifecycle=self.lifecycle.use(ExecutionConfig(
+                forward=ForwardConfig(required=True)
+            )),
         )
         self.lock = threading.Lock()
         self.is_weight_only = False

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import transformers
 
-from ..looper.loop_processor import ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import ExecutionConfig, ForwardConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..quantization.config import AutoModuleDecoderConfig, SmootherConfig, TensorParallelPadderConfig
 
@@ -46,8 +46,10 @@ class ModulePreProcessor(LoopProcessor):
             calibration_concat_separator=None,
             batch_size=1,
             execution_config=ExecutionConfig(
-                require_fwd=False,
-                fwd_replay_after_process=False,
+                forward=ForwardConfig(
+                    required=False,
+                    replay_after_process=False,
+                ),
             ),
         )
         self.qcfg = qcfg

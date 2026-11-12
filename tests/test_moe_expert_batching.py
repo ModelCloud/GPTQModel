@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from gptqmodel.looper.loop_processor import ExecutionConfig
+from gptqmodel.looper.loop_processor import ExecutionConfig, ForwardConfig
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
@@ -47,9 +47,13 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self.processor.name.return_value = "GPTQProcessor"
         self.processor.execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
+            forward=ForwardConfig(
+                required=True,
+                replay_after_process=True,
+            ),
         )
+        self.processor.restore_subset_capture_frontier.return_value = False
+        self.processor.plan_subset_zero_route_recovery.return_value = ()
         # Mock processor tasks
         self.processor.tasks = {}
         self.processor.begin_shared_input_capture.return_value = {}

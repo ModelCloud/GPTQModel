@@ -424,7 +424,7 @@ def test_npu_gptq_processor_has_torch_runtime_kernel():
     processor = GPTQProcessor(**_processor_common_kwargs(qcfg))
 
     assert processor.name() == "gptq"
-    assert processor.execution_config.require_fwd is True
+    assert processor.execution_config.forward.required is True
     assert _npu_select_quant_linear(qcfg, method=METHOD.GPTQ, fmt=FORMAT.GPTQ) is TorchLinear
 
 
@@ -491,7 +491,7 @@ def test_npu_gguf_weight_only_processor_has_torch_runtime_kernel():
     processor = WeightOnlyProcessor(tokenizer=None, qcfg=qcfg)
 
     assert processor.name() == "weight_only_gguf"
-    assert processor.execution_config.require_fwd is False
+    assert processor.execution_config.forward.required is False
     assert _npu_select_quant_linear(qcfg, method=METHOD.GGUF, fmt=FORMAT.GGUF) is GGUFTorchLinear
 
 

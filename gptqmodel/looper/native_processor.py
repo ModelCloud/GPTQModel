@@ -8,7 +8,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import ExecutionConfig, ForwardConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
@@ -48,8 +48,10 @@ class NativeProcessor(LoopProcessor):
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
             execution_config=ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=False,
+                forward=ForwardConfig(
+                    required=require_fwd,
+                    replay_after_process=False,
+                ),
                 fwd_all_modules_in_single_pass=True,
             ),
         )

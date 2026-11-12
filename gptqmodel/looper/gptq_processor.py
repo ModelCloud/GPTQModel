@@ -19,6 +19,7 @@ from ..looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
     ExecutionConfig,
+    ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
     bind_effective_module_config,
@@ -213,9 +214,11 @@ class GPTQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=True,
+            lifecycle=self.lifecycle.use(ExecutionConfig(
+                forward=ForwardConfig(
+                    required=require_fwd,
+                    replay_after_process=True,
+                ),
                 subset_forward_early_stop=True,
             )),
         )

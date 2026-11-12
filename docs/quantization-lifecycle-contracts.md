@@ -92,6 +92,7 @@ from gptqmodel.looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
     ExecutionConfig,
+    ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
 )
@@ -105,15 +106,17 @@ class ExampleProcessor(LoopProcessor):
     def __init__(self, require_fwd=True, **kwargs):
         super().__init__(
             **kwargs,
-            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=True,
+            lifecycle=self.lifecycle.use(ExecutionConfig(
+                forward=ForwardConfig(
+                    required=require_fwd,
+                    replay_after_process=True,
+                ),
                 subset_forward_early_stop=True,
             )),
         )
 ```
 
-`ExecutionConfig` controls forward replay and activation capture. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
+`ExecutionConfig.forward` controls whether a processor needs a forward and when the authoritative replay runs. The remaining `ExecutionConfig` fields control combined-pass replay, early stopping, and activation capture. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
 
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 

@@ -31,7 +31,7 @@ if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import ExecutionConfig, ForwardConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
@@ -368,8 +368,10 @@ class _StubAWQProcessor(LoopProcessor):
             prepare_dataset_func=_prepare_dataset_func,
             batch_size=1,
             execution_config=ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
+                forward=ForwardConfig(
+                    required=True,
+                    replay_after_process=False,
+                ),
                 subset_forward_early_stop=True,
             ),
         )

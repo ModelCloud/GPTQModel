@@ -11,7 +11,7 @@ from gptqmodel import QuantizeEmbed, QuantizeEmbedConfig
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import ExecutionConfig
+from gptqmodel.looper.loop_processor import ExecutionConfig, ForwardConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
@@ -693,7 +693,7 @@ def test_stage_subset_flush_goes_global_when_work_fans_out_across_devices():
 
 def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch):
     class DummyProcessor:
-        execution_config = ExecutionConfig(require_fwd=False)
+        execution_config = ExecutionConfig(forward=ForwardConfig(required=False))
         tasks = {}
 
         def set_fwd_time(self, *_):
@@ -761,8 +761,10 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
 def test_subset_pass_restored_capture_skips_forward(monkeypatch):
     class DummyProcessor:
         execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
+            forward=ForwardConfig(
+                required=True,
+                replay_after_process=True,
+            ),
         )
         tasks = {}
 
@@ -891,8 +893,10 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
 
     class DummyProcessor:
         execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
+            forward=ForwardConfig(
+                required=True,
+                replay_after_process=True,
+            ),
         )
         tasks = {projection.name: object()}
 
@@ -1052,8 +1056,10 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
 
     class DummyProcessor:
         execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
+            forward=ForwardConfig(
+                required=True,
+                replay_after_process=True,
+            ),
         )
         tasks = {projection.name: object()}
 
@@ -1526,8 +1532,10 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
+                forward=ForwardConfig(
+                    required=True,
+                    replay_after_process=False,
+                ),
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -1745,8 +1753,10 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
+                forward=ForwardConfig(
+                    required=True,
+                    replay_after_process=False,
+                ),
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -1993,8 +2003,10 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
     class DummyProcessor:
         def __init__(self):
             self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=True,
+                forward=ForwardConfig(
+                    required=True,
+                    replay_after_process=True,
+                ),
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -2683,8 +2695,10 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
     class DummyProcessor:
         def __init__(self, initial_inputs):
             self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=True,
+                forward=ForwardConfig(
+                    required=True,
+                    replay_after_process=True,
+                ),
                 fwd_all_modules_in_single_pass=False,
                 subset_forward_early_stop=True,
             )

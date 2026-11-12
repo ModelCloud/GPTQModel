@@ -10,6 +10,8 @@ from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 from gptqmodel.looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
+    ExecutionConfig,
+    ForwardConfig,
     ProcessorLifecycleConfig,
 )
 from gptqmodel.looper.stage_subset import _resolve_subset_calibration_coverage_policy
@@ -61,6 +63,24 @@ def test_processor_lifecycle_config_is_mutable():
     lifecycle.calibration = CalibrationTypes.EACH_MODULE_NEEDS_INPUT
 
     assert lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT
+
+
+def test_lifecycle_use_returns_configured_copy():
+    lifecycle = ProcessorLifecycleConfig()
+    configured = lifecycle.use(
+        ExecutionConfig(
+            forward=ForwardConfig(
+                required=False,
+                replay_after_process=False,
+            )
+        )
+    )
+
+    assert configured is not lifecycle
+    assert configured.execution.forward.required is False
+    assert configured.execution.forward.replay_after_process is False
+    assert lifecycle.execution.forward.required is True
+    assert lifecycle.execution.forward.replay_after_process is True
 
 
 def test_effective_module_config_is_ordered_and_immutable():

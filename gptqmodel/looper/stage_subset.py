@@ -587,7 +587,7 @@ def build_subset_plan(
 
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
-    execute_forward = execution_config.require_fwd
+    execute_forward = execution_config.forward.required
     batch_count, forward_row_counts, forward_total_rows = (
         _collect_subset_forward_progress(
             looper,
@@ -625,7 +625,7 @@ def build_subset_plan(
         subset_total=subset_total,
         execute_forward=execute_forward,
         replay_after_process=execute_forward
-        and execution_config.fwd_replay_after_process,
+        and execution_config.forward.replay_after_process,
         forward_mode="serial" if subset_forward_serial else "parallel",
         batch_count=batch_count,
         forward_row_counts=forward_row_counts,
@@ -996,7 +996,7 @@ def _run_single_subset_pass(
                         processor, original_hook, hook_source
                     )
                 enable_stop = (
-                    execution_config.fwd_replay_after_process
+                    execution_config.forward.replay_after_process
                     or execution_config.subset_forward_early_stop
                 )
                 if is_last and enable_stop:
@@ -1737,7 +1737,7 @@ def run_subset_stage(
         # No forward required; still run process() for each module.
         if DEBUG_ON:
             logger.debug(
-                "StageSubset: processor=%s layer=%s subset=%s/%s skipping forward (require_fwd=False)",
+                "StageSubset: processor=%s layer=%s subset=%s/%s skipping forward (forward.required=False)",
                 processor_name,
                 layer_index,
                 plan.subset_index + 1,

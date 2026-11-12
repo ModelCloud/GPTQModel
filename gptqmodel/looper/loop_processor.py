@@ -193,27 +193,31 @@ class _ThreadSafeInputCache:
 
 
 @dataclass(frozen=True)
+class ForwardConfig:
+    """Describe whether and when a processor replays a layer forward."""
+
+    required: bool = True
+    replay_after_process: bool = True
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     """Describe how a processor participates in forward replay and activation capture.
 
     Processor defaults:
 
-    +--------------+------+------------------------+---------------------------+----------------+--------------------+
-    | Processor     | fwd? | replay_after_process? | single_pass_all_modules?  | early_stop?    | activation_capture?|
-    +--------------+------+------------------------+---------------------------+----------------+--------------------+
-    | GPTQ          | yes  | yes                    | no                        | yes            | no                 |
-    | AWQ           | yes  | yes                    | no                        | yes            | yes                |
-    | ParoQuant     | yes  | yes                    | no                        | yes            | yes                |
-    | Native        | yes  | no                     | yes                       | no             | no                 |
-    | WeightOnly    | no   | no                     | no/default                | no/default     | no                 |
-    +--------------+------+------------------------+---------------------------+----------------+--------------------+
+    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
+    | Processor     | required?| replay_after_process? | single_pass_all_modules?  | early_stop?    | activation_capture?|
+    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
+    | GPTQ          | yes      | yes                    | no                        | yes            | no                 |
+    | AWQ           | yes      | yes                    | no                        | yes            | yes                |
+    | ParoQuant     | yes      | yes                    | no                        | yes            | yes                |
+    | Native        | yes      | no                     | yes                       | no             | no                 |
+    | WeightOnly    | no       | no                     | no/default                | no/default     | no                 |
+    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
     """
 
-    # Whether the processor needs forward replay at all.
-    require_fwd: bool = True
-    # Whether the layer outputs become authoritative only after a replay that
-    # runs after process(), rather than from the subset forward itself.
-    fwd_replay_after_process: bool = True
+    forward: ForwardConfig = ForwardConfig()
     # Whether layer modules are replayed in one combined pass instead of per subset.
     fwd_all_modules_in_single_pass: bool = False
     # Whether a subset forward can stop as soon as the last subset hook fires.
@@ -245,8 +249,8 @@ class ProcessorLifecycleConfig:
     calibration: CalibrationTypes = CalibrationTypes.NOT_REQUIRED
     checkpointing: CheckpointSupport = CheckpointSupport.UNSUPPORTED
 
-    def with_execution(self, execution: ExecutionConfig) -> "ProcessorLifecycleConfig":
-        """Return a copy with specialized replay settings."""
+    def use(self, execution: ExecutionConfig) -> "ProcessorLifecycleConfig":
+        """Return a copy using the supplied execution configuration."""
         return replace(self, execution=execution)
 
 
