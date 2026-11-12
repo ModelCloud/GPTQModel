@@ -934,20 +934,34 @@ def load_blockfloat_model(
     config = AutoConfig.from_pretrained(checkpoint_dir)
     model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
 
+    # A decoder-only directory (``save_blockfloat_checkpoint``) has neither of
+    # these. Loading it here would leave the embedding and every norm at their
+    # random initial values and still return a model, so refuse instead.
     norms_path = os.path.join(checkpoint_dir, NORMS_PAYLOAD)
-    if os.path.isfile(norms_path):
-        model.load_state_dict(load_file(norms_path), strict=False)
-
     embed_path = os.path.join(checkpoint_dir, EMBED_PAYLOAD)
-    if os.path.isfile(embed_path):
-        with safe_open(embed_path, framework="pt") as handle:
-            embed_bits = int((handle.metadata() or {}).get("bits", "8"))
-            codes = handle.get_tensor("codes")
-            shape = tuple(int(v) for v in handle.get_tensor("code_shape"))
-            exponents = handle.get_tensor("exponents")
-        weights = recompose_blockfloat(codes.reshape(shape), exponents, bits=embed_bits)
-        with torch.no_grad():
-            model.get_input_embeddings().weight.copy_(weights.to(dtype))
+    for path, name in ((norms_path, NORMS_PAYLOAD), (embed_path, EMBED_PAYLOAD)):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"{checkpoint_dir} has no {name}, so it is a decoder-only "
+                f"checkpoint from save_blockfloat_checkpoint(). Load it with "
+                f"load_blockfloat_into_model() against the base model instead."
+            )
+
+    _missing, unexpected = model.load_state_dict(load_file(norms_path), strict=False)
+    if unexpected:
+        raise ValueError(
+            f"{norms_path} contains tensors this config has no home for: "
+            f"{sorted(unexpected)[:5]}"
+        )
+
+    with safe_open(embed_path, framework="pt") as handle:
+        embed_bits = int((handle.metadata() or {}).get("bits", "8"))
+        codes = handle.get_tensor("codes")
+        shape = tuple(int(v) for v in handle.get_tensor("code_shape"))
+        exponents = handle.get_tensor("exponents")
+    weights = recompose_blockfloat(codes.reshape(shape), exponents, bits=embed_bits)
+    with torch.no_grad():
+        model.get_input_embeddings().weight.copy_(weights.to(dtype))
 
     restored = load_native_checkpoint_into_dense_model(model, checkpoint_dir)
     model.eval()

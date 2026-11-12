@@ -1553,6 +1553,47 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
     assert after.shape == expected.shape
 
 
+def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
+    """A decoder-only directory must fail loudly, not load random norms.
+
+    ``save_blockfloat_checkpoint`` writes the decoder blocks alone. Pointing the
+    self-contained loader at that directory would leave the embedding and every
+    norm at their initial values and still return a usable-looking model.
+    """
+
+    import importlib
+    import os
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(1)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+
+    out = str(tmp_path / "full")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+
+    # Strip the two payloads that make the directory self-contained.
+    for name in (bq.NORMS_PAYLOAD, bq.EMBED_PAYLOAD):
+        os.replace(os.path.join(out, name), os.path.join(str(tmp_path), f"moved-{name}"))
+
+    with pytest.raises(FileNotFoundError):
+        bq.load_blockfloat_model(out)
+
+
 def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     """Saving codes and reading them back must reconstruct the same weights."""
 
