@@ -268,29 +268,33 @@ def test_awq_module_pack_boundaries_and_dtype_moves(dtype):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("bias_dtype", [None, torch.float32])
 def test_awq_module_bias_added_before_output_rounding(dtype, bias_dtype):
-    """The AWQ wrapper has the same post-GEMM bias add as the GPTQ module."""
+    """The AWQ wrapper adds bias before the GEMM result is rounded."""
     from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 
     assert prewarm_allspark_extension(), "AllSpark CUDA extension failed to build"
     k, n = 4096, 128
     dense = torch.nn.Linear(k, n, bias=True, device="cuda", dtype=dtype)
     dense.weight.data.fill_(1.0)
-    dense.bias.data.fill_(-32768.0 if bias_dtype is torch.float32 else -32768.0)
+    dense.bias.data.fill_(-32768.0)
     mod = AllSparkAwqLinear(bits=8, group_size=-1, sym=False, desc_act=False,
                             in_features=k, out_features=n, bias=True,
                             dtype=dtype, register_buffers=True).cuda()
     zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
     mod.pack(dense, torch.ones(n, 1, device="cuda", dtype=dtype), zeros)
     if bias_dtype is torch.float32:
-        mod.bias = mod.bias.to(torch.float32)
+        mod.bias = torch.full((n,), -100000.0, device="cuda", dtype=torch.float32)
+    mod.to(dtype)
+    assert mod.bias.dtype == (bias_dtype or dtype)
     mod.post_init()
 
-    x = torch.full((2, k), 16.0, dtype=dtype, device="cuda")
+    input_value = 32.0 if bias_dtype is torch.float32 else 16.0
+    bias_value = -100000.0 if bias_dtype is torch.float32 else -32768.0
+    x = torch.full((2, k), input_value, dtype=dtype, device="cuda")
     with torch.no_grad():
         out = mod(x)
     assert out.dtype == dtype
     assert torch.isfinite(out).all(), "bias was added after the FP16/BF16 rounding"
-    torch.testing.assert_close(out, torch.full_like(out, 16.0 * k - 32768.0),
+    torch.testing.assert_close(out, torch.full_like(out, input_value * k + bias_value),
                                rtol=0, atol=0)
 
 
@@ -311,7 +315,6 @@ def test_awq_module_bias_matches_oracle_and_keeps_packed_storage(dtype):
     per_channel = (dense.weight.data.abs().amax(dim=1) / 127).clamp_min(1e-8).reshape(n, 1)
     zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
     mod.pack(dense, per_channel, zeros)
-    packed_bytes = sum(t.numel() * t.element_size() for _, t in mod.named_buffers())
     mod.post_init()
     packed_bytes = sum(t.numel() * t.element_size() for _, t in mod.named_buffers())
 

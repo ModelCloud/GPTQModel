@@ -96,7 +96,8 @@ def test_allspark_linear_matches_dequant(m, dtype):
     assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
 
 
-def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128):
+def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128,
+                      bias_value: float = -32768.0):
     """AllSparkLinear with unit weights and an FP32 bias outside FP16 range."""
     from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
 
@@ -107,10 +108,11 @@ def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128):
     mod = AllSparkLinear(
         bits=8, group_size=-1, desc_act=False, sym=True,
         in_features=k, out_features=n, bias=True, dtype=dtype,
-    ).cuda().to(dtype)
+    ).cuda()
+    mod.bias.data.fill_(bias_value)
+    mod.to(dtype)
     mod.qweight.data.copy_(qweight.contiguous())
     mod.scales.data.copy_(scale)
-    mod.bias.data.fill_(-32768.0)
     mod.post_init()
     return mod, k, n
 
@@ -128,6 +130,22 @@ def test_linear_bias_added_before_output_rounding(dtype):
     assert out.dtype == dtype
     assert torch.isfinite(out).all(), "bias was added after the FP16/BF16 rounding"
     torch.testing.assert_close(out, torch.full_like(out, 16.0 * k - 32768.0),
+                               rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp32_bias_survives_module_dtype_move(dtype):
+    """A dtype move cannot turn an out-of-range FP32 bias into infinity."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, k, _ = _fp32_bias_module(dtype, bias_value=-100000.0)
+    assert mod.bias.dtype == torch.float32
+    assert mod.bias[0].item() == -100000.0
+    x = torch.full((2, k), 32.0, dtype=dtype, device="cuda")
+    out = mod(x)
+    torch.testing.assert_close(out, torch.full_like(out, 32.0 * k - 100000.0),
                                rtol=0, atol=0)
 
 

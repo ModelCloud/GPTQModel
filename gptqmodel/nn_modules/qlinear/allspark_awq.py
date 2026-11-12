@@ -148,6 +148,19 @@ class AllSparkAwqLinear(AWQuantLinear):
         # with the wrong kernel yields garbage rather than an error.
         self._hip = IS_ROCM
 
+    def _apply(self, fn, recurse=True):
+        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        bias = getattr(self, "bias", None)
+        if bias is None or bias.dtype != torch.float32:
+            return super()._apply(fn, recurse=recurse)
+
+        def preserve_bias_width(tensor):
+            if tensor is bias:
+                return fn(tensor.view(torch.uint8)).view(torch.float32)
+            return fn(tensor)
+
+        return super()._apply(preserve_bias_width, recurse=recurse)
+
     @property
     def _kernel_group_size(self) -> int:
         # The kernel keeps one scale/zero row per output channel, so the only

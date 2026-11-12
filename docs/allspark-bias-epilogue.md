@@ -41,6 +41,10 @@ signature. The kernel reads either an activation-dtype buffer or an FP32 buffer;
 `bias32` selects the latter. The CUDA and HIP packed layouts are otherwise
 unchanged, so no checkpoint or repack bytes change.
 
+An FP32 checkpoint bias also stays FP32 when the module moves to FP16 or BF16:
+each module's `_apply` moves the bias storage without casting its values. The
+loader preserves the same width when it loads a low-precision checkpoint.
+
 ## Where the bias is applied
 
 | Path | Mechanism before | Mechanism now |
@@ -62,6 +66,7 @@ also stays a plain accumulator so the numerics oracles remain comparable.
 | --- | --- | --- |
 | FP32 bias `-32768`, FP16 product `65536` | `inf` | `32768` |
 | Bias stored in FP32, activation FP16/BF16 | the module narrowed it first | the kernel adds it in FP32 |
+| FP32 bias outside FP16 range followed by a module dtype move | the bias became infinity | `_apply` preserves its FP32 width before the kernel reads it |
 | Bias is not one element per output channel | broadcast shape error | explicit rejection before launch |
 | Bias on another device or an unsupported dtype | a deep device/dtype error | explicit rejection in the helper and both bindings |
 | No bias | unchanged | unchanged (`bias=None`) |

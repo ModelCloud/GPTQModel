@@ -163,6 +163,19 @@ class AllSparkLinear(GPTQQuantLinear):
 
         self._repacked = False
 
+    def _apply(self, fn, recurse=True):
+        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        bias = self.bias
+        if bias is None or bias.dtype != torch.float32:
+            return super()._apply(fn, recurse=recurse)
+
+        def preserve_bias_width(tensor):
+            if tensor is bias:
+                return fn(tensor.view(torch.uint8)).view(torch.float32)
+            return fn(tensor)
+
+        return super()._apply(preserve_bias_width, recurse=recurse)
+
     @torch.no_grad()
     def post_init(self):
         """Unpack the GPTQ 8-bit codes and reorder them into the kernel layout."""
