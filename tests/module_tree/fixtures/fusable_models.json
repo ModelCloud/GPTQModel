@@ -3967,7 +3967,7 @@
       ]
     },
     "olmo2": {
-      "definition": "LlamaQModel",
+      "definition": "Olmo2QModel",
       "profiles": {
         "qkv": [
           "q",

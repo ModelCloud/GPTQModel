@@ -19,6 +19,23 @@ class Gemma2QModel(LlamaQModel):
 
     shared_input_verified_model_types = frozenset({"gemma2"})
 
+    # Gemma 2 wraps the MLP in two additional RMSNorm layers. They own
+    # checkpoint weights but are never quantized, so they must be declared as
+    # excluded leaves; the generic Llama tree cannot resolve them.
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!:norm",),
+            "self_attn": ("q_proj:0:q:in=x", "k_proj:0:k:in=x", "v_proj:0:v:in=x", "o_proj:1:o"),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
+            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+        },
+    ]
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
