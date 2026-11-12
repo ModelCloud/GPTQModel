@@ -918,6 +918,37 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         self.pack_factor = self.pack_dtype_bits // self.bits
 
 
+def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
+    """Cast quantization scales to the fp16 storage dtype without silent overflow.
+
+    A scale is ``amax / maxq``. For 4-bit that is ``amax / 15``, so any channel
+    whose largest weight exceeds ``65504 * 15`` (about 9.8e5) cannot be
+    represented by an fp16 scale: the cast turns the scale into ``inf`` and the
+    whole channel dequantizes to NaN, with no error anywhere. bf16 checkpoints
+    reach that magnitude legitimately, so this is reachable without a corrupt
+    file.
+
+    Refusing loudly is the only honest option here. Clamping the scale would put
+    the stored value out of step with the one the codes were computed with, and
+    the channel would silently dequantize to the wrong magnitude.
+    """
+
+    limit = t.finfo(t.float16).max
+    finite = t.isfinite(scales)
+    too_large = scales.abs() > limit
+    bad = (~finite) | too_large
+    if bool(bad.any()):
+        count = int(bad.sum())
+        worst = float(scales[bad].abs().max()) if finite.any() else float("inf")
+        raise ValueError(
+            f"{name}: {count} scale value(s) do not fit fp16 (max {limit:.0f}); "
+            f"largest is {worst:.3e}. A channel whose |weight| exceeds "
+            f"{limit:.0f} * (2**bits - 1) cannot be represented with fp16 scales, "
+            "and storing it would dequantize the channel to NaN."
+        )
+    return scales.to(dtype=t.float16)
+
+
 class WeightOnlyQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bits: int,
@@ -1373,7 +1404,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         num_groups = scales.shape[0]
 
         # small buffers
-        self.register_buffer("scales", scales.to(dtype=t.float16))
+        self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
         elif not hasattr(self, "bias"):
@@ -1674,7 +1705,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         zeros_dev = zeros_g.to(device=target_device)
         scale_zeros_dev = scale_zeros_g.to(device=target_device)
 
-        self.register_buffer("scales", scales_g.to(device="cpu", dtype=t.float16))
+        self.register_buffer("scales", _scales_for_storage(scales_g, name=f"{self.name}.scales").to(device="cpu"))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to(device="cpu", dtype=t.float16))
         else:
@@ -1828,7 +1859,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
             # TODO why clone?
             # self.scales = scales.clone().to(dtype=t.float16)
-            self.register_buffer("scales", scales.to(dtype=t.float16))
+            self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
 
             if hasattr(linear, "bias") and linear.bias is not None:
                 # TODO why clone?
