@@ -52,9 +52,9 @@ from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
-    EffectiveModuleConfig,
     FORMAT_FIELD_CODE,
     METHOD,
+    EffectiveModuleConfig,
     _normalize_bitsandbytes_block_size,
     _normalize_bitsandbytes_format,
     _normalize_fp8_fmt,

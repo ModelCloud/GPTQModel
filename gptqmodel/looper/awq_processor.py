@@ -17,9 +17,15 @@ from torch import nn
 from torch.nn import Module
 
 from ..looper.loop_processor import (
-    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CalibrationTypes, CheckpointSupport,
-    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
-    bind_effective_module_config, get_effective_module_config,
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationTypes,
+    CheckpointSupport,
+    ExecutionConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_effective_module_config,
+    get_effective_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -2749,7 +2755,7 @@ class AWQProcessor(LoopProcessor):
             # Stage the codes at the width this module will be packed at. RCO
             # assigns widths per module through `dynamic`, so reading the global
             # `qcfg.bits` here would stage the wrong code range.
-            effective = named_get_effective_module_config(module)
+            effective = get_effective_module_config(named_module)
             module_bits = self._module_bits(named_module.full_name, effective=effective)
             module_group_size = self._module_group_size(
                 named_module.full_name, effective=effective,

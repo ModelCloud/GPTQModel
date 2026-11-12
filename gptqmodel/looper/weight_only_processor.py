@@ -12,9 +12,14 @@ from typing import Optional
 import torch
 
 from ..looper.loop_processor import (
-    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CheckpointSupport,
-    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
-    bind_effective_module_config, get_effective_module_config,
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CheckpointSupport,
+    ExecutionConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_effective_module_config,
+    get_effective_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel

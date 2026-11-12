@@ -13,8 +13,12 @@ from torch.nn import Module
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
 from ..looper.loop_processor import (
-    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CheckpointSupport,
-    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CheckpointSupport,
+    ExecutionConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
