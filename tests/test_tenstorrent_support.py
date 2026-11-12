@@ -1932,3 +1932,74 @@ def test_opt125m_native_bf4_matches_int4_quantized_checkpoint():
 
     bf4_cos = float(torch.nn.functional.cosine_similarity(dense, bf4, dim=0))
     assert bf4_cos > 0.99, f"native bf4 cosine {bf4_cos} below the int4 class"
+
+
+# --- GSM8K evaluation harness ----------------------------------------------
+#
+# The evaluator itself is tested without a model: prompt construction, answer
+# extraction and scoring are deterministic and cost nothing, so they belong in
+# the always-on suite. The model run is gated.
+
+def _load_gsm8k_eval():
+    """Load the GSM8K helpers from the scripts directory if present."""
+
+    import importlib.util
+    import os as _os
+
+    path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)),
+                         "scripts", "gsm8k_eval.py")
+    if not _os.path.exists(path):
+        pytest.skip("scripts/gsm8k_eval.py not present")
+    spec = importlib.util.spec_from_file_location("gsm8k_eval_helpers", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_gsm8k_answer_extraction_prefers_the_marker():
+    """`#### N` is the gold answer format and must win over prose numbers."""
+
+    ev = _load_gsm8k_eval()
+
+    assert ev.extract("She earns 18 dollars.\n#### 18") == "18"
+    assert ev.extract("So the answer is #### 1,234") == "1234"
+    assert ev.extract("#### -5") == "-5"
+    # Without a marker, fall back to the last number in the text.
+    assert ev.extract("9 eggs then 18 dollars") == "18"
+
+
+def test_gsm8k_gold_strips_marker_and_separators():
+    ev = _load_gsm8k_eval()
+    assert ev.gold("work...\n#### 18") == "18"
+    assert ev.gold("#### 1,000") == "1000"
+
+
+def test_gsm8k_prompt_is_five_shot_and_ends_with_the_question():
+    """The prompt must be deterministic and end where the model should answer."""
+
+    import types
+
+    ev = _load_gsm8k_eval()
+    rows = [
+        {"question": f"q{i}", "answer": f"#### {i}"} for i in range(10)
+    ]
+    prompt = ev.build_prompt(rows, 7, tok=types.SimpleNamespace())
+    assert prompt.count("Question:") == 6        # 5 shots + the question under test
+    assert prompt.rstrip().endswith("Answer:")
+    assert prompt.endswith("Question: q7\nAnswer:")
+    # Earlier shots precede the target question.
+    assert prompt.index("q2") < prompt.index("q7")
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TT_MODEL") != "1",
+    reason="explicit end-to-end model gate (runs GSM8K generation)",
+)
+def test_gsm8k_eval_reports_a_score(tmp_path):
+    """A short GSM8K run must produce a well-formed accuracy in [0, 1]."""
+
+    ev = _load_gsm8k_eval()
+    result = ev.run_eval("facebook/opt-125m", limit=4)
+    assert 0.0 <= result["accuracy"] <= 1.0
+    assert result["n"] == 4
+    assert result["correct"] <= result["n"]
