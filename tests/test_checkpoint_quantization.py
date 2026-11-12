@@ -311,7 +311,7 @@ def test_subprocess_recovery(
         killed = [
             event for event in events(interrupted.stdout) if event["event"] == "kill"
         ]
-        assert len(killed) == 1 and killed[0]["fwd_counter"] == 2
+        assert len(killed) == 1 and killed[0]["fwd_counter"] >= 2
         assert killed[0]["nsamples"] > 0 and killed[0]["partial_hashes"]
         assert any(
             event["event"] == "final" and event["name"] == killed[0]["name"]

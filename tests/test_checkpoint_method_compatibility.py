@@ -88,11 +88,17 @@ def test_unsupported_checkpoint_fails_before_model_or_disk_mutation(
         "kill-hessian-early",
     ],
 )
-def test_eora_checkpoint_recovery(tmp_path, family, mode):
+def test_eora_checkpoint_recovery(tmp_path, monkeypatch, family, mode):
+    import os
+
     from test_checkpoint_quantization import test_subprocess_recovery
 
-    if torch.cuda.device_count() < 2:
+    visible_gpus = torch.cuda.device_count()
+    if visible_gpus < 2:
         pytest.skip("requires two CUDA devices")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    selected = visible.split(",")[:2] if visible else ["0", "1"]
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(selected))
     test_subprocess_recovery(
         tmp_path, family, mode, device="cuda:0", required_gpus=2, eora=True
     )

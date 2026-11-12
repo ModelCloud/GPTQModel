@@ -14,9 +14,15 @@ import torch
 from torch.nn import Module
 
 from ..looper.loop_processor import (
-    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CalibrationTypes, CheckpointSupport,
-    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
-    bind_effective_module_config, get_effective_module_config,
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationTypes,
+    CheckpointSupport,
+    ExecutionConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_effective_module_config,
+    get_effective_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -46,11 +52,11 @@ from ..quantization.activation_floatx import (
 )
 from ..quantization.config import (
     METHOD,
+    EffectiveModuleConfig,
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
-    EffectiveModuleConfig,
     apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
@@ -859,18 +865,21 @@ class GPTQProcessor(LoopProcessor):
 
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
-        with (self.lock):
-            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
-            if self.calculate_w_wq_diff:
-                module.weight.data = module.state.pop("wq").to(CPU)
+        # Finalization is already isolated per module. Do not hold the
+        # processor-wide lock while accessing NamedModule wrappers: they take
+        # the parent module lock, while create_quant_module/pack_module take
+        # these locks in the opposite order. EoRA enables this path through
+        # calculate_w_wq_diff, so the mixed order can deadlock multi-GPU runs.
+        if self.calculate_w_wq_diff:
+            module.weight.data = module.state.pop("wq").to(CPU)
 
-            module.state.pop("w", None) #
-            module.state.pop("w_wq_diff", None)
+        module.state.pop("w", None)  #
+        module.state.pop("w_wq_diff", None)
 
-            # need to clone to due to steamed pinned memory and access on diff thread
-            q_zeros = module.state.pop("q_zeros").clone()
-            q_scales = module.state.pop("q_scales").clone()
-            q_g_idx = module.state.pop("q_g_idx").clone()
+        # need to clone to due to steamed pinned memory and access on diff thread
+        q_zeros = module.state.pop("q_zeros").clone()
+        q_scales = module.state.pop("q_scales").clone()
+        q_g_idx = module.state.pop("q_g_idx").clone()
 
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
@@ -950,8 +959,7 @@ class GPTQProcessor(LoopProcessor):
             )
 
         # TODO: store module quant results in module, not global processor result
-        with self.lock:
-            self.result_pop(module.full_name)
+        self.result_pop(module.full_name)
 
         del q_scales, q_zeros, q_g_idx
         module.unregister_parameter("weight")
