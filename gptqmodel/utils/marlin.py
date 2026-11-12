@@ -387,8 +387,16 @@ def marlin_device_profile(
         # Torch narrows device indices and wraps values such as
         # `cuda:256` to device 0. Retain the original ordinal before parsing.
         raw_index = device if isinstance(device, int) and not isinstance(device, bool) else None
-        if isinstance(device, str) and device.startswith("cuda:") and device[5:].isdecimal():
-            raw_index = int(device[5:])
+        if isinstance(device, str) and device.startswith("cuda:"):
+            ordinal = device[5:]
+            if ordinal.isdecimal() or (ordinal.startswith("-") and ordinal[1:].isdecimal()):
+                raw_index = int(ordinal)
+        if raw_index is not None and raw_index < 0:
+            count = torch.cuda.device_count()
+            raise ValueError(
+                f"Marlin device profile: device index {raw_index} is out of range "
+                f"[0, {count})."
+            )
         target = torch.device(device)
         if target.type != "cuda":
             raise ValueError(
