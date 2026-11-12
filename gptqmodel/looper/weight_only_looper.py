@@ -53,6 +53,7 @@ from ..utils.looper_helpers import (
     find_last_quantized_layer_index,
     move_module_to_device,
     normalize_device_like,
+    plan_layer_count,
     select_forward_devices,
 )
 from ..utils.model import (
@@ -958,15 +959,14 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
             layer_count=layer_count,
         )
-        plan_layer_count = (
-            layer_count
-            if last_quantized_layer_index is None
-            else max(0, last_quantized_layer_index + 1)
+        planned_layer_count = plan_layer_count(
+            layer_count,
+            last_quantized_layer_index,
         )
         try:
             plan = LoopPlan(tuple(
                 LoopStep("layer", index, get_layer_name(layer_names, index))
-                for index in range(plan_layer_count)
+                for index in range(planned_layer_count)
             ) + ((LoopStep("lm_head", layer_count, lm_head_name),) if quant_lm_head_in_loop else ()))
             start_step = self.extensions.start(LoopContext(
                 plan, self.gptq_model, (self.processor,), {}, self,

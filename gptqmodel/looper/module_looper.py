@@ -54,6 +54,7 @@ from ..utils.looper_helpers import (
     forward_batch_worker,
     move_module_to_device,
     normalize_device_like,
+    plan_layer_count,
     rehome_module_to_device,
     select_forward_devices,
 )
@@ -1937,17 +1938,21 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
             layer_count=layer_count,
         )
-        plan_layer_count = (
-            layer_count
-            if last_quantized_layer_index is None
-            else max(0, last_quantized_layer_index + 1)
+        # `run_layer_stage()` only stops early at the last quantized layer when
+        # no embedding endpoint is requantized. With INPUT/OUTPUT/BOTH it still
+        # replays and publishes every trailing decoder layer, so the plan must
+        # cover them as well.
+        planned_layer_count = plan_layer_count(
+            layer_count,
+            last_quantized_layer_index,
+            replay_all_layers=self.embed_quant_mode is not None,
         )
         steps = []
         if quant_input_embeddings:
             steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
         steps.extend(
             LoopStep("layer", index, get_layer_name(layer_names, index))
-            for index in range(plan_layer_count)
+            for index in range(planned_layer_count)
         )
         if quant_output_embeddings:
             steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
