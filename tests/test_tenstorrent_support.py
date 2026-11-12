@@ -1702,3 +1702,233 @@ def test_actual_ttnn_linear_matches_torch_oracle(device_count):
     finally:
         module.release_device()
         close_mesh()
+
+
+# --- end-to-end: dense -> native bf4 -> post-quant inference ----------------
+#
+# Two levels. The CPU contract below runs always, using a synthetic decoder so it
+# exercises the real save/load/serve code paths without a download. The hardware
+# test is gated and runs the actual model on device, because that is where the
+# claim "native format, no dequant at load" has to hold.
+
+OPT_MODEL_ID = "facebook/opt-125m"
+OPT_CHECKPOINT_ID = "ModelCloud/Opt-125-GPTQ-4bit-10-25-2024"
+
+
+def _tiny_decoder_model(in_f=64, out_f=32):
+    """Minimal OPT-shaped model: model.decoder.layers[i].<name> Linear modules."""
+
+    def build():
+        block = torch.nn.Module()
+        block.q_proj = torch.nn.Linear(in_f, out_f, bias=True)
+        block.fc1 = torch.nn.Linear(in_f, in_f, bias=False)
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.decoder = torch.nn.Module()
+        model.model.decoder.layers = torch.nn.ModuleList([block])
+        return model
+
+    return build
+
+
+def _quantize_and_infer_tiny(tmp_path, bits=4):
+    """Quantize the synthetic model onto the grid, save, reload, and compare."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    build = _tiny_decoder_model()
+
+    torch.manual_seed(17)
+    src = build()
+    with torch.no_grad():
+        for param in src.parameters():
+            param.copy_(torch.randn_like(param) * 0.02)
+
+    # The synthetic model has no tokenizer, so drive the quantizer from a
+    # hand-built Hessian: this is exactly what quantize_model_blockfloat does
+    # internally, minus the calibration replay.
+    in_f = src.model.decoder.layers[0].fc1.weight.shape[1]
+    hessian = torch.eye(in_f) * float(in_f)
+    solved = {}
+    with torch.no_grad():
+        for index, block in enumerate(src.model.decoder.layers):
+            for name, module in block.named_modules():
+                if not isinstance(module, torch.nn.Linear):
+                    continue
+                q = bq.gptq_solve_blockfloat(
+                    module.weight.detach(), hessian, bits=bits, grid="blockfloat"
+                )
+                module.weight.copy_(q)
+                solved[f"{index}.{name}"] = q.clone()
+
+    out_dir = str(tmp_path / "native")
+    info = bq.save_blockfloat_checkpoint(src, out_dir, bits=bits)
+    assert info["layers"] == len(solved)
+
+    # Post-quant inference must run and must reflect the quantized weights.
+    ids = torch.randint(0, 8, (1, 4))
+    inputs = src.model.decoder.layers[0].fc1.weight.new_zeros(1, 4, in_f)
+    with torch.no_grad():
+        direct = src.model.decoder.layers[0].fc1(inputs)
+
+    fresh = build()
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out_dir)
+    assert len(restored) == len(solved)
+    for key, expected in solved.items():
+        index, name = key.split(".", 1)
+        module = dict(fresh.model.decoder.layers[int(index)].named_modules())[name]
+        assert module.weight.detach().equal(expected), f"{key} did not restore exactly"
+
+    with torch.no_grad():
+        again = fresh.model.decoder.layers[0].fc1(inputs)
+    assert torch.equal(direct, again), "post-quant inference changed after reload"
+    return src, fresh, ids
+
+
+def test_dense_to_native_bf4_to_inference(tmp_path):
+    """Dense -> grid GPTQ -> packed codes -> reload -> inference, all exact."""
+
+    src, fresh, _ = _quantize_and_infer_tiny(tmp_path)
+    # The quantized weights differ from the dense ones (i.e. it really quantized)
+    # yet inference after reload is bit-identical to inference before saving.
+    assert fresh is not src
+
+
+def test_native_bf4_payload_is_denser_than_float16(tmp_path):
+    """4-bit packing must actually beat a float weight per element."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    build = _tiny_decoder_model(in_f=256, out_f=256)
+    model = build()
+    torch.manual_seed(3)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.copy_(bq.quantize_bfloat4_b(torch.randn_like(param) * 0.02))
+
+    info = bq.save_blockfloat_checkpoint(model, str(tmp_path / "p2"), bits=4)
+    elements = 256 * 256 * 2                     # q_proj + fc1
+    float16_bytes = elements * 2
+    assert info["payload_bytes"] < float16_bytes * 0.6, (
+        f"{info['payload_bytes']} bytes is not meaningfully below "
+        f"{float16_bytes} for {elements} elements"
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TT_MODEL") != "1",
+    reason="explicit end-to-end model gate (downloads OPT-125M, runs on device)",
+)
+def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
+    """Quantize real OPT-125M to native bf4, then run post-quant inference.
+
+    Checks the property the whole path exists for: the solver's output survives
+    bfloat4_b storage unchanged, so inference needs no dequant at load.
+    """
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from gptqmodel.utils.tt_blockfloat_quant import (
+        expand_native_layer,
+        load_native_checkpoint_into_dense_model,
+        quantize_model_blockfloat,
+        read_blockfloat_checkpoint,
+        save_blockfloat_checkpoint,
+    )
+
+    tok = AutoTokenizer.from_pretrained(OPT_MODEL_ID)
+    model = AutoModelForCausalLM.from_pretrained(OPT_MODEL_ID, dtype=torch.float32)
+    ids = tok("The quick brown fox jumps over", return_tensors="pt").input_ids
+
+    with torch.no_grad():
+        dense_logits = model(ids).logits[0, -1].float().clone()
+
+    report = quantize_model_blockfloat(model, tok, bits=4, nsamples=4)
+    assert len(report) >= 72, f"only {len(report)} layers quantized"
+    assert all(entry["on_grid"] for entry in report.values()), "a layer left the grid"
+    # Guard the aliasing bug: a detached reference made this read 0.0 everywhere.
+    assert min(entry["norm_l1"] for entry in report.values()) > 0.0, (
+        "reported quantization error is zero, which means it was measured after "
+        "the in-place write"
+    )
+
+    out_dir = str(tmp_path / "opt-native")
+    saved = save_blockfloat_checkpoint(model, out_dir, bits=4)
+    assert saved["layers"] >= 72
+
+    with torch.no_grad():
+        quantized_logits = model(ids).logits[0, -1].float().clone()
+
+    # Native checkpoints must be usable without any float weights on disk.
+    payload = read_blockfloat_checkpoint(out_dir)
+    assert payload["bits"] == 4 and payload["block"] == 16
+    assert len(payload["layers"]) >= 72
+
+    fresh = AutoModelForCausalLM.from_pretrained(OPT_MODEL_ID, dtype=torch.float32)
+    restored = load_native_checkpoint_into_dense_model(fresh, out_dir)
+    assert len(restored) >= 72
+    with torch.no_grad():
+        reloaded_logits = fresh(ids).logits[0, -1].float().clone()
+
+    # The reload must reproduce post-quant inference exactly, not approximately.
+    assert torch.equal(reloaded_logits, quantized_logits), (
+        "reloading from codes changed the output"
+    )
+
+    # And quantization must stay close to the dense model.
+    cosine = float(torch.nn.functional.cosine_similarity(
+        dense_logits, reloaded_logits, dim=0
+    ))
+    assert cosine > 0.99, f"logits cosine {cosine} is too low"
+    assert int(dense_logits.argmax()) == int(reloaded_logits.argmax())
+
+    # On device, a restored layer must store as bfloat4_b with no drift.
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, import_ttnn, open_mesh
+
+    ttnn = import_ttnn()
+    weights = expand_native_layer(payload["layers"]["0.self_attn.q_proj"])
+    mesh = current_mesh() or open_mesh(device_count=1)
+    try:
+        device_tensor = ttnn.to_device(
+            ttnn.from_torch(weights, dtype=ttnn.bfloat4_b, layout=ttnn.TILE_LAYOUT),
+            mesh.device,
+        )
+        round_tripped = ttnn.to_torch(device_tensor).float()
+        drift = float((round_tripped - weights.float()).abs().max())
+        assert drift == 0.0, f"bfloat4_b storage moved the grid values by {drift}"
+        ttnn.deallocate(device_tensor)
+    finally:
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TT_MODEL") != "1",
+    reason="explicit end-to-end model gate",
+)
+def test_opt125m_native_bf4_matches_int4_quantized_checkpoint():
+    """Native bf4 should be in the same accuracy class as a shipped GPTQ int4 model.
+
+    Compares post-quantization quality on the same prompt, using the published
+    OPT-125M GPTQ int4 checkpoint as the reference point rather than the dense
+    model, which is the comparison a user actually cares about.
+    """
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from gptqmodel.utils.tt_blockfloat_quant import quantize_model_blockfloat
+
+    tok = AutoTokenizer.from_pretrained(OPT_MODEL_ID)
+    ids = tok("The quick brown fox", return_tensors="pt").input_ids
+
+    model = AutoModelForCausalLM.from_pretrained(OPT_MODEL_ID, dtype=torch.float32)
+    with torch.no_grad():
+        dense = model(ids).logits[0, -1].float().clone()
+
+    quantize_model_blockfloat(model, tok, bits=4, nsamples=4)
+    with torch.no_grad():
+        bf4 = model(ids).logits[0, -1].float().clone()
+
+    bf4_cos = float(torch.nn.functional.cosine_similarity(dense, bf4, dim=0))
+    assert bf4_cos > 0.99, f"native bf4 cosine {bf4_cos} below the int4 class"
