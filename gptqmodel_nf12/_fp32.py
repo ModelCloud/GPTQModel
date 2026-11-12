@@ -21,10 +21,24 @@ import triton.language as tl
 from .api import NF12Weight
 
 
-_gate_views: weakref.WeakKeyDictionary[NF12Weight, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = (
+_gate_views: weakref.WeakKeyDictionary[NF12Weight, tuple[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = (
     weakref.WeakKeyDictionary()
 )
 _gate_lock = threading.Lock()
+
+
+def _gate_cache_key(weight: NF12Weight) -> tuple:
+    """Track source replacement, ordinary in-place writes, and exponent edits."""
+
+    def tensor_key(tensor: torch.Tensor) -> tuple:
+        try:
+            version = None if tensor.is_inference() else tensor._version
+        except RuntimeError:
+            version = None
+        return (id(tensor), tensor.data_ptr(), tensor.device, tensor.dtype,
+                tuple(tensor.shape), version)
+
+    return tensor_key(weight.packed), tensor_key(weight.escapes), weight.exp_base
 
 
 def prepare_fp32_gate(weight: NF12Weight) -> None:
@@ -39,8 +53,12 @@ def prepare_fp32_gate(weight: NF12Weight) -> None:
     if n not in (128, 384) or k != 5120 or weight.device.type != "cuda":
         raise ValueError("prepare_fp32_gate requires a CUDA NF12 [128 or 384,5120] weight")
     with _gate_lock:
-        if weight in _gate_views:
-            return
+        key = _gate_cache_key(weight)
+        # An explicit prepare always rebuilds. Neither inference tensors nor
+        # writes through ``.data`` have a usable version counter, so callers
+        # can reprepare after those edits without relying on a separate clear.
+        # A stale view must not survive if rebuilding fails.
+        _gate_views.pop(weight, None)
         dense = weight.decode()
         bits = (dense.view(torch.int16).to(torch.int32) & 65535).view(n, 640, 8)
         exponent = (bits >> 7) & 255
@@ -63,12 +81,20 @@ def prepare_fp32_gate(weight: NF12Weight) -> None:
             low_words[:, :, 1][escaped_groups] = 0
             meta[escaped_groups] = 0
         del dense, bits, exponent, sign, offset, meta_bytes, valid, escaped_groups
-        _gate_views[weight] = (meta, low, escapes)
+        if _gate_cache_key(weight) != key:
+            raise RuntimeError("NF12 weight changed while preparing the FP32 gate view")
+        _gate_views[weight] = (key, (meta, low, escapes))
 
 
 def _get_gate_view(weight: NF12Weight):
     with _gate_lock:
-        return _gate_views.get(weight)
+        cached = _gate_views.get(weight)
+        if cached is None:
+            return None
+        if cached[0] != _gate_cache_key(weight):
+            _gate_views.pop(weight, None)
+            return None
+        return cached[1]
 
 
 @triton.jit

@@ -303,6 +303,14 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                         x = torch.full((6, 5120), 0.125, device="cuda")
                         nf12.linear_fp32_staged_b1(x, packed)
                         nf12.linear_fp32(x[:1], packed)
+                        # The replacement route uses a different Triton
+                        # kernel. Compile it before workers race through the
+                        # cache test; Triton's cold JIT is not this cache.
+                        changed = nf12.encode(-weight)
+                        packed.packed = changed.packed
+                        packed.escapes = changed.escapes
+                        packed.exp_base = changed.exp_base
+                        nf12.linear_fp32(x[:1], packed)
                 nf12_gate_ready[0] = True
             if not hasattr(nf12_thread, "device"):
                 nf12_thread.device = nf12_next_device[0] % 2
@@ -320,6 +328,39 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         if not (torch.equal(staged[0:1], ordinary)
                 and bool(torch.all((staged - torch.nn.functional.linear(x, weight.float())).abs() < 1e-4))):
             raise AssertionError("concurrent NF12 gate preparation or B1 projection changed values")
+        changed = nf12.encode(-weight)
+        packed.packed = changed.packed
+        packed.escapes = changed.escapes
+        packed.exp_base = changed.exp_base
+        fallback = nf12.linear_fp32(x[:1], packed)
+        nf12.prepare_fp32_gate(packed)
+        rebuilt = nf12.linear_fp32_staged_b1(x, packed)
+        expected = torch.nn.functional.linear(x, -weight.float())
+        torch.cuda.current_stream().synchronize()
+        if not (bool(torch.all((fallback - expected[:1]).abs() < 1e-4))
+                and bool(torch.all((rebuilt - expected).abs() < 1e-4))):
+            raise AssertionError("concurrent NF12 gate cache used a replaced weight")
+        return True
+
+    def tensor_cache_revision() -> bool:
+        regular = torch.zeros(16, device="cuda")
+        before = (regular._version, regular.data_ptr(), regular.device,
+                  regular.dtype, tuple(regular.shape), regular.is_inference())
+        regular.copy_(torch.ones_like(regular))
+        after = (regular._version, regular.data_ptr(), regular.device,
+                 regular.dtype, tuple(regular.shape), regular.is_inference())
+        if after[0] != before[0] + 1 or after[1:] != before[1:]:
+            raise AssertionError("ordinary tensor cache revision did not track an in-place write")
+        with torch.inference_mode():
+            inferred = torch.zeros(16, device="cuda")
+            if not inferred.is_inference():
+                raise AssertionError("inference tensor was not marked as unversioned")
+            try:
+                inferred._version
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("inference tensor unexpectedly exposed a version")
         return True
 
     nf12_prefill_ready = [False]
@@ -362,6 +403,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12.gate": nf12_gate,
+        "Tensor cache revision metadata": tensor_cache_revision,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
