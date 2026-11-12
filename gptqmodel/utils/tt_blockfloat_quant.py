@@ -40,6 +40,8 @@ from typing import Optional, Tuple
 
 import torch
 
+from .calibration import iter_calibration_windows
+
 
 #: Bits per element for each supported block-float format.
 BLOCKFLOAT_BITS = {"bfloat8_b": 8, "bfloat4_b": 4}
@@ -305,12 +307,37 @@ __all__ += [
 # expands it in the data path.
 
 DEFAULT_CALIBRATION_TEXT = (
-    "The quick brown fox jumps over the lazy dog. "
-    "Tenstorrent accelerators pair many small RISC-V cores with a matrix engine. "
-    "Quantization reduces the number of bits needed to store model weights. "
-    "A transformer layer projects hidden states through attention and feed-forward blocks. "
-    "Numerical precision and memory bandwidth both bound inference throughput. "
-    "The model reads a sentence, predicts the next token, and repeats. "
+    # Long enough to give distinct windows at the default 256-token stride: a short
+    # string silently collapses every sample onto one passage, which is how the
+    # block-float Hessian once ended up describing a single paragraph.
+    "The quick brown fox jumps over the lazy dog while the morning fog lifts off "
+    "the river and the market stalls open one by one along the narrow street. "
+    "Tenstorrent accelerators pair many small RISC-V cores with a matrix engine, "
+    "and each core owns a slice of memory beside its arithmetic unit. "
+    "Quantization reduces the number of bits needed to store model weights, so a "
+    "larger model fits in the same memory and moves less data per token. "
+    "A transformer layer projects hidden states through attention and feed-forward "
+    "blocks, and every projection is a matrix multiply over the same input row. "
+    "Numerical precision and memory bandwidth both bound inference throughput, and "
+    "which one binds depends on the batch size and the sequence length. "
+    "A shop sells pencils in boxes of twelve. If four boxes arrive on Monday and "
+    "three boxes are sold by Friday, how many pencils remain in the stockroom? "
+    "First multiply four boxes by twelve pencils to get forty-eight, then subtract "
+    "the thirty-six pencils that were sold, which leaves twelve pencils in total. "
+    "The library opens at nine in the morning and closes at six in the evening, so "
+    "a student who arrives at ten and leaves at four spends six hours reading. "
+    "Rain fell for three hours at two centimeters per hour, and the gauge already "
+    "held five centimeters, so the final reading was eleven centimeters. "
+    "The model reads a sentence, predicts the next token, and repeats until it "
+    "emits a stop marker or reaches the maximum length allowed by the caller. "
+    "Sorting a list of numbers takes time proportional to the product of its "
+    "length and the logarithm of that length when the algorithm is efficient. "
+    "Engineers measured the cable twice, once before the storm and once after, and "
+    "the second measurement was longer by the amount the supports had stretched. "
+    "A recipe calls for two cups of flour for every three cups of milk, so nine "
+    "cups of milk require six cups of flour to keep the mixture consistent. "
+    "When the test suite runs, each case reports whether it passed, failed, or was "
+    "skipped because the required hardware was not present on the machine. "
 )
 
 
@@ -376,22 +403,13 @@ def collect_layer_hessians(
     handles = [module.register_forward_hook(make_hook(name))
                for name, module in targets.items()]
     try:
-        ids = tokenizer(text, return_tensors="pt").input_ids
         model.eval()
         with torch.no_grad():
-            # Stride through the text: one distinct window per sample. Reusing the
-            # first window (which this used to do) makes ``nsamples`` a multiplier
-            # on a single passage, so the Hessian describes 256 tokens of one text
-            # and the error feedback is tuned to it -- measurably catastrophic on
-            # other text. Wraparound keeps short calibration strings usable.
-            total = ids.shape[1]
-            for i in range(nsamples):
-                if total <= seqlen:
-                    # Text fits in one window: nothing to stride over.
-                    window = ids
-                else:
-                    start = (i * seqlen) % (total - seqlen + 1)
-                    window = ids[:, start : start + seqlen]
+            # Windowing lives in one place so a quantizer cannot reintroduce the
+            # "same passage every sample" bug that made this Hessian useless.
+            for window in iter_calibration_windows(
+                tokenizer, text, seqlen=seqlen, nsamples=nsamples
+            ):
                 model(window)
     finally:
         for handle in handles:

@@ -1329,6 +1329,60 @@ def test_calibration_hessian_strides_through_the_text():
     assert seen[0][0] == 0 and seen[1][0] == seqlen and seen[3][0] == 3 * seqlen
 
 
+def test_tt_hessian_matches_core_gptq_accumulator():
+    """The TT collector's ``X^T X`` must agree with core GPTQ's accumulator.
+
+    The two paths cannot share the accumulator yet -- core only fills ``H`` inside
+    ``quantize()``, so there is no public "collect a Hessian" entry point -- so
+    this pins agreement instead. It reads the private per-device partials on
+    purpose: that is the only place core exposes the raw sum.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    from gptqmodel.quantization.gptq import GPTQ
+
+    torch.manual_seed(3)
+    width = 32
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.decoder = torch.nn.Module()
+            block = torch.nn.Module()
+            block.proj = torch.nn.Linear(width, 8, bias=False)
+            self.model.decoder.layers = torch.nn.ModuleList([block])
+            self.last_x = None
+
+        def forward(self, ids):
+            x = ids.float().reshape(1, -1, 1).expand(1, ids.shape[1], width) / 10.0
+            self.last_x = x
+            self.model.decoder.layers[0].proj(x)
+            return None
+
+    class _Tok:
+        def __call__(self, _text, return_tensors=None):
+            class _Out:
+                input_ids = torch.arange(12).unsqueeze(0)
+
+            return _Out()
+
+    model = _Model()
+    hessians = bq.collect_layer_hessians(
+        model, _Tok(), text="ignored", nsamples=1, seqlen=12
+    )
+    h_tt = hessians["0.proj"]
+
+    accumulator = GPTQ(model.model.decoder.layers[0].proj)
+    accumulator.add_batch(model.last_x, None)
+    h_core = sum(accumulator._device_hessian_partials.values())
+
+    assert tuple(h_tt.shape) == (width, width)
+    assert torch.allclose(h_tt, h_core, atol=1e-6), float((h_tt - h_core).abs().max())
+
+
 def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     """Saving codes and reading them back must reconstruct the same weights."""
 

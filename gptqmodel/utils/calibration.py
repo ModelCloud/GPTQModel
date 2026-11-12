@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import random
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 import torch
 
@@ -665,4 +665,81 @@ def prepare_calibration_dataset(
     return new_calibration_dataset_batched
 
 
-__all__ = ["batched", "prepare_calibration_dataset"]
+#: A window shorter than this carries no usable activation statistics.
+MIN_WINDOW_TOKENS = 8
+
+
+def iter_calibration_windows(
+    tokenizer,
+    text: str,
+    *,
+    seqlen: int = 256,
+    nsamples: int = 32,
+    min_tokens: int = MIN_WINDOW_TOKENS,
+) -> Iterator[torch.Tensor]:
+    """Yield ``nsamples`` distinct ``[1, seqlen]`` windows of ``text``.
+
+    GPTQ's error feedback pushes each layer's rounding error into directions where
+    the calibration input has little curvature, so the Hessian decides *where* the
+    error lands. If every sample is the same passage, "low curvature" means
+    "rarely active in that passage" and the error is steered into directions that
+    are ordinary for every other text.
+
+    That happened here: the Tenstorrent block-float path collected its Hessian with
+    ``ids[:, :seqlen]`` on every iteration, so ``nsamples`` multiplied a single
+    passage. The resulting Llama-3.2-1B checkpoint measured perplexity 354 on
+    held-out questions against 9.03 dense, while plain per-layer rounding of the
+    same weights gave 10.21 -- and every per-layer metric looked correct. Keeping
+    the windowing in one place stops a quantizer from reintroducing that shape, and
+    reports a short calibration string instead of silently degrading into a single
+    passage.
+
+    Windows are non-overlapping and stride through the text, wrapping around when
+    it is shorter than ``nsamples * seqlen`` so every sample still lands on a
+    different offset.
+    """
+
+    if seqlen < min_tokens:
+        raise ValueError(f"seqlen must be >= {min_tokens}, got {seqlen}")
+    if nsamples < 1:
+        raise ValueError(f"nsamples must be positive, got {nsamples}")
+
+    log = setup_logger()
+    ids = tokenizer(text, return_tensors="pt").input_ids
+    if ids.dim() != 2:
+        ids = ids.unsqueeze(0)
+    total = int(ids.shape[1])
+    if total < min_tokens:
+        raise ValueError(
+            f"calibration text tokenized to {total} tokens, need at least "
+            f"{min_tokens}; a Hessian built from this would be meaningless"
+        )
+
+    if total <= seqlen:
+        log.warning(
+            f"calibration text is {total} tokens but seqlen={seqlen}: all "
+            f"{nsamples} samples are the same window, so the Hessian describes one "
+            "passage. Pass longer calibration text."
+        )
+        for _ in range(nsamples):
+            yield ids
+        return
+
+    span = total - seqlen + 1
+    if nsamples > span:
+        log.warning(
+            f"calibration text yields only {span} distinct windows of {seqlen} "
+            f"tokens but nsamples={nsamples}; the last {nsamples - span} samples "
+            "repeat. Pass longer calibration text."
+        )
+    for index in range(nsamples):
+        start = (index * seqlen) % span
+        yield ids[:, start : start + seqlen]
+
+
+__all__ = [
+    "MIN_WINDOW_TOKENS",
+    "batched",
+    "iter_calibration_windows",
+    "prepare_calibration_dataset",
+]
