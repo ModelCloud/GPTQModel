@@ -31,7 +31,7 @@ if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-from gptqmodel.looper.loop_processor import ExecutionConfig, ForwardConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import ForwardConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
@@ -291,7 +291,7 @@ def test_awq_processor_enables_subset_early_stop():
         model=dummy_model,
     )
 
-    assert processor.execution_config.forward.subset_early_stop is True
+    assert processor.forward_config.subset_early_stop is True
 
 
 def test_module_looper_subset_callback_invoked():
@@ -367,13 +367,11 @@ class _StubAWQProcessor(LoopProcessor):
             calibration=calibration,
             prepare_dataset_func=_prepare_dataset_func,
             batch_size=1,
-            execution_config=ExecutionConfig(
-                forward=ForwardConfig(
-                    required=True,
-                    replay_after_process=False,
-                    subset_early_stop=True,
-                ),
-            ),
+            forward_config=ForwardConfig(
+                                                 required=True,
+                                                 replay_after_process=False,
+                                                 subset_early_stop=True,
+                                             ),
         )
         self.hook_calls: List[str] = []
         self.process_calls: List[str] = []

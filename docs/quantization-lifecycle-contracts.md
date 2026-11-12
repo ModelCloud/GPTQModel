@@ -18,7 +18,7 @@ The redesign follows two rules:
 | Shared contract | Consumers | Why it is shared |
 | --- | --- | --- |
 | `QuantizationRunPlan.processors` | `BaseQModel`, `ModuleLooper`, checkpoint preflight | GPTQ, QQQ, AWQ, ParoQuant, EXL3, weight-only, native, and EoRA runs need one ordered chain. |
-| `ProcessorLifecycleConfig.execution` | subset planning, layer replay, capture hooks | Multiple calibrated methods use the same replay decisions. |
+| `ProcessorLifecycleConfig.forward` | subset planning, layer replay, capture hooks | Multiple calibrated methods use the same replay decisions. |
 | `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, ParoQuant, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
 | `ProcessorLifecycleConfig.checkpointing` | checkpoint adapter and checkpoint preflight | Primary and EoRA adapter processors compose in the same continuation chain. |
 | `EffectiveModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
@@ -91,7 +91,6 @@ Processors declare lifecycle behavior instead of being recognized through class 
 from gptqmodel.looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -106,12 +105,10 @@ class ExampleProcessor(LoopProcessor):
     def __init__(self, require_fwd=True, **kwargs):
         super().__init__(
             **kwargs,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(
-                    required=require_fwd,
-                    replay_after_process=True,
-                    subset_early_stop=True,
-                ),
+            lifecycle=self.lifecycle.use(ForwardConfig(
+                required=require_fwd,
+                replay_after_process=True,
+                subset_early_stop=True,
             )),
         )
 ```
@@ -165,7 +162,7 @@ Checkpointed quantization records the effective packing fields and winning rule 
 | Calibrated method has no processor mapping | `QuantizationRunPlan.build` raises `ValueError` before the looper starts. |
 | Weight-only config requests EoRA or native capture | `QuantizationRunPlan.build` raises `NotImplementedError`. |
 | Checkpoint processor chain is unsupported | `quantize()` raises `NotImplementedError` before processor construction. |
-| `lifecycle.execution` and `execution_config` disagree | `LoopProcessor.__init__` raises `ValueError`. |
+| `lifecycle.forward` and `forward_config` disagree | `LoopProcessor.__init__` raises `ValueError`. |
 | Negative dynamic rule wins | The module is skipped and the exclusion is recorded by the existing calibration policy. |
 | Snapshot name differs from the packed module name | `create_quant_module` raises `ValueError`; a snapshot cannot leak across modules. |
 

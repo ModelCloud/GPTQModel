@@ -38,7 +38,6 @@ from ..looper.loop_processor import (
     MODULE_FEATURE_COLUMN,
     CalibrationTypes,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -254,15 +253,15 @@ class ParoQuantProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(
+            lifecycle=self.lifecycle.use(
+                ForwardConfig(
                     required=require_fwd,
                     replay_after_process=True,
                     subset_early_stop=True,
                     activation_capture=True,
                     capture_layer_context=capture_group_layer_context,
-                ),
-            )),
+                )
+            ),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff

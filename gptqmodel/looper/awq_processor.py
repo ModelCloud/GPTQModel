@@ -21,7 +21,6 @@ from ..looper.loop_processor import (
     MODULE_FEATURE_COLUMN,
     CalibrationTypes,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -272,13 +271,11 @@ class AWQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(
-                    required=require_fwd,
-                    replay_after_process=True,
-                    subset_early_stop=True,
-                    activation_capture=True,
-                ),
+            lifecycle=self.lifecycle.use(ForwardConfig(
+                required=require_fwd,
+                replay_after_process=True,
+                subset_early_stop=True,
+                activation_capture=True,
             )),
         )
 
@@ -698,7 +695,7 @@ class AWQProcessor(LoopProcessor):
         of AWQ-specific state and math.
         """
 
-        if not self.execution_config.forward.activation_capture:
+        if not self.forward_config.activation_capture:
             return False
 
         root_policy = self._feature_aggregation_policy(moe_block_name)

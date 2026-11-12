@@ -31,7 +31,6 @@ from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -730,12 +729,10 @@ class EXL3Processor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(
-                    required=require_fwd,
-                    replay_after_process=True,
-                    subset_early_stop=True,
-                ),
+            lifecycle=self.lifecycle.use(ForwardConfig(
+                required=require_fwd,
+                replay_after_process=True,
+                subset_early_stop=True,
             )),
         )
 

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import torch
 
-from gptqmodel.looper.loop_processor import ExecutionConfig, ForwardConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import SubsetPlan, build_layer_subset_plans, build_subset_plan
 from gptqmodel.quantization.config import VramStrategy
@@ -54,13 +54,13 @@ def _make_looper():
 
 
 class _StubProcessor:
-    def __init__(self, execution_config: ExecutionConfig):
-        self.execution_config = execution_config
+    def __init__(self, forward_config: ForwardConfig):
+        self.forward_config = forward_config
 
 
 def test_build_subset_plan_skips_forward_for_no_forward_processor():
     looper = _make_looper()
-    processor = _StubProcessor(ExecutionConfig(forward=ForwardConfig(required=False)))
+    processor = _StubProcessor(ForwardConfig(required=False))
     subset = {"mlp.down_proj": _make_named_module("mlp.down_proj")}
 
     plan = build_subset_plan(
@@ -94,7 +94,7 @@ def test_layer_plan_wraps_only_meta_forward_fallback_modules():
     looper = _make_looper()
     looper.gptq_model.lm_head = "lm_head"
     looper.create_named_modules.return_value = {}
-    processor = _StubProcessor(ExecutionConfig(forward=ForwardConfig(required=True)))
+    processor = _StubProcessor(ForwardConfig(required=True))
 
     plans = build_layer_subset_plans(
         looper,
@@ -182,12 +182,10 @@ def test_build_subset_plan_balanced_moe_uses_serial_forward_and_device_map():
     looper._extract_moe_group_key.side_effect = _group_key
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=True,
+                    )
     )
     subset = {
         "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
@@ -235,7 +233,7 @@ def test_build_subset_plan_preserves_distributed_family_device_assignment():
         return ".".join(parts[: expert_index + 2])
 
     looper._extract_moe_group_key.side_effect = _group_key
-    processor = _StubProcessor(ExecutionConfig(forward=ForwardConfig(required=True)))
+    processor = _StubProcessor(ForwardConfig(required=True))
     subset = {
         "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
         "mlp.experts.0.up_proj": _make_named_module("mlp.experts.0.up_proj"),
@@ -283,12 +281,10 @@ def test_build_subset_plan_balanced_moe_pins_untouched_modules_to_baseline_devic
     looper._extract_moe_group_key.side_effect = _group_key
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=True,
+                    )
     )
     subset = {
         "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
@@ -342,12 +338,10 @@ def test_build_subset_plan_split_pools_reserve_dense_and_moe_devices():
     looper._extract_moe_group_key.side_effect = _group_key
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=True,
+                    )
     )
     subset = {
         "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
@@ -407,12 +401,10 @@ def test_build_subset_plan_dense_balanced_keeps_qkv_group_together():
     looper._is_attention_module_name.side_effect = lambda name: name.startswith("self_attn.")
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=True,
+                    )
     )
     subset = {
         "self_attn.q_proj": _make_named_module("self_attn.q_proj"),
@@ -459,7 +451,7 @@ def test_build_subset_plan_honors_model_forward_device_override():
     looper._dense_quant_devices = [torch.device("cuda:0")]
     looper._dense_vram_strategy_explicit = True
 
-    processor = _StubProcessor(ExecutionConfig(forward=ForwardConfig(required=True)))
+    processor = _StubProcessor(ForwardConfig(required=True))
     subset = {"ple.key_proj": _make_named_module("ple.key_proj")}
     ngram_embedding = torch.nn.Embedding(8, 4)
     full = {
@@ -489,7 +481,7 @@ def test_build_subset_plan_honors_model_forward_device_override():
 
 def test_build_subset_plan_activates_model_override_without_explicit_vram_strategy():
     looper = _make_looper()
-    processor = _StubProcessor(ExecutionConfig(forward=ForwardConfig(required=True)))
+    processor = _StubProcessor(ForwardConfig(required=True))
     subset = {"mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj")}
     ngram_embedding = torch.nn.Embedding(8, 4)
     full = {
@@ -543,12 +535,10 @@ def test_build_subset_plan_split_pools_pin_dense_subset_and_balance_experts():
     looper._is_attention_module_name.side_effect = lambda name: name.startswith("self_attn.")
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=True,
+                    )
     )
     subset = {
         "self_attn.q_proj": _make_named_module("self_attn.q_proj"),
@@ -605,13 +595,11 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
     looper.create_named_modules.side_effect = _create_named_modules
 
     processor = _StubProcessor(
-        ExecutionConfig(
-            forward=ForwardConfig(
-                required=True,
-                replay_after_process=False,
-                all_modules_in_single_pass=True,
-            ),
-        )
+        ForwardConfig(
+                        required=True,
+                        replay_after_process=False,
+                        all_modules_in_single_pass=True,
+                    )
     )
 
     plans = build_layer_subset_plans(

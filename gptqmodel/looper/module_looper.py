@@ -1866,14 +1866,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
-        # Capture-only layer groups are driven by processor execution config,
+        # Capture-only layer groups are driven by processor forward config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(
-                getattr(getattr(proc, "execution_config", None), "forward", None),
-                "activation_capture",
-                False,
-            )
+            getattr(getattr(proc, "forward_config", None), "activation_capture", False)
             for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(

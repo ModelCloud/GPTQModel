@@ -194,25 +194,7 @@ class _ThreadSafeInputCache:
 
 @dataclass(frozen=True)
 class ForwardConfig:
-    """Describe how a processor captures and replays layer forwards."""
-
-    required: bool = True
-    replay_after_process: bool = True
-    # Whether layer modules are replayed in one combined pass instead of per subset.
-    all_modules_in_single_pass: bool = False
-    # Whether a subset forward can stop as soon as the last subset hook fires.
-    subset_early_stop: bool = False
-    # Whether capture-only modules/hooks (for example ':?') should be enabled.
-    activation_capture: bool = False
-    # Whether the processor needs the original layer IO from the pre-process
-    # forward, even when the authoritative next-layer cache is produced by a
-    # later replay-after-process step.
-    capture_layer_context: bool = False
-
-
-@dataclass(frozen=True)
-class ExecutionConfig:
-    """Describe how a processor executes.
+    """Describe how a processor captures and replays layer forwards.
 
     Processor defaults:
 
@@ -227,7 +209,18 @@ class ExecutionConfig:
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
     """
 
-    forward: ForwardConfig = ForwardConfig()
+    required: bool = True
+    replay_after_process: bool = True
+    # Whether layer modules are replayed in one combined pass instead of per subset.
+    all_modules_in_single_pass: bool = False
+    # Whether a subset forward can stop as soon as the last subset hook fires.
+    subset_early_stop: bool = False
+    # Whether capture-only modules/hooks (for example ':?') should be enabled.
+    activation_capture: bool = False
+    # Whether the processor needs the original layer IO from the pre-process
+    # forward, even when the authoritative next-layer cache is produced by a
+    # later replay-after-process step.
+    capture_layer_context: bool = False
 
 
 class CalibrationTypes(str, Enum):
@@ -245,13 +238,13 @@ class CheckpointSupport(str, Enum):
 class ProcessorLifecycleConfig:
     """Mutable processor configuration consumed by the looper and checkpoint adapter."""
 
-    execution: ExecutionConfig = ExecutionConfig()
+    forward: ForwardConfig = ForwardConfig()
     calibration: CalibrationTypes = CalibrationTypes.NOT_REQUIRED
     checkpointing: CheckpointSupport = CheckpointSupport.UNSUPPORTED
 
-    def use(self, execution: ExecutionConfig) -> "ProcessorLifecycleConfig":
-        """Return a copy using the supplied execution configuration."""
-        return replace(self, execution=execution)
+    def use(self, forward: ForwardConfig) -> "ProcessorLifecycleConfig":
+        """Return a copy using the supplied forward configuration."""
+        return replace(self, forward=forward)
 
 
 def bind_effective_module_config(module, effective) -> None:
@@ -290,7 +283,7 @@ class LoopProcessor:
             calibration_sort: Optional[str] = None,
             calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
-            execution_config: Optional[ExecutionConfig] = None,
+            forward_config: Optional[ForwardConfig] = None,
             lifecycle: Optional[ProcessorLifecycleConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
@@ -311,13 +304,13 @@ class LoopProcessor:
         self.qcfg_dynamic = None # cloned and dynamic filtered
 
         # Keep lifecycle and replay policy in one object so the stages consume
-        # one execution mode instead of a scattered set of booleans.
-        if lifecycle is not None and execution_config is not None and lifecycle.execution != execution_config:
-            raise ValueError("lifecycle.execution and execution_config disagree")
+        # one forward mode instead of a scattered set of booleans.
+        if lifecycle is not None and forward_config is not None and lifecycle.forward != forward_config:
+            raise ValueError("lifecycle.forward and forward_config disagree")
         self.lifecycle = lifecycle or ProcessorLifecycleConfig(
-            execution=execution_config or ExecutionConfig()
+            forward=forward_config or ForwardConfig()
         )
-        self.execution_config = self.lifecycle.execution
+        self.forward_config = self.lifecycle.forward
 
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _ThreadSafeDict()

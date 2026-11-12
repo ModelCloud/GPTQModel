@@ -15,7 +15,6 @@ from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -88,12 +87,12 @@ class WeightOnlyProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(
+            lifecycle=self.lifecycle.use(
+                ForwardConfig(
                     required=False,
                     replay_after_process=False,
                 )
-            )),
+            ),
         )
         self.lock = threading.Lock()
 

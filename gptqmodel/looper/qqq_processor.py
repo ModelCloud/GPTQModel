@@ -15,7 +15,6 @@ from ..looper.loop_processor import (
     MODULE_FEATURE_COLUMN,
     CalibrationTypes,
     CheckpointSupport,
-    ExecutionConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -81,9 +80,7 @@ class QQQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ExecutionConfig(
-                forward=ForwardConfig(required=require_fwd)
-            )),
+            lifecycle=self.lifecycle.use(ForwardConfig(required=require_fwd)),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
