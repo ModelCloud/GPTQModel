@@ -1958,8 +1958,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
         elif self.gptq_model.quantize_config.lm_head:
             steps.append(LoopStep("lm_head", layer_count, "lm_head"))
+        plan = LoopPlan(tuple(steps))
         self.start_step = self.extensions.start(LoopContext(
-            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
+            plan, self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
         ))
 
         if self.gptq_model.quantize_config.lm_head:
@@ -1987,7 +1988,8 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             start_layer_index=start_layer_index,
             embed_quant_mode=self.embed_quant_mode,
             embed_only=self.embed_only,
-            last_quantized_layer_index=last_quantized_layer_index,
+            plan=plan,
+            cursor=self.start_step,
             logger=log,
         )
 

@@ -8,8 +8,8 @@ import torch
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
-from ..nn_modules.qlinear.qqq import QQQLinear
 from ..quantization.config import resolve_quant_format, serialize_quant_bits
+from ..quantization.module_spec import ModuleConstructorSpec, module_constructor_spec
 from ..utils.importer import get_auto_backend_kernel_mapping
 from .checkpoint_store import CheckpointError
 
@@ -65,17 +65,6 @@ def _resolve_checkpoint_kernel(checkpoint_kernel, default_kernel, config, format
     )
 
 
-def _module_checkpoint_format(module, config, module_name):
-    format_value = getattr(module, "format", None)
-    if format_value is None and module_name is not None:
-        format_value = config.resolve_module_config(module_name).get(
-            "format", config.format
-        )
-    if format_value is None or format_value is False:
-        format_value = config.format
-    return resolve_quant_format(format_value, config.method)
-
-
 def packed_module_spec(module, config, *, module_name=None):
     dimensions = {
         "in_features": module.in_features,
@@ -94,60 +83,31 @@ def packed_module_spec(module, config, *, module_name=None):
                 for key, value in module.state_dict().items()
             },
         }
+    constructor = module_constructor_spec(module, config, module_name=module_name)
     spec = {
         **dimensions,
-        "bits": serialize_quant_bits(module.bits),
-        "group_size": getattr(module, "group_size", config.group_size),
-        "desc_act": getattr(module, "desc_act", config.desc_act),
-        "sym": getattr(module, "sym", config.sym),
+        "bits": serialize_quant_bits(constructor.bits),
+        "group_size": constructor.group_size,
+        "desc_act": constructor.desc_act,
+        "sym": constructor.sym,
         "bias": getattr(module, "bias", None) is not None,
-        "pack_dtype": _serialize_value(
-            getattr(module, "pack_dtype", config.pack_dtype)
-        ),
-        "format": _serialize_value(
-            _module_checkpoint_format(module, config, module_name)
-        ),
+        "pack_dtype": _serialize_value(constructor.pack_dtype),
+        "format": _serialize_value(constructor.format),
     }
+    if constructor.kind is not None:
+        spec["kind"] = constructor.kind
+    if constructor.options:
+        spec["options"] = _serialize_value(constructor.options_dict())
     if is_packed_module(module):
         spec["kernel"] = _kernel_path(type(module))
-    if type(module) is ParoLinear:
-        spec["kind"] = "paro"
-        spec["options"] = {
-            key: getattr(module, key)
-            for key in (
-                "krot",
-                "fp32_accum",
-                "cache_runtime_dtype",
-                "auto_cache_bf16_runtime_dtype",
-                "cache_rotation_dtype",
-                "auto_cache_bf16_rotation_dtype",
-            )
-        }
-    if getattr(module, "QUANT_TYPE", None) == "fp8":
-        spec["options"] = {
-            "format": module.fp8_format,
-            "weight_scale_method": module.weight_scale_method,
-            "weight_block_size": (
-                list(module.weight_block_size)
-                if module.weight_block_size is not None
-                else None
-            ),
-            "weight_scale_semantics": module.weight_scale_semantics,
-        }
     if getattr(module, "QUANT_TYPE", None) == "bitsandbytes":
         spec["compute_dtype"] = str(module.compute_dtype) if module.compute_dtype is not None else None
-        spec["options"] = {
-            "format": module.bnb_format,
-            "block_size": module.bnb_block_size,
-            "compress_statistics": module.bnb_compress_statistics,
-        }
         if module.is_4bit:
             # Packed QuantState JSON length depends on values, not dimensions.
             spec["quant_state_shape"] = list(module.weight_quant_state.shape)
     if getattr(module, "QUANT_TYPE", None) in {"gptq_bitblas", "awq_bitblas"}:
         spec["compute_dtype"] = str(module.quant_config.torch_dtype)
-    if type(module) is QQQLinear:
-        spec["kind"] = "qqq"
+    if constructor.kind == "qqq":
         spec["group_scales"] = "s_group" in module.state_dict()
     return spec
 
@@ -176,7 +136,6 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         spec = dict(spec)
         kind = spec.pop("kind", None)
         group_scales = spec.pop("group_scales", True)
-        options = spec.pop("options", {})
         checkpoint_kernel = spec.pop("kernel", None)
         checkpoint_pack_dtype = spec.pop("pack_dtype", None)
         checkpoint_format = spec.pop("format", None)
@@ -195,19 +154,27 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             config,
             module_format,
         )
-        # Global method defaults come first so the checkpoint's resolved
-        # per-module settings always win during reconstruction.
-        kwargs = dict(config.quant_linear_init_kwargs())
-        kwargs.update({
-            "pack_dtype": _deserialize_pack_dtype(
+        # The checkpoint's own constructor spec is authoritative. Global method
+        # defaults only fill fields the spec does not carry.
+        constructor = ModuleConstructorSpec(
+            bits=spec.pop("bits"),
+            group_size=spec.pop("group_size"),
+            desc_act=spec.pop("desc_act"),
+            sym=spec.pop("sym"),
+            pack_dtype=_deserialize_pack_dtype(
                 checkpoint_pack_dtype, config.pack_dtype
             ),
+            format=module_format,
+            options=tuple(dict(spec.pop("options", {})).items()),
+            kind=kind,
+        )
+        kwargs = dict(config.quant_linear_init_kwargs())
+        kwargs.update(constructor.constructor_kwargs())
+        kwargs.update({
             "name": name,
             "lm_head_name": lm_head_name,
-            "format": module_format,
             "register_buffers": True,
         })
-        kwargs.update(options)
         if has_compute_dtype and dtype_name is None:
             kwargs["dtype"] = None
         elif dtype_name is not None:

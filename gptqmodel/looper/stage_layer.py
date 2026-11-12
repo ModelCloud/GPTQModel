@@ -43,7 +43,7 @@ from ..utils.looper_helpers import (
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
-from .extension import LoopStep
+from .extension import LoopPlan, LoopStep
 from .input_cache import TensorLifetimeDiagnostic
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
@@ -55,6 +55,24 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
 # Distinguishes "planner supplied no extent" from a resolved ``None`` (no
 # trailing excluded layers), so the stage can consume the planner's decision.
 _UNRESOLVED_LAYER_EXTENT = object()
+
+
+def _step_progress_index(
+    step: LoopStep,
+    *,
+    layer_count: int,
+    layer_index_offset: int,
+) -> int:
+    """Map one planned execution step onto the stage's progress index.
+
+    The plan owns step identity; the progress index only drives display and
+    the existing layer-local bookkeeping.
+    """
+    if step.kind == "input_embeddings":
+        return 0
+    if step.kind in {"output_embeddings", "lm_head"}:
+        return layer_count + layer_index_offset
+    return step.index + layer_index_offset
 
 
 def _log_cuda_memory_diagnostics(log, layer_index) -> None:
@@ -445,13 +463,25 @@ def run_layer_stage(
     embed_quant_mode: Optional[QuantizeEmbed] = None,
     embed_only: Optional[bool] = None,
     last_quantized_layer_index: object = _UNRESOLVED_LAYER_EXTENT,
+    plan: Optional[LoopPlan] = None,
+    cursor: int = 0,
     logger=None,
 ) -> None:
-    """Execute the main per-layer quantization loop."""
+    """Execute the main per-layer quantization loop.
+
+    When ``plan`` is supplied, its steps (from ``cursor``) are the authority
+    for which units run and which step objects observers receive. Without a
+    plan, the stage falls back to iterating the progress bar and recomputing
+    the stopping layer, which keeps direct callers and older tests working.
+    """
+    if plan is not None and (type(cursor) is not int or not 0 <= cursor <= len(plan.steps)):
+        raise ValueError("execution cursor is outside the plan")
+    planned_steps = None if plan is None else plan.steps[cursor:]
+
     # Trailing layers whose tracked modules are all dynamically excluded never
     # need another forward or finalize pass, so the loop can stop once the
     # final eligible layer has been processed.
-    if last_quantized_layer_index is _UNRESOLVED_LAYER_EXTENT:
+    if planned_steps is None and last_quantized_layer_index is _UNRESOLVED_LAYER_EXTENT:
         last_quantized_layer_index = find_last_quantized_layer_index(
             looper.gptq_model.quantize_config,
             layer_modules=layer_modules,
@@ -477,15 +507,33 @@ def run_layer_stage(
     layer_index_offset = 1 if quant_input_embeddings else 0
 
     extensions = getattr(looper, "extensions", None)
-    for layer_index in pb:
-        if layer_index < getattr(looper, "start_step", 0):
+    if planned_steps is None:
+        execution_steps = ((layer_index, None) for layer_index in pb)
+    else:
+        execution_steps = (
+            (
+                _step_progress_index(
+                    step,
+                    layer_count=layer_count,
+                    layer_index_offset=layer_index_offset,
+                ),
+                step,
+            )
+            for step in planned_steps
+        )
+    last_planned_step = planned_steps[-1] if planned_steps else None
+
+    for progress_index, planned_step in execution_steps:
+        layer_index = progress_index
+        if planned_steps is not None:
+            pb.current_iter_step = progress_index + 1
+        elif layer_index < getattr(looper, "start_step", 0):
             continue
         boundary_futures = []
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
-        progress_index = layer_index
         is_input_embeddings_module = quant_input_embeddings and progress_index == 0
         model_layer_index = progress_index - layer_index_offset
         is_output_embeddings_module = quant_output_embeddings and model_layer_index >= layer_count
@@ -512,7 +560,8 @@ def run_layer_stage(
             continue
 
         if (
-            embed_quant_mode is None
+            planned_steps is None
+            and embed_quant_mode is None
             and not is_embeddings_module
             and last_quantized_layer_index is not None
             and model_layer_index > last_quantized_layer_index
@@ -908,7 +957,11 @@ def run_layer_stage(
             )
             pristine_group_module = None
 
-            is_last_module = progress_index == len(pb) - 1
+            is_last_module = (
+                planned_step is last_planned_step
+                if planned_step is not None
+                else progress_index == len(pb) - 1
+            )
             for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
@@ -1435,15 +1488,20 @@ def run_layer_stage(
                         layer_name=layer_descriptor,
                     )
         if extensions:
-            step_kind = (
-                "input_embeddings" if is_input_embeddings_module else
-                "output_embeddings" if is_output_embeddings_module else
-                "lm_head" if is_lm_head_module else "layer"
-            )
-            extensions.publish(
-                LoopStep(step_kind, model_layer_index, layer_name or step_kind),
-                boundary_futures,
-            )
+            if planned_step is not None:
+                # Publish the planner's own step object so observers and the
+                # plan can never drift apart.
+                extensions.publish(planned_step, boundary_futures)
+            else:
+                step_kind = (
+                    "input_embeddings" if is_input_embeddings_module else
+                    "output_embeddings" if is_output_embeddings_module else
+                    "lm_head" if is_lm_head_module else "layer"
+                )
+                extensions.publish(
+                    LoopStep(step_kind, model_layer_index, layer_name or step_kind),
+                    boundary_futures,
+                )
 
         if durable_progress_logs:
             log.info(
@@ -1458,3 +1516,6 @@ def run_layer_stage(
         # grows by one entry per layer for the whole run and is never
         # reclaimed (harmless per-entry, but unbounded over many layers).
         shared_kv_cache_dict.pop(layer_index - 1, None)
+
+    if planned_steps is not None:
+        pb.close()

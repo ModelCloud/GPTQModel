@@ -55,20 +55,13 @@ from ..quantization.config import (
     FORMAT_FIELD_CODE,
     METHOD,
     ResolvedModuleConfig,
-    _normalize_bitsandbytes_block_size,
-    _normalize_bitsandbytes_format,
-    _normalize_fp8_fmt,
-    _normalize_fp8_scale_semantics,
-    _normalize_fp8_weight_block_size,
-    _normalize_fp8_weight_scale_method,
-    _normalize_gguf_config_spec,
-    _normalize_pack_dtype,
     _normalize_quant_bits,
     dynamic_get,
     dynamic_matching_pattern,
     quant_bits_width,
     resolve_quant_format,
 )
+from ..quantization.module_spec import resolve_module_constructor_spec
 from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
 from .ctx import ctx
@@ -678,83 +671,41 @@ def create_quant_module(
 
     bias = submodule.bias is not None if hasattr(submodule, "bias") else False
 
-    # need copies as dynamic config may override these in for loop
-    tmp_bits = _normalize_quant_bits(bits, format_value=format)
-    tmp_group_size = group_size
-    tmp_desc_act = desc_act
-    tmp_sym = sym
-    tmp_pack_dtype = pack_dtype
-    tmp_init_kwargs = dict(init_kwargs or {})
-
-    # dynamic bits, group_size, sym, pack_dtype for each layer/module
     if resolved_module_config is not None and resolved_module_config.module_name != name:
         raise ValueError("resolved module config does not match quantized module name")
-    if dynamic is not None or resolved_module_config is not None:
+    if resolved_module_config is not None:
         overrides = (
-            False if resolved_module_config.excluded else resolved_module_config.overrides
-        ) if resolved_module_config is not None else dynamic_get(dynamic=dynamic, module_name=name)
+            False
+            if resolved_module_config.excluded
+            else resolved_module_config.overrides
+        )
+    elif dynamic is not None:
+        overrides = dynamic_get(dynamic=dynamic, module_name=name)
+    else:
+        overrides = None
+
+    # One owner resolves the module's effective constructor settings. Packing
+    # and checkpoint restore both consume this spec instead of reinterpreting
+    # dynamic overrides independently.
+    module_spec = resolve_module_constructor_spec(
+        bits=_normalize_quant_bits(bits, format_value=format),
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        pack_dtype=pack_dtype,
+        format=format,
+        init_kwargs=init_kwargs,
+        overrides=overrides,
+    )
+    if module_spec is None:
         # negative module match, skip this module
-        if overrides == False:  # noqa: E712
-            return
-
-        # positive module match
-        if overrides:
-            # override base QuantizeConfig for every quant config key/value
-            tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=format)
-            tmp_group_size = overrides.get("group_size", group_size)
-            tmp_desc_act = overrides.get("desc_act", desc_act)
-            tmp_sym = overrides.get("sym", sym)
-            tmp_pack_dtype = _normalize_pack_dtype(
-                overrides.get("pack_dtype", pack_dtype)
-            )
-
-            if format == FORMAT.FP8:
-                fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))
-                if fp8_format_override is not None:
-                    tmp_init_kwargs["format"] = _normalize_fp8_fmt(fp8_format_override)
-                block_size_override = overrides.get(
-                    "weight_block_size",
-                    tmp_init_kwargs.get("weight_block_size"),
-                )
-                normalized_block_size = _normalize_fp8_weight_block_size(block_size_override)
-                if "weight_scale_method" in overrides or block_size_override is not None:
-                    tmp_init_kwargs["weight_scale_method"] = _normalize_fp8_weight_scale_method(
-                        overrides.get(
-                            "weight_scale_method",
-                            tmp_init_kwargs.get("weight_scale_method"),
-                        ),
-                        weight_block_size=normalized_block_size,
-                    )
-                if "weight_scale_semantics" in overrides:
-                    tmp_init_kwargs["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
-                        overrides["weight_scale_semantics"]
-                    )
-                if "weight_block_size" in overrides:
-                    tmp_init_kwargs["weight_block_size"] = normalized_block_size
-            elif format == FORMAT.BITSANDBYTES:
-                raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("bnb_quant_type"))
-                if raw_format is not None:
-                    tmp_init_kwargs["format"] = _normalize_bitsandbytes_format(
-                        raw_format,
-                        bits=quant_bits_width(tmp_bits),
-                    )
-                if "block_size" in overrides or "bnb_block_size" in overrides:
-                    tmp_init_kwargs["block_size"] = _normalize_bitsandbytes_block_size(
-                        overrides.get("block_size", overrides.get("bnb_block_size"))
-                    )
-                if "compress_statistics" in overrides or "bnb_compress_statistics" in overrides:
-                    tmp_init_kwargs["compress_statistics"] = bool(
-                        overrides.get("compress_statistics", overrides.get("bnb_compress_statistics"))
-                    )
-            elif format == FORMAT.GGUF:
-                # Resolve width and subtype independently, matching the config
-                # used to quantize this module. Width-only overrides inherit the
-                # base subtype; format-only overrides inherit only its width.
-                base_width, base_format, _ = _normalize_gguf_config_spec(bits, None)
-                _, _, tmp_bits = _normalize_gguf_config_spec(
-                    overrides.get("bits", base_width),
-                    overrides.get(FORMAT_FIELD_CODE, base_format),
-                )
+        return
+    tmp_bits = module_spec.bits
+    tmp_group_size = module_spec.group_size
+    tmp_desc_act = module_spec.desc_act
+    tmp_sym = module_spec.sym
+    tmp_pack_dtype = module_spec.pack_dtype
+    tmp_init_kwargs = module_spec.options_dict()
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits

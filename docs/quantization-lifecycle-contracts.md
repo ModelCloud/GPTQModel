@@ -5,6 +5,7 @@ A quantization run now uses three explicit contracts:
 1. `QuantizationRunPlan` records the method, format, backends, batch size, and ordered processor chain.
 2. `ProcessorLifecycleConfig` declares replay behavior, calibration policies, and checkpoint support on each processor.
 3. `ResolvedModuleConfig` freezes the first matching `dynamic` rule and its values for one module.
+4. `ModuleConstructorSpec` normalizes one module's effective constructor settings for packing and checkpoint restore.
 
 The flow keeps quantization math and packing on the same resolved values while making unsupported processor chains fail before tensor work begins.
 
@@ -22,6 +23,7 @@ The redesign follows two rules:
 | `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, ParoQuant, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
 | `ProcessorLifecycleConfig.checkpointing` | checkpoint adapter and checkpoint preflight | Primary and EoRA adapter processors compose in the same continuation chain. |
 | `ResolvedModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
+| `ModuleConstructorSpec` | `create_quant_module`, checkpoint capture, checkpoint restore | Packing and restore must agree on bits, group size, symmetry, packing dtype, format, kernel, and method-specific options. |
 
 The three contracts do not introduce a generic quantization algorithm, a processor registry for every method, or a shared math interface. Those details remain local because they change for reasons unrelated to the common lifecycle.
 
@@ -44,7 +46,7 @@ flowchart TD
     K -- yes --> X2["skip module<br/>record dynamic exclusion"]
     K -- no --> L["bind_resolved_module_config"]
     L --> M["quantize using snapshot"]
-    L --> N["pack using same snapshot"]
+    L --> N["ModuleConstructorSpec<br/>pack + checkpoint schema"]
     F --> O["QuantizationCheckpointAdapter.bind"]
     O --> P["ProcessorLifecycleConfig.checkpointing"]
 
@@ -177,7 +179,41 @@ assert excluded.excluded
 
 The snapshot is immutable and retains the ordered winning rule. Later edits to `config.dynamic` affect new resolutions; they do not change an existing snapshot. Processors bind the snapshot to `NamedModule.state["resolved_module_config"]`, and `create_quant_module` consumes it during packing. This prevents quantization and packing from resolving different values after a concurrent or late dynamic edit.
 
+Packing then resolves the snapshot into one `ModuleConstructorSpec`:
+
+```python
+from gptqmodel.quantization.module_spec import resolve_module_constructor_spec
+
+spec = resolve_module_constructor_spec(
+    bits=config.bits,
+    group_size=config.group_size,
+    desc_act=config.desc_act,
+    sym=config.sym,
+    pack_dtype=config.pack_dtype,
+    format=config.format,
+    overrides=snapshot.overrides if not snapshot.excluded else False,
+)
+assert spec.bits == 3
+```
+
+`packed_module_spec()` derives the same object from the packed module, and `restore_packed_module()` consumes it. The checkpoint therefore persists the selected kernel plus the validated constructor settings instead of maintaining a second field inventory. Method-specific values (FP8 subtype and scales, BitsAndBytes block settings, Paro rotation options) live in the spec's `options`.
+
 Checkpointed quantization records the resolved packing fields and winning rule for each completed packed module. The adapter restores each module with its own `bits`, `group_size`, `sym`, `desc_act`, `pack_dtype`, and format instead of reusing global settings. Dynamic exclusions remain dense source modules, and trailing excluded layers are omitted from the checkpoint execution plan.
+
+## Execution plan authority
+
+`ModuleLooper` builds one `LoopPlan` and passes it, with the extension cursor, into `run_layer_stage()`. The stage iterates the planned steps, maps each step to its display index, and publishes that exact step object to extensions. The plan therefore decides which layers run and where observers see boundaries; the stage no longer recomputes its own stopping condition. The resume cursor is a plan position, distinct from the model-layer index used by layer-boundary recovery.
+
+```python
+plan = LoopPlan((
+    LoopStep("input_embeddings", -1, "input_embeddings"),
+    LoopStep("layer", 0, "model.layers.0"),
+    LoopStep("layer", 1, "model.layers.1"),
+    LoopStep("output_embeddings", 2, "output_embeddings"),
+))
+cursor = extensions.start(LoopContext(plan, model, processors, shared_state, looper))
+run_layer_stage(..., plan=plan, cursor=cursor)
+```
 
 ## Before and after
 
@@ -200,4 +236,4 @@ Checkpointed quantization records the resolved packing fields and winning rule f
 | Negative dynamic rule wins | The module is skipped and the exclusion is recorded by the existing calibration policy. |
 | Snapshot name differs from the packed module name | `create_quant_module` raises `ValueError`; a snapshot cannot leak across modules. |
 
-The new types live in `gptqmodel/looper/loop_processor.py`, `gptqmodel/models/quantization_run_plan.py`, and `gptqmodel/quantization/config.py`.
+The new types live in `gptqmodel/looper/loop_processor.py`, `gptqmodel/models/quantization_run_plan.py`, `gptqmodel/quantization/config.py`, and `gptqmodel/quantization/module_spec.py`.

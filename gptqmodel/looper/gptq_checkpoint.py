@@ -164,7 +164,7 @@ def _checkpoint_quantization_identity(config):
 
 def _checkpoint_runtime_dynamic_rules(config):
     """Capture runtime calibration exclusions separately from checkpoint identity."""
-    dynamic = config.dynamic or {}
+    dynamic = getattr(config, "dynamic", None) or {}
     exclusions = getattr(config, "_runtime_dynamic_exclusions", ()) or ()
     if isinstance(exclusions, str):
         raise CheckpointError("invalid runtime dynamic exclusions")

@@ -334,3 +334,82 @@ def test_module_snapshot_cannot_leak_to_another_pack_name():
             format=FORMAT.GPTQ,
             resolved_module_config=resolved_cfg,
         )
+
+
+def test_packing_and_checkpoint_share_one_constructor_spec():
+    from gptqmodel.quantization.module_spec import (
+        module_constructor_spec,
+        resolve_module_constructor_spec,
+    )
+
+    config = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ,
+        dynamic={
+            r"+:^proj$": {
+                "bits": 8,
+                "group_size": 64,
+                "sym": False,
+                "pack_dtype": "int16",
+            },
+        },
+    )
+    resolved_cfg = config.resolve_module_config("proj")
+
+    packed = resolve_module_constructor_spec(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ,
+        overrides=resolved_cfg.overrides,
+    )
+    assert packed.bits == 8
+    assert packed.group_size == 64
+    assert packed.sym is False
+    assert packed.pack_dtype is torch.int16
+
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(64, 64, bias=False, dtype=torch.float16)
+    create_quant_module(
+        name="proj",
+        linear_cls=TorchLinear,
+        bits=config.bits,
+        desc_act=config.desc_act,
+        dynamic=config.dynamic,
+        group_size=config.group_size,
+        module=model,
+        submodule=model.proj,
+        sym=config.sym,
+        device=DEVICE.CPU,
+        lm_head_name="lm_head",
+        pack_dtype=config.pack_dtype,
+        format=FORMAT.GPTQ,
+        resolved_module_config=resolved_cfg,
+    )
+
+    # Checkpoint derives its spec from the packed module, not a second field
+    # inventory, and must agree with the spec packing used.
+    checkpoint = module_constructor_spec(model.proj, config, module_name="proj")
+    assert (checkpoint.bits, checkpoint.group_size) == (packed.bits, packed.group_size)
+    assert checkpoint.sym is packed.sym
+    assert checkpoint.pack_dtype is packed.pack_dtype
+    assert checkpoint.format is packed.format
+
+    # An excluded module resolves to no spec at all.
+    excluded = QuantizeConfig(dynamic={r"-:^proj$": {}})
+    excluded_cfg = excluded.resolve_module_config("proj")
+    assert resolve_module_constructor_spec(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ,
+        overrides=False if excluded_cfg.excluded else excluded_cfg.overrides,
+    ) is None
