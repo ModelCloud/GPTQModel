@@ -1200,12 +1200,14 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         replay_batch_size=None,
         prepared_forward=None,
         bits=None,
+        group_sizes=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
         captured["fp16_output_shapes"] = [tuple(chunk.shape) for chunk in fp16_output]
         captured["replay_batch_size"] = replay_batch_size
         captured["prepared_forward"] = prepared_forward
+        captured["group_sizes"] = group_sizes
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
@@ -1229,6 +1231,7 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     assert captured["fp16_output_shapes"] == [(4, 8, 16)]
     assert captured["replay_batch_size"] == 0
     assert captured["prepared_forward"] is not None
+    assert captured["group_sizes"] == [16]
     assert len(prepare_calls) == 1
 
 
@@ -1269,11 +1272,13 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         replay_batch_size=None,
         prepared_forward=None,
         bits=None,
+        group_sizes=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
         captured["fp16_output_device"] = fp16_output.device.type
         captured["fp16_output_shape"] = tuple(fp16_output.shape)
+        captured["group_sizes"] = group_sizes
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
@@ -1295,6 +1300,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     assert captured["fp16_output_type"] == "Tensor"
     assert captured["fp16_output_device"] == "cuda"
     assert captured["fp16_output_shape"] == (4, 8, 16)
+    assert captured["group_sizes"] == [16]
 
 
 def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
