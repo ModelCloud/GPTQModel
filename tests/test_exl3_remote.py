@@ -286,8 +286,12 @@ def test_assignment_publication_is_exclusive_and_resumes_authoritative_slot(tmp_
     key = "model.layers.0.mlp.experts.0.gate_proj"
 
     first._persist_assignment(key, "coordinator:cuda:0")
+    published = first._assignment_path(key)
+    assert set(published.parent.iterdir()) == {published}
+    assert published.stat().st_nlink == 1
     with pytest.raises(FileExistsError):
         second._persist_assignment(key, "coordinator:cuda:1")
+    assert set(published.parent.iterdir()) == {published}
 
     assert second._read_assignment(key) == "coordinator:cuda:0"
     lease = second.acquire_slot(key)

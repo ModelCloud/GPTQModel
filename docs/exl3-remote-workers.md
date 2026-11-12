@@ -43,8 +43,10 @@ flowchart TD
     B -->|"yes"| H{"local slot capacity available"}
     B -->|"no"| C["select available slot"]
     C --> D["_persist_assignment"]
-    D -->|"os.link succeeds"| E["record new_assignment"]
-    D -->|"FileExistsError"| G["_read_assignment"]
+    D -->|"os.link succeeds"| N["fsync published name; unlink temporary name; fsync directory"]
+    N --> E["record new_assignment"]
+    D -->|"FileExistsError"| U["unlink unpublished temporary name"]
+    U --> G["_read_assignment"]
     G -->|"missing or invalid"| X["fail closed"]
     E --> H
     G --> H
@@ -60,6 +62,7 @@ flowchart TD
 | Mechanism | Before | After |
 |---|---|---|
 | Assignment publication | `os.replace()` could overwrite a record published concurrently | `os.link()` publishes only when the destination is absent |
+| Temporary name cleanup (`gptqmodel/utils/exl3_remote.py:864-896`) | The successful `os.link()` path kept a hidden second name for every assignment | The `finally` block unlinks the temporary name on success and failure; a successful publication fsyncs that removal |
 | Concurrent loser | selected from process-local state and reported `new_assignment=True` | reads and validates the authoritative record, reporting `new_assignment=False` |
 | Physical-slot ownership | process-local busy counter only | process-local counter plus a `FileLock` per slot position |
 | Waiting for a remote holder | no notification source | 50 ms condition polling while cross-process locks are enabled |
