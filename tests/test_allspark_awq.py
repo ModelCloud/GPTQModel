@@ -449,6 +449,71 @@ def test_awq_repack_rejects_invalid_format(bad):
         allspark_hip_repack_awq(qw, qz, scales, n, k, -1)
 
 
+# ---------------------------------------------------------------------------
+# Bias epilogue (HIP path)
+# ---------------------------------------------------------------------------
+
+
+def test_awq_module_bias_added_before_output_rounding():
+    """The AWQ wrapper must not add bias to the narrowed FP16/BF16 output."""
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+
+    k, n, dtype = 4096, 128, torch.float16
+    dense = torch.nn.Linear(k, n, bias=True, device="cuda", dtype=dtype)
+    dense.weight.data.fill_(1.0)
+    dense.bias.data.fill_(-32768.0)
+    mod = AllSparkAwqLinear(bits=8, group_size=-1, sym=False, desc_act=False,
+                            in_features=k, out_features=n, bias=True,
+                            dtype=dtype, register_buffers=True).cuda()
+    zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
+    mod.pack(dense, torch.ones(n, 1, device="cuda", dtype=dtype), zeros)
+    mod.post_init()
+
+    x = torch.full((2, k), 16.0, dtype=dtype, device="cuda")
+    with torch.no_grad():
+        out = mod(x)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all(), "bias was added after the FP16 rounding"
+    torch.testing.assert_close(out, torch.full_like(out, 16.0 * k - 32768.0),
+                               rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_awq_module_bias_matches_oracle_without_weight_expansion(dtype):
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+
+    k, n = 512, 256
+    torch.manual_seed(21)
+    dense = torch.nn.Linear(k, n, bias=True, device="cuda", dtype=dtype)
+    dense.weight.data.normal_(0.0, 0.02)
+    dense.bias.data.normal_(0.0, 2.0)
+    mod = AllSparkAwqLinear(bits=8, group_size=-1, sym=False, desc_act=False,
+                            in_features=k, out_features=n, bias=True,
+                            dtype=dtype, register_buffers=True).cuda()
+    per_channel = (dense.weight.data.abs().amax(dim=1) / 127).clamp_min(1e-8).reshape(n, 1)
+    zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
+    mod.pack(dense, per_channel, zeros)
+    mod.post_init()
+    packed_bytes = sum(t.numel() * t.element_size() for _, t in mod.named_buffers())
+
+    x = torch.randn(4, k, device="cuda", dtype=dtype) * 0.02
+    with torch.no_grad():
+        out = mod(x)
+    codes = (dense.weight.data.t() / per_channel.reshape(1, n)).round() + 128
+    ref = x.double() @ (((codes.double() - 128)
+                         * per_channel.double().reshape(1, n)).to(dtype)).double()
+    ref = ref + dense.bias.data.double()[None, :]
+    rounded = ref.to(dtype)
+    ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+           - rounded.double()).abs()
+    excess = ((out.double() - ref).abs() - ulp).clamp_min(0)
+    assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+    for _ in range(2):
+        with torch.no_grad():
+            mod(x)
+    assert sum(t.numel() * t.element_size() for _, t in mod.named_buffers()) == packed_bytes
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_awq_module_export_keeps_checkpoint_layout(dtype):
     """AWQ AllSpark must keep its checkpoint tensors registered and exportable.

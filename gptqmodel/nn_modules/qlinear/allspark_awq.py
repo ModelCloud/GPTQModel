@@ -144,14 +144,30 @@ class AllSparkAwqLinear(AWQuantLinear):
         if register_buffers:
             if self.scales is not None and self.scales.dtype != self.compute_dtype:
                 self.scales = self.scales.to(dtype=self.compute_dtype)
-            if self.bias is not None and self.bias.dtype != self.compute_dtype:
-                self.bias = self.bias.to(dtype=self.compute_dtype)
+            # Keep a checkpoint bias at its stored width: the kernel adds it to
+            # the FP32 accumulator, so narrowing an FP32 -65536 to FP16 -inf
+            # here would defeat the wide epilogue.
+            if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                self.bias = self.bias.to(dtype=torch.float32)
         self._repacked = False
         self._packed_key = None
         # Pick the kernel family once. The two extensions use different packed
         # layouts (WMMA fragments on ROCm, N32K16 on CUDA), and pairing a buffer
         # with the wrong kernel yields garbage rather than an error.
         self._hip = IS_ROCM
+
+    def _apply(self, fn, recurse=True):
+        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        bias = getattr(self, "bias", None)
+        if bias is None or bias.dtype != torch.float32:
+            return super()._apply(fn, recurse=recurse)
+
+        def preserve_bias_width(tensor):
+            if tensor is bias:
+                return fn(tensor.view(torch.uint8)).view(torch.float32)
+            return fn(tensor)
+
+        return super()._apply(preserve_bias_width, recurse=recurse)
 
     @property
     def _kernel_group_size(self) -> int:
@@ -185,10 +201,10 @@ class AllSparkAwqLinear(AWQuantLinear):
         scale_dtype = self.scales.dtype if getattr(self, "scales", None) is not None else self.compute_dtype
         self.register_buffer("scales", scales.clone().to(scale_dtype))
         if linear.bias is not None:
-            bias_dtype = (linear.bias.dtype
-                          if linear.bias.dtype in (torch.float16, torch.bfloat16)
-                          else scale_dtype)
-            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
+            # Keep the source width; an FP32 bias must stay FP32 through the
+            # kernel's FP32 epilogue instead of narrowing to the activation
+            # dtype first.
+            self.register_buffer("bias", linear.bias.clone())
         else:
             self.bias = None
 
@@ -286,6 +302,7 @@ class AllSparkAwqLinear(AWQuantLinear):
             self._ensure_repacked()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features).contiguous()
+        bias = getattr(self, "bias", None)
         if self._hip:
             out = allspark_hip_gemm(
                 x2d,
@@ -294,6 +311,7 @@ class AllSparkAwqLinear(AWQuantLinear):
                 self.out_features,
                 b_qzeros=self.zeros_packed,
                 group_size=self._kernel_group_size,
+                bias=bias,
             )
         else:
             out = allspark_gemm(
@@ -302,9 +320,6 @@ class AllSparkAwqLinear(AWQuantLinear):
                 self.scales_packed,
                 self.out_features,
                 b_qzeros=self.zeros_packed,
+                bias=bias,
             )
-        out = out.reshape(shape)
-        bias = getattr(self, "bias", None)
-        if bias is not None:
-            out = out + bias
-        return out.to(x.dtype)
+        return out.reshape(shape).to(x.dtype)

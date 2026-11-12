@@ -110,6 +110,9 @@ documents fused low-precision bias addition and FP32 checkpoint bias handling.
 The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
 reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
 failure paths in one place.
+The [AllSpark W8A16 bias epilogue](docs/allspark-bias-epilogue.md)
+documents how the CUDA and RDNA4 kernels add a checkpoint bias to the
+FP32 accumulator before output rounding.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.

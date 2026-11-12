@@ -177,13 +177,38 @@ def allspark_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
     return allspark_repack(codes, scales_1d.reshape(n), n, k, zeros=zero_adjusted)
 
 
+def _prepare_bias(a: torch.Tensor, bias: torch.Tensor | None, n: int) -> torch.Tensor | None:
+    """Validate the bias and give the kernel a matching or FP32 buffer.
+
+    The kernel reads either the activation dtype or FP32 (``bias32``). A
+    mismatched 16-bit bias is widened to FP32, which is lossless and keeps the
+    addition in the FP32 epilogue.
+    """
+    if bias is None:
+        return None
+    if bias.device != a.device:
+        raise ValueError("bias must be on the activation device")
+    if bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("bias must be float16, bfloat16 or float32")
+    if bias.dim() != 1 or bias.numel() != n:
+        raise ValueError("bias must hold one element per output channel")
+    if bias.dtype != a.dtype and bias.dtype != torch.float32:
+        bias = bias.to(torch.float32)
+    return bias
+
+
 def allspark_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor, n: int,
-                  b_qzeros: torch.Tensor | None = None):
+                  b_qzeros: torch.Tensor | None = None, bias: torch.Tensor | None = None):
     """W8A16 GEMM against weights already in N32K16 order.
 
     ``b_qzeros`` is the repacked ``zero_awq - 128`` buffer (see
     :func:`allspark_repack_awq`); ``None`` keeps the GPTQ symmetric path.
+
+    ``bias`` is added to the FP32 accumulators before the single cast to the
+    activation dtype. Adding it afterwards would round (and could overflow) the
+    partial sum first; the kernel accepts an activation-dtype or FP32 buffer.
     """
+    bias = _prepare_bias(a, bias, n)
     device = a.device
     props = torch.cuda.get_device_properties(device)
     sm_version = props.major * 10 + props.minor
@@ -199,4 +224,5 @@ def allspark_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tens
         ALLSPARK_M_CUBLAS_THRESHOLD,
         b_qzeros is not None,
         True,
+        bias,
     )
