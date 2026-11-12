@@ -830,10 +830,13 @@ def _finish_ggml_output(
     """Add the stored bias before rounding a ggml result to the input dtype."""
 
     bias = module.bias
-    if bias is not None and output.dtype in (torch.float16, torch.bfloat16):
+    if bias is not None and (
+        x_flat.device.type == "cuda" or output.dtype in (torch.float16, torch.bfloat16)
+    ):
         # A low-precision ggml output has already rounded the dot product.
-        # Recompute only this biased case with a temporary FP32 decoded weight
-        # so cancellation and out-of-range FP32 bias remain representable.
+        # GGML CUDA can also return an FP32 tensor whose product has already
+        # overflowed or lost precision, including inf for a finite result.
+        # Recompute these biased cases before rounding to the input dtype.
         with torch.autocast(device_type=x_flat.device.type, enabled=False):
             weight = module.dequantize_weight(device=x_flat.device, dtype=torch.float32)
             output = x_flat.float() @ weight
