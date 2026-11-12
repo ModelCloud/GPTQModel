@@ -919,34 +919,31 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
 
 
 def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
-    """Cast quantization scales to the fp16 storage dtype without silent overflow.
+    """Reject scales that become nonfinite or zero in the GPTQ FP16 layout.
 
-    A scale is ``amax / maxq``. For 4-bit that is ``amax / 15``, so any channel
-    whose largest weight exceeds ``65504 * 15`` (about 9.8e5) cannot be
-    represented by an fp16 scale: the cast turns the scale into ``inf`` and the
-    whole channel dequantizes to NaN, with no error anywhere. bf16 checkpoints
-    reach that magnitude legitimately, so this is reachable without a corrupt
-    file.
-
-    Refusing loudly is the only honest option here. Clamping the scale would put
-    the stored value out of step with the one the codes were computed with, and
-    the channel would silently dequantize to the wrong magnitude.
+    Check the cast result rather than comparing the source to ``finfo.max``:
+    a finite FP32 value at the FP16 overflow midpoint also rounds to infinity.
+    A nonzero scale that rounds to zero would erase the corresponding weights.
+    Ordinary finite FP16 rounding remains part of this checkpoint layout.
     """
-
-    limit = t.finfo(t.float16).max
+    stored = scales.to(dtype=t.float16)
     finite = t.isfinite(scales)
-    too_large = scales.abs() > limit
-    bad = (~finite) | too_large
+    nonfinite = ~finite
+    overflow = finite & ~t.isfinite(stored)
+    underflow = finite & (scales != 0) & (stored == 0)
+    bad = nonfinite | overflow | underflow
     if bool(bad.any()):
         count = int(bad.sum())
-        worst = float(scales[bad].abs().max()) if finite.any() else float("inf")
+        finite_bad = bad & finite
+        worst = float(scales[finite_bad].abs().max()) if bool(finite_bad.any()) else None
+        magnitude = f"; largest finite source magnitude is {worst:.3e}" if worst is not None else ""
         raise ValueError(
-            f"{name}: {count} scale value(s) do not fit fp16 (max {limit:.0f}); "
-            f"largest is {worst:.3e}. A channel whose |weight| exceeds "
-            f"{limit:.0f} * (2**bits - 1) cannot be represented with fp16 scales, "
-            "and storing it would dequantize the channel to NaN."
+            f"{name}: {count} scale value(s) cannot be stored as fp16 "
+            f"(max {t.finfo(t.float16).max:.0f}; source nonfinite={int(nonfinite.sum())}, "
+            f"cast overflow={int(overflow.sum())}, cast underflow={int(underflow.sum())})"
+            f"{magnitude}."
         )
-    return scales.to(dtype=t.float16)
+    return stored
 
 
 class WeightOnlyQuantLinear(BaseQuantLinear):

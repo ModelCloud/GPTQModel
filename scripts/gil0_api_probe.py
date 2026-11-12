@@ -454,6 +454,40 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent AWQ FP32 dequantization changed checkpoint scales")
         return True
 
+    gptq_scale_thread = threading.local()
+    gptq_scale_next_device = [0]
+    gptq_scale_lock = threading.Lock()
+
+    def gptq_scale_storage_guard() -> bool:
+        """Check FP16 scale cast decisions from concurrent pack workers."""
+        from gptqmodel.nn_modules.qlinear import _scales_for_storage
+
+        with gptq_scale_lock:
+            if not hasattr(gptq_scale_thread, "device"):
+                gptq_scale_thread.device = gptq_scale_next_device[0] % 2
+                gptq_scale_next_device[0] += 1
+            device = gptq_scale_thread.device
+        torch.cuda.set_device(device)
+
+        valid = torch.tensor([65504.0, 65505.0, 2.0**-24, 0.0], device="cuda")
+        stored = _scales_for_storage(valid, name="valid.scales")
+        expected = torch.tensor([65504.0, 65504.0, 2.0**-24, 0.0], device="cuda", dtype=torch.float16)
+        invalid = torch.tensor([float("nan"), 65520.0, 1e-40], device="cuda")
+        try:
+            _scales_for_storage(invalid, name="invalid.scales")
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("concurrent GPTQ scale guard accepted invalid scales")
+        torch.cuda.current_stream().synchronize()
+        if not torch.equal(stored, expected):
+            raise AssertionError("concurrent GPTQ scale guard changed valid scales")
+        if not all(part in message for part in (
+            "source nonfinite=1", "cast overflow=1", "cast underflow=1"
+        )):
+            raise AssertionError(f"concurrent GPTQ scale guard misclassified scales: {message}")
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -497,6 +531,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
         "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
+        "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -587,7 +622,7 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
-            or name == "AWQ FP32 dequantize_gemm")
+            or name in ("AWQ FP32 dequantize_gemm", "GPTQ FP16 scale storage guard"))
 
 
 def run_child(name: str) -> int:
