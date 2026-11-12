@@ -254,6 +254,7 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
     class _StubModuleLooper:
         def __init__(self, _model, *, processors, **_kwargs):
             self.processors = processors
+            self.layer_module_coverage = SimpleNamespace(report=lambda *_args: None)
 
         def loop(self, **_kwargs):
             return self.processors[0].calibration_dataset

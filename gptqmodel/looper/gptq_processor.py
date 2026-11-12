@@ -13,7 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CalibrationTypes, CheckpointSupport,
+    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
+    bind_effective_module_config, get_effective_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -46,7 +50,8 @@ from ..quantization.config import (
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
-    _normalize_mse,
+    EffectiveModuleConfig,
+    apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
 )
@@ -122,36 +127,24 @@ def clone_gptq_config_for_module(
     module_full_name: str,
     *,
     fallback=None,
+    effective: Optional[EffectiveModuleConfig] = None,
 ) -> Optional[QuantizeConfig]:
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
-    # entire module is skipped
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    effective = effective or qcfg.resolve_module_config(module_full_name)
+    if effective.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
-    # dynamic overrides
-    if qcfg.dynamic is not None:
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.mse = _normalize_mse(
-            qcfg.dynamic_get(module_full_name, "mse", None), base=qcfg_clone.mse,
-        )
+    apply_scalar_module_overrides(qcfg_clone, effective)
 
-        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
-        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
-        if desc_act_override is not None:
-            qcfg_clone.desc_act = desc_act_override
-        act_group_aware_override = qcfg.dynamic_get(module_full_name, "act_group_aware", None)
-        if act_group_aware_override is not None:
-            qcfg_clone.act_group_aware = act_group_aware_override
-        qcfg_clone.damp_percent = qcfg.dynamic_get(module_full_name, "damp_percent", qcfg_clone.damp_percent)
-        qcfg_clone.static_groups = qcfg.dynamic_get(module_full_name, "static_groups", qcfg_clone.static_groups)
-        fallback_override = qcfg.dynamic_get(module_full_name, "fallback", None)
+    # Method-specific dynamic fields stay with GPTQ.
+    if qcfg.dynamic is not None:
+        fallback_override = effective.get("fallback", None)
         if fallback_override is not None:
             qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
-        hessian_override = qcfg.dynamic_get(module_full_name, "hessian", None)
+        hessian_override = effective.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
                 qcfg_clone.hessian = HessianConfig(**hessian_override)
@@ -159,9 +152,9 @@ def clone_gptq_config_for_module(
                 qcfg_clone.hessian = hessian_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
-        gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
-        foem_override = qcfg.dynamic_get(module_full_name, "foem", None)
-        qcfg_clone.gsq = normalize_gsq_config(qcfg.dynamic_get(module_full_name, "gsq", qcfg_clone.gsq))
+        gptaq_override = effective.get("gptaq", None)
+        foem_override = effective.get("foem", None)
+        qcfg_clone.gsq = normalize_gsq_config(effective.get("gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
@@ -177,7 +170,6 @@ def clone_gptq_config_for_module(
             else:
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
 
-        qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
         qcfg_clone.validate_gsq()
 
     qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
@@ -185,6 +177,11 @@ def clone_gptq_config_for_module(
 
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
+
+    lifecycle_spec = ProcessorLifecycleConfig(
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
 
     def __init__(
         self,
@@ -210,11 +207,11 @@ class GPTQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            execution_config=ExecutionConfig(
+            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
                 require_fwd=require_fwd,
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
-            ),
+            )),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -360,13 +357,16 @@ class GPTQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
 
+        effective = self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
             module.full_name,
             fallback=fallback,
+            effective=effective,
         )
         if qcfg_clone is None:
             return
+        bind_effective_module_config(module, effective)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
@@ -905,6 +905,7 @@ class GPTQProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
+                    effective_module_config=get_effective_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record(

@@ -12,7 +12,10 @@ from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CheckpointSupport,
+    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -35,6 +38,10 @@ log = setup_logger()
 
 class EoraProcessor(LoopProcessor):
     """Builds LoRA-style error adapters from dequantization residuals and activations."""
+
+    lifecycle_spec = ProcessorLifecycleConfig(
+        checkpointing=CheckpointSupport.SECONDARY,
+    )
 
     def __init__(
         self,
@@ -59,7 +66,9 @@ class EoraProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            execution_config=ExecutionConfig(require_fwd=require_fwd),
+            lifecycle_spec=self.lifecycle_spec.with_execution(
+                ExecutionConfig(require_fwd=require_fwd)
+            ),
         )
 
         # Track per-module segment accumulators keyed by device so we can merge

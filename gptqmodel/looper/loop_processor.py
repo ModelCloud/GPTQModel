@@ -5,8 +5,9 @@
 import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -191,7 +192,7 @@ class _ThreadSafeInputCache:
             delattr(object.__getattribute__(self, "_cache"), name)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExecutionConfig:
     """Describe how a processor participates in forward replay and activation capture.
 
@@ -225,6 +226,53 @@ class ExecutionConfig:
     capture_layer_forward_context: bool = False
 
 
+class CalibrationTypes(str, Enum):
+    NOT_REQUIRED = "not_required"
+    EACH_MODULE_NEEDS_INPUT = "each_module_needs_input"
+
+
+class CheckpointSupport(str, Enum):
+    UNSUPPORTED = "unsupported"
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+
+@dataclass(frozen=True)
+class ProcessorLifecycleConfig:
+    """Processor-owned policy consumed by the looper and checkpoint adapter."""
+
+    execution: ExecutionConfig = ExecutionConfig()
+    calibration: CalibrationTypes = CalibrationTypes.NOT_REQUIRED
+    checkpointing: CheckpointSupport = CheckpointSupport.UNSUPPORTED
+
+    def with_execution(self, execution: ExecutionConfig) -> "ProcessorLifecycleConfig":
+        """Keep the calibration and checkpoint policy while specializing replay."""
+        return replace(self, execution=execution)
+
+
+def bind_effective_module_config(module, effective) -> None:
+    """Attach one resolved dynamic snapshot to a real module or test adapter."""
+    state = getattr(module, "state", None)
+    if state is not None:
+        try:
+            state["effective_module_config"] = effective
+            return
+        except (TypeError, AttributeError):
+            pass
+    setattr(module, "effective_module_config", effective)
+
+
+def get_effective_module_config(module):
+    """Read the snapshot attached by ``bind_effective_module_config``."""
+    state = getattr(module, "state", None)
+    if state is not None:
+        try:
+            return state.get("effective_module_config")
+        except AttributeError:
+            pass
+    return getattr(module, "effective_module_config", None)
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
@@ -239,6 +287,7 @@ class LoopProcessor:
             calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
             execution_config: Optional[ExecutionConfig] = None,
+            lifecycle_spec: Optional[ProcessorLifecycleConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
 
@@ -259,7 +308,12 @@ class LoopProcessor:
 
         # Keep lifecycle and replay policy in one object so the stages consume
         # one execution mode instead of a scattered set of booleans.
-        self.execution_config = execution_config or ExecutionConfig()
+        if lifecycle_spec is not None and execution_config is not None and lifecycle_spec.execution != execution_config:
+            raise ValueError("lifecycle_spec.execution and execution_config disagree")
+        self.lifecycle_spec = lifecycle_spec or ProcessorLifecycleConfig(
+            execution=execution_config or ExecutionConfig()
+        )
+        self.execution_config = self.lifecycle_spec.execution
 
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _ThreadSafeDict()

@@ -9,7 +9,11 @@ import torch
 import transformers
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CalibrationTypes,
+    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
+    bind_effective_module_config, get_effective_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -44,6 +48,10 @@ class VPTQProcessor(LoopProcessor):
     required: Hessians are always built from the calibration data.
     """
 
+    lifecycle_spec = ProcessorLifecycleConfig(
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+    )
+
     def __init__(
         self,
         tokenizer,
@@ -68,7 +76,9 @@ class VPTQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            execution_config=ExecutionConfig(require_fwd=require_fwd),
+            lifecycle_spec=self.lifecycle_spec.with_execution(
+                ExecutionConfig(require_fwd=require_fwd)
+            ),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -85,8 +95,10 @@ class VPTQProcessor(LoopProcessor):
         del kwargs
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:  # noqa: E712
+        effective = self.qcfg.resolve_module_config(module.full_name)
+        if effective.excluded:
             return
+        bind_effective_module_config(module, effective)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
 
@@ -259,6 +271,7 @@ class VPTQProcessor(LoopProcessor):
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
+                effective_module_config=get_effective_module_config(module),
             )
 
         qmodule = model.model.get_submodule(module.full_name)

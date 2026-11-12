@@ -26,8 +26,7 @@ import pcre
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..looper.gptq_processor import GPTQProcessor
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import CalibrationTypes, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..models.module_plan import _model_module_plan
@@ -38,10 +37,6 @@ from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
-from .awq_processor import AWQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
-from .vptq_processor import VPTQProcessor
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -230,8 +225,10 @@ def _resolve_subset_calibration_coverage_policy(
 ) -> CalibrationCoveragePolicy:
     """Resolve how this subset handles modules that never receive calibration traffic."""
 
-    validate_input_coverage = isinstance(
-        processor, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor, VPTQProcessor)
+    lifecycle = getattr(processor, "lifecycle_spec", None)
+    validate_input_coverage = (
+        lifecycle is not None
+        and lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT
     )
     fallback_enabled = fallback is not None
     prune_uncovered_modules = validate_input_coverage and not fallback_enabled

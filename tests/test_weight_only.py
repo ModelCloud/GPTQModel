@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.quantization_run_plan import ProcessorStep
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import (
     GGUFTorchLinear,
@@ -310,6 +311,8 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
+    assert model.quantization_run_plan is not None
+    assert model.quantization_run_plan.processors == (ProcessorStep.WEIGHT_ONLY,)
 
     qmodules = find_modules(model.model, [TorchLinear])
     assert len(qmodules) == 4

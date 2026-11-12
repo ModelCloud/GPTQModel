@@ -13,12 +13,19 @@ import torch
 from ..quantization.config import FP8Config, clone_weight_only_config_for_module
 from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
-from .loop_processor import ExecutionConfig, LoopProcessor
+from .loop_processor import (
+    ExecutionConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_effective_module_config,
+)
 from .weight_only_processor import WeightOnlyProcessor
 
 
 class FP8GSQProcessor(WeightOnlyProcessor):
     """Capture module inputs, then export the fitted FP8 bytes without refitting."""
+
+    lifecycle_spec = ProcessorLifecycleConfig()
 
     def __init__(self, tokenizer, qcfg, calibration, prepare_dataset_func,
                  calibration_concat_size=None, calibration_sort=None, batch_size=1,
@@ -29,7 +36,9 @@ class FP8GSQProcessor(WeightOnlyProcessor):
             self, tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
             prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
-            batch_size=batch_size, execution_config=ExecutionConfig(require_fwd=True))
+            batch_size=batch_size,
+            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(require_fwd=True)),
+        )
         self.lock = threading.Lock()
         self.is_weight_only = False
         self.preserve_batch_keep_mask = True
@@ -44,9 +53,13 @@ class FP8GSQProcessor(WeightOnlyProcessor):
         super().release_calibration_dataset()
 
     def preprocess(self, module, **kwargs):
-        config = clone_weight_only_config_for_module(self.qcfg, module.full_name)
+        effective = self.qcfg.resolve_module_config(module.full_name)
+        config = clone_weight_only_config_for_module(
+            self.qcfg, module.full_name, effective=effective,
+        )
         if config is None:
             return
+        bind_effective_module_config(module, effective)
         if config.weight_scale_method == "tensor":
             raise ValueError("FP8 calibrated GSQ processor requires native activation replay for tensor scales")
         task = FP8GSQTask(module.weight, config) if gsq_enabled_for(config.gsq, module.full_name) else None

@@ -52,6 +52,7 @@ from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
+    EffectiveModuleConfig,
     FORMAT_FIELD_CODE,
     METHOD,
     _normalize_bitsandbytes_block_size,
@@ -624,6 +625,7 @@ def create_quant_module(
     adapter: Optional[Adapter] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
+    effective_module_config: Optional[EffectiveModuleConfig] = None,
 
 ):
     # unwrap named module
@@ -684,8 +686,12 @@ def create_quant_module(
     tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
-    if dynamic is not None:
-        overrides = dynamic_get(dynamic=dynamic, module_name=name)
+    if effective_module_config is not None and effective_module_config.module_name != name:
+        raise ValueError("effective module config does not match quantized module name")
+    if dynamic is not None or effective_module_config is not None:
+        overrides = (
+            False if effective_module_config.excluded else effective_module_config.overrides
+        ) if effective_module_config is not None else dynamic_get(dynamic=dynamic, module_name=name)
         # negative module match, skip this module
         if overrides == False:  # noqa: E712
             return

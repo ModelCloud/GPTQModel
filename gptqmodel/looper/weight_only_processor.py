@@ -11,7 +11,11 @@ from typing import Optional
 
 import torch
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, CheckpointSupport,
+    ExecutionConfig, LoopProcessor, ProcessorLifecycleConfig,
+    bind_effective_module_config, get_effective_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -58,6 +62,10 @@ def _mean_abs_error(reference: torch.Tensor, dequantized: torch.Tensor) -> float
 class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
 
+    lifecycle_spec = ProcessorLifecycleConfig(
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
@@ -74,10 +82,10 @@ class WeightOnlyProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            execution_config=ExecutionConfig(
+            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
                 require_fwd=False,
                 fwd_replay_after_process=False,
-            ),
+            )),
         )
         self.lock = threading.Lock()
 
@@ -111,9 +119,13 @@ class WeightOnlyProcessor(LoopProcessor):
     ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
-        qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
+        effective = get_effective_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
+        qcfg_clone = clone_weight_only_config_for_module(
+            self.qcfg, module.full_name, effective=effective,
+        )
         if qcfg_clone is None:
             return None
+        bind_effective_module_config(module, effective)
         if device is not None:
             qcfg_clone.device = device
 
@@ -210,6 +222,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
                     register_buffers=False,
                     init_kwargs=active_qcfg.quant_linear_init_kwargs(),
+                    effective_module_config=get_effective_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)

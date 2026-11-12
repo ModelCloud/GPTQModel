@@ -30,8 +30,10 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
+    CheckpointSupport,
     ExecutionConfig,
     LoopProcessor,
+    ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -670,26 +672,25 @@ def clone_exllamav3_config_for_module(
     if not qcfg.module_is_included(module_full_name):
         return None
 
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    effective = qcfg.resolve_module_config(module_full_name)
+    if effective.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = qcfg.dynamic_get(
-            module_full_name, "head_bits", qcfg_clone.head_bits
-        )
+        qcfg_clone.bits = effective.get("bits", qcfg_clone.bits)
+        qcfg_clone.head_bits = effective.get("head_bits", qcfg_clone.head_bits)
 
-        out_scales_override = qcfg.dynamic_get(module_full_name, "out_scales", None)
+        out_scales_override = effective.get("out_scales", None)
         if out_scales_override is not None:
             qcfg_clone.out_scales = out_scales_override
 
-        codebook_override = qcfg.dynamic_get(module_full_name, "codebook", None)
+        codebook_override = effective.get("codebook", None)
         if codebook_override is not None:
             qcfg_clone.codebook = codebook_override
 
-        calibration_override = qcfg.dynamic_get(module_full_name, "calibration", None)
+        calibration_override = effective.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
@@ -699,6 +700,10 @@ def clone_exllamav3_config_for_module(
 
 class EXL3Processor(LoopProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
+
+    lifecycle_spec = ProcessorLifecycleConfig(
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
 
     def __init__(
         self,
@@ -724,11 +729,11 @@ class EXL3Processor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            execution_config=ExecutionConfig(
+            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
                 require_fwd=require_fwd,
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
-            ),
+            )),
         )
 
         self.avg_losses = []

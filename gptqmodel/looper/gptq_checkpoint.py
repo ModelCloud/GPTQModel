@@ -27,7 +27,6 @@ from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import METHOD
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
-from .awq_processor import AWQProcessor
 from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_modules import (
     is_packed_module,
@@ -36,11 +35,7 @@ from .checkpoint_modules import (
 )
 from .checkpoint_store import CheckpointError
 from .continuation import ContinuationCodec
-from .eora_processor import EoraProcessor
-from .gptq_processor import GPTQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
-from .weight_only_processor import WeightOnlyProcessor
+from .loop_processor import CheckpointSupport
 
 
 _CHECKPOINT_IDENTITY_VERSION = 2
@@ -246,23 +241,14 @@ class QuantizationCheckpointAdapter:
         if self.execution is None:
             raise CheckpointError("checkpoint requires execution placement state")
         self.model = context.model
-        processor_types = tuple(type(processor) for processor in context.processors)
-        supported_processors = {
-            (GPTQProcessor,),
-            (GPTQProcessor, EoraProcessor),
-            (AWQProcessor,),
-            (AWQProcessor, EoraProcessor),
-            (WeightOnlyProcessor,),
-            (QQQProcessor,),
-            (QQQProcessor, EoraProcessor),
-            (ParoQuantProcessor,),
-            (ParoQuantProcessor, EoraProcessor),
-        }
-        if self.model.quantize_config.method == METHOD.EXL3:
-            from .exllamav3_processor import EXL3Processor
-
-            supported_processors.add((EXL3Processor,))
-        if processor_types not in supported_processors:
+        roles = tuple(
+            getattr(getattr(processor, "lifecycle_spec", None), "checkpointing", CheckpointSupport.UNSUPPORTED)
+            for processor in context.processors
+        )
+        if roles not in {
+            (CheckpointSupport.PRIMARY,),
+            (CheckpointSupport.PRIMARY, CheckpointSupport.SECONDARY),
+        }:
             raise NotImplementedError(
                 "checkpoint has no state adapter for this processor chain"
             )

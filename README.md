@@ -140,6 +140,7 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
+The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `EffectiveModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts. Expert cardinality follows the same rule: a `#` placeholder expands only when the definition declares `dynamic_expert_index` and the owning config node resolves it, so **[expert cardinality resolution](docs/model-tree-resolution.md#expert-cardinality-resolution)** covers that step and why a surviving placeholder is a silent miss.
 
