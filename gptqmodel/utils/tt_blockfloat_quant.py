@@ -498,6 +498,12 @@ def quantize_model_blockfloat(
 
 BLOCKFLOAT_SAVE_FORMAT_VERSION = 1
 
+#: Tensor payload file. safetensors is the format: no pickle, memory-mappable, and
+#: it is what the rest of the repo already ships. ``blockfloat.pt`` is still read
+#: so checkpoints written before the switch keep loading.
+BLOCKFLOAT_PAYLOAD = "blockfloat.safetensors"
+BLOCKFLOAT_PAYLOAD_LEGACY = "blockfloat.pt"
+
 
 def decompose_blockfloat(
     weight: torch.Tensor, bits: int = 4, block: int = BLOCKFLOAT_BLOCK
@@ -622,7 +628,18 @@ def save_blockfloat_checkpoint(
             }
 
     os.makedirs(output_dir, exist_ok=True)
-    torch.save(tensors, os.path.join(output_dir, "blockfloat.pt"))
+    from safetensors.torch import save_file
+
+    save_file(
+        {key: value.contiguous() for key, value in tensors.items()},
+        os.path.join(output_dir, BLOCKFLOAT_PAYLOAD),
+        metadata={
+            "format": "tt-blockfloat",
+            "version": str(BLOCKFLOAT_SAVE_FORMAT_VERSION),
+            "bits": str(bits),
+            "block": str(BLOCKFLOAT_BLOCK),
+        },
+    )
     # Caller metadata goes first: the format fields below describe how the payload
     # is encoded and are what the loader dispatches on, so they must win. A caller
     # that passed ``bits`` or ``layers`` would otherwise silently corrupt the file.
@@ -645,6 +662,27 @@ def save_blockfloat_checkpoint(
     return {"layers": len(summary), "payload_bytes": total, "bits": bits}
 
 
+def _load_blockfloat_payload(checkpoint_dir: str) -> dict:
+    """Read the tensor payload, preferring safetensors over the legacy pickle."""
+
+    import os
+
+    safetensors_path = os.path.join(checkpoint_dir, BLOCKFLOAT_PAYLOAD)
+    if os.path.isfile(safetensors_path):
+        from safetensors.torch import load_file
+
+        return load_file(safetensors_path)
+
+    legacy_path = os.path.join(checkpoint_dir, BLOCKFLOAT_PAYLOAD_LEGACY)
+    if os.path.isfile(legacy_path):
+        return torch.load(legacy_path, map_location="cpu")
+
+    raise FileNotFoundError(
+        f"no {BLOCKFLOAT_PAYLOAD} (or legacy {BLOCKFLOAT_PAYLOAD_LEGACY}) in "
+        f"{checkpoint_dir}"
+    )
+
+
 def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
     """Restore native grid weights into ``model`` from a saved checkpoint.
 
@@ -656,7 +694,6 @@ def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
     import os
 
     meta_path = os.path.join(checkpoint_dir, "blockfloat.json")
-    tensors_path = os.path.join(checkpoint_dir, "blockfloat.pt")
     with open(meta_path) as handle:
         meta = json.load(handle)
     if meta.get("format") != "tt-blockfloat":
@@ -666,7 +703,7 @@ def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
             f"unsupported blockfloat checkpoint version {meta.get('version')}"
         )
     bits = int(meta["bits"])
-    tensors = torch.load(tensors_path, map_location="cpu")
+    tensors = _load_blockfloat_payload(checkpoint_dir)
 
     blocks = _decoder_blocks(model)
     restored = {}
@@ -716,7 +753,7 @@ def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
     if meta.get("format") != "tt-blockfloat":
         raise ValueError(f"{meta_path} is not a tt-blockfloat checkpoint")
     bits = int(meta["bits"])
-    tensors = torch.load(os.path.join(checkpoint_dir, "blockfloat.pt"), map_location="cpu")
+    tensors = _load_blockfloat_payload(checkpoint_dir)
 
     layers = {}
     for key in meta.get("layers", {}):
@@ -774,3 +811,152 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
                     module.bias.copy_(entry["bias"].to(module.bias.dtype))
                 restored[key] = list(entry["shape"])
     return restored
+
+
+#: Payload names for a self-contained checkpoint.
+EMBED_PAYLOAD = "embed_tokens.bf8.safetensors"
+NORMS_PAYLOAD = "norms.safetensors"
+
+
+def save_blockfloat_model(
+    model,
+    output_dir: str,
+    *,
+    bits: int = 4,
+    embed_bits: int = 8,
+    tokenizer=None,
+    metadata: "Optional[dict]" = None,
+) -> dict:
+    """Write a self-contained checkpoint: linears, embedding, norms and config.
+
+    :func:`save_blockfloat_checkpoint` stores the decoder blocks only, which makes a
+    checkpoint an overlay on the base model. This writes the rest as well, so the
+    directory loads on its own through :func:`load_blockfloat_model`.
+    """
+
+    import json
+    import os
+
+    from safetensors.torch import save_file
+
+    info = save_blockfloat_checkpoint(
+        model, output_dir, bits=bits, metadata=metadata
+    )
+    with open(os.path.join(output_dir, "blockfloat.json")) as handle:
+        stored_layers = list(json.load(handle)["layers"])
+
+    # Embedding. When ``tie_word_embeddings`` the output head is the same tensor, so
+    # quantising this covers both and lm_head must not be stored separately.
+    tied = bool(getattr(model.config, "tie_word_embeddings", False))
+    embedding = model.get_input_embeddings()
+    if embedding is not None and embedding.weight is not None:
+        weight = embedding.weight.detach().to(torch.float32)
+        grid = quantize_blockfloat(weight, embed_bits)[0]
+        codes, exponents = decompose_blockfloat(grid, bits=embed_bits)
+        save_file(
+            {
+                "codes": _pack_codes(codes, embed_bits).contiguous(),
+                "code_shape": torch.tensor(list(codes.shape), dtype=torch.int64),
+                "exponents": exponents.to(torch.int8).contiguous(),
+            },
+            os.path.join(output_dir, EMBED_PAYLOAD),
+            metadata={
+                "format": "tt-blockfloat",
+                "bits": str(embed_bits),
+                "block": str(BLOCKFLOAT_BLOCK),
+                "tied": str(tied).lower(),
+            },
+        )
+
+    # Everything that is not a decoder linear and not the embedding: norms, and the
+    # head only when it is not tied to the embedding.
+    covered = {f"model.layers.{key}.weight" for key in stored_layers}
+    remaining = {}
+    for name, param in model.named_parameters():
+        if name in covered or name.endswith("embed_tokens.weight"):
+            continue
+        if name.endswith("lm_head.weight") and tied:
+            continue
+        remaining[name] = param.detach().to(torch.float16).contiguous()
+    save_file(
+        remaining,
+        os.path.join(output_dir, NORMS_PAYLOAD),
+        metadata={"format": "pt", "dtype": "float16"},
+    )
+
+    config = model.config.to_dict()
+    config["torch_dtype"] = "float16"
+    config["quantization_config"] = {
+        "quant_method": "tt-blockfloat",
+        "checkpoint_format": "tt-blockfloat",
+        "bits": bits,
+        "block": BLOCKFLOAT_BLOCK,
+        "group_size": BLOCKFLOAT_BLOCK,
+        "stored_mantissa_bits": stored_mantissa_bits(bits),
+        "sym": True,
+        "desc_act": False,
+        "lm_head": True,
+        "lm_head_quant_bits": embed_bits if tied else 0,
+        "lm_head_tied_to_embedding": tied,
+        "embed_bits": embed_bits,
+        "meta": dict(metadata or {}),
+    }
+    with open(os.path.join(output_dir, "config.json"), "w") as handle:
+        json.dump(config, handle, indent=2)
+
+    if tokenizer is not None:
+        tokenizer.save_pretrained(output_dir)
+
+    return {
+        "layers": info["layers"],
+        "payload_bytes": info["payload_bytes"],
+        "bits": bits,
+        "embed_bits": embed_bits,
+        "tied": tied,
+        "dense_tensors": len(remaining),
+    }
+
+
+def load_blockfloat_model(
+    checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
+) -> "tuple":
+    """Load a self-contained checkpoint written by :func:`save_blockfloat_model`.
+
+    Returns ``(model, restored_layers)``. The model is built from the checkpoint's
+    own ``config.json``; nothing is downloaded from the base model.
+    """
+
+    import os
+
+    from safetensors.torch import load_file, safe_open
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(checkpoint_dir)
+    model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
+
+    norms_path = os.path.join(checkpoint_dir, NORMS_PAYLOAD)
+    if os.path.isfile(norms_path):
+        model.load_state_dict(load_file(norms_path), strict=False)
+
+    embed_path = os.path.join(checkpoint_dir, EMBED_PAYLOAD)
+    if os.path.isfile(embed_path):
+        with safe_open(embed_path, framework="pt") as handle:
+            embed_bits = int((handle.metadata() or {}).get("bits", "8"))
+            codes = handle.get_tensor("codes")
+            shape = tuple(int(v) for v in handle.get_tensor("code_shape"))
+            exponents = handle.get_tensor("exponents")
+        weights = recompose_blockfloat(codes.reshape(shape), exponents, bits=embed_bits)
+        with torch.no_grad():
+            model.get_input_embeddings().weight.copy_(weights.to(dtype))
+
+    restored = load_native_checkpoint_into_dense_model(model, checkpoint_dir)
+    model.eval()
+    return model, restored
+
+
+__all__ += [
+    "EMBED_PAYLOAD",
+    "NORMS_PAYLOAD",
+    "load_blockfloat_model",
+    "save_blockfloat_model",
+]

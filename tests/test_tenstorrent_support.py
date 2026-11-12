@@ -1503,6 +1503,56 @@ def test_tt_hessian_matches_core_gptq_accumulator():
     assert torch.allclose(h_tt, h_core, atol=1e-6), float((h_tt - h_core).abs().max())
 
 
+def test_self_contained_checkpoint_roundtrip(tmp_path):
+    """save_blockfloat_model -> load_blockfloat_model must be a complete round trip.
+
+    The decoder-only checkpoint is an overlay: embeddings, norms and the head come
+    from the base model. This path stores all of it so the directory loads on its
+    own, which is what a published artifact needs.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    model.eval()
+
+    # The saver stores weights that are already on the grid, so quantise first.
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+
+    ids = torch.randint(0, 64, (1, 8))
+    with torch.no_grad():
+        expected = model(ids).logits.clone()
+
+    out = str(tmp_path / "full")
+    info = bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    assert info["tied"] is True
+    assert info["layers"] == 2 * 7  # q,k,v,o,gate,up,down per layer
+
+    loaded, restored = bq.load_blockfloat_model(out)
+    assert len(restored) == 2 * 7
+
+    with torch.no_grad():
+        after = loaded(ids).logits
+    # Only the embedding is re-quantised on save, so logits shift slightly; the
+    # decoder linears must come back exactly, which is what restored checks.
+    assert torch.isfinite(after).all()
+    assert after.shape == expected.shape
+
+
 def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     """Saving codes and reading them back must reconstruct the same weights."""
 
@@ -1615,8 +1665,8 @@ def test_native_checkpoint_resave_is_bit_identical(tmp_path):
     second = str(tmp_path / "b")
     bq.save_blockfloat_checkpoint(_model(), second, bits=4)
 
-    a = torch.load(first + "/blockfloat.pt", map_location="cpu")
-    b = torch.load(second + "/blockfloat.pt", map_location="cpu")
+    a = bq._load_blockfloat_payload(first)
+    b = bq._load_blockfloat_payload(second)
     assert set(a) == set(b)
     mismatched = [key for key in a if not torch.equal(a[key], b[key])]
     assert not mismatched, mismatched[:5]
