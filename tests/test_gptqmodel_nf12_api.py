@@ -8,6 +8,9 @@ NF12 decoder and the native inference operators.
 
 from __future__ import annotations
 
+import threading
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -67,6 +70,31 @@ def test_native_embedding_preserves_row_bits_and_shape():
     assert actual.shape == (2, 2, 256)
     assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
+
+
+def test_repeat4_uses_single_copy_from_preloaded_legacy_namespace(monkeypatch):
+    from gptqmodel_nf12 import _library, api
+
+    bits = torch.tensor([[-32768, 0x7FC1, 1, -1], [0, 1, 2, 3]], dtype=torch.int16)
+    single = bits.view(torch.bfloat16).reshape(2, 1, 4)
+    legacy = SimpleNamespace(**{name: lambda *args: None for name in (
+        "encode", "decode", "linear", "encode_moe", "moe_linear", "_fused_moe")})
+    legacy.embedding = lambda *args: single
+    monkeypatch.setattr(torch.ops, "nf12", legacy)
+    monkeypatch.setattr(torch.version, "hip", None)
+    loaded = threading.Event()
+    monkeypatch.setattr(_library, "_loaded", loaded)
+    monkeypatch.setattr(api, "_check_cuda", lambda *_: None)
+    ids = torch.tensor([[0], [-1]], dtype=torch.int64)
+    weight = SimpleNamespace(packed=torch.empty((16, 96), dtype=torch.uint8),
+                             escapes=torch.empty((0, 8), dtype=torch.int16), exp_base=0)
+
+    actual = api.embedding_repeat4(ids, weight)
+
+    assert loaded.is_set()
+    assert actual.shape == (2, 1, 4, 4)
+    assert torch.equal(actual.view(torch.int16),
+                       single.unsqueeze(-2).repeat(1, 1, 4, 1).view(torch.int16))
 
 
 @pytest.mark.parametrize("m,id_dtype", [(6, torch.int32), (312, torch.int64),

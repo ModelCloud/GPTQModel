@@ -1,24 +1,29 @@
 # NF12 embedding with four hyper-connection copies
 
 Lite's released checkpoint has `hc_mult=4`. Its initial activation path
-materializes four identical BF16 copies after an embedding lookup. The native
-`gptqmodel_nf12.embedding_repeat4` operation looks up each packed row once,
-decodes it in registers, and writes all four activation copies in one CUDA
-launch. It returns `[*ids.shape, 4, K]` and preserves the bits of
+materializes four identical BF16 copies after an embedding lookup. The
+`gptqmodel_nf12.embedding_repeat4` wrapper uses the native operation when it is
+registered: it looks up each packed row once, decodes it in registers, and
+writes all four activation copies in one CUDA launch. It returns
+`[*ids.shape, 4, K]` and preserves the bits of
 `embedding(ids, weight).unsqueeze(-2).repeat(..., 4, 1)`. Invalid IDs produce
-four `+0.0` rows.
+four `+0.0` rows. If a previously loaded NF12 library lacks the new operation,
+the wrapper uses its single-copy packed lookup and repeats that activation.
 
 ```mermaid
 flowchart TD
     A["Lite embedding_hc with HC=4"] --> B{"Weight is NF12?"}
     B -- yes --> C["gptqmodel_nf12.embedding_repeat4"]
     B -- no --> F["Torch F.embedding + repeat"]
-    C --> D["torch.ops.nf12.embedding_repeat4"]
-    D --> E["nf12_embedding_i64_repeat4 or nf12_embedding_repeat4"]
-    E --> V{"Valid packed weight, ID pointer, output stride?"}
+    C --> D{"Native repeat4 op registered?"}
+    D -- yes --> E["torch.ops.nf12.embedding_repeat4"]
+    D -- no --> L["torch.ops.nf12.embedding<br/>then repeat_interleave"]
+    E --> N["nf12_embedding_i64_repeat4 or nf12_embedding_repeat4"]
+    N --> V{"Valid packed weight, ID pointer, output stride?"}
     V -- no --> X["NF12_ERROR_INVALID_ARGUMENT"]
     V -- yes --> K["embedding_kernel with Repeats=4"]
     K --> Z["Four bit-exact BF16 activation copies"]
+    L --> Z
     F --> Z
     classDef failure fill:#f9d8d8,stroke:#b42318,color:#111;
     class X failure;
@@ -30,6 +35,13 @@ flowchart TD
 | Native lookup | `embedding_kernel` wrote one row to `p.out` | `embedding_kernel<..., Repeats=4>` writes four copies from the same decoded registers |
 | Other HC values or dense weight | Torch lookup and repeat | Existing Torch lookup and repeat |
 | Persistent weight | Packed bytes and escapes | Same packed bytes and escapes; no expanded weight cache |
+| Older loaded NF12 operator library | `gptqmodel_nf12/api.py:206` called the missing `embedding_repeat4` op and raised `AttributeError` | `api.embedding_repeat4` checks the registered op and repeats the legacy single-copy activation when needed |
+
+The legacy branch retains no decoded weight. Its single-copy activation is
+temporary; the returned four-copy activation is the same shape and BF16 bits
+as the native result. It uses an extra lookup result and copy, so the speed
+measurements below describe only the native branch. `load()` still requires
+the original NF12 operators and fails if those are unavailable.
 
 The new C API uses `ldo` as the BF16 stride between IDs and validates that
 each output row can hold `4*K` elements. It bounds output offsets, requires one
