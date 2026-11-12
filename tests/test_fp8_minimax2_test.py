@@ -17,6 +17,7 @@ import sys
 from typing import Dict, List
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig
 
@@ -63,7 +64,11 @@ def _run_quant_on_device(device_index: int) -> torch.device:
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        require_fwd=False,
+        forward=ForwardConfig(
+            required=False,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
         calculate_w_wq_diff=False,
     )
     processor.pb = _DummyProgressBar()

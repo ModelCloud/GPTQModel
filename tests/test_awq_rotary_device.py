@@ -69,7 +69,6 @@ def _make_processor(rotary: nn.Module, *, preserve_explicit_position_embeddings:
             awq_preserve_explicit_position_embeddings=preserve_explicit_position_embeddings,
         ),
         model=model,
-        require_fwd=True,
         calculate_w_wq_diff=False,
         calibration_concat_separator=None,
     )

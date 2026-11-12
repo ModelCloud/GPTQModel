@@ -56,7 +56,7 @@ class EoraProcessor(LoopProcessor):
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
-        require_fwd: bool = True,
+        forward: Optional[ForwardConfig] = None,
         calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes EoRA processing and per-module segment accumulation state."""
@@ -70,7 +70,7 @@ class EoraProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ForwardConfig(required=require_fwd)),
+            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 
         # Track per-module segment accumulators keyed by device so we can merge

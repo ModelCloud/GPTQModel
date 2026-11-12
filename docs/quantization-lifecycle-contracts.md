@@ -98,22 +98,25 @@ from gptqmodel.looper.loop_processor import (
 
 class ExampleProcessor(LoopProcessor):
     lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
         checkpointing=CheckpointSupport.PRIMARY,
     )
 
-    def __init__(self, require_fwd=True, **kwargs):
+    def __init__(self, forward: ForwardConfig | None = None, **kwargs):
         super().__init__(
             **kwargs,
-            lifecycle=self.lifecycle.use(ForwardConfig(
-                required=require_fwd,
-                replay_after_process=True,
-                subset_early_stop=True,
-            )),
+            lifecycle=self.lifecycle.use(
+                forward or self.lifecycle.forward
+            ),
         )
 ```
 
-`ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
+Processor constructors accept one complete `ForwardConfig`; they do not expose its fields as separate parameters. `ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
 
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 

@@ -223,6 +223,12 @@ class ParoQuantProcessor(LoopProcessor):
     """Standalone ParoQuant lifecycle: capture, optimize, export, then pack."""
 
     lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+            activation_capture=True,
+        ),
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
         checkpointing=CheckpointSupport.PRIMARY,
     )
@@ -238,12 +244,20 @@ class ParoQuantProcessor(LoopProcessor):
         batch_size: int,
         gptq_model,
         model,
-        require_fwd: bool = True,
+        forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
     ):
         """Configure a looper that captures activations and quantizes after replay."""
         capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
+        if forward is None:
+            forward = ForwardConfig(
+                required=True,
+                replay_after_process=True,
+                subset_early_stop=True,
+                activation_capture=True,
+                capture_layer_context=capture_group_layer_context,
+            )
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -253,15 +267,7 @@ class ParoQuantProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(
-                ForwardConfig(
-                    required=require_fwd,
-                    replay_after_process=True,
-                    subset_early_stop=True,
-                    activation_capture=True,
-                    capture_layer_context=capture_group_layer_context,
-                )
-            ),
+            lifecycle=self.lifecycle.use(forward),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff

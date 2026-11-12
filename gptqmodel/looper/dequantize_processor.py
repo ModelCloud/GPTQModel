@@ -19,7 +19,11 @@ log = setup_logger()
 class DequantizeProcessor(LoopProcessor):
     """Restores quantized weights to dense tensors for comparison or recovery flows."""
 
-    def __init__(self, quantized_modules: Dict[str, TorchLinear]):
+    def __init__(
+        self,
+        quantized_modules: Dict[str, TorchLinear],
+        forward: Optional[ForwardConfig] = None,
+    ):
         """Initializes the processor with the quantized modules to dequantize."""
 
         super().__init__(
@@ -29,7 +33,7 @@ class DequantizeProcessor(LoopProcessor):
             calibration_concat_size=None,
             prepare_dataset_func=None,
             batch_size=1,
-            forward=ForwardConfig(
+            forward=forward or ForwardConfig(
                 required=False,
                 replay_after_process=False,
             ),

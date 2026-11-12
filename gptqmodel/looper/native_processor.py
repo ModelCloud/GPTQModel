@@ -8,7 +8,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import ForwardConfig, LoopProcessor
+from ..looper.loop_processor import ForwardConfig, LoopProcessor, ProcessorLifecycleConfig
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
@@ -24,6 +24,14 @@ NATIVE_INPUTS_STATE_KEY = "native_inp"
 class NativeProcessor(LoopProcessor):
     """Caches raw module inputs for later native or GPTAQ-style processing."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=False,
+            all_modules_in_single_pass=True,
+        ),
+    )
+
     def __init__(
         self,
         tokenizer,
@@ -33,7 +41,7 @@ class NativeProcessor(LoopProcessor):
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
-        require_fwd: bool = True,
+        forward: Optional[ForwardConfig] = None,
         calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes the processor and enables single-pass input capture."""
@@ -47,11 +55,7 @@ class NativeProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            forward=ForwardConfig(
-                required=require_fwd,
-                replay_after_process=False,
-                all_modules_in_single_pass=True,
-            ),
+            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 
         self.native_inp_caches = {}

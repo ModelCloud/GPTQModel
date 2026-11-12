@@ -7,6 +7,7 @@
 
 import threading
 import time
+from typing import Optional
 
 import torch
 
@@ -25,11 +26,11 @@ from .weight_only_processor import WeightOnlyProcessor
 class FP8GSQProcessor(WeightOnlyProcessor):
     """Capture module inputs, then export the fitted FP8 bytes without refitting."""
 
-    lifecycle = ProcessorLifecycleConfig()
+    lifecycle = ProcessorLifecycleConfig(forward=ForwardConfig(required=True))
 
     def __init__(self, tokenizer, qcfg, calibration, prepare_dataset_func,
                  calibration_concat_size=None, calibration_sort=None, batch_size=1,
-                 calibration_concat_separator=None):
+                 calibration_concat_separator=None, forward: Optional[ForwardConfig] = None):
         if not isinstance(qcfg, FP8Config):
             raise TypeError('FP8 GSQ processor requires FP8Config')
         LoopProcessor.__init__(
@@ -37,9 +38,7 @@ class FP8GSQProcessor(WeightOnlyProcessor):
             prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(
-                ForwardConfig(required=True)
-            ),
+            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
         self.lock = threading.Lock()
         self.is_weight_only = False

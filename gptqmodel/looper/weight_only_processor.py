@@ -68,6 +68,10 @@ class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
 
     lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=False,
+            replay_after_process=False,
+        ),
         checkpointing=CheckpointSupport.PRIMARY,
     )
 
@@ -75,6 +79,7 @@ class WeightOnlyProcessor(LoopProcessor):
         self,
         tokenizer,
         qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        forward: Optional[ForwardConfig] = None,
     ):
         """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
 
@@ -87,12 +92,7 @@ class WeightOnlyProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            lifecycle=self.lifecycle.use(
-                ForwardConfig(
-                    required=False,
-                    replay_after_process=False,
-                )
-            ),
+            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
         self.lock = threading.Lock()
 

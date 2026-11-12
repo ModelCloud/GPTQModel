@@ -702,6 +702,11 @@ class EXL3Processor(LoopProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
     lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
         checkpointing=CheckpointSupport.PRIMARY,
     )
 
@@ -714,7 +719,7 @@ class EXL3Processor(LoopProcessor):
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
-        require_fwd: bool = True,
+        forward: Optional[ForwardConfig] = None,
         calibration_concat_separator: Optional[str] = None,
         lm_head_name: str = "lm_head",
     ):
@@ -729,11 +734,7 @@ class EXL3Processor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle=self.lifecycle.use(ForwardConfig(
-                required=require_fwd,
-                replay_after_process=True,
-                subset_early_stop=True,
-            )),
+            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 
         self.avg_losses = []

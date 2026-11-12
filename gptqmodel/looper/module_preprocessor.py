@@ -29,7 +29,7 @@ class ModulePreProcessor(LoopProcessor):
 
     _TP_TARGETS = (2, 4, 8)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, forward: Optional[ForwardConfig] = None, **kwargs):
         """Initialize a no-forward planning processor for module preprocessors."""
 
         kwargs = dict(kwargs)
@@ -45,7 +45,7 @@ class ModulePreProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            forward=ForwardConfig(
+            forward=forward or ForwardConfig(
                 required=False,
                 replay_after_process=False,
             ),

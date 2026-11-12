@@ -91,7 +91,7 @@ def _processor(model, **config):
         prepare_dataset_func=None, calibration_concat_size=None, calibration_sort=None,
         batch_size=1, gptq_model=SimpleNamespace(
             model=model, qlinear_kernel=AwqTorchLinear, rotary_embedding=None, lm_head="lm_head",
-        ), model=model, require_fwd=True, calculate_w_wq_diff=False,
+        ), model=model, calculate_w_wq_diff=False,
         calibration_concat_separator=None,
     )
     processor.draw_progress = lambda *args: None

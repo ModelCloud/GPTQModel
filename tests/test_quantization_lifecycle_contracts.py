@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from inspect import signature
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
@@ -62,6 +63,13 @@ def test_processor_lifecycle_config_is_mutable():
     lifecycle.calibration = CalibrationTypes.EACH_MODULE_NEEDS_INPUT
 
     assert lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT
+
+
+def test_processor_constructor_accepts_forward_config():
+    parameters = signature(GPTQProcessor).parameters
+
+    assert parameters["forward"].default is None
+    assert "require_fwd" not in parameters
 
 
 def test_lifecycle_use_returns_configured_copy():

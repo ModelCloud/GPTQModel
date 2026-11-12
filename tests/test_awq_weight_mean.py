@@ -126,7 +126,6 @@ class _TestAWQProcessor(AWQProcessor):
                 rotary_embedding=None,
             ),
             model=None,
-            require_fwd=True,
             calculate_w_wq_diff=False,
             calibration_concat_separator=None,
         )
@@ -1171,7 +1170,6 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         batch_size=1,
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
         calibration_concat_separator=None,
     )
@@ -1249,7 +1247,6 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         batch_size=1,
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
         calibration_concat_separator=None,
     )
