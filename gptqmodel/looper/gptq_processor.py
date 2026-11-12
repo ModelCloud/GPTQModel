@@ -178,7 +178,7 @@ def clone_gptq_config_for_module(
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
-    lifecycle_spec = ProcessorLifecycleConfig(
+    lifecycle = ProcessorLifecycleConfig(
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
         checkpointing=CheckpointSupport.PRIMARY,
     )
@@ -207,7 +207,7 @@ class GPTQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
+            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
                 require_fwd=require_fwd,
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,

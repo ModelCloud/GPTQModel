@@ -237,16 +237,16 @@ class CheckpointSupport(str, Enum):
     SECONDARY = "secondary"
 
 
-@dataclass(frozen=True)
+@dataclass
 class ProcessorLifecycleConfig:
-    """Processor-owned policy consumed by the looper and checkpoint adapter."""
+    """Mutable processor configuration consumed by the looper and checkpoint adapter."""
 
     execution: ExecutionConfig = ExecutionConfig()
     calibration: CalibrationTypes = CalibrationTypes.NOT_REQUIRED
     checkpointing: CheckpointSupport = CheckpointSupport.UNSUPPORTED
 
     def with_execution(self, execution: ExecutionConfig) -> "ProcessorLifecycleConfig":
-        """Keep the calibration and checkpoint policy while specializing replay."""
+        """Return a copy with specialized replay settings."""
         return replace(self, execution=execution)
 
 
@@ -287,7 +287,7 @@ class LoopProcessor:
             calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
             execution_config: Optional[ExecutionConfig] = None,
-            lifecycle_spec: Optional[ProcessorLifecycleConfig] = None,
+            lifecycle: Optional[ProcessorLifecycleConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
 
@@ -308,12 +308,12 @@ class LoopProcessor:
 
         # Keep lifecycle and replay policy in one object so the stages consume
         # one execution mode instead of a scattered set of booleans.
-        if lifecycle_spec is not None and execution_config is not None and lifecycle_spec.execution != execution_config:
-            raise ValueError("lifecycle_spec.execution and execution_config disagree")
-        self.lifecycle_spec = lifecycle_spec or ProcessorLifecycleConfig(
+        if lifecycle is not None and execution_config is not None and lifecycle.execution != execution_config:
+            raise ValueError("lifecycle.execution and execution_config disagree")
+        self.lifecycle = lifecycle or ProcessorLifecycleConfig(
             execution=execution_config or ExecutionConfig()
         )
-        self.execution_config = self.lifecycle_spec.execution
+        self.execution_config = self.lifecycle.execution
 
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _ThreadSafeDict()

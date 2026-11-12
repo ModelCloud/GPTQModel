@@ -225,7 +225,7 @@ def _awq_bound_affine_codes(
 class AWQProcessor(LoopProcessor):
     """Captures activations and quantizes layers with the AWQ scaling workflow."""
 
-    lifecycle_spec = ProcessorLifecycleConfig(
+    lifecycle = ProcessorLifecycleConfig(
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
         checkpointing=CheckpointSupport.PRIMARY,
     )
@@ -265,7 +265,7 @@ class AWQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
+            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
                 require_fwd=require_fwd,
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,

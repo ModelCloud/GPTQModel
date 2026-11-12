@@ -242,7 +242,7 @@ class QuantizationCheckpointAdapter:
             raise CheckpointError("checkpoint requires execution placement state")
         self.model = context.model
         roles = tuple(
-            getattr(getattr(processor, "lifecycle_spec", None), "checkpointing", CheckpointSupport.UNSUPPORTED)
+            getattr(getattr(processor, "lifecycle", None), "checkpointing", CheckpointSupport.UNSUPPORTED)
             for processor in context.processors
         )
         if roles not in {

@@ -97,7 +97,7 @@ from gptqmodel.looper.loop_processor import (
 )
 
 class ExampleProcessor(LoopProcessor):
-    lifecycle_spec = ProcessorLifecycleConfig(
+    lifecycle = ProcessorLifecycleConfig(
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
         checkpointing=CheckpointSupport.PRIMARY,
     )
@@ -105,7 +105,7 @@ class ExampleProcessor(LoopProcessor):
     def __init__(self, require_fwd=True, **kwargs):
         super().__init__(
             **kwargs,
-            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
+            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
                 require_fwd=require_fwd,
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
@@ -160,7 +160,7 @@ The snapshot is immutable and retains the ordered winning rule. Later edits to `
 | Calibrated method has no processor mapping | `QuantizationRunPlan.build` raises `ValueError` before the looper starts. |
 | Weight-only config requests EoRA or native capture | `QuantizationRunPlan.build` raises `NotImplementedError`. |
 | Checkpoint processor chain is unsupported | `quantize()` raises `NotImplementedError` before processor construction. |
-| `lifecycle_spec.execution` and `execution_config` disagree | `LoopProcessor.__init__` raises `ValueError`. |
+| `lifecycle.execution` and `execution_config` disagree | `LoopProcessor.__init__` raises `ValueError`. |
 | Negative dynamic rule wins | The module is skipped and the exclusion is recorded by the existing calibration policy. |
 | Snapshot name differs from the packed module name | `create_quant_module` raises `ValueError`; a snapshot cannot leak across modules. |
 

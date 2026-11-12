@@ -39,7 +39,7 @@ log = setup_logger()
 class EoraProcessor(LoopProcessor):
     """Builds LoRA-style error adapters from dequantization residuals and activations."""
 
-    lifecycle_spec = ProcessorLifecycleConfig(
+    lifecycle = ProcessorLifecycleConfig(
         checkpointing=CheckpointSupport.SECONDARY,
     )
 
@@ -66,7 +66,7 @@ class EoraProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            lifecycle_spec=self.lifecycle_spec.with_execution(
+            lifecycle=self.lifecycle.with_execution(
                 ExecutionConfig(require_fwd=require_fwd)
             ),
         )

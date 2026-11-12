@@ -225,7 +225,7 @@ def _resolve_subset_calibration_coverage_policy(
 ) -> CalibrationCoveragePolicy:
     """Resolve how this subset handles modules that never receive calibration traffic."""
 
-    lifecycle = getattr(processor, "lifecycle_spec", None)
+    lifecycle = getattr(processor, "lifecycle", None)
     validate_input_coverage = (
         lifecycle is not None
         and lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT

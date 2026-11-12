@@ -62,7 +62,7 @@ def _mean_abs_error(reference: torch.Tensor, dequantized: torch.Tensor) -> float
 class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
 
-    lifecycle_spec = ProcessorLifecycleConfig(
+    lifecycle = ProcessorLifecycleConfig(
         checkpointing=CheckpointSupport.PRIMARY,
     )
 
@@ -82,7 +82,7 @@ class WeightOnlyProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(
+            lifecycle=self.lifecycle.with_execution(ExecutionConfig(
                 require_fwd=False,
                 fwd_replay_after_process=False,
             )),

@@ -44,7 +44,7 @@ def test_run_plan_is_the_single_processor_chain_contract():
 
 def test_lifecycle_calibration_policy_is_declared_by_processor():
     processor = SimpleNamespace(
-        lifecycle_spec=ProcessorLifecycleConfig(
+        lifecycle=ProcessorLifecycleConfig(
             calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
             checkpointing=CheckpointSupport.PRIMARY,
         )
@@ -54,6 +54,13 @@ def test_lifecycle_calibration_policy_is_declared_by_processor():
 
     assert policy.validate_input_coverage
     assert policy.prune_uncovered_modules
+
+
+def test_processor_lifecycle_config_is_mutable():
+    lifecycle = ProcessorLifecycleConfig()
+    lifecycle.calibration = CalibrationTypes.EACH_MODULE_NEEDS_INPUT
+
+    assert lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT
 
 
 def test_effective_module_config_is_ordered_and_immutable():

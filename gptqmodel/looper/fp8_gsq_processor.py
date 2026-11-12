@@ -25,7 +25,7 @@ from .weight_only_processor import WeightOnlyProcessor
 class FP8GSQProcessor(WeightOnlyProcessor):
     """Capture module inputs, then export the fitted FP8 bytes without refitting."""
 
-    lifecycle_spec = ProcessorLifecycleConfig()
+    lifecycle = ProcessorLifecycleConfig()
 
     def __init__(self, tokenizer, qcfg, calibration, prepare_dataset_func,
                  calibration_concat_size=None, calibration_sort=None, batch_size=1,
@@ -37,7 +37,7 @@ class FP8GSQProcessor(WeightOnlyProcessor):
             prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
             batch_size=batch_size,
-            lifecycle_spec=self.lifecycle_spec.with_execution(ExecutionConfig(require_fwd=True)),
+            lifecycle=self.lifecycle.with_execution(ExecutionConfig(require_fwd=True)),
         )
         self.lock = threading.Lock()
         self.is_weight_only = False
