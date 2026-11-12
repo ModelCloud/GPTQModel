@@ -70,6 +70,45 @@ def test_accumulated_loss_matches_whole_batch_gradients(mode, return_dict):
         torch.testing.assert_close(parameter.grad, expected[name], atol=2e-6, rtol=2e-5, msg=name)
 
 
+def test_legacy_accumulation_with_empty_label_microbatch_matches_full_gradient():
+    model = review_model("legacy").train()
+    ids = torch.tensor([[3, 4, 5, 6], [2, 3, 4, 5]])
+    labels = ids.clone()
+    labels[0] = -100
+    token_count = int((labels[:, 1:] != -100).sum())
+
+    full_logits = model(ids, use_cache=False).logits.float()
+    expected_loss = (
+        torch.nn.functional.cross_entropy(
+            full_logits[:, :-1, :].reshape(-1, full_logits.shape[-1]),
+            labels[:, 1:].reshape(-1),
+            reduction="sum",
+        )
+        / token_count
+    )
+    expected_loss.backward()
+    expected_gradient = model.lm_head.weight.grad.clone()
+    model.zero_grad()
+
+    losses = [
+        model(
+            ids[index : index + 1],
+            labels=labels[index : index + 1],
+            num_items_in_batch=token_count,
+            logits_to_keep=1,
+            return_dict=False,
+            use_cache=False,
+        )[0]
+        for index in range(2)
+    ]
+    assert losses[0].item() == 0.0
+    assert bool(torch.isfinite(losses[1]))
+    actual_loss = sum(losses)
+    torch.testing.assert_close(actual_loss, expected_loss, atol=1e-6, rtol=1e-6)
+    actual_loss.backward()
+    torch.testing.assert_close(model.lm_head.weight.grad, expected_gradient, atol=2e-6, rtol=2e-5)
+
+
 @pytest.mark.parametrize("mode", ["native", "legacy"])
 def test_trainer_accumulation_preserves_optimizer_update(mode, tmp_path):
     try:
@@ -165,6 +204,37 @@ def test_shared_model_concurrent_calls_keep_independent_logits(mode, second_requ
         torch.testing.assert_close(out.logits, expected.logits)
         if expected.loss is not None:
             torch.testing.assert_close(out.loss, expected.loss)
+
+
+def test_legacy_concurrent_tuple_outputs_keep_independent_rows():
+    model = review_model("legacy").eval()
+    ids = torch.tensor([[3, 4, 5, 6]])
+    with torch.no_grad():
+        full_logits = model(ids, use_cache=False, return_dict=False)[0]
+
+    gate = threading.Barrier(2, timeout=10)
+    head = model.lm_head
+    original_head_forward = head.forward
+
+    def synchronized_head_forward(hidden_states):
+        gate.wait()
+        return original_head_forward(hidden_states)
+
+    def run(keep):
+        with torch.no_grad():
+            return model(ids, logits_to_keep=keep, return_dict=False, use_cache=False)[0]
+
+    head.forward = synchronized_head_forward
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            actual = list(executor.map(run, [1, 2]))
+    finally:
+        del head.forward
+
+    for output, keep in zip(actual, [1, 2]):
+        assert output.shape[1] == keep
+        torch.testing.assert_close(output, full_logits[:, -keep:, :])
+    assert not head._forward_pre_hooks
 
 
 @pytest.mark.parametrize("mode", ["native", "patched", "legacy"])

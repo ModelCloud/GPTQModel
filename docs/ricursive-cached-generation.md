@@ -160,8 +160,9 @@ compatibility references are `gptqmodel/utils/ricursive_patch.py` at `4e174cb53`
 | Compatibility line 818: only dictionary logits are trimmed. | Preserve the requested shape for tuple outputs too. |
 
 
-The subsequent clean review fixes and their 38 new regression cases are in
+The subsequent clean review fixes and the original 38 regression cases are in
 [GPT-QModel #3710](https://github.com/ModelCloud/GPTQModel/pull/3710).
+The suite now includes two additional accumulation and concurrent tuple-output cases.
 That review compared native `948fa2689` and compatibility
 `1efaf4a298` and added these regressions:
 
@@ -182,7 +183,7 @@ That review compared native `948fa2689` and compatibility
 | `tests/test_ricursive_modeling_contracts.py` | All 13 review findings, checkpoint recomputation/gradient parity, compatibility generation, head replacement, and exception cleanup. |
 | `tests/test_ricursive_modeling_numerics.py` | Independent FP32 model oracle, head-width variants, window eviction, block decoding, MLP chunking, static/dynamic caches, greedy/beam generation, and chunked prefill. |
 | `tests/test_ricursive_modeling_precision.py` | CPU and active CUDA/ROCm runtime checks in FP32, FP16, and BF16, including the 80-query/8-KV head layout. |
-| `tests/test_ricursive_review_regressions.py` | 38 cases: all five clean-review defects, actual historical source, real Trainer updates, concurrent labeled/full/sliced requests, tied resize/save/load, and real two-rank TP. |
+| `tests/test_ricursive_review_regressions.py` | 40 cases: all five clean-review defects, actual historical source, real Trainer updates, empty-label accumulation, concurrent labeled/full/sliced and tuple-output requests, tied resize/save/load, and real two-rank TP. |
 | `tests/ricursive_tp_worker.py`, `tests/ricursive_tp_oracle.py` | Distributed loader, dynamic/static cache and generation checks, independent partition-aware arithmetic, and separately measured fused-backend rounding. |
 | `tests/ricursive_test_utils.py` | Isolated tiny-model fixtures and standalone compatibility-module loading for Transformers 4.57. |
 
