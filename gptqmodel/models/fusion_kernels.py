@@ -160,12 +160,16 @@ class FusionKernelSpec:
         elif self.layout == "allspark":
             if n % 32:
                 return "AllSpark fusion requires complete N=32 tiles"
+            source_names = ("qweight", "scales") if self.gptq else ("qweight", "qzeros", "scales")
+            sources = [getattr(module, name, None) for name in source_names]
+            weight = sources[0]
+            if (not isinstance(weight, torch.Tensor) or weight.device.type != "cuda"
+                    or any(not isinstance(source, torch.Tensor) or source.device != weight.device
+                           for source in sources[1:])):
+                return "AllSpark fusion requires materialized CUDA/ROCm checkpoint operands on one device"
             if not module.packed_ready():
                 # ``prepare()`` rebuilds the derived layout from the checkpoint
                 # tensors; a source that cannot be repacked stays ineligible.
-                weight = getattr(module, "qweight", None)
-                if not isinstance(weight, torch.Tensor) or weight.device.type != "cuda":
-                    return "AllSpark fusion requires materialized CUDA/ROCm checkpoint operands"
                 return ""
             if (tuple(module.qweight_packed.shape) != (n, k)
                     or module.scales_packed.numel() != n):

@@ -114,6 +114,22 @@ def _load_gptq_module(dtype, bias=True, k=256, n=512):
     return module, qweight, scales, codes
 
 
+def test_fusion_rejects_checkpoint_sources_split_across_devices():
+    """A stale packed view must not make mixed-device sources fusion-eligible."""
+    from gptqmodel.models.fusion_kernels import kernel_specs
+
+    if not _kernel_supported():
+        pytest.skip("AllSpark requires compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    module, _, _, _ = _load_gptq_module(torch.float16)
+    module.post_init()
+    module.scales = torch.nn.Parameter(module.scales.detach().cpu(), requires_grad=False)
+
+    assert not module.packed_ready()
+    assert "one device" in kernel_specs()[type(module)].shape_error(module)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_module_export_keeps_checkpoint_layout(dtype):
     """``post_init()`` must not drop the checkpoint tensors from the export.

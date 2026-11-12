@@ -52,15 +52,18 @@ flowchart LR
     D["load_state_dict"] --> E["BaseQuantLinear._clear_runtime_weight_cache"]
     F["device or dtype move"] --> E
     G["in-place scales.mul_()"] --> H["_version changes"]
+    L["inference-mode source write"] --> E2["caller invokes clear_weight_cache"]
     E --> I["clear_weight_cache: _repacked = False"]
+    E2 --> I
     H --> J["packed_ready is False"]
     I --> K["next forward repacks from checkpoint tensors"]
     J --> K
 ```
 
 `forward` re-checks `packed_ready()` rather than trusting the `_repacked` flag
-alone, because inference tensors have no version counter of their own and an
-in-place `scales`/`qweight` write is otherwise invisible.
+alone. Ordinary tensors expose a version counter, so in-place writes invalidate
+the key. Inference-mode tensors do not expose a version counter: code that
+mutates them inside `InferenceMode` must call `clear_weight_cache()` explicitly.
 
 ## Before / after
 
@@ -94,7 +97,8 @@ stateDiagram-v2
     Loaded --> Fresh: post_init / first forward
     Fresh --> Stale: load_state_dict
     Fresh --> Stale: device or dtype move
-    Fresh --> Stale: in-place qweight/scales write
+    Fresh --> Stale: versioned qweight/scales write
+    Fresh --> Stale: explicit clear after inference-mode write
     Stale --> Fresh: _ensure_repacked
     Stale --> Blocked: operand device is not CUDA/ROCm
     Blocked --> Fresh: move operands to a supported device
@@ -105,7 +109,8 @@ stateDiagram-v2
 | Export after any number of forwards | checkpoint layout under checkpoint keys |
 | `load_state_dict` of the module's own runtime dict | accepted; cache invalidated, repacked on next forward |
 | `load_state_dict` of the original checkpoint | accepted; strict load has no missing/unexpected keys |
-| In-place `scales`/`qweight` write while idle | detected by the cache key; repacked before the next launch |
+| In-place write to a versioned `scales`/`qweight` | detected by the cache key; repacked before the next launch |
+| Inference-mode source write | caller must invoke `clear_weight_cache()`; repacked before the next launch |
 | Fusion over sources whose cache was invalidated | `prepare()` repacks, then the group concatenates the native operands |
 | Fusion over CPU/meta operands | declared ineligible; no repack inside a forward |
 

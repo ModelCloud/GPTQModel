@@ -280,8 +280,8 @@ class AllSparkAwqLinear(AWQuantLinear):
         self._packed_key = self._source_key() if key is None else key
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # The cache key covers in-place checkpoint writes (``scales.mul_()``)
-        # as well as replacement, so a stale kernel layout is never served.
+        # Versioned checkpoint tensors reveal in-place writes. Inference-mode
+        # tensors need an explicit clear_weight_cache() after mutation.
         if not self.packed_ready():
             self._ensure_repacked()
         shape = x.shape[:-1] + (self.out_features,)
