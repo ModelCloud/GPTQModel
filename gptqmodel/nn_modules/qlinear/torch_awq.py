@@ -119,8 +119,9 @@ class AwqTorchLinear(AWQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros.float() * scales.float()
 
-        scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
-        self.register_buffer("scales", scales.clone().to(scale_dtype))
+        # Torch AWQ converts scales for each forward, so packing need not
+        # narrow a source scale before writing the checkpoint.
+        self.register_buffer("scales", scales.clone())
         if linear.bias is not None:
             # The bias is added after a wide reduction, so keep the source
             # precision even when AWQ scales are stored in half precision.

@@ -170,7 +170,8 @@ def _awq_oracle(module, x):
     scales = module.scales.cpu().to(torch.float64)
     groups = torch.arange(codes.shape[0]) // module.group_size
     weight = (codes - zeros[groups]) * scales[groups]
-    return x.cpu().to(torch.float64) @ weight + module.bias.cpu().to(torch.float64)
+    output = x.cpu().to(torch.float64) @ weight
+    return output if module.bias is None else output + module.bias.cpu().to(torch.float64)
 
 
 @pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
@@ -215,6 +216,28 @@ def test_awq_torch_pack_keeps_fp32_source_bias(activation_dtype):
 
     assert module.bias.dtype is torch.float32
     torch.testing.assert_close(module(x), _awq_oracle(module, x).to(activation_dtype), rtol=0, atol=0)
+
+
+def test_awq_torch_pack_keeps_fp32_source_scales():
+    tiny = torch.tensor(1e-40, dtype=torch.bfloat16).float().item()
+    source = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+    source.weight.data.fill_(tiny)
+    scales = torch.full((8, 1), tiny, dtype=torch.float32)
+    module = AwqTorchLinear(
+        bits=4, group_size=16, sym=True, desc_act=False,
+        in_features=16, out_features=8, bias=False,
+    )
+    module.pack(source, scales, torch.zeros((8, 1)))
+    module.post_init()
+    stored_scales = module.scales.clone()
+
+    assert module.scales.dtype is torch.float32
+    assert torch.equal(module.scales, scales.t())
+    module(torch.ones((1, 16), dtype=torch.float16))
+    x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16)
+    actual = module(x_bf16)
+    assert torch.equal(module.scales, stored_scales)
+    torch.testing.assert_close(actual, _awq_oracle(module, x_bf16).to(torch.bfloat16), rtol=0, atol=0)
 
 
 def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
