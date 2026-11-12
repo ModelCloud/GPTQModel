@@ -59,26 +59,40 @@ Callers requiring those shapes keep their existing per-row path.
 temporarily decodes BF16, repacks each row into a 32-bit metadata word and
 eight low bytes per eight values, compacts exceptional groups, and releases
 the dense tensor. A weak map keyed by `NF12Weight` owns this view, so it dies
-with the model weight. The original tiled NF12 tensor remains available for
+with the model weight. Each view also records the source tensor identities,
+versions, shapes, devices, and exponent base. A changed key retires the view;
+`linear_fp32` uses the ordinary packed route until `prepare_fp32_gate` rebuilds
+it. The original tiled NF12 tensor remains available for
 other shapes and kernels. Both views are 12-bit compressed; no BF16 weight
 matrix remains resident. The view uses 2,949,120 bytes for 384 rows or 983,040
 bytes for 128 rows, plus its exceptional table, in addition to the original
 packed view.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["NF12Weight"] --> B["prepare_fp32_gate"]
-    B --> C["temporary BF16 decode"]
-    C --> D["K-contiguous meta, low, escapes"]
-    D --> E["weak packed-view cache"]
-    E --> F["linear_fp32 M1"]
-    E --> G["linear_fp32_staged_b1 M6"]
-    F --> H["_linear_fp32_gate_planes BK1024, 4 warps"]
-    G --> H
-    B -->|invalid geometry or device| X["ValueError"]
+    B --> D["temporary BF16 decode and repack"]
+    D --> F{"Source changed during preparation?"}
+    F -- no --> E["publish weak packed-view cache"]
+    F -- yes --> X["RuntimeError; do not cache mixed source"]
+    E --> G["linear_fp32 M1 or staged M6"]
+    G --> H{"_get_gate_view key matches?"}
+    H -- yes --> I["_linear_fp32_gate_planes"]
+    H -- no --> J["retire stale view; use tiled NF12 route"]
+    B -->|invalid geometry or device| Y["ValueError"]
     X:::error
+    Y:::error
     classDef error fill:#fdd,stroke:#b33
 ```
+
+Before this check, `gptqmodel_nf12/_fp32.py:42` returned from preparation
+whenever the object was in the weak map, and `_get_gate_view` at line 71 used
+that entry even after `packed`, `escapes`, or `exp_base` changed. The revision
+check now invalidates replacement and ordinary in-place edits. Inference-mode
+tensors and writes through `.data` have no usable version counter: after editing
+their bytes in place, call `prepare_fp32_gate` again to rebuild the view
+explicitly. Each explicit call rebuilds the view. A source changed during
+preparation raises without publishing a view.
 
 On NVIDIA PG506-230, PyTorch 2.15 CUDA 13.2 with GIL disabled, a CUDA graph
 rotating the 40 actual checkpoint gate matrices measured 13.158 microseconds

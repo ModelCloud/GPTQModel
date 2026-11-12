@@ -256,6 +256,68 @@ def test_prepared_fp32_gate_matches_b1_and_fp64_oracle(n):
                        nf12.linear_fp32(changed[2:3], packed, bias)[0])
 
 
+def test_prepared_fp32_gate_discards_replaced_and_modified_weight():
+    from gptqmodel_nf12._fp32 import _get_gate_view
+
+    device = _cuda()
+    dense = torch.full((128, 5120), 0.03125, dtype=torch.bfloat16, device=device)
+    dense[1::2].neg_()
+    original = nf12.encode(dense)
+    replacement = nf12.encode(-dense)
+    replacement_bytes = replacement.packed.clone()
+    assert original.num_escapes == replacement.num_escapes == 0
+    assert original.exp_base == replacement.exp_base
+    weight = nf12.NF12Weight(original.packed.clone(), original.escapes.clone(), original.exp_base)
+    x = torch.ones((6, 5120), dtype=torch.float32, device=device)
+
+    nf12.prepare_fp32_gate(weight)
+    torch.testing.assert_close(nf12.linear_fp32(x[:1], weight),
+                               F.linear(x[:1], dense.float()), rtol=2e-3, atol=2e-3)
+
+    weight.packed = replacement.packed
+    weight.escapes = replacement.escapes
+    assert _get_gate_view(weight) is None
+    torch.testing.assert_close(nf12.linear_fp32(x[:1], weight),
+                               F.linear(x[:1], -dense.float()), rtol=2e-3, atol=2e-3)
+    nf12.prepare_fp32_gate(weight)
+    torch.testing.assert_close(nf12.linear_fp32_staged_b1(x, weight),
+                               F.linear(x, -dense.float()), rtol=2e-3, atol=2e-3)
+
+    weight.packed.copy_(original.packed)
+    assert _get_gate_view(weight) is None
+    torch.testing.assert_close(nf12.linear_fp32(x[:1], weight),
+                               F.linear(x[:1], dense.float()), rtol=2e-3, atol=2e-3)
+    nf12.prepare_fp32_gate(weight)
+    torch.testing.assert_close(nf12.linear_fp32_staged_b1(x, weight),
+                               F.linear(x, dense.float()), rtol=2e-3, atol=2e-3)
+    weight.packed.data.copy_(replacement_bytes)
+    # ``.data`` writes bypass the version counter; explicit preparation is the
+    # contract for this form of mutation.
+    nf12.prepare_fp32_gate(weight)
+    torch.testing.assert_close(nf12.linear_fp32_staged_b1(x, weight),
+                               F.linear(x, -dense.float()), rtol=2e-3, atol=2e-3)
+    assert set(vars(weight)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+def test_prepared_fp32_gate_reprepares_unversioned_inference_weight():
+    device = _cuda()
+    dense = torch.full((128, 5120), 0.03125, dtype=torch.bfloat16, device=device)
+    replacement = nf12.encode(-dense)
+    with torch.inference_mode():
+        source = nf12.encode(dense)
+        weight = nf12.NF12Weight(source.packed.clone(), source.escapes.clone(), source.exp_base)
+    assert weight.packed.is_inference()
+    x = torch.ones((1, 5120), dtype=torch.float32, device=device)
+    nf12.prepare_fp32_gate(weight)
+    with torch.inference_mode():
+        weight.packed.copy_(replacement.packed)
+    # Inference tensors have no version counter. Repeating this explicit
+    # preparation is the cache-clear contract after an in-place edit.
+    nf12.prepare_fp32_gate(weight)
+    torch.testing.assert_close(nf12.linear_fp32(x, weight),
+                               F.linear(x, -dense.float()), rtol=2e-3, atol=2e-3)
+
+
 @pytest.mark.parametrize("shape", [
     (32, 512), (32, 5120), (128, 5120), (384, 5120), (512, 5120),
 ])
