@@ -50,6 +50,7 @@ from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
+    find_last_quantized_layer_index,
     forward_batch_worker,
     move_module_to_device,
     normalize_device_like,
@@ -1930,11 +1931,24 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # the looper. Non-checkpoint observers may omit on_start entirely.
         from ..utils.model import get_layer_name
 
+        last_quantized_layer_index = find_last_quantized_layer_index(
+            self.gptq_model.quantize_config,
+            layer_modules=layer_modules,
+            layer_names=layer_names,
+            layer_count=layer_count,
+        )
+        plan_layer_count = (
+            layer_count
+            if last_quantized_layer_index is None
+            else max(0, last_quantized_layer_index + 1)
+        )
         steps = []
         if quant_input_embeddings:
             steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
-        steps.extend(LoopStep("layer", index, get_layer_name(layer_names, index))
-                     for index in range(layer_count))
+        steps.extend(
+            LoopStep("layer", index, get_layer_name(layer_names, index))
+            for index in range(plan_layer_count)
+        )
         if quant_output_embeddings:
             steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
         elif self.gptq_model.quantize_config.lm_head:

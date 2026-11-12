@@ -193,13 +193,12 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or (adapter is not None and type(adapter) is not Lora)
         or config.lm_head
         or embed_quant_config is not None
-        or config.dynamic
         or getattr(config, "rotation", None)
         or (config.adapter is not None and type(config.adapter) is not Lora)
     ):
         raise NotImplementedError(
-            "checkpoint requires sequential quantization without dynamic exclusions, "
-            "GPTAQ/FOEM, or embedding/lm_head quantization"
+            "checkpoint requires sequential quantization without GPTAQ/FOEM "
+            "or embedding/lm_head quantization"
         )
     model_type = model.model.config.model_type
     if model_type not in CHECKPOINT_MODEL_TYPES:
@@ -234,7 +233,7 @@ def _source_identity(model):
 
 
 class QuantizationCheckpointAdapter:
-    VERSION = 3
+    VERSION = 4
 
     def bind(self, context):
         self.execution = context.execution
@@ -258,6 +257,7 @@ class QuantizationCheckpointAdapter:
         self.offload = Path(self.model.quantize_config.offload_to_disk_path)
         self._artifacts = {}
         config = _checkpoint_quantization_identity(self.model.quantize_config)
+        self._quantization_identity = config
         return {
             "adapter_version": self.VERSION,
             "device_topology": checkpoint_device_topology(
@@ -308,7 +308,20 @@ class QuantizationCheckpointAdapter:
                         for key, value in module.state_dict().items()
                     }
                 )
-            specs[name] = packed_module_spec(module, self.model.quantize_config)
+            specs[name] = packed_module_spec(
+                module,
+                self.model.quantize_config,
+                module_name=name,
+            )
+        quantization_identity = getattr(self, "_quantization_identity", None)
+        if (
+            quantization_identity is not None
+            and _checkpoint_quantization_identity(self.model.quantize_config)
+            != quantization_identity
+        ):
+            raise CheckpointError(
+                "quantization configuration changed during checkpoint capture"
+            )
         np_state = np.random.get_state()
         processor_states = [
             processor.continuation_state_dict() for processor in self.processors

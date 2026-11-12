@@ -5,8 +5,25 @@ import pytest
 import torch
 
 from gptqmodel import CheckpointConfig, QuantizeConfig
+from gptqmodel.looper.gptq_checkpoint import validate_checkpoint_support
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import FORMAT, METHOD
+
+
+def test_checkpoint_support_accepts_dynamic_configuration(tmp_path):
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        offload_to_disk=True,
+        offload_to_disk_path=str(tmp_path / "offload"),
+        dynamic={r"+:.*q_proj$": {"bits": 8}},
+    )
+    model = SimpleNamespace(
+        quantize_config=config,
+        model=SimpleNamespace(config=SimpleNamespace(model_type="llama")),
+    )
+
+    validate_checkpoint_support(model)
 
 
 @pytest.mark.parametrize("existing_checkpoint", [False, True])

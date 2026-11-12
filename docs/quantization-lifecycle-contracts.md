@@ -143,6 +143,8 @@ assert excluded.excluded
 
 The snapshot is immutable and retains the ordered winning rule. Later edits to `config.dynamic` affect new resolutions; they do not change an existing snapshot. Processors bind the snapshot to `NamedModule.state["effective_module_config"]`, and `create_quant_module` consumes it during packing. This prevents quantization and packing from resolving different values after a concurrent or late dynamic edit.
 
+Checkpointed quantization records the effective packing fields and winning rule for each completed packed module. The adapter restores each module with its own `bits`, `group_size`, `sym`, `desc_act`, `pack_dtype`, and format instead of reusing global settings. Dynamic exclusions remain dense source modules, and trailing excluded layers are omitted from the checkpoint execution plan.
+
 ## Before and after
 
 | Decision | Before | After |

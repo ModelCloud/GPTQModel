@@ -722,8 +722,9 @@ raise `CheckpointStopped`. A hard kill resumes from the last published layer;
 the unfinished layer is repeated. Resume validation requires the same source
 weights, calibration data, quantization settings, software versions, and device
 topology. Current checkpoint support is limited to Llama and Qwen3 MoE model
-types, requires `offload_to_disk=True`, and does not yet support dynamic
-exclusions, rotation, or embedding/`lm_head` quantization.
+types, requires `offload_to_disk=True`, and supports per-module dynamic
+overrides and exclusions. Rotation and embedding/`lm_head` quantization remain
+unsupported.
 
 See **[Quantization checkpointing and resume](checkpoint.md)** for resume
 policies, supported methods, safe-stop behavior, storage requirements, recovery

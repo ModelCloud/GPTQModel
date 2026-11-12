@@ -99,6 +99,37 @@ def test_one_module_snapshot_drives_clone_and_pack_settings():
     assert clone.group_size == 64
 
 
+def test_dynamic_pack_dtype_is_normalized_during_module_creation():
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={r"+:^proj$": {"bits": 8, "pack_dtype": "int16"}},
+    )
+    effective = config.resolve_module_config("proj")
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(128, 128, bias=False, dtype=torch.float16)
+
+    create_quant_module(
+        name="proj",
+        linear_cls=TorchLinear,
+        bits=4,
+        desc_act=False,
+        dynamic=config.dynamic,
+        group_size=32,
+        module=model,
+        submodule=model.proj,
+        sym=True,
+        device=DEVICE.CPU,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ,
+        effective_module_config=effective,
+    )
+
+    assert model.proj.bits == 8
+    assert model.proj.pack_dtype is torch.int16
+
+
 def test_module_snapshot_cannot_leak_to_another_pack_name():
     config = QuantizeConfig(dynamic={r"+:^other$": {"bits": 3}})
     effective = config.resolve_module_config("other")

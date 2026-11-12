@@ -62,6 +62,7 @@ from ..quantization.config import (
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
     _normalize_gguf_config_spec,
+    _normalize_pack_dtype,
     _normalize_quant_bits,
     dynamic_get,
     dynamic_matching_pattern,
@@ -703,7 +704,9 @@ def create_quant_module(
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
-            tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+            tmp_pack_dtype = _normalize_pack_dtype(
+                overrides.get("pack_dtype", pack_dtype)
+            )
 
             if format == FORMAT.FP8:
                 fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))

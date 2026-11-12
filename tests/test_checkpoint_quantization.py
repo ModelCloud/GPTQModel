@@ -407,3 +407,71 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
     completed = run("completed", checkpoint)
     assert_identical_tensors(baseline, resumed)
     assert_identical_tensors(baseline, completed)
+
+
+def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    native_model = build_native_model("llama", config_args, moe_intermediate_size=32)
+    native_model.save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            dynamic={
+                r"+:^model\.layers\.0\.self_attn\.q_proj$": {
+                    "bits": 8,
+                },
+                r"-:^model\.layers\.1\.": {},
+            },
+        )
+        model = GPTQModel.load(
+            str(native), quantize_config=config, backend=BACKEND.TORCH
+        )
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+            checkpoint=checkpoint,
+        )
+        model.save(tmp_path / output)
+        return load_file(tmp_path / output / "model.safetensors")
+
+    baseline = run("dynamic-baseline", None)
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "dynamic-checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("dynamic-interrupted", checkpoint)
+
+    resumed = run("dynamic-resumed", checkpoint)
+    completed = run("dynamic-completed", checkpoint)
+    assert_identical_tensors(baseline, resumed)
+    assert_identical_tensors(baseline, completed)

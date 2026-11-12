@@ -56,6 +56,44 @@ def test_gptq_packed_schema(format, bits):
     assert_schema_roundtrip(module, config)
 
 
+def test_dynamic_pack_settings_roundtrip_per_module():
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        format="gptq",
+        desc_act=False,
+        pack_dtype=torch.int32,
+        dynamic={r"+:^proj$": {"bits": 8, "pack_dtype": "int16"}},
+    )
+    module = TorchLinear(
+        bits=8,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        bias=True,
+        pack_dtype=torch.int16,
+        format=config.format,
+        register_buffers=True,
+    )
+    spec = packed_module_spec(module, config, module_name="proj")
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=config,
+        kernel=TorchLinear,
+        lm_head_name="lm_head",
+    )
+
+    assert spec["dynamic"]["source_pattern"] == r"+:^proj$"
+    assert spec["pack_dtype"] == "int16"
+    assert restored.bits == 8
+    assert restored.pack_dtype is torch.int16
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_bitblas_compute_dtype_schema_without_optional_compiler(dtype):
     config = QuantizeConfig(bits=4, group_size=32, desc_act=False)

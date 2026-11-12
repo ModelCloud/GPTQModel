@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit constructors for packed checkpoint modules; no dynamic imports from data."""
 
+from enum import Enum
+
 import torch
 
 from ..nn_modules.exllamav3 import ExllamaV3Linear
@@ -11,11 +13,71 @@ from ..quantization.config import resolve_quant_format, serialize_quant_bits
 from .checkpoint_store import CheckpointError
 
 
+_PACKING_OVERRIDE_FIELDS = {
+    "bits",
+    "group_size",
+    "desc_act",
+    "sym",
+    "pack_dtype",
+    "format",
+    "fmt",
+    "bnb_quant_type",
+    "block_size",
+    "compress_statistics",
+    "weight_block_size",
+    "weight_scale_method",
+    "weight_scale_semantics",
+}
+
+
 def is_packed_module(module):
     return isinstance(module, (BaseQuantLinear, ExllamaV3Linear))
 
 
-def packed_module_spec(module, config):
+def _serialize_value(value):
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, torch.dtype):
+        return str(value).removeprefix("torch.")
+    if isinstance(value, dict):
+        return {str(key): _serialize_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(item) for item in value]
+    return str(value)
+
+
+def _deserialize_pack_dtype(value, default):
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise CheckpointError("invalid checkpoint pack dtype")
+    dtype = getattr(torch, value, None)
+    if dtype not in {torch.int8, torch.int16, torch.int32, torch.int64}:
+        raise CheckpointError(f"unsupported checkpoint pack dtype: {value}")
+    return dtype
+
+
+def _dynamic_checkpoint_config(effective):
+    if effective is None or (
+        effective.source_pattern is None and not effective.excluded
+    ):
+        return None
+    return {
+        "source_pattern": effective.source_pattern,
+        "excluded": effective.excluded,
+        "overrides": {
+            key: _serialize_value(value)
+            for key, value in effective.overrides.items()
+            if key in _PACKING_OVERRIDE_FIELDS
+        },
+    }
+
+
+def packed_module_spec(module, config, *, module_name=None, effective=None):
     dimensions = {
         "in_features": module.in_features,
         "out_features": module.out_features,
@@ -40,7 +102,22 @@ def packed_module_spec(module, config):
         "desc_act": getattr(module, "desc_act", config.desc_act),
         "sym": getattr(module, "sym", config.sym),
         "bias": getattr(module, "bias", None) is not None,
+        "pack_dtype": _serialize_value(
+            getattr(module, "pack_dtype", config.pack_dtype)
+        ),
+        "format": _serialize_value(
+            getattr(module, "format", config.format)
+        ),
     }
+    if is_packed_module(module):
+        spec["kernel"] = f"{type(module).__module__}.{type(module).__qualname__}"
+    dynamic = _dynamic_checkpoint_config(
+        effective
+        if effective is not None or module_name is None
+        else config.resolve_module_config(module_name)
+    )
+    if dynamic is not None:
+        spec["dynamic"] = dynamic
     if type(module) is ParoLinear:
         spec["kind"] = "paro"
         spec["options"] = {
@@ -92,16 +169,30 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         kind = spec.pop("kind", None)
         group_scales = spec.pop("group_scales", True)
         options = spec.pop("options", {})
+        checkpoint_kernel = spec.pop("kernel", None)
+        checkpoint_pack_dtype = spec.pop("pack_dtype", None)
+        checkpoint_format = spec.pop("format", None)
+        spec.pop("dynamic", None)
         has_compute_dtype = "compute_dtype" in spec
         dtype_name = spec.pop("compute_dtype", None)
         quant_state_shape = spec.pop("quant_state_shape", None)
         if kind == "paro":
             kernel = ParoLinear
+        expected_kernel = f"{kernel.__module__}.{kernel.__qualname__}"
+        if checkpoint_kernel is not None and checkpoint_kernel != expected_kernel:
+            raise CheckpointError(
+                f"checkpoint module `{name}` requires {checkpoint_kernel}, got {expected_kernel}"
+            )
         kwargs = {
-            "pack_dtype": config.pack_dtype,
+            "pack_dtype": _deserialize_pack_dtype(
+                checkpoint_pack_dtype, config.pack_dtype
+            ),
             "name": name,
             "lm_head_name": lm_head_name,
-            "format": resolve_quant_format(config.format, config.method),
+            "format": resolve_quant_format(
+                checkpoint_format if checkpoint_format is not None else config.format,
+                config.method,
+            ),
             "register_buffers": True,
         }
         kwargs.update(config.quant_linear_init_kwargs())
