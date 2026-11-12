@@ -91,6 +91,23 @@ def apply_chat_template_to_prompt(tok, prompt: str, *, enabled: bool) -> tuple[s
     return rendered, True
 
 
+def read_checkpoint_source_model(checkpoint_dir: str) -> str | None:
+    """Return the model id a native checkpoint was quantized from, if recorded.
+
+    Reading only ``blockfloat.json`` keeps this cheap; the payload can be hundreds
+    of megabytes and this is a provenance check, not a load.
+    """
+
+    path = os.path.join(checkpoint_dir, "blockfloat.json")
+    try:
+        with open(path) as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    source = meta.get("source_model")
+    return source if isinstance(source, str) else None
+
+
 def extract(text: str) -> str | None:
     """Pull the predicted numeric answer out of generated text."""
 
@@ -127,9 +144,20 @@ def run_eval(
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
 
     restored = 0
+    checkpoint_source = None
     if native:
         from gptqmodel.utils.tt_blockfloat_quant import load_native_checkpoint_into_dense_model
 
+        # Weights and tokenizer must come from the same model. A checkpoint scored
+        # against a different tokenizer is a silent mis-measurement, so say so
+        # before spending an hour generating.
+        checkpoint_source = read_checkpoint_source_model(native)
+        if checkpoint_source and checkpoint_source != model_id:
+            print(
+                f"[E] WARNING: {native} was quantized from {checkpoint_source!r} but "
+                f"is being scored with {model_id!r}; weights and tokenizer differ.",
+                flush=True,
+            )
         restored = len(load_native_checkpoint_into_dense_model(model, native))
         if verbose:
             print(f"[E] loaded {restored} layers from {native}", flush=True)
@@ -185,6 +213,7 @@ def run_eval(
         "seconds": round(time.time() - started, 1),
         "chat_template": chat_template,
         "tokenizer_has_template": templated,
+        "checkpoint_source_model": checkpoint_source,
     }
     if verbose:
         print(f"[E] RESULT {result}", flush=True)

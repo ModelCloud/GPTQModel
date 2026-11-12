@@ -590,16 +590,18 @@ def save_blockfloat_checkpoint(
 
     os.makedirs(output_dir, exist_ok=True)
     torch.save(tensors, os.path.join(output_dir, "blockfloat.pt"))
-    meta = {
+    # Caller metadata goes first: the format fields below describe how the payload
+    # is encoded and are what the loader dispatches on, so they must win. A caller
+    # that passed ``bits`` or ``layers`` would otherwise silently corrupt the file.
+    meta = dict(metadata or {})
+    meta.update({
         "format": "tt-blockfloat",
         "version": BLOCKFLOAT_SAVE_FORMAT_VERSION,
         "bits": bits,
         "block": BLOCKFLOAT_BLOCK,
         "stored_mantissa_bits": stored_mantissa_bits(bits),
         "layers": summary,
-    }
-    if metadata:
-        meta.update(metadata)
+    })
     with open(os.path.join(output_dir, "blockfloat.json"), "w") as handle:
         json.dump(meta, handle, indent=1)
     total = sum(v["codes_bytes"] + v["exponent_bytes"] for v in summary.values())

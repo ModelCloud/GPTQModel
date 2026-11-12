@@ -1312,6 +1312,52 @@ def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     assert expanded.equal(w), "codes must reconstruct the grid weights exactly"
 
 
+def test_native_checkpoint_records_its_source_model(tmp_path):
+    """A checkpoint must name the model and tokenizer it came from.
+
+    A native checkpoint scored with a different tokenizer -- or an instruct model
+    scored without its chat template -- produces a meaningless number, and the
+    files themselves are indistinguishable without this metadata.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(7)
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=False)
+    with torch.no_grad():
+        block.proj.weight.copy_(bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02))
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = tmp_path / "meta"
+    bq.save_blockfloat_checkpoint(
+        model,
+        str(out),
+        bits=4,
+        metadata={
+            "source_model": "unsloth/Llama-3.2-1B-Instruct",
+            "tokenizer_has_chat_template": True,
+            # Deliberately wrong: format fields must win over caller metadata,
+            # otherwise a stray key would make the checkpoint unloadable.
+            "bits": 8,
+            "format": "bogus",
+        },
+    )
+
+    meta = json.loads((out / "blockfloat.json").read_text())
+    assert meta["source_model"] == "unsloth/Llama-3.2-1B-Instruct"
+    assert meta["tokenizer_has_chat_template"] is True
+    # Caller metadata must not clobber the format fields the loader depends on.
+    assert meta["format"] == "tt-blockfloat" and meta["bits"] == 4
+    assert meta["block"] == 16
+
+
 def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     """A fresh model populated from codes must match the saved weights."""
 
@@ -1992,6 +2038,38 @@ def test_chat_template_is_only_applied_when_the_tokenizer_has_one():
         _WithTemplate(), "Q", enabled=False
     )
     assert applied is False and raw == "Q"
+
+
+def test_gsm8k_reports_the_checkpoint_source_model(tmp_path):
+    """A native checkpoint names its source model; the harness must surface it.
+
+    Scoring a checkpoint against a different tokenizer silently mis-measures, so
+    the harness reads the recorded source model before loading the payload.
+    """
+
+    import json
+
+    ev = _load_gsm8k_eval()
+
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "blockfloat.json").write_text(
+        json.dumps({"format": "tt-blockfloat", "source_model": "org/model-a"})
+    )
+    assert ev.read_checkpoint_source_model(str(good)) == "org/model-a"
+
+    # No metadata at all: unknown provenance, not an error.
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "blockfloat.json").write_text(json.dumps({"format": "tt-blockfloat"}))
+    assert ev.read_checkpoint_source_model(str(bare)) is None
+
+    assert ev.read_checkpoint_source_model(str(tmp_path / "missing")) is None
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "blockfloat.json").write_text("{not json")
+    assert ev.read_checkpoint_source_model(str(broken)) is None
 
 
 def test_gsm8k_prompt_rendering_is_identical_across_shots():
