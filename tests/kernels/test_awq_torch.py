@@ -112,3 +112,113 @@ def test_awq_torch_backend_selection():
         pack_dtype=torch.int32,
     )
     assert qlinear_cls is AwqTorchLinear
+
+
+_AWQ_TEST_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _make_unit_awq_module(*, scales, bias, device=None):
+    """Pack an AWQ layer whose dequantized weight is exactly the scale value.
+
+    ``(code - zero)`` is one for every element, so the dequantized weight
+    equals ``scales`` and the independent FP64 oracle is easy to state.
+    """
+
+    bits = 4
+    group_size = 16
+    in_features = 16
+    out_features = 8
+    device = _AWQ_TEST_DEVICE if device is None else device
+
+    int_weight = torch.ones((in_features, out_features), dtype=torch.int32)
+    zero_points = torch.zeros((1, out_features), dtype=torch.int32)
+    module = AwqTorchLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=False,
+    )
+    module.register_buffer("qweight", _pack_awq_tensor(int_weight, bits).to(device))
+    module.register_buffer("qzeros", _pack_awq_tensor(zero_points, bits).to(device))
+    module.register_buffer("scales", scales.to(device))
+    module.register_buffer("bias", bias.to(device))
+    return module
+
+
+def _awq_oracle(module, x):
+    """Independent FP64 oracle over the stored checkpoint-precision buffers."""
+
+    weight = dequantize_gemm(
+        qweight=module.qweight.cpu(),
+        qzeros=module.qzeros.cpu(),
+        scales=module.scales.cpu().to(torch.float64),
+        bits=module.bits,
+        group_size=module.group_size,
+    )
+    return x.cpu().to(torch.float64) @ weight + module.bias.cpu().to(torch.float64)
+
+
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_awq_torch_wide_checkpoint_bias_rounds_after_wide_accumulation(activation_dtype):
+    """A stored FP32 bias must cancel the reduction before the output is rounded.
+
+    The reduction is ``16 * 4096 = 65536``; the stored bias is ``-65535``, so
+    the FP64 oracle is ``1``. Narrowing the bias to the activation dtype turns
+    it into ``-inf`` (FP16) or ``-65536`` (BF16) and destroys the result.
+    """
+
+    scales = torch.ones((1, 8), dtype=torch.float32)
+    bias = torch.full((8,), -65535.0, dtype=torch.float32)
+    module = _make_unit_awq_module(scales=scales, bias=bias)
+    module.post_init()
+    x = torch.full((1, 16), 4096.0, dtype=activation_dtype, device=_AWQ_TEST_DEVICE)
+    expected = _awq_oracle(module, x)
+
+    actual = module(x)
+
+    assert module.scales.dtype is torch.float32
+    assert module.bias.dtype is torch.float32
+    assert actual.dtype is activation_dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(
+        actual, expected.to(device=actual.device, dtype=activation_dtype), rtol=0, atol=0
+    )
+
+
+def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
+    """Forward must not rewrite stored BF16 precision with the activation dtype.
+
+    ``1e-40`` is representable in BF16 but underflows to zero in FP16, so an
+    in-place conversion permanently zeroes the scale and every later BF16
+    forward returns zero as well.
+    """
+
+    tiny = torch.tensor([[1e-40] * 8], dtype=torch.bfloat16)
+    bias = torch.zeros(8, dtype=torch.bfloat16)
+    module = _make_unit_awq_module(scales=tiny, bias=bias)
+    module.post_init()
+    stored_scales = module.scales.clone()
+    stored_bias = module.bias.clone()
+    x_fp16 = torch.ones((1, 16), dtype=torch.float16, device=_AWQ_TEST_DEVICE)
+    x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16, device=_AWQ_TEST_DEVICE)
+    expected = _awq_oracle(module, x_bf16)
+
+    module(x_fp16)
+
+    assert module.scales.dtype is torch.bfloat16
+    assert torch.equal(module.scales, stored_scales)
+    assert torch.equal(module.bias, stored_bias)
+
+    actual = module(x_bf16)
+
+    assert module.scales.dtype is torch.bfloat16
+    assert torch.equal(module.scales, stored_scales)
+    assert torch.equal(module.bias, stored_bias)
+    assert actual.dtype is torch.bfloat16
+    torch.testing.assert_close(
+        actual, expected.to(device=actual.device, dtype=torch.bfloat16), rtol=0, atol=0
+    )

@@ -85,6 +85,7 @@ GPTQ Hessian capture and repeated finalization are described in the [Hessian acc
 Disk-backed replay outputs use [bounded staging and shard verification on every read](docs/looper-checkpoint-redesign.md#disk-backed-layer-output-staging-and-reads).
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
+Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
 The legacy `GPTQ_TORCH_CACHE_WEIGHTS` / `GPTQ_TORCH_LOOKAHEAD` flags and
