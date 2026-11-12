@@ -421,7 +421,7 @@ def build_subset_plan(
     - how uncovered calibration modules are handled
     """
 
-    forward_config = processor.forward_config
+    forward = processor.forward
     calibration_coverage_policy = _resolve_subset_calibration_coverage_policy(
         processor, fallback
     )
@@ -587,7 +587,7 @@ def build_subset_plan(
 
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
-    execute_forward = forward_config.required
+    execute_forward = forward.required
     batch_count, forward_row_counts, forward_total_rows = (
         _collect_subset_forward_progress(
             looper,
@@ -625,7 +625,7 @@ def build_subset_plan(
         subset_total=subset_total,
         execute_forward=execute_forward,
         replay_after_process=execute_forward
-        and forward_config.replay_after_process,
+        and forward.replay_after_process,
         forward_mode="serial" if subset_forward_serial else "parallel",
         batch_count=batch_count,
         forward_row_counts=forward_row_counts,
@@ -655,13 +655,13 @@ def build_layer_subset_plans(
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
-    forward_config = processor.forward_config
+    forward = processor.forward
     if embedding_module_name is not None:
         module_name_groups = [[embedding_module_name]]
     else:
         module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-    if forward_config.all_modules_in_single_pass:
+    if forward.all_modules_in_single_pass:
         # Native-style processors consume one merged replay over the whole layer.
         # Build one plan up front so the layer stage does not keep re-deriving
         # merged subset state while it is also coordinating execution.
@@ -869,7 +869,7 @@ def _run_single_subset_pass(
     subset_names = plan.ordered_module_names or list(subset.keys())
     subset_index = plan.subset_index
     subset_total = plan.subset_total
-    forward_config = processor.forward_config
+    forward = processor.forward
     calibration_coverage_policy = plan.calibration_coverage_policy
     forward_row_counts = plan.forward_row_counts
     batch_count = plan.batch_count
@@ -884,7 +884,7 @@ def _run_single_subset_pass(
     if (
         execute_forward
         and not plan.need_forward_outputs
-        and not forward_config.capture_layer_context
+        and not forward.capture_layer_context
         and callable(restore_capture)
     ):
         capture_restored = bool(
@@ -996,8 +996,8 @@ def _run_single_subset_pass(
                         processor, original_hook, hook_source
                     )
                 enable_stop = (
-                    forward_config.replay_after_process
-                    or forward_config.subset_early_stop
+                    forward.replay_after_process
+                    or forward.subset_early_stop
                 )
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
@@ -1042,7 +1042,7 @@ def _run_single_subset_pass(
             )
 
     capture_layer_forward_context = (
-        execute_forward and forward_config.capture_layer_context
+        execute_forward and forward.capture_layer_context
     )
     if capture_layer_forward_context:
         subset_capture_override = getattr(

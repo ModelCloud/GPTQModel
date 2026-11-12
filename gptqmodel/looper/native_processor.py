@@ -47,7 +47,7 @@ class NativeProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            forward_config=ForwardConfig(
+            forward=ForwardConfig(
                 required=require_fwd,
                 replay_after_process=False,
                 all_modules_in_single_pass=True,

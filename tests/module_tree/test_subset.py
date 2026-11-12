@@ -291,7 +291,7 @@ def test_awq_processor_enables_subset_early_stop():
         model=dummy_model,
     )
 
-    assert processor.forward_config.subset_early_stop is True
+    assert processor.forward.subset_early_stop is True
 
 
 def test_module_looper_subset_callback_invoked():
@@ -367,7 +367,7 @@ class _StubAWQProcessor(LoopProcessor):
             calibration=calibration,
             prepare_dataset_func=_prepare_dataset_func,
             batch_size=1,
-            forward_config=ForwardConfig(
+            forward=ForwardConfig(
                                                  required=True,
                                                  replay_after_process=False,
                                                  subset_early_stop=True,

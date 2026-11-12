@@ -54,8 +54,8 @@ def _make_looper():
 
 
 class _StubProcessor:
-    def __init__(self, forward_config: ForwardConfig):
-        self.forward_config = forward_config
+    def __init__(self, forward: ForwardConfig):
+        self.forward = forward
 
 
 def test_build_subset_plan_skips_forward_for_no_forward_processor():

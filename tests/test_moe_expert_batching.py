@@ -46,7 +46,7 @@ class TestMoEExpertBatching(unittest.TestCase):
         self.looper._moe_vram_strategy_explicit = False
 
         self.processor.name.return_value = "GPTQProcessor"
-        self.processor.forward_config = ForwardConfig(
+        self.processor.forward = ForwardConfig(
                                                           required=True,
                                                           replay_after_process=True,
                                                       )

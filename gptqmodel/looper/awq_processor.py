@@ -695,7 +695,7 @@ class AWQProcessor(LoopProcessor):
         of AWQ-specific state and math.
         """
 
-        if not self.forward_config.activation_capture:
+        if not self.forward.activation_capture:
             return False
 
         root_policy = self._feature_aggregation_policy(moe_block_name)

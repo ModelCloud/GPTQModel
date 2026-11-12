@@ -45,7 +45,7 @@ class ModulePreProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            forward_config=ForwardConfig(
+            forward=ForwardConfig(
                 required=False,
                 replay_after_process=False,
             ),

@@ -693,7 +693,7 @@ def test_stage_subset_flush_goes_global_when_work_fans_out_across_devices():
 
 def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch):
     class DummyProcessor:
-        forward_config = ForwardConfig(required=False)
+        forward = ForwardConfig(required=False)
         tasks = {}
 
         def set_fwd_time(self, *_):
@@ -760,7 +760,7 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
 
 def test_subset_pass_restored_capture_skips_forward(monkeypatch):
     class DummyProcessor:
-        forward_config = ForwardConfig(
+        forward = ForwardConfig(
                                            required=True,
                                            replay_after_process=True,
                                        )
@@ -890,7 +890,7 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
     )
 
     class DummyProcessor:
-        forward_config = ForwardConfig(
+        forward = ForwardConfig(
                                            required=True,
                                            replay_after_process=True,
                                        )
@@ -1051,7 +1051,7 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
             return ImmediateFuture(callback(*args))
 
     class DummyProcessor:
-        forward_config = ForwardConfig(
+        forward = ForwardConfig(
                                            required=True,
                                            replay_after_process=True,
                                        )
@@ -1525,7 +1525,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
     class DummyProcessor:
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
-            self.forward_config = ForwardConfig(
+            self.forward = ForwardConfig(
                                                         required=True,
                                                         replay_after_process=False,
                                                         all_modules_in_single_pass=False,
@@ -1744,7 +1744,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
     class DummyProcessor:
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
-            self.forward_config = ForwardConfig(
+            self.forward = ForwardConfig(
                                                         required=True,
                                                         replay_after_process=False,
                                                         all_modules_in_single_pass=False,
@@ -1992,7 +1992,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
 
     class DummyProcessor:
         def __init__(self):
-            self.forward_config = ForwardConfig(
+            self.forward = ForwardConfig(
                                                         required=True,
                                                         replay_after_process=True,
                                                         all_modules_in_single_pass=False,
@@ -2682,7 +2682,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
 
     class DummyProcessor:
         def __init__(self, initial_inputs):
-            self.forward_config = ForwardConfig(
+            self.forward = ForwardConfig(
                                                         required=True,
                                                         replay_after_process=True,
                                                         all_modules_in_single_pass=False,

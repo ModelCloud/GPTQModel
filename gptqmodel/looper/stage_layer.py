@@ -806,8 +806,8 @@ def run_layer_stage(
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
             # Read the replay policy once per processor so the layer stage uses
-            # one execution config instead of a group of unrelated flags.
-            forward_config = processor.forward_config
+            # one forward config instead of a group of unrelated flags.
+            forward = processor.forward
 
             if is_input_embeddings_module:
                 layer_inputs = processor.inputs_cache.src_inputs
@@ -1000,8 +1000,8 @@ def run_layer_stage(
             replay_skipped_layer = (
                 not is_last_module
                 and not subset_plans
-                and forward_config.required
-                and forward_config.replay_after_process
+                and forward.required
+                and forward.replay_after_process
             )
 
             if replay_skipped_layer:
@@ -1050,7 +1050,7 @@ def run_layer_stage(
             replay_for_output_consumer = (
                 output_required
                 and not replay_after_process
-                and forward_config.required
+                and forward.required
             )
 
             if replay_skipped_layer or replay_after_process or replay_for_output_consumer:
@@ -1134,7 +1134,7 @@ def run_layer_stage(
                 if region_timer is not None:
                     region_timer.flush()
 
-            if forward_config.replay_after_process:
+            if forward.replay_after_process:
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs

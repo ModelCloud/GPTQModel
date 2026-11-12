@@ -283,7 +283,7 @@ class LoopProcessor:
             calibration_sort: Optional[str] = None,
             calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
-            forward_config: Optional[ForwardConfig] = None,
+            forward: Optional[ForwardConfig] = None,
             lifecycle: Optional[ProcessorLifecycleConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
@@ -305,12 +305,12 @@ class LoopProcessor:
 
         # Keep lifecycle and replay policy in one object so the stages consume
         # one forward mode instead of a scattered set of booleans.
-        if lifecycle is not None and forward_config is not None and lifecycle.forward != forward_config:
-            raise ValueError("lifecycle.forward and forward_config disagree")
+        if lifecycle is not None and forward is not None and lifecycle.forward != forward:
+            raise ValueError("lifecycle.forward conflicts with the supplied forward")
         self.lifecycle = lifecycle or ProcessorLifecycleConfig(
-            forward=forward_config or ForwardConfig()
+            forward=forward or ForwardConfig()
         )
-        self.forward_config = self.lifecycle.forward
+        self.forward = self.lifecycle.forward
 
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _ThreadSafeDict()

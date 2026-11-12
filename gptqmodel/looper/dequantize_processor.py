@@ -29,7 +29,7 @@ class DequantizeProcessor(LoopProcessor):
             calibration_concat_size=None,
             prepare_dataset_func=None,
             batch_size=1,
-            forward_config=ForwardConfig(
+            forward=ForwardConfig(
                 required=False,
                 replay_after_process=False,
             ),

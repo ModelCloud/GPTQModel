@@ -162,7 +162,7 @@ Checkpointed quantization records the effective packing fields and winning rule 
 | Calibrated method has no processor mapping | `QuantizationRunPlan.build` raises `ValueError` before the looper starts. |
 | Weight-only config requests EoRA or native capture | `QuantizationRunPlan.build` raises `NotImplementedError`. |
 | Checkpoint processor chain is unsupported | `quantize()` raises `NotImplementedError` before processor construction. |
-| `lifecycle.forward` and `forward_config` disagree | `LoopProcessor.__init__` raises `ValueError`. |
+| Supplied `forward` conflicts with `lifecycle.forward` | `LoopProcessor.__init__` raises `ValueError`. |
 | Negative dynamic rule wins | The module is skipped and the exclusion is recorded by the existing calibration policy. |
 | Snapshot name differs from the packed module name | `create_quant_module` raises `ValueError`; a snapshot cannot leak across modules. |
 
