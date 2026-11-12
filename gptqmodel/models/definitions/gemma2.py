@@ -49,18 +49,15 @@ class Gemma2QModel(LlamaQModel):
                     return
 
                 # quantized gemma-2 27b model only support vLLM/SGLang load.
-                from ...utils.vllm import VLLM_AVAILABLE
-                if VLLM_AVAILABLE:
-                    from vllm import LLM
-                    if isinstance(self.model, LLM):
-                        backend = BACKEND.VLLM
+                from ...utils.sglang import is_sglang_model
+                from ...utils.vllm import is_vllm_model
 
-                from ...utils.sglang import SGLANG_AVAILABLE
-                if SGLANG_AVAILABLE:
-                    from sglang.srt.server import Runtime
-                    if isinstance(self.model, Runtime):
-                        backend = BACKEND.SGLANG
+                backend = None
+                if is_vllm_model(self.model):
+                    backend = BACKEND.VLLM
+                elif is_sglang_model(self.model):
+                    backend = BACKEND.SGLANG
 
-                if backend not in [BACKEND.VLLM,  BACKEND.SGLANG]:
+                if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
                     raise ValueError(SUPPORT_ERR)
 
