@@ -282,7 +282,12 @@ def gptq_solve_blockfloat(
 
 
 __all__ += [
+    "BLOCKFLOAT_SAVE_FORMAT_VERSION",
     "DEFAULT_CALIBRATION_TEXT",
+    "decompose_blockfloat",
+    "load_blockfloat_into_model",
+    "recompose_blockfloat",
+    "save_blockfloat_checkpoint",
     "collect_layer_hessians",
     "quantize_model_blockfloat",
 ]
@@ -438,3 +443,213 @@ def quantize_model_blockfloat(
             if verbose:
                 log.info(f"TTBlockFloat: {key} norm_l1={norm_l1:.4f} on_grid={on_grid}")
     return report
+
+
+# --- packed checkpoint format ----------------------------------------------
+#
+# A grid-quantized weight is fully described by one small integer per element plus
+# one exponent per 16-value block, so it can be stored at bf4 density WITHOUT
+# re-quantising at load time:
+#
+#   codes:      uint8 per element, value in [0, 2*mantissa_bits] -- 0..8 for bf4
+#   exponents:  int8 per 16-value block
+#   dequant:    value = code / levels * 2**exponent
+#
+# That is exact: it is the same arithmetic the grid quantiser used, so loading
+# reproduces the quantised weights bit-for-bit. Because the codes are already on
+# the hardware grid, the loader can either expand them to floats or feed them
+# straight to a TT kernel, with no host-side re-quantisation.
+
+BLOCKFLOAT_SAVE_FORMAT_VERSION = 1
+
+
+def decompose_blockfloat(
+    weight: torch.Tensor, bits: int = 4, block: int = BLOCKFLOAT_BLOCK
+) -> "tuple[torch.Tensor, torch.Tensor]":
+    """Split a grid-quantized weight into integer codes and per-block exponents.
+
+    Raises if ``weight`` is not exactly on the grid, so a checkpoint can never
+    silently claim to be native when it is not.
+    """
+
+    w = weight.to(torch.float32)
+    rows, cols = w.shape
+    if cols % block:
+        raise ValueError(f"in_features={cols} must be a multiple of {block}")
+    levels = 1 << stored_mantissa_bits(bits)
+    # Grid codes span [-(2*levels-1), +(2*levels-1)]: one implicit mantissa bit
+    # lets a block hold values up to just under 2x its shared scale. That is
+    # 2**(bits-1) levels per sign for 4-bit, so the code fits a nibble exactly.
+    offset = 2 * levels - 1
+    # Recover each block's exponent. floor(log2(max)) is right only when the block
+    # max sits in the lower half of its binade, so search upward and keep the
+    # candidate that reproduces the weights exactly.
+    base = _block_exponents(w, block)
+    for shift in range(0, 3):
+        candidate = (base + shift).to(torch.float32)
+        scale = torch.pow(2.0, candidate).repeat_interleave(block, dim=1)
+        codes = torch.round(w / scale * levels)
+        if codes.abs().max() > offset:
+            continue
+        if torch.equal(codes / levels * scale, w):
+            packed = (codes + offset).to(torch.uint8)
+            return packed, candidate.to(torch.int8)
+    raise ValueError("weight is not exactly on the block-float grid")
+
+
+def recompose_blockfloat(
+    codes: torch.Tensor, exponents: torch.Tensor, bits: int = 4, block: int = BLOCKFLOAT_BLOCK
+) -> torch.Tensor:
+    """Rebuild exact grid weights from codes plus exponents (inverse of decompose)."""
+
+    levels = 1 << stored_mantissa_bits(bits)
+    offset = 2 * levels - 1
+    scale = torch.pow(2.0, exponents.to(torch.float32)).repeat_interleave(block, dim=1)
+    return ((codes.to(torch.float32) - offset) / levels * scale).contiguous()
+
+
+def _pack_codes(codes: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack codes at their natural density: two per byte for 4-bit, one for 8-bit."""
+
+    flat = codes.reshape(-1)
+    if bits == 4:
+        if flat.numel() % 2:
+            flat = torch.nn.functional.pad(flat, (0, 1))
+        lo = flat[0::2].to(torch.int16)
+        hi = flat[1::2].to(torch.int16)
+        return (lo | (hi << 4)).to(torch.uint8)
+    return flat.to(torch.uint8)
+
+
+def _unpack_codes(packed: torch.Tensor, bits: int, shape: "tuple") -> torch.Tensor:
+    """Inverse of :func:`_pack_codes`."""
+
+    flat = packed.reshape(-1)
+    if bits == 4:
+        lo = (flat & 0x0F).to(torch.int16)
+        hi = ((flat >> 4) & 0x0F).to(torch.int16)
+        out = torch.stack([lo, hi], dim=1).reshape(-1)
+        return out[: shape[0] * shape[1]].to(torch.uint8).reshape(shape)
+    return flat[: shape[0] * shape[1]].to(torch.uint8).reshape(shape)
+
+
+def save_blockfloat_checkpoint(
+    model,
+    output_dir: str,
+    *,
+    bits: int = 4,
+    metadata: "Optional[dict]" = None,
+) -> dict:
+    """Write grid-quantized decoder linears as a bf4/bf8-native checkpoint.
+
+    Weights become ``<layer>.blockfloat_codes`` (uint8) plus
+    ``<layer>.blockfloat_exponents`` (int8), so the stored payload is 1 byte per
+    element for bf4 -- the same order as int4 packing without a second quantisation
+    step at load. Returns a summary of what was written.
+    """
+
+    import json
+    import os
+
+    from .logger import setup_logger
+
+    log = setup_logger()
+    blocks = _decoder_blocks(model)
+    tensors: dict = {}
+    summary: dict = {}
+
+    for index, block in enumerate(blocks):
+        for name, module in block.named_modules():
+            if not hasattr(module, "weight") or module.weight is None:
+                continue
+            if module.weight.dim() != 2:
+                continue
+            key = f"{index}.{name}"
+            w = module.weight.detach().to(torch.float32)
+            try:
+                codes, exponents = decompose_blockfloat(w, bits=bits)
+            except ValueError:
+                # Not quantized (or not on the grid): keep it as dense float.
+                tensors[f"{key}.weight"] = w.to(torch.float16)
+                continue
+            tensors[f"{key}.blockfloat_codes"] = _pack_codes(codes, bits)
+            tensors[f"{key}.blockfloat_code_shape"] = torch.tensor(codes.shape)
+            tensors[f"{key}.blockfloat_exponents"] = exponents
+            if getattr(module, "bias", None) is not None:
+                tensors[f"{key}.bias"] = module.bias.detach().float().to(torch.float16)
+            packed = tensors[f"{key}.blockfloat_codes"]
+            summary[key] = {
+                "shape": list(w.shape),
+                "codes_bytes": int(packed.numel()),
+                "numel": int(codes.numel()),
+                "exponent_bytes": int(exponents.numel()),
+            }
+
+    os.makedirs(output_dir, exist_ok=True)
+    torch.save(tensors, os.path.join(output_dir, "blockfloat.pt"))
+    meta = {
+        "format": "tt-blockfloat",
+        "version": BLOCKFLOAT_SAVE_FORMAT_VERSION,
+        "bits": bits,
+        "block": BLOCKFLOAT_BLOCK,
+        "stored_mantissa_bits": stored_mantissa_bits(bits),
+        "layers": summary,
+    }
+    if metadata:
+        meta.update(metadata)
+    with open(os.path.join(output_dir, "blockfloat.json"), "w") as handle:
+        json.dump(meta, handle, indent=1)
+    total = sum(v["codes_bytes"] + v["exponent_bytes"] for v in summary.values())
+    log.info(
+        f"TTBlockFloat: wrote {len(summary)} layers to {output_dir} "
+        f"({total / 1024 / 1024:.2f} MiB payload, {bits}-bit)"
+    )
+    return {"layers": len(summary), "payload_bytes": total, "bits": bits}
+
+
+def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
+    """Restore native grid weights into ``model`` from a saved checkpoint.
+
+    No quantisation happens here -- the codes are already on the hardware grid, so
+    this is arithmetic-free reconstruction and lands on the identical values.
+    """
+
+    import json
+    import os
+
+    meta_path = os.path.join(checkpoint_dir, "blockfloat.json")
+    tensors_path = os.path.join(checkpoint_dir, "blockfloat.pt")
+    with open(meta_path) as handle:
+        meta = json.load(handle)
+    if meta.get("format") != "tt-blockfloat":
+        raise ValueError(f"{meta_path} is not a tt-blockfloat checkpoint")
+    if meta.get("version") != BLOCKFLOAT_SAVE_FORMAT_VERSION:
+        raise ValueError(
+            f"unsupported blockfloat checkpoint version {meta.get('version')}"
+        )
+    bits = int(meta["bits"])
+    tensors = torch.load(tensors_path, map_location="cpu")
+
+    blocks = _decoder_blocks(model)
+    restored = {}
+    with torch.no_grad():
+        for index, block in enumerate(blocks):
+            for name, module in block.named_modules():
+                if not hasattr(module, "weight") or module.weight is None:
+                    continue
+                key = f"{index}.{name}"
+                codes = tensors.get(f"{key}.blockfloat_codes")
+                exponents = tensors.get(f"{key}.blockfloat_exponents")
+                if codes is None or exponents is None:
+                    continue
+                shape = tensors.get(f"{key}.blockfloat_code_shape")
+                if shape is not None:
+                    codes = _unpack_codes(codes, bits, tuple(int(v) for v in shape))
+                module.weight.copy_(
+                    recompose_blockfloat(codes, exponents, bits=bits).to(module.weight.dtype)
+                )
+                bias = tensors.get(f"{key}.bias")
+                if bias is not None and getattr(module, "bias", None) is not None:
+                    module.bias.copy_(bias.to(module.bias.dtype))
+                restored[key] = list(codes.shape)
+    return restored

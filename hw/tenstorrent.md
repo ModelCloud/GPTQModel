@@ -842,7 +842,48 @@ Encoding values and reading them back, rather than trusting documentation:
 Both match `stored_mantissa_bits()`, so the quantizer and the hardware agree on the
 grid -- no wasted precision, and no values the hardware would silently re-round.
 
-**Blocks are 16 values with one shared exponent each.** Verified by placing a
+**## Saving a native-format checkpoint
+
+A grid-quantized weight is fully described by one small integer per element plus
+one exponent per 16-value block, so it can be stored at bf4 density **without
+re-quantising at load**:
+
+```
+codes:      uint8 per element, value in [0, 2*levels]   (15 levels for bf4)
+exponents:  int8 per 16-value block
+reconstruct: value = (code - offset) / levels * 2**exponent
+```
+
+Codes pack two per byte at 4-bit density. Measured on **facebook/opt-125m**:
+
+| | |
+| --- | --- |
+| layers saved / restored | **72 / 72** |
+| checkpoint payload | **45.56 MiB** (85M codes nibble-packed) |
+| weights bit-exact after load | **True** |
+| next-token logits vs pre-save | **identical**, maxdiff `0.00e+00` |
+
+`save_blockfloat_checkpoint` / `load_blockfloat_into_model` implement this. The
+loader performs no quantisation -- it is pure reconstruction, so a saved model
+loads onto exactly the values the solver produced.
+
+### Two bugs this exposed, both silent
+
+1. **The code range is `[-(2*levels-1), 2*levels-1]`, not `[-levels, levels]`.**
+   One implicit mantissa bit lets a block hold values up to just under twice its
+   shared scale, so 4-bit needs 15 levels and codes reach 14. Decompose rejected
+   valid weights because it clamped at `levels`, which looked like "this model
+   isn't quantized" rather than a range bug.
+2. **`floor(log2(block_max))` is not always the quantiser's exponent.** It is
+   right only when the block max lands in the lower half of its binade. Decompose
+   now tries the exponent and its neighbour and keeps whichever reproduces the
+   weights exactly -- or refuses, so a checkpoint can never claim to be native
+   when it is not.
+
+A third, less subtle: `payload_bytes` initially reported the *unpacked* code count
+(86 MiB) while 45.56 MiB actually reached disk.
+
+Blocks are 16 values with one shared exponent each.** Verified by placing a
 16x weaker segment next to a strong one in the same row: both keep their own 4
 levels and carry different exponents (measured -1 and -5), rather than the weak
 segment collapsing into a single value. An earlier probe that put strong and weak

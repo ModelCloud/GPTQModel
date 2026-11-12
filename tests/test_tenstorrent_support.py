@@ -1278,6 +1278,55 @@ def test_blockfloat_grid_matches_hardware_levels():
     assert torch.unique(out[0, 16:]).numel() == 4
 
 
+def test_blockfloat_pack_roundtrips_exactly():
+    """Codes plus exponents must reconstruct the grid weights bit-for-bit.
+
+    The checkpoint stores no floats for weights, so exactness here is what makes
+    "native format" true rather than approximate.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(4)
+    w = bq.quantize_bfloat4_b(torch.randn(64, 128) * 0.02)
+    codes, exponents = bq.decompose_blockfloat(w, bits=4)
+    assert codes.dtype == torch.uint8
+    assert bq.recompose_blockfloat(codes, exponents, bits=4).equal(w)
+
+    # Two codes per byte at 4-bit density.
+    packed = bq._pack_codes(codes, 4)
+    assert packed.numel() == codes.numel() // 2
+    unpacked = bq._unpack_codes(packed, 4, tuple(codes.shape))
+    assert unpacked.equal(codes)
+
+    # Off-grid input must be rejected rather than silently approximated.
+    with pytest.raises(ValueError, match="not exactly on the block-float grid"):
+        bq.decompose_blockfloat(torch.randn(8, 16) * 0.017, bits=4)
+
+
+def test_blockfloat_decompose_allows_the_full_code_range():
+    """A block may hold values up to just under 2x its shared scale.
+
+    The code range is [-(2*levels-1), 2*levels-1] -- 15 values for 4-bit -- not
+    [-levels, levels]. Clamping at levels rejected valid quantised weights.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    # Force values in the upper half of the binade, which needs the extra bit.
+    w = torch.zeros(1, 16)
+    w[0, :8] = 0.9
+    w[0, 8:] = -0.9
+    quantized = bq.quantize_bfloat4_b(w)
+    codes, exponents = bq.decompose_blockfloat(quantized, bits=4)
+    assert int(codes.max()) > 4, "test data should exercise codes above levels"
+    assert bq.recompose_blockfloat(codes, exponents, bits=4).equal(quantized)
+
+
 def test_gptq_blockfloat_is_native_not_an_int4_cast():
     """The solve must land on the bf4 grid itself, not pass through int4.
 
