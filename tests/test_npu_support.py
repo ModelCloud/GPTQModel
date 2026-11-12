@@ -438,7 +438,7 @@ def test_npu_awq_processor_selects_torch_runtime_kernel():
     )
 
     assert processor.name() == "awq"
-    assert processor.execution_config.enable_activation_capture is True
+    assert processor.execution_config.forward.activation_capture is True
     assert processor.qlinear_kernel is AwqTorchLinear
     assert _npu_select_quant_linear(qcfg, method=METHOD.AWQ, fmt=FORMAT.GEMM) is AwqTorchLinear
 
@@ -460,7 +460,7 @@ def test_npu_paroquant_processor_has_torch_runtime_kernel():
     )
 
     assert processor.name() == "paroquant"
-    assert processor.execution_config.enable_activation_capture is True
+    assert processor.execution_config.forward.activation_capture is True
     assert processor.qlinear_kernel is ParoLinear
     assert _npu_select_quant_linear(qcfg, method=METHOD.PARO, fmt=FORMAT.PAROQUANT) is ParoLinear
 

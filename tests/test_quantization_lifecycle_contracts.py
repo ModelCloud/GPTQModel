@@ -72,6 +72,10 @@ def test_lifecycle_use_returns_configured_copy():
             forward=ForwardConfig(
                 required=False,
                 replay_after_process=False,
+                all_modules_in_single_pass=True,
+                subset_early_stop=True,
+                activation_capture=True,
+                capture_layer_context=True,
             )
         )
     )
@@ -79,8 +83,16 @@ def test_lifecycle_use_returns_configured_copy():
     assert configured is not lifecycle
     assert configured.execution.forward.required is False
     assert configured.execution.forward.replay_after_process is False
+    assert configured.execution.forward.all_modules_in_single_pass is True
+    assert configured.execution.forward.subset_early_stop is True
+    assert configured.execution.forward.activation_capture is True
+    assert configured.execution.forward.capture_layer_context is True
     assert lifecycle.execution.forward.required is True
     assert lifecycle.execution.forward.replay_after_process is True
+    assert lifecycle.execution.forward.all_modules_in_single_pass is False
+    assert lifecycle.execution.forward.subset_early_stop is False
+    assert lifecycle.execution.forward.activation_capture is False
+    assert lifecycle.execution.forward.capture_layer_context is False
 
 
 def test_effective_module_config_is_ordered_and_immutable():

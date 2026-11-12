@@ -194,40 +194,40 @@ class _ThreadSafeInputCache:
 
 @dataclass(frozen=True)
 class ForwardConfig:
-    """Describe whether and when a processor replays a layer forward."""
+    """Describe how a processor captures and replays layer forwards."""
 
     required: bool = True
     replay_after_process: bool = True
+    # Whether layer modules are replayed in one combined pass instead of per subset.
+    all_modules_in_single_pass: bool = False
+    # Whether a subset forward can stop as soon as the last subset hook fires.
+    subset_early_stop: bool = False
+    # Whether capture-only modules/hooks (for example ':?') should be enabled.
+    activation_capture: bool = False
+    # Whether the processor needs the original layer IO from the pre-process
+    # forward, even when the authoritative next-layer cache is produced by a
+    # later replay-after-process step.
+    capture_layer_context: bool = False
 
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    """Describe how a processor participates in forward replay and activation capture.
+    """Describe how a processor executes.
 
     Processor defaults:
 
-    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
-    | Processor     | required?| replay_after_process? | single_pass_all_modules?  | early_stop?    | activation_capture?|
-    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
-    | GPTQ          | yes      | yes                    | no                        | yes            | no                 |
-    | AWQ           | yes      | yes                    | no                        | yes            | yes                |
-    | ParoQuant     | yes      | yes                    | no                        | yes            | yes                |
-    | Native        | yes      | no                     | yes                       | no             | no                 |
-    | WeightOnly    | no       | no                     | no/default                | no/default     | no                 |
-    +--------------+----------+------------------------+---------------------------+----------------+--------------------+
+    +--------------+----------+------------------------+---------------------------+------------+--------------------+
+    | Processor     | required?| replay_after_process? | all_modules_in_single_pass?| early_stop?| activation_capture?|
+    +--------------+----------+------------------------+---------------------------+------------+--------------------+
+    | GPTQ          | yes      | yes                    | no                        | yes        | no                 |
+    | AWQ           | yes      | yes                    | no                        | yes        | yes                |
+    | ParoQuant     | yes      | yes                    | no                        | yes        | yes                |
+    | Native        | yes      | no                     | yes                       | no         | no                 |
+    | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
+    +--------------+----------+------------------------+---------------------------+------------+--------------------+
     """
 
     forward: ForwardConfig = ForwardConfig()
-    # Whether layer modules are replayed in one combined pass instead of per subset.
-    fwd_all_modules_in_single_pass: bool = False
-    # Whether a subset forward can stop as soon as the last subset hook fires.
-    subset_forward_early_stop: bool = False
-    # Whether capture-only modules/hooks (for example ':?') should be enabled.
-    enable_activation_capture: bool = False
-    # Whether the processor needs the original layer IO from the pre-process
-    # forward, even when the authoritative next-layer cache is produced by a
-    # later replay-after-process step.
-    capture_layer_forward_context: bool = False
 
 
 class CalibrationTypes(str, Enum):

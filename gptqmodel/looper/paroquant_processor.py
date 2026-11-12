@@ -258,10 +258,10 @@ class ParoQuantProcessor(LoopProcessor):
                 forward=ForwardConfig(
                     required=require_fwd,
                     replay_after_process=True,
+                    subset_early_stop=True,
+                    activation_capture=True,
+                    capture_layer_context=capture_group_layer_context,
                 ),
-                subset_forward_early_stop=True,
-                enable_activation_capture=True,
-                capture_layer_forward_context=capture_group_layer_context,
             )),
         )
 

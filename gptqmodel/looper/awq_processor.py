@@ -276,9 +276,9 @@ class AWQProcessor(LoopProcessor):
                 forward=ForwardConfig(
                     required=require_fwd,
                     replay_after_process=True,
+                    subset_early_stop=True,
+                    activation_capture=True,
                 ),
-                subset_forward_early_stop=True,
-                enable_activation_capture=True,
             )),
         )
 
@@ -698,7 +698,7 @@ class AWQProcessor(LoopProcessor):
         of AWQ-specific state and math.
         """
 
-        if not self.execution_config.enable_activation_capture:
+        if not self.execution_config.forward.activation_capture:
             return False
 
         root_policy = self._feature_aggregation_policy(moe_block_name)

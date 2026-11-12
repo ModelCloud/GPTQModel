@@ -609,8 +609,8 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
             forward=ForwardConfig(
                 required=True,
                 replay_after_process=False,
+                all_modules_in_single_pass=True,
             ),
-            fwd_all_modules_in_single_pass=True,
         )
     )
 

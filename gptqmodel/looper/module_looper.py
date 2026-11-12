@@ -1869,7 +1869,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Capture-only layer groups are driven by processor execution config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(getattr(proc, "execution_config", None), "enable_activation_capture", False)
+            getattr(
+                getattr(getattr(proc, "execution_config", None), "forward", None),
+                "activation_capture",
+                False,
+            )
             for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(

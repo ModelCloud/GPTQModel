@@ -2929,7 +2929,7 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
         model=None,
     )
 
-    assert processor.execution_config.capture_layer_forward_context is expected_capture
+    assert processor.execution_config.forward.capture_layer_context is expected_capture
 
 
 @pytest.mark.parametrize(

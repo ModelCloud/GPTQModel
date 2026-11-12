@@ -734,8 +734,8 @@ class EXL3Processor(LoopProcessor):
                 forward=ForwardConfig(
                     required=require_fwd,
                     replay_after_process=True,
+                    subset_early_stop=True,
                 ),
-                subset_forward_early_stop=True,
             )),
         )
 

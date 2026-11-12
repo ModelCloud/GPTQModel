@@ -661,7 +661,7 @@ def build_layer_subset_plans(
     else:
         module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-    if execution_config.fwd_all_modules_in_single_pass:
+    if execution_config.forward.all_modules_in_single_pass:
         # Native-style processors consume one merged replay over the whole layer.
         # Build one plan up front so the layer stage does not keep re-deriving
         # merged subset state while it is also coordinating execution.
@@ -884,7 +884,7 @@ def _run_single_subset_pass(
     if (
         execute_forward
         and not plan.need_forward_outputs
-        and not execution_config.capture_layer_forward_context
+        and not execution_config.forward.capture_layer_context
         and callable(restore_capture)
     ):
         capture_restored = bool(
@@ -997,7 +997,7 @@ def _run_single_subset_pass(
                     )
                 enable_stop = (
                     execution_config.forward.replay_after_process
-                    or execution_config.subset_forward_early_stop
+                    or execution_config.forward.subset_early_stop
                 )
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
@@ -1042,7 +1042,7 @@ def _run_single_subset_pass(
             )
 
     capture_layer_forward_context = (
-        execute_forward and execution_config.capture_layer_forward_context
+        execute_forward and execution_config.forward.capture_layer_context
     )
     if capture_layer_forward_context:
         subset_capture_override = getattr(
