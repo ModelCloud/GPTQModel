@@ -363,6 +363,62 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                 raise AssertionError("inference tensor unexpectedly exposed a version")
         return True
 
+    def embedding_row_gather() -> bool:
+        # Quantized embeddings decode a lookup with per-token gathers on the
+        # packed word row, the intra-word shift, and the scale/zero group. A
+        # golden result for one fixed token set is computed once on the main
+        # thread; every concurrent worker repeats the gathers and must match it
+        # exactly, so a torn or cross-thread read is detected.
+        vocab, dim, group_size = 4096, 128, 128
+        num_groups = vocab // group_size
+        state = {}
+
+        def decode(weight, zeros, scales, groups, ids, device):
+            tokens = torch.arange(vocab, device=device, dtype=torch.int32)
+            word_of_token = torch.div(tokens, 8, rounding_mode="floor")
+            shifts = tokens.remainder(8) * 4
+            codes = (weight.index_select(0, word_of_token.index_select(0, ids))
+                     >> shifts.index_select(0, ids).view(-1, 1)) & 0xF
+            selected = groups.index_select(0, ids)
+            return ((codes.to(torch.int16) - zeros.index_select(0, selected))
+                    * scales.index_select(0, selected))
+
+        if not hasattr(embedding_row_thread, "device"):
+            embedding_row_thread.device = embedding_row_next_device[0] % 2
+            embedding_row_next_device[0] += 1
+        device = embedding_row_thread.device
+        torch.cuda.set_device(device)
+
+        with embedding_row_lock:
+            if device not in state:
+                weight = torch.randint(
+                    0, 1 << 31, (vocab * 4 // 32, dim), dtype=torch.int32, device=device
+                )
+                zeros = torch.randint(0, 16, (num_groups, dim), dtype=torch.int16, device=device)
+                scales = torch.rand(num_groups, dim, device=device, dtype=torch.float16)
+                groups = torch.arange(vocab, device=device, dtype=torch.int32) // group_size
+                ids = torch.randint(
+                    0, vocab, (256,),
+                    generator=torch.Generator(device=device).manual_seed(20261112),
+                    device=device,
+                )
+                torch.cuda.synchronize()
+                state[device] = (
+                    weight, zeros, scales, groups, ids,
+                    decode(weight, zeros, scales, groups, ids, device),
+                )
+            weight, zeros, scales, groups, ids, golden = state[device]
+
+        got = decode(weight, zeros, scales, groups, ids, device)
+        torch.cuda.current_stream().synchronize()
+        if not bool(torch.equal(got, golden)):
+            raise AssertionError("concurrent embedding row gather changed values")
+        return True
+
+    embedding_row_thread = threading.local()
+    embedding_row_next_device = [0]
+    embedding_row_lock = threading.Lock()
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -404,6 +460,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
+        "Tensor.index_select row gather": embedding_row_gather,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
