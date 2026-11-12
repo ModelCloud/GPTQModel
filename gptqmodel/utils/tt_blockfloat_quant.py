@@ -36,7 +36,7 @@ that report.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -335,7 +335,7 @@ def collect_layer_hessians(
     tokenizer,
     *,
     layers: Optional[list] = None,
-    text: str,
+    text: Union[str, Sequence[str]],
     nsamples: int = 32,
     seqlen: int = 256,
 ) -> dict:
@@ -398,7 +398,7 @@ def quantize_model_blockfloat(
     bits: int = 4,
     damp: float = 0.01,
     nsamples: int = 32,
-    text: str,
+    text: Union[str, Sequence[str]],
     verbose: bool = False,
 ) -> dict:
     """Quantize every decoder linear onto the TT block-float grid, in place.

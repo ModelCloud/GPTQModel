@@ -106,3 +106,75 @@ def test_invalid_window_arguments_are_rejected():
         list(cal.iter_calibration_windows(_Tok(64), "ignored", seqlen=4, nsamples=2))
     with pytest.raises(ValueError, match="nsamples"):
         list(cal.iter_calibration_windows(_Tok(64), "ignored", seqlen=16, nsamples=0))
+
+
+class _CountingTok:
+    """Tokenizer stub yielding globally increasing ids, one block per call."""
+
+    def __init__(self):
+        self.next_id = 0
+
+    def __call__(self, text, return_tensors=None):
+        class _Out:
+            input_ids = None
+
+        start = self.next_id
+        self.next_id += len(text)
+        out = _Out()
+        out.input_ids = torch.arange(start, self.next_id).unsqueeze(0)
+        return out
+
+
+def test_windows_accept_records_from_a_dataset():
+    cal = _calibration()
+    tok = _CountingTok()
+    windows = list(
+        cal.iter_calibration_windows(
+            tok, ["a" * 8, "b" * 12, "c" * 8], seqlen=8, nsamples=2
+        )
+    )
+
+    # 8 + 12 + 8 = 28 ids concatenated, so the windows stride across records.
+    assert [tuple(window.shape) for window in windows] == [(1, 8), (1, 8)]
+    assert [int(window[0, 0]) for window in windows] == [0, 8]
+
+
+def test_load_calibration_records_reads_json_gz(tmp_path):
+    import gzip
+    import json
+
+    cal = _calibration()
+    path = tmp_path / "calibration.json.gz"
+    with gzip.open(path, "wt") as handle:
+        json.dump([{"text": "first"}, {"text": "second"}, {"text": "third"}], handle)
+
+    assert cal.load_calibration_records(str(path)) == ["first", "second", "third"]
+    assert cal.load_calibration_records(str(path), rows=2) == ["first", "second"]
+
+
+def test_load_calibration_records_reads_jsonl(tmp_path):
+    import json
+
+    cal = _calibration()
+    path = tmp_path / "calibration.jsonl"
+    path.write_text("\n".join(json.dumps({"text": t}) for t in ("a", "b")) + "\n")
+
+    assert cal.load_calibration_records(str(path)) == ["a", "b"]
+
+
+def test_load_calibration_records_rejects_records_without_text(tmp_path):
+    import json
+
+    cal = _calibration()
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps([{"nope": 1}]))
+
+    with pytest.raises(ValueError, match="no calibration text"):
+        cal.load_calibration_records(str(path))
+
+
+def test_missing_calibration_file_is_reported_not_silently_skipped(tmp_path):
+    cal = _calibration()
+    missing = str(tmp_path / "absent.json.gz")
+    with pytest.raises(FileNotFoundError, match="calibration file not found"):
+        cal.load_calibration_records(missing)

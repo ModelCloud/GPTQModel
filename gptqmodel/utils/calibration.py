@@ -669,15 +669,111 @@ def prepare_calibration_dataset(
 MIN_WINDOW_TOKENS = 8
 
 
+def _record_text(record: Any) -> Optional[str]:
+    """Pull the text out of one calibration record."""
+
+    if isinstance(record, str):
+        return record
+    if isinstance(record, dict):
+        for key in ("text", "content", "prompt", "question"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        joined = " ".join(str(v) for v in record.values() if isinstance(v, str))
+        return joined or None
+    return None
+
+
+def load_calibration_records(
+    source: Optional[str] = None, *, rows: int = 0
+) -> List[str]:
+    """Load calibration texts from the source the GPTQ test harness uses.
+
+    Resolution order mirrors ``tests/models/model_test.py`` so the TT path and the
+    GPTQ path calibrate on the same records: an explicit ``source``, then
+    ``$GPTQMODEL_CALIBRATION_PARQUET``, then the local ``nm-calibration`` parquet,
+    then the ``nm-calibration`` dataset repo. Parquet needs ``pyarrow``; the JSON
+    and JSONL forms do not.
+    """
+
+    source = (
+        source
+        or os.environ.get("GPTQMODEL_CALIBRATION_PARQUET")
+        or "/monster/data/model/dataset/nm-calibration/llm.parquet"
+    )
+
+    records: Any
+    if os.path.isfile(source):
+        if source.endswith(".gz"):
+            import gzip
+            import json
+
+            with gzip.open(source, "rt") as handle:
+                records = json.load(handle)
+        elif source.endswith(".jsonl"):
+            import json
+
+            with open(source) as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+        elif source.endswith(".json"):
+            import json
+
+            with open(source) as handle:
+                records = json.load(handle)
+        elif source.endswith(".parquet"):
+            try:
+                import pyarrow.parquet as pq
+            except ImportError as exc:  # pragma: no cover - depends on environment
+                raise ImportError(
+                    f"reading {source} needs pyarrow; install a numpy-compatible "
+                    "build or export the records as JSONL"
+                ) from exc
+            records = pq.read_table(source).to_pylist()
+        else:
+            raise ValueError(f"unsupported calibration file type: {source}")
+    else:
+        if source.startswith(("/", "./", "../", "~")):
+            raise FileNotFoundError(
+                f"calibration file not found: {os.path.expanduser(source)}; pass a "
+                "local file or a Hub dataset repo id instead"
+            )
+        # Treat it as a Hub dataset repo and fetch the JSON payload it ships.
+        from huggingface_hub import hf_hub_download, list_repo_files
+
+        files = list(list_repo_files(source, repo_type="dataset"))
+        preferred = [
+            name for name in files
+            if name.endswith((".json.gz", ".json", ".jsonl", ".parquet"))
+        ]
+        if not preferred:
+            raise ValueError(f"{source} ships no JSON or parquet calibration file")
+        local = hf_hub_download(
+            source, preferred[0], repo_type="dataset"
+        )
+        return load_calibration_records(local, rows=rows)
+
+    if isinstance(records, dict):
+        records = list(records.values())
+    texts = [text for text in (_record_text(r) for r in records) if text]
+    if not texts:
+        raise ValueError(f"no calibration text found in {source}")
+    return texts[:rows] if rows else texts
+
+
 def iter_calibration_windows(
     tokenizer,
-    text: str,
+    text: Union[str, Sequence[str]],
     *,
     seqlen: int = 256,
     nsamples: int = 32,
     min_tokens: int = MIN_WINDOW_TOKENS,
 ) -> Iterator[torch.Tensor]:
     """Yield ``nsamples`` distinct ``[1, seqlen]`` windows of ``text``.
+
+    ``text`` may be one string or a sequence of calibration records. Records are
+    tokenized individually -- as the GPTQ calibration loader does -- and the ids
+    are concatenated before windowing, so a dataset-based run covers the same
+    records the quantizer would see.
 
     GPTQ's error feedback pushes each layer's rounding error into directions where
     the calibration input has little curvature, so the Hessian decides *where* the
@@ -705,7 +801,15 @@ def iter_calibration_windows(
         raise ValueError(f"nsamples must be positive, got {nsamples}")
 
     log = setup_logger()
-    ids = tokenizer(text, return_tensors="pt").input_ids
+    if isinstance(text, str):
+        ids = tokenizer(text, return_tensors="pt").input_ids
+    else:
+        rows = [row for row in text if isinstance(row, str) and row.strip()]
+        if not rows:
+            raise ValueError("calibration records are empty")
+        ids = torch.cat(
+            [tokenizer(row, return_tensors="pt").input_ids for row in rows], dim=1
+        )
     if ids.dim() != 2:
         ids = ids.unsqueeze(0)
     total = int(ids.shape[1])
@@ -742,5 +846,6 @@ __all__ = [
     "MIN_WINDOW_TOKENS",
     "batched",
     "iter_calibration_windows",
+    "load_calibration_records",
     "prepare_calibration_dataset",
 ]

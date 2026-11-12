@@ -29,14 +29,24 @@ def main(argv: list) -> int:
     parser.add_argument("--out", required=True, help="checkpoint output directory")
     parser.add_argument("--bits", type=int, default=4, choices=(4, 8))
     parser.add_argument("--nsamples", type=int, default=8)
-    parser.add_argument(
+    calibration_source = parser.add_mutually_exclusive_group(required=True)
+    calibration_source.add_argument(
         "--calibration",
-        required=True,
         help=(
-            "calibration text for the per-layer Hessians. Required: a narrow "
-            "passage tunes GPTQ's error feedback to that passage, which is "
-            "catastrophic on other text (OPT-125M measured perplexity 296 from a "
-            "409-token synthetic passage against 20.3 from real text)."
+            "calibration text for the per-layer Hessians. Required in some form: "
+            "a narrow passage tunes GPTQ's error feedback to that passage, which "
+            "is catastrophic on other text (OPT-125M measured perplexity 296 from "
+            "a 409-token synthetic passage against 20.3 from real text)."
+        ),
+    )
+    calibration_source.add_argument(
+        "--calibration-dataset",
+        metavar="PATH_OR_REPO",
+        help=(
+            "calibration records from the same source the GPTQ test harness uses: "
+            "a .json/.json.gz/.jsonl/.parquet file or a Hub dataset repo id "
+            "(defaults to $GPTQMODEL_CALIBRATION_PARQUET, then the local "
+            "nm-calibration parquet)"
         ),
     )
     args = parser.parse_args(argv)
@@ -56,12 +66,24 @@ def main(argv: list) -> int:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
 
-    calibration_tokens = tokenizer(
-        args.calibration, return_tensors="pt"
-    ).input_ids.shape[1]
+    if args.calibration is not None:
+        calibration = args.calibration
+        calibration_tokens = tokenizer(
+            calibration, return_tensors="pt"
+        ).input_ids.shape[1]
+        calibration_records = 1
+    else:
+        from gptqmodel.utils.calibration import load_calibration_records
+
+        calibration = load_calibration_records(args.calibration_dataset)
+        calibration_tokens = sum(
+            tokenizer(row, return_tensors="pt").input_ids.shape[1]
+            for row in calibration
+        )
+        calibration_records = len(calibration)
     print(
-        f"[Q] calibration: {calibration_tokens} distinct tokens, "
-        f"{args.nsamples} windows of 256",
+        f"[Q] calibration: {calibration_records} record(s), {calibration_tokens} "
+        f"tokens, {args.nsamples} windows of 256",
         flush=True,
     )
 
@@ -76,7 +98,7 @@ def main(argv: list) -> int:
         tokenizer,
         bits=args.bits,
         nsamples=args.nsamples,
-        text=args.calibration,
+        text=calibration,
     )
     print(
         f"[Q] quantized {len(report)} layers in {time.time() - started:.0f}s",
