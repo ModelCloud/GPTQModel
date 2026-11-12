@@ -162,6 +162,52 @@ def _checkpoint_quantization_identity(config):
     return identity
 
 
+def _checkpoint_runtime_dynamic_rules(config):
+    """Capture runtime calibration exclusions separately from checkpoint identity."""
+    dynamic = config.dynamic or {}
+    exclusions = getattr(config, "_runtime_dynamic_exclusions", ()) or ()
+    if isinstance(exclusions, str):
+        raise CheckpointError("invalid runtime dynamic exclusions")
+    rules = {}
+    for pattern in exclusions:
+        if (
+            not isinstance(pattern, str)
+            or pattern not in dynamic
+            or not isinstance(dynamic[pattern], Mapping)
+        ):
+            raise CheckpointError("runtime dynamic exclusion is missing its rule")
+        rules[pattern] = dict(dynamic[pattern])
+    return rules
+
+
+def _validate_checkpoint_runtime_dynamic_rules(rules):
+    if rules is None:
+        return {}
+    if not isinstance(rules, Mapping):
+        raise CheckpointError("invalid checkpoint runtime dynamic exclusions")
+    validated = {}
+    for pattern, rule in rules.items():
+        if not isinstance(pattern, str) or not isinstance(rule, Mapping):
+            raise CheckpointError("invalid checkpoint runtime dynamic exclusion")
+        validated[pattern] = dict(rule)
+    return validated
+
+
+def _restore_checkpoint_runtime_dynamic_rules(config, rules):
+    """Merge runtime calibration exclusions back into the resumable config."""
+    validated = _validate_checkpoint_runtime_dynamic_rules(rules)
+    if not validated:
+        return
+    dynamic = dict(config.dynamic or {})
+    dynamic.update(validated)
+    config.dynamic = dynamic
+    runtime_exclusions = set(
+        getattr(config, "_runtime_dynamic_exclusions", ()) or ()
+    )
+    runtime_exclusions.update(validated)
+    config._runtime_dynamic_exclusions = runtime_exclusions
+
+
 @contextmanager
 def checkpoint_session(config, model):
     from .checkpoint import CheckpointExtension
@@ -256,7 +302,7 @@ def _source_identity(model):
 
 
 class QuantizationCheckpointAdapter:
-    VERSION = 4
+    VERSION = 5
 
     def bind(self, context):
         self.execution = context.execution
@@ -322,6 +368,7 @@ class QuantizationCheckpointAdapter:
             specs[name] = packed_module_spec(
                 module,
                 self.model.quantize_config,
+                module_name=name,
             )
         quantization_identity = getattr(self, "_quantization_identity", None)
         if (
@@ -368,6 +415,9 @@ class QuantizationCheckpointAdapter:
                 "dense": dense,
                 "dense_aliases": dense_aliases,
                 "specs": specs,
+                "runtime_dynamic_exclusions": _checkpoint_runtime_dynamic_rules(
+                    self.model.quantize_config
+                ),
                 "execution": self.execution.execution_state_dict(),
                 "rng": torch.random.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all()
@@ -396,6 +446,9 @@ class QuantizationCheckpointAdapter:
         if len(state["processors"]) != len(self.processors):
             raise CheckpointError("checkpoint processor count differs")
         config = self.model.quantize_config
+        runtime_dynamic_exclusions = _validate_checkpoint_runtime_dynamic_rules(
+            state.get("runtime_dynamic_exclusions", {})
+        )
         self.execution.load_execution_state_dict(state["execution"])
         actual_execution = self.execution.execution_state_dict()
         matched = actual_execution == state["execution"]
@@ -528,6 +581,9 @@ class QuantizationCheckpointAdapter:
             setattr(
                 self.model.model.get_submodule(name), key, getattr(owner, owner_key)
             )
+        _restore_checkpoint_runtime_dynamic_rules(
+            config, runtime_dynamic_exclusions
+        )
         for processor, processor_state in zip(self.processors, state["processors"]):
             processor.load_continuation_state_dict(processor_state)
         self.shared_state.clear()

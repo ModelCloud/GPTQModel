@@ -65,7 +65,18 @@ def _resolve_checkpoint_kernel(checkpoint_kernel, default_kernel, config, format
     )
 
 
-def packed_module_spec(module, config):
+def _module_checkpoint_format(module, config, module_name):
+    format_value = getattr(module, "format", None)
+    if format_value is None and module_name is not None:
+        format_value = config.resolve_module_config(module_name).get(
+            "format", config.format
+        )
+    if format_value is None or format_value is False:
+        format_value = config.format
+    return resolve_quant_format(format_value, config.method)
+
+
+def packed_module_spec(module, config, *, module_name=None):
     dimensions = {
         "in_features": module.in_features,
         "out_features": module.out_features,
@@ -94,7 +105,7 @@ def packed_module_spec(module, config):
             getattr(module, "pack_dtype", config.pack_dtype)
         ),
         "format": _serialize_value(
-            getattr(module, "format", config.format)
+            _module_checkpoint_format(module, config, module_name)
         ),
     }
     if is_packed_module(module):

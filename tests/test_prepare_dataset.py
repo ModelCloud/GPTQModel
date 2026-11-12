@@ -300,6 +300,9 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
     class _StubPreprocessor:
         def __init__(self, **kwargs):
             assert "calculate_w_wq_diff" not in kwargs
+            calibration = kwargs["calibration"]
+            assert calibration.dataset is None
+            assert calibration.prepare_dataset is None
             constructed.append(self)
 
     class _StubPrimary:

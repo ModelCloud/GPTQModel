@@ -2211,6 +2211,7 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
+        from ..looper.loop_processor import CalibrationConfig
         from ..looper.module_looper import ModuleLooper
 
         if run_plan is None:
@@ -2256,12 +2257,13 @@ class BaseQModel(nn.Module):
                 native_args.pop("calculate_w_wq_diff")
                 processors.append(factory(**native_args))
             elif step is ProcessorStep.PREPROCESSOR:
-                preprocessor_args = {
-                    key: value
-                    for key, value in args.items()
-                    if key != "calculate_w_wq_diff"
-                }
-                processors.append(factory(**preprocessor_args))
+                processors.append(
+                    factory(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                        calibration=CalibrationConfig(),
+                    )
+                )
             elif step is ProcessorStep.EORA:
                 eora_calibration = self._build_calibration_config(
                     adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,

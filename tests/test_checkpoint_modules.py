@@ -123,6 +123,39 @@ def test_checkpoint_restores_dynamic_kernel_different_from_global_kernel():
     assert type(restored) is AwqTorchLinear
 
 
+def test_checkpoint_persists_effective_dynamic_awq_format():
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+
+    config = AWQConfig(
+        bits=4,
+        group_size=64,
+        format=FORMAT.GEMM,
+        dynamic={r"+:^proj$": {"format": "gemv"}},
+    )
+    module = AwqGEMVLinear(
+        bits=4,
+        group_size=64,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        format=FORMAT.GEMV,
+        register_buffers=True,
+    )
+
+    spec = packed_module_spec(module, config, module_name="proj")
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=config,
+        kernel=AwqGEMVLinear,
+        lm_head_name="lm_head",
+    )
+
+    assert spec["format"] == FORMAT.GEMV.value
+    assert type(restored) is AwqGEMVLinear
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_bitblas_compute_dtype_schema_without_optional_compiler(dtype):
     config = QuantizeConfig(bits=4, group_size=32, desc_act=False)

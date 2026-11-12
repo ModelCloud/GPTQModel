@@ -494,6 +494,86 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
     assert_identical_tensors(baseline, completed)
 
 
+def test_runtime_calibration_exclusions_survive_resume(tmp_path, monkeypatch):
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    native_model = build_native_model(
+        "qwen3_moe", config_args, moe_intermediate_size=32
+    )
+    # Top-k routing with tied logits leaves the final experts without
+    # calibration traffic, forcing runtime exclusions in the first layer.
+    with torch.no_grad():
+        native_model.model.layers[0].mlp.gate.weight.zero_()
+    native_model.save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            fallback=None,
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            moe=MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok=2)),
+        )
+        model = GPTQModel.load(
+            str(native), quantize_config=config, backend=BACKEND.TORCH
+        )
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+            checkpoint=checkpoint,
+        )
+        model.save(tmp_path / output)
+        saved_config = json.loads(
+            (tmp_path / output / "quantize_config.json").read_text()
+        )
+        assert any(
+            pattern.startswith(r"-:model\.layers\.0\.mlp\.experts\.")
+            for pattern in saved_config["dynamic"]
+        )
+        loaded = GPTQModel.load(
+            str(tmp_path / output), device="cpu", backend=BACKEND.TORCH
+        )
+        del loaded
+        return load_file(tmp_path / output / "model.safetensors")
+
+    baseline = run("runtime-baseline", None)
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "runtime-checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("runtime-interrupted", checkpoint)
+
+    resumed = run("runtime-resumed", checkpoint)
+
+    assert_identical_tensors(baseline, resumed)
+
+
 def test_checkpoint_identity_preserves_dynamic_rule_order():
     specific = r"+:^model\.layers\.0\.self_attn\.q_proj$"
     broad = r"+:^model\.layers\.0\."
@@ -579,3 +659,68 @@ def test_checkpoint_capture_accepts_dynamic_awq_kernel(tmp_path):
 
     assert set(artifacts) == {"proj"}
     assert state["specs"]["proj"]["kernel"].endswith(".AwqTorchLinear")
+
+
+def test_checkpoint_roundtrip_restores_runtime_dynamic_exclusions(tmp_path):
+    class _Execution:
+        def __init__(self):
+            self.state = {"logical_index": 0}
+
+        def execution_state_dict(self):
+            return dict(self.state)
+
+        def load_execution_state_dict(self, state):
+            self.state = dict(state)
+
+    class _Processor:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.loaded = None
+
+        def continuation_state_dict(self):
+            return {"cursor": 1}
+
+        def load_continuation_state_dict(self, state):
+            self.loaded = state
+
+    def adapter(config):
+        checkpoint = GPTQCheckpointAdapter()
+        checkpoint.model = SimpleNamespace(
+            model=torch.nn.Module(),
+            quantize_config=config,
+            qlinear_kernel=torch.nn.Linear,
+        )
+        checkpoint.offload = tmp_path
+        checkpoint._artifacts = {}
+        checkpoint.processors = [_Processor()]
+        checkpoint.processor = checkpoint.processors[0]
+        checkpoint.shared_state = {"progress": 1}
+        checkpoint.execution = _Execution()
+        checkpoint._quantization_identity = _checkpoint_quantization_identity(config)
+        return checkpoint
+
+    broad_rule = r"+:^model\.layers\.0\."
+    runtime_rule = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad_rule: {"bits": 8}, runtime_rule: {}},
+    )
+    config._runtime_dynamic_exclusions = {runtime_rule}
+    source = adapter(config)
+
+    state, artifacts = source.capture()
+
+    resumed_config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad_rule: {"bits": 8}},
+    )
+    resumed = adapter(resumed_config)
+    resumed.restore(state, artifacts)
+
+    assert state["runtime_dynamic_exclusions"] == {runtime_rule: {}}
+    assert type(state["runtime_dynamic_exclusions"][runtime_rule]) is dict
+    assert resumed_config.dynamic == config.dynamic
+    assert resumed_config._runtime_dynamic_exclusions == {runtime_rule}
+    assert resumed.processors[0].loaded == {"cursor": 1}
