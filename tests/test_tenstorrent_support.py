@@ -1358,6 +1358,45 @@ def test_native_checkpoint_records_its_source_model(tmp_path):
     assert meta["block"] == 16
 
 
+def test_native_checkpoint_resave_is_bit_identical(tmp_path):
+    """checkpoint -> floats -> checkpoint must reproduce the same codes.
+
+    Re-saving is how provenance is added to a checkpoint that was written before
+    the metadata existed. That is only honest if the decode/encode round trip is
+    exact -- otherwise "re-saving" would quietly re-quantise the model.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(11)
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=True)
+    with torch.no_grad():
+        block.proj.weight.copy_(bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02))
+        block.proj.bias.zero_()
+
+    def _model():
+        m = torch.nn.Module()
+        m.model = torch.nn.Module()
+        m.model.decoder = torch.nn.Module()
+        m.model.decoder.layers = torch.nn.ModuleList([block])
+        return m
+
+    first = str(tmp_path / "a")
+    bq.save_blockfloat_checkpoint(_model(), first, bits=4)
+    bq.load_native_checkpoint_into_dense_model(_model(), first)
+    second = str(tmp_path / "b")
+    bq.save_blockfloat_checkpoint(_model(), second, bits=4)
+
+    a = torch.load(first + "/blockfloat.pt", map_location="cpu")
+    b = torch.load(second + "/blockfloat.pt", map_location="cpu")
+    assert set(a) == set(b)
+    mismatched = [key for key in a if not torch.equal(a[key], b[key])]
+    assert not mismatched, mismatched[:5]
+
+
 def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     """A fresh model populated from codes must match the saved weights."""
 
