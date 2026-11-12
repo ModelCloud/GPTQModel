@@ -82,6 +82,18 @@ class FusionKernelSpec:
             for module in modules:
                 module._refresh_int8_runtime()
             return
+        if self.layout == "allspark":
+            # The checkpoint tensors stay authoritative, so a source whose
+            # derived layout was invalidated by a load or a device/dtype move
+            # re-derives it here before the group concatenates the operands.
+            # Only a materialized CUDA/ROCm source may repack; anything else
+            # stays ineligible through ``shape_error`` instead of raising
+            # inside a forward.
+            for module in modules:
+                weight = getattr(module, "qweight", None)
+                if isinstance(weight, torch.Tensor) and weight.device.type == "cuda":
+                    module._ensure_repacked()
+            return
         if self.layout == "exllamav2":
             for module in modules:
                 metadata = getattr(module, "q_tensors", None) or {}
@@ -146,8 +158,17 @@ class FusionKernelSpec:
             if tuple(module.qzeros.shape) != (groups, n // 8) or tuple(module.scales.shape) != (groups, n):
                 return "ExLlamaV2 native group metadata shape differs"
         elif self.layout == "allspark":
-            if (not module._repacked or n % 32 or
-                    tuple(module.qweight_packed.shape) != (n, k) or module.scales_packed.numel() != n):
+            if n % 32:
+                return "AllSpark fusion requires complete N=32 tiles"
+            if not module.packed_ready():
+                # ``prepare()`` rebuilds the derived layout from the checkpoint
+                # tensors; a source that cannot be repacked stays ineligible.
+                weight = getattr(module, "qweight", None)
+                if not isinstance(weight, torch.Tensor) or weight.device.type != "cuda":
+                    return "AllSpark fusion requires materialized CUDA/ROCm checkpoint operands"
+                return ""
+            if (tuple(module.qweight_packed.shape) != (n, k)
+                    or module.scales_packed.numel() != n):
                 return "AllSpark fusion requires finalized unpadded native N32 tiles"
             if self.zero_name is not None and module.zeros_packed.numel() != n:
                 return "AllSpark native zero-point layout differs"
@@ -238,6 +259,13 @@ class FusionKernelSpec:
 
             module.int8_module = Int8PackedModule(module.int8_weight_nk, module.int8_channel_scale).eval()
             module._int8_source_signature = module._source_signature()
+            return
+        if self.layout == "allspark":
+            # ``_share_operands``/``combine`` just installed the finalized
+            # packed operands; declare the derived cache consistent with them so
+            # the next forward does not repack from the checkpoint tensors.
+            module._packed_key = module._source_key()
+            module._repacked = True
             return
         if self.layout == "exllamav2":
             metadata = getattr(module, "q_tensors", None)
