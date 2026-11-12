@@ -202,7 +202,6 @@ def gptq_solve_blockfloat(
     damp: float = 0.01,
     block: int = BLOCKFLOAT_BLOCK,
     grid: str = "blockfloat",
-    blocksize: int = 128,
 ) -> torch.Tensor:
     """GPTQ error-feedback solve whose quantizer is the block-float grid.
 
@@ -246,70 +245,37 @@ def gptq_solve_blockfloat(
     mean = torch.mean(torch.diag(h))
     h += torch.eye(in_features, dtype=h.dtype) * (damp * mean)
 
-    # The hardware fixes one exponent per 16-wide block of a row, so derive those
-    # exponents from the *original* weights before the solve starts. Recomputing
-    # them per column would let them drift and would make the result un-storable.
-    fixed_exponents = _block_exponents(w, block) if use_blockfloat else None
-    blockfloat_levels = float(1 << stored_mantissa_bits(bits))
-    uniform_levels = float((1 << (bits - 1)) - 1)
-
-    def snap(col: torch.Tensor, index: int) -> torch.Tensor:
-        """Snap one column onto its grid, with the exponent fixed per block."""
-
-        if use_blockfloat:
-            exp = fixed_exponents[:, index // block : index // block + 1]
-            scale = torch.pow(2.0, exp)
-            unit = torch.round(col.unsqueeze(-1) / scale * blockfloat_levels)
-            unit = (unit / blockfloat_levels).clamp(
-                min=-(2.0 - 1.0 / blockfloat_levels),
-                max=(2.0 - 1.0 / blockfloat_levels),
-            )
-            return (unit * scale).squeeze(-1)
-        # Symmetric uniform grid with a per-column scale: GPTQ's usual choice.
-        scale = col.abs().max().clamp_min(torch.finfo(torch.float32).tiny) / uniform_levels
-        return torch.round(col / scale).clamp(-uniform_levels - 1, uniform_levels) * scale
-
-    q = torch.zeros_like(w)
-
-    # Blocking the column loop is what makes the wide layers affordable: a
-    # per-column trailing update rewrites the whole remaining matrix, so the work
-    # grows with the square of the width (measured 52.6 s for one 2048x8192 layer).
-    # The block form is exact only with the upper Cholesky factor of H^-1 -- with
-    # the dense inverse it double-counts and the result changes materially -- so
-    # that is the form used here. A Hessian too ill-conditioned to factor falls
-    # back to the dense inverse, one column at a time.
-    try:
-        hinv_tri = torch.linalg.cholesky(torch.linalg.inv(h), upper=True)
-    except Exception:
-        hinv_tri = None
-
-    if hinv_tri is not None:
-        for i1 in range(0, in_features, blocksize):
-            i2 = min(i1 + blocksize, in_features)
-            W1 = w[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            H1 = hinv_tri[i1:i2, i1:i2]
-            for i in range(i2 - i1):
-                col = W1[:, i]
-                quant = snap(col, i1 + i)
-                Q1[:, i] = quant
-                err = (col - quant) / H1[i, i]
-                if i + 1 < i2 - i1:
-                    W1[:, i + 1:] -= err.unsqueeze(-1) @ H1[i, i + 1:].unsqueeze(0)
-                Err1[:, i] = err
-            q[:, i1:i2] = Q1
-            if i2 < in_features:
-                w[:, i2:] -= Err1 @ hinv_tri[i1:i2, i2:]
-        return q
-
+    # GPTQ needs the full inverse here. Taking ``triu`` of a lower-triangular
+    # Cholesky factor leaves only the diagonal, which silently disables error
+    # feedback (measured: the solve then matched plain rounding exactly).
     try:
         hinv = torch.linalg.inv(h)
     except Exception:  # pragma: no cover - singular Hessian
         hinv = torch.linalg.pinv(h)
+
+    # The hardware fixes one exponent per 16-wide block of a row, so derive those
+    # exponents from the *original* weights before the solve starts. Recomputing
+    # them per column would let them drift and would make the result un-storable.
+    fixed_exponents = _block_exponents(w, block) if use_blockfloat else None
+
+    q = torch.zeros_like(w)
     for i in range(in_features):
         col = w[:, i]
-        quant = snap(col, i)
+        if use_blockfloat:
+            # Exponent is fixed per row-block from the current (error-feedback)
+            # weights, and the element is snapped onto that grid.
+            block_idx = i // block
+            exp = fixed_exponents[:, block_idx:block_idx + 1]
+            levels = float(1 << stored_mantissa_bits(bits))
+            scale = torch.pow(2.0, exp)
+            unit = torch.round(col.unsqueeze(-1) / scale * levels) / levels
+            unit = unit.clamp(min=-(2.0 - 1.0 / levels), max=(2.0 - 1.0 / levels))
+            quant = (unit * scale).squeeze(-1)
+        else:
+            # Symmetric uniform grid with a per-column scale: GPTQ's usual choice.
+            levels = float((1 << (bits - 1)) - 1)
+            scale = col.abs().max().clamp_min(torch.finfo(torch.float32).tiny) / levels
+            quant = torch.round(col / scale).clamp(-levels - 1, levels) * scale
         q[:, i] = quant
         err = (col - quant) / hinv[i, i]
         if i + 1 < in_features:
@@ -397,7 +363,8 @@ def collect_layer_hessians(
     # q/k/v share one input, and so do gate/up, so ``X^T X`` is computed once per
     # distinct activation rather than once per linear. Keyed on the tensor's
     # address with the tensor kept alive, so a freed buffer cannot alias a later
-    # layer's input; the cache is cleared for every window.
+    # layer's input; the cache is cleared for every window. The reuse is exact --
+    # it is the same matrix for the same activation.
     window_cache: dict = {}
 
     def make_hook(name):
@@ -428,9 +395,10 @@ def collect_layer_hessians(
     handles = [module.register_forward_hook(make_hook(name))
                for name, module in targets.items()]
     # Only decoder activations are needed, so run the backbone and skip the output
-    # projection: the lm_head GEMM is about 20% of a forward pass on a 1B model and
-    # its logits are never read here. Models without a ``.model`` backbone fall
-    # back to the full forward.
+    # projection: the lm_head GEMM is about 20 % of a forward pass on a 1B model
+    # and its logits are never read here. Models without a usable ``.model``
+    # backbone fall back to the full forward. This does not change any activation
+    # the hooks see.
     backbone = getattr(model, "model", None)
     runner = model
     if (
