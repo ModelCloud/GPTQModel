@@ -108,7 +108,19 @@ class _CudaWideMatmul(torch.autograd.Function):
 def matmul_fp32_reduce(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """Keep the CUDA reduction and optional bias in FP32 until output rounding."""
+    """Keep the CUDA reduction and optional bias in FP32 until output rounding.
+
+    ``weight`` is the ``[in_features, out_features]`` operand of the 2-D
+    product. A bias stored wider than the activation dtype is never narrowed
+    here: on HIP and CPU the low-precision reduction alone can overflow (or
+    round away) the partial sum before such a bias cancels it, so those calls
+    use the same FP32 epilogue as :func:`linear_fp32_reduce`.
+    """
+    wide_bias = linear_needs_wide_bias(x, bias)
+    if wide_bias and (not _wants_fp32_reduce(x) or autocast_active(x.device.type)):
+        # Autocast narrows the GEMM operands, so its unfused expression would
+        # round the product before a wide bias cancels it.
+        return linear_wide_bias(x, weight.t(), bias)
     if _wants_fp32_reduce(x):
         if _needs_wide_autograd(x, weight, bias):
             return _CudaWideMatmul.apply(x, weight, bias)
