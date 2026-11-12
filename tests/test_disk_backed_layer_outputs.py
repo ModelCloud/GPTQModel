@@ -3,10 +3,12 @@ from __future__ import annotations
 import gc
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from gptqmodel.looper.input_cache import (
     DiskBackedLayerOutputSequence,
@@ -45,6 +47,116 @@ def test_disk_backed_layer_outputs_are_sharded_and_random_access(tmp_path):
     assert len(manifest["shards"]) == 3
     reopened = DiskBackedLayerOutputSequence.open(root / "layer-000001")
     assert torch.equal(reopened[3][0], expected[3])
+
+
+def test_out_of_order_batches_spill_payloads_until_each_shard_is_complete(tmp_path):
+    writer = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=64,
+        provenance={"plan": "out-of-order"}, shard_batches=2,
+    )
+    for index in range(0, 64, 2):
+        writer.put(index, [torch.full((1, 1024), index, dtype=torch.float32)])
+
+    # Every shard is incomplete. Its activation must live on disk, even when
+    # many different shards have received their first out-of-order batch.
+    assert len(writer._pending) == 32
+    assert all(
+        not isinstance(batch, torch.Tensor)
+        for shard in writer._pending.values() for batch in shard.values()
+    )
+    assert len(list(writer.temporary.glob("pending-*.safetensors"))) == 32
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(writer.put, index, [torch.full((1, 1024), index, dtype=torch.float32)])
+            for index in range(1, 64, 2)
+        ]
+        for future in futures:
+            future.result()
+    assert not writer._pending
+    assert not list(writer.temporary.glob("pending-*.safetensors"))
+    sequence = writer.finalize()
+    for index in (0, 1, 31, 32, 63):
+        assert torch.equal(sequence[index][0], torch.full((1, 1024), index))
+
+
+def test_concurrent_append_reserves_distinct_batch_indices(tmp_path):
+    writer = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=32,
+        provenance={"plan": "concurrent-append"}, shard_batches=1,
+    )
+    batches = [[torch.full((1, 2), index)] for index in range(32)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(writer.append, batch) for batch in batches]
+        for future in futures:
+            future.result()
+    sequence = writer.finalize()
+    assert sorted(int(sequence[index][0][0, 0]) for index in range(32)) == list(range(32))
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_uncommitted_batch_spills_are_discarded_on_resume(tmp_path, abort):
+    provenance = {"plan": "interrupted-partial-shard"}
+    writer = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=2,
+        provenance=provenance, shard_batches=2,
+    )
+    writer.put(0, [torch.full((1, 2), 7.0)])
+    assert list(writer.temporary.glob("pending-*.safetensors"))
+    if abort:
+        writer.abort()
+        assert not list(writer.temporary.glob("pending-*.safetensors"))
+
+    # A restarted writer trusts only complete shards in progress.json.
+    resumed = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=2,
+        provenance=provenance, shard_batches=2,
+    )
+    assert not list(resumed.temporary.glob("pending-*.safetensors"))
+    resumed.put(0, [torch.zeros(1, 2)])
+    resumed.put(1, [torch.ones(1, 2)])
+    sequence = resumed.finalize()
+    assert torch.equal(sequence[0][0], torch.zeros(1, 2))
+    assert torch.equal(sequence[1][0], torch.ones(1, 2))
+
+
+def test_changed_uncommitted_spill_cannot_enter_committed_shard(tmp_path):
+    writer = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=2,
+        provenance={"plan": "spill-integrity"}, shard_batches=2,
+    )
+    writer.put(0, [torch.zeros(1, 2)])
+    staged = next(writer.temporary.glob("pending-*.safetensors"))
+    save_file({"hidden": torch.full((1, 2), 7.0)}, staged)
+    with pytest.raises(ValueError, match="pending batch hash differs"):
+        writer.put(1, [torch.ones(1, 2)])
+    assert not writer.committed_indices
+
+
+@pytest.mark.parametrize("shard_batches", [1, 2])
+def test_open_sequence_rechecks_shard_hash_on_every_read(tmp_path, shard_batches):
+    writer = DiskBackedLayerOutputWriter(
+        tmp_path, layer_index=0, expected_batches=shard_batches,
+        provenance={"plan": "read-after-replace"}, shard_batches=shard_batches,
+    )
+    for index in range(shard_batches):
+        writer.put(index, [torch.full((1, 2), index, dtype=torch.float32)])
+    finalized = writer.finalize()  # finalize skips the redundant open-time hash.
+    reopened = DiskBackedLayerOutputSequence.open(writer.destination)
+    assert torch.equal(finalized[0][0], torch.zeros(1, 2))
+    assert torch.equal(reopened[0][0], torch.zeros(1, 2))
+
+    contents = (
+        {"hidden": torch.full((1, 2), 7.0)}
+        if shard_batches == 1 else {
+            f"batch_{index:09d}": torch.full((1, 2), 7.0)
+            for index in range(shard_batches)
+        }
+    )
+    save_file(contents, writer.destination / "outputs-000000.safetensors")
+    for sequence in (finalized, reopened):
+        with pytest.raises(ValueError, match="shard hash differs"):
+            _ = sequence[shard_batches - 1]
 
 
 def test_disk_backed_layer_outputs_report_issued_tensor_lifetime(tmp_path):
