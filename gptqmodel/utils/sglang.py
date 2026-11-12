@@ -408,6 +408,16 @@ def _uses_engine_api(model: Any) -> bool:
     return model.__class__.__module__.startswith("sglang.srt.entrypoints.")
 
 
+def is_sglang_model(model: Any) -> bool:
+    """Return True when `model` is an SGLang engine or legacy runtime instance."""
+    if not SGLANG_AVAILABLE:
+        return False
+    if _uses_engine_api(model):
+        return True
+    runtime_factory = getattr(sgl, "Runtime", None)
+    return isinstance(runtime_factory, type) and isinstance(model, runtime_factory)
+
+
 def _legacy_sglang_sampling_params(sampling_params: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(sampling_params)
     _move_alias(normalized, "max_new_tokens", "max_tokens")

@@ -59,6 +59,11 @@ def _vllm_unavailable_message() -> str:
 VLLM_INSTALL_HINT = _vllm_unavailable_message()
 
 
+def is_vllm_model(model: Any) -> bool:
+    """Return True when `model` is a live vLLM `LLM` engine instance."""
+    return bool(VLLM_AVAILABLE and isinstance(LLM, type) and isinstance(model, LLM))
+
+
 def _require_vllm() -> None:
     if not VLLM_AVAILABLE:
         raise ValueError(VLLM_INSTALL_HINT) from VLLM_IMPORT_ERROR
