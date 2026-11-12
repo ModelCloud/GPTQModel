@@ -1388,9 +1388,22 @@ def _run_single_subset_pass(
                 if calibration_coverage_policy.record_dynamic_exclusions:
                     if processor.qcfg.dynamic is None:
                         processor.qcfg.dynamic = {}
-                    processor.qcfg.dynamic[
-                        f"-:{pcre.escape(skipped_module.full_name)}"
-                    ] = {}
+                    pattern = f"-:{pcre.escape(skipped_module.full_name)}"
+                    if pattern not in processor.qcfg.dynamic:
+                        processor.qcfg.dynamic[pattern] = {}
+                        runtime_exclusions = getattr(
+                            processor.qcfg,
+                            "_runtime_dynamic_exclusions",
+                            None,
+                        )
+                        if runtime_exclusions is None:
+                            runtime_exclusions = set()
+                            setattr(
+                                processor.qcfg,
+                                "_runtime_dynamic_exclusions",
+                                runtime_exclusions,
+                            )
+                        runtime_exclusions.add(pattern)
 
     quant_target_devices: Dict[str, torch.device] = {}
     active_subset_names = [name for name in subset_names if name in subset]

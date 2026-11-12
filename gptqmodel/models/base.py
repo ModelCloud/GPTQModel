@@ -2176,6 +2176,26 @@ class BaseQModel(nn.Module):
 
         return result
 
+    @staticmethod
+    def _build_calibration_config(
+        dataset,
+        prepare_dataset,
+        concat_size: Optional[int],
+        sort: Optional[str],
+        concat_separator: Optional[str],
+        batch_size: int,
+    ):
+        from ..looper.loop_processor import CalibrationConfig
+
+        return CalibrationConfig(
+            dataset=dataset,
+            prepare_dataset=prepare_dataset,
+            concat_size=concat_size,
+            sort=sort,
+            concat_separator=concat_separator,
+            batch_size=batch_size,
+        )
+
     def _quantize_with_calibration(
         self,
         *,
@@ -2191,7 +2211,6 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import CalibrationConfig
         from ..looper.module_looper import ModuleLooper
 
         if run_plan is None:
@@ -2214,13 +2233,13 @@ class BaseQModel(nn.Module):
             self.prepare_dataset,
             calibration_data_min_length=calibration_data_min_length,
         )
-        calibration_config = CalibrationConfig(
-            dataset=calibration,
-            prepare_dataset=prepare_dataset_func,
-            concat_size=calibration_concat_size,
-            sort=calibration_sort,
-            concat_separator=calibration_concat_separator,
-            batch_size=run_plan.batch_size,
+        calibration_config = self._build_calibration_config(
+            calibration,
+            prepare_dataset_func,
+            calibration_concat_size,
+            calibration_sort,
+            calibration_concat_separator,
+            run_plan.batch_size,
         )
         args = {
             "tokenizer": self.tokenizer,
@@ -2236,14 +2255,21 @@ class BaseQModel(nn.Module):
                 native_args = dict(args)
                 native_args.pop("calculate_w_wq_diff")
                 processors.append(factory(**native_args))
+            elif step is ProcessorStep.PREPROCESSOR:
+                preprocessor_args = {
+                    key: value
+                    for key, value in args.items()
+                    if key != "calculate_w_wq_diff"
+                }
+                processors.append(factory(**preprocessor_args))
             elif step is ProcessorStep.EORA:
-                eora_calibration = CalibrationConfig(
-                    dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
-                    prepare_dataset=prepare_dataset_func,
-                    concat_size=calibration_concat_size,
-                    sort=calibration_sort,
-                    concat_separator=calibration_concat_separator,
-                    batch_size=run_plan.batch_size,
+                eora_calibration = self._build_calibration_config(
+                    adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
+                    prepare_dataset_func,
+                    calibration_concat_size,
+                    calibration_sort,
+                    calibration_concat_separator,
+                    run_plan.batch_size,
                 )
                 processors.append(factory(
                     tokenizer=self.tokenizer,
@@ -2391,7 +2417,6 @@ class BaseQModel(nn.Module):
         from ..adapter.adapter import Lora
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
-        from ..looper.loop_processor import CalibrationConfig
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
 
@@ -2400,13 +2425,13 @@ class BaseQModel(nn.Module):
         assert isinstance(self.quantize_config.adapter, Lora)
 
         # init processor with EoRA processor
-        calibration_config = CalibrationConfig(
-            dataset=calibration_dataset,
-            prepare_dataset=self.prepare_dataset,
-            concat_size=calibration_dataset_concat_size,
-            sort=calibration_dataset_sort,
-            concat_separator=calibration_concat_separator,
-            batch_size=batch_size,
+        calibration_config = self._build_calibration_config(
+            calibration_dataset,
+            self.prepare_dataset,
+            calibration_dataset_concat_size,
+            calibration_dataset_sort,
+            calibration_concat_separator,
+            batch_size,
         )
         processors = []
         if getattr(self.quantize_config, "preprocessors", None):

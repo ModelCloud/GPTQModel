@@ -19,7 +19,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import FORMAT, AWQConfig
 
 
 def _stub(bits=4, dynamic=None):
@@ -268,3 +268,62 @@ def test_gemm_kernel_selection_respects_module_width(bits):
     processor.gptq_model.qlinear_kernel = AwqGEMMLinear
     expected = AwqGEMMLinear if bits == 4 else AwqTorchLinear
     assert processor._resolve_qlinear_kernel("proj") is expected
+
+
+@torch.inference_mode()
+def test_scale_search_uses_per_module_format(monkeypatch):
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4, bias=False))
+    processor = _processor(
+        model,
+        bits=8,
+        group_size=-1,
+        sym=False,
+        format=FORMAT.GEMM,
+        dynamic={"0": {"format": "gemv_fast"}},
+        scale_search_chunked_activations=False,
+    )
+    captured_formats = []
+
+    def fake_pseudo_quantize(src, dst, **kwargs):
+        captured_formats.append(kwargs["format"])
+        dst.copy_(src)
+
+    monkeypatch.setattr(processor, "_pseudo_quantize_tensor_into", fake_pseudo_quantize)
+    monkeypatch.setattr(processor, "_module_forward", lambda x, module, _kwargs: module(x))
+    x = torch.randn(3, 4)
+    processor._compute_best_scale(
+        x,
+        torch.ones(4),
+        torch.ones(4),
+        model[0],
+        [model[0]],
+        model[0](x),
+        bits=8,
+        group_sizes=-1,
+        formats=[processor._format_for(model, model[0])],
+    )
+
+    assert captured_formats
+    assert set(captured_formats) == {FORMAT.GEMV_FAST}
+
+
+@torch.inference_mode()
+def test_clip_search_uses_per_module_format(monkeypatch):
+    processor = _processor(torch.nn.Module(), bits=8, group_size=-1, sym=False)
+    captured_formats = []
+
+    def fake_pseudo_quantize(src, dst, **kwargs):
+        captured_formats.append(kwargs["format"])
+        dst.copy_(src)
+
+    monkeypatch.setattr(processor, "_pseudo_quantize_tensor_into", fake_pseudo_quantize)
+    processor._compute_best_clip(
+        torch.randn(64, 4),
+        torch.randn(3, 4),
+        bits=8,
+        group_size=-1,
+        format=FORMAT.GEMV_FAST,
+    )
+
+    assert captured_formats
+    assert set(captured_formats) == {FORMAT.GEMV_FAST}

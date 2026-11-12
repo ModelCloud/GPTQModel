@@ -318,11 +318,20 @@ class LoopProcessor:
 
         # Keep lifecycle and replay policy in one object so the stages consume
         # one forward mode instead of a scattered set of booleans.
-        if lifecycle is not None and forward is not None and lifecycle.forward != forward:
-            raise ValueError("lifecycle.forward conflicts with the supplied forward")
-        self.lifecycle = lifecycle or ProcessorLifecycleConfig(
-            forward=forward or ForwardConfig()
-        )
+        if lifecycle is not None:
+            if forward is not None and lifecycle.forward != forward:
+                raise ValueError("lifecycle.forward conflicts with the supplied forward")
+            self.lifecycle = lifecycle
+        else:
+            default_lifecycle = getattr(type(self), "lifecycle", None)
+            if default_lifecycle is None:
+                self.lifecycle = ProcessorLifecycleConfig(
+                    forward=forward or ForwardConfig()
+                )
+            else:
+                self.lifecycle = default_lifecycle.use(
+                    forward or default_lifecycle.forward
+                )
         self.forward = self.lifecycle.forward
 
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))

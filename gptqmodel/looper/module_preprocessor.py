@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Optional
 import torch
 import transformers
 
-from ..looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
+from ..looper.loop_processor import (
+    CalibrationConfig,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+)
 from ..looper.named_module import NamedModule
 from ..quantization.config import (
     AutoModuleDecoderConfig,
@@ -33,6 +38,9 @@ class ModulePreProcessor(LoopProcessor):
     """Annotate modules with an ordered preprocessor plan before quantization."""
 
     _TP_TARGETS = (2, 4, 8)
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(required=False, replay_after_process=False)
+    )
 
     def __init__(
         self,
@@ -48,10 +56,7 @@ class ModulePreProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration or CalibrationConfig(),
-            forward=forward or ForwardConfig(
-                required=False,
-                replay_after_process=False,
-            ),
+            forward=forward,
         )
         self.qcfg = qcfg
 

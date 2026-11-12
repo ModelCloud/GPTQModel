@@ -725,7 +725,7 @@ class EXL3Processor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
+            forward=forward,
         )
 
         self.avg_losses = []

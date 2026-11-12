@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,7 +27,10 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 
 from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
-from gptqmodel.looper.gptq_checkpoint import GPTQCheckpointAdapter
+from gptqmodel.looper.gptq_checkpoint import (
+    GPTQCheckpointAdapter,
+    _checkpoint_quantization_identity,
+)
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
@@ -487,3 +492,90 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
     completed = run("dynamic-completed", checkpoint)
     assert_identical_tensors(baseline, resumed)
     assert_identical_tensors(baseline, completed)
+
+
+def test_checkpoint_identity_preserves_dynamic_rule_order():
+    specific = r"+:^model\.layers\.0\.self_attn\.q_proj$"
+    broad = r"+:^model\.layers\.0\."
+    module_name = "model.layers.0.self_attn.q_proj"
+
+    first = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={specific: {"bits": 3}, broad: {"bits": 8}},
+    )
+    second = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad: {"bits": 8}, specific: {"bits": 3}},
+    )
+
+    assert first.resolve_module_config(module_name).get("bits") == 3
+    assert second.resolve_module_config(module_name).get("bits") == 8
+    assert _checkpoint_quantization_identity(first) != _checkpoint_quantization_identity(second)
+
+
+def test_checkpoint_identity_ignores_runtime_calibration_exclusions():
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={r"+:^model\.layers\.0\.": {"bits": 8}},
+    )
+    before = _checkpoint_quantization_identity(config)
+    pattern = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config.dynamic[pattern] = {}
+    config._runtime_dynamic_exclusions = {pattern}
+
+    assert _checkpoint_quantization_identity(config) == before
+
+
+def test_checkpoint_identity_keeps_empty_dynamic_equivalent_to_none():
+    config = QuantizeConfig(bits=4, group_size=32)
+    before = _checkpoint_quantization_identity(config)
+    pattern = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config.dynamic = {pattern: {}}
+    config._runtime_dynamic_exclusions = {pattern}
+
+    assert _checkpoint_quantization_identity(config) == before
+
+
+def test_checkpoint_capture_accepts_dynamic_awq_kernel(tmp_path):
+    from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import FORMAT, AWQConfig
+
+    config = AWQConfig(bits=8, group_size=32, format=FORMAT.GEMM)
+    model = torch.nn.Module()
+    model.proj = AwqTorchLinear(
+        bits=8,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        format=FORMAT.GEMM,
+        register_buffers=True,
+    )
+    adapter = GPTQCheckpointAdapter()
+    adapter.model = SimpleNamespace(
+        model=model,
+        quantize_config=config,
+        qlinear_kernel=AwqGEMMLinear,
+    )
+    adapter.offload = tmp_path
+    adapter._artifacts = {}
+    adapter.processors = [
+        SimpleNamespace(
+            continuation_state_dict=lambda: {},
+            lock=threading.Lock(),
+        )
+    ]
+    adapter.processor = adapter.processors[0]
+    adapter.shared_state = {}
+    adapter.execution = SimpleNamespace(execution_state_dict=lambda: {})
+    adapter._quantization_identity = _checkpoint_quantization_identity(config)
+
+    state, artifacts = adapter.capture()
+
+    assert set(artifacts) == {"proj"}
+    assert state["specs"]["proj"]["kernel"].endswith(".AwqTorchLinear")

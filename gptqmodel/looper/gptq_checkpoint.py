@@ -22,8 +22,6 @@ from safetensors import safe_open
 from safetensors.torch import save
 
 from ..adapter.adapter import Lora
-from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import METHOD
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
@@ -38,7 +36,7 @@ from .continuation import ContinuationCodec
 from .loop_processor import CheckpointSupport
 
 
-_CHECKPOINT_IDENTITY_VERSION = 2
+_CHECKPOINT_IDENTITY_VERSION = 3
 _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "offload_to_disk_path",
     "_offload_temp_dir",
@@ -46,7 +44,7 @@ _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
 }
 
 
-def _checkpoint_identity_value(value):
+def _checkpoint_identity_value(value, *, preserve_mapping_order=False):
     """Convert a quantization setting into a deterministic JSON value.
 
     QuantizeConfig.to_dict() is an export format and intentionally omits
@@ -79,6 +77,11 @@ def _checkpoint_identity_value(value):
             "sha256": hashlib.sha256(raw).hexdigest(),
         }
     if isinstance(value, Mapping):
+        if preserve_mapping_order:
+            return [
+                [str(key), _checkpoint_identity_value(item)]
+                for key, item in value.items()
+            ]
         return {
             str(key): _checkpoint_identity_value(item)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
@@ -92,7 +95,10 @@ def _checkpoint_identity_value(value):
         return {
             "type": f"{type(value).__module__}.{type(value).__qualname__}",
             "fields": {
-                field.name: _checkpoint_identity_value(getattr(value, field.name))
+                field.name: _checkpoint_identity_value(
+                    getattr(value, field.name),
+                    preserve_mapping_order=field.name == "dynamic",
+                )
                 for field in fields(value)
             },
         }
@@ -131,11 +137,28 @@ def _checkpoint_quantization_identity(config):
         if field.name in _IDENTITY_EXCLUDED_CONFIG_FIELDS:
             continue
         value = getattr(config, field.name)
+        if field.name == "dynamic" and isinstance(value, Mapping):
+            runtime_exclusions = getattr(
+                config,
+                "_runtime_dynamic_exclusions",
+                (),
+            )
+            if runtime_exclusions:
+                value = {
+                    key: item
+                    for key, item in value.items()
+                    if key not in runtime_exclusions
+                }
+            if not value:
+                value = None
         if field.name == "meta" and isinstance(value, Mapping):
             value = dict(value)
             value.pop("offload_to_disk_path", None)
             value.pop("telemetry", None)
-        identity[field.name] = _checkpoint_identity_value(value)
+        identity[field.name] = _checkpoint_identity_value(
+            value,
+            preserve_mapping_order=field.name == "dynamic",
+        )
     return identity
 
 
@@ -284,18 +307,6 @@ class QuantizationCheckpointAdapter:
         for name, module in self.model.model.named_modules():
             if not is_packed_module(module):
                 continue
-            expected_kernel = (
-                ParoLinear
-                if self.model.quantize_config.method == METHOD.PARO
-                else self.model.qlinear_kernel
-            )
-            if (
-                isinstance(module, BaseQuantLinear)
-                and type(module) is not expected_kernel
-            ):
-                raise NotImplementedError(
-                    f"unsupported checkpoint quantized module: {type(module).__name__}"
-                )
             bundle = self._artifacts.get(
                 name, self.offload / name / "module.safetensors"
             )
@@ -311,7 +322,6 @@ class QuantizationCheckpointAdapter:
             specs[name] = packed_module_spec(
                 module,
                 self.model.quantize_config,
-                module_name=name,
             )
         quantization_identity = getattr(self, "_quantization_identity", None)
         if (

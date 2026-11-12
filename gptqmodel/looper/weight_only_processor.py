@@ -88,7 +88,7 @@ class WeightOnlyProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=CalibrationConfig(),
-            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
+            forward=forward,
         )
         self.lock = threading.Lock()
 

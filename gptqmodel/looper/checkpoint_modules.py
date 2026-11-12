@@ -14,23 +14,6 @@ from ..utils.importer import get_auto_backend_kernel_mapping
 from .checkpoint_store import CheckpointError
 
 
-_PACKING_OVERRIDE_FIELDS = {
-    "bits",
-    "group_size",
-    "desc_act",
-    "sym",
-    "pack_dtype",
-    "format",
-    "fmt",
-    "bnb_quant_type",
-    "block_size",
-    "compress_statistics",
-    "weight_block_size",
-    "weight_scale_method",
-    "weight_scale_semantics",
-}
-
-
 def is_packed_module(module):
     return isinstance(module, (BaseQuantLinear, ExllamaV3Linear))
 
@@ -82,23 +65,7 @@ def _resolve_checkpoint_kernel(checkpoint_kernel, default_kernel, config, format
     )
 
 
-def _dynamic_checkpoint_config(effective):
-    if effective is None or (
-        effective.source_pattern is None and not effective.excluded
-    ):
-        return None
-    return {
-        "source_pattern": effective.source_pattern,
-        "excluded": effective.excluded,
-        "overrides": {
-            key: _serialize_value(value)
-            for key, value in effective.overrides.items()
-            if key in _PACKING_OVERRIDE_FIELDS
-        },
-    }
-
-
-def packed_module_spec(module, config, *, module_name=None, effective=None):
+def packed_module_spec(module, config):
     dimensions = {
         "in_features": module.in_features,
         "out_features": module.out_features,
@@ -132,13 +99,6 @@ def packed_module_spec(module, config, *, module_name=None, effective=None):
     }
     if is_packed_module(module):
         spec["kernel"] = _kernel_path(type(module))
-    dynamic = _dynamic_checkpoint_config(
-        effective
-        if effective is not None or module_name is None
-        else config.resolve_module_config(module_name)
-    )
-    if dynamic is not None:
-        spec["dynamic"] = dynamic
     if type(module) is ParoLinear:
         spec["kind"] = "paro"
         spec["options"] = {
@@ -193,7 +153,6 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         checkpoint_kernel = spec.pop("kernel", None)
         checkpoint_pack_dtype = spec.pop("pack_dtype", None)
         checkpoint_format = spec.pop("format", None)
-        spec.pop("dynamic", None)
         has_compute_dtype = "compute_dtype" in spec
         dtype_name = spec.pop("compute_dtype", None)
         quant_state_shape = spec.pop("quant_state_shape", None)

@@ -43,7 +43,7 @@ class FP8GSQProcessor(WeightOnlyProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
+            forward=forward,
         )
         self.lock = threading.Lock()
         self.is_weight_only = False

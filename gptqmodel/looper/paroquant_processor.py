@@ -258,7 +258,7 @@ class ParoQuantProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            lifecycle=self.lifecycle.use(forward),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff

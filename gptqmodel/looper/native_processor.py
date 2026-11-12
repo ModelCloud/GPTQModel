@@ -50,7 +50,7 @@ class NativeProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
+            forward=forward,
         )
 
         self.native_inp_caches = {}

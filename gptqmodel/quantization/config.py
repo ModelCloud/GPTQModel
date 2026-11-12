@@ -3184,6 +3184,27 @@ def _validate_unique_preprocessors(preprocessors: List[BasePreProcessorConfig]) 
         codes_seen.add(preprocessor.code)
 
 
+def _select_dynamic_value(overrides: Mapping, key: Optional[str], default: Any, sub_key: Optional[str]) -> Any:
+    if key is None:
+        return overrides
+    if key in overrides:
+        value = overrides[key]
+    elif key in DYNAMIC_FIELD_SYNONYMS:
+        value = next(
+            (overrides[legacy_key] for legacy_key in DYNAMIC_FIELD_SYNONYMS[key] if legacy_key in overrides),
+            default,
+        )
+    else:
+        return default
+
+    if sub_key:
+        if isinstance(value, Mapping):
+            return value.get(sub_key, default)
+        log.info("QuantConfig: Dynamic `sub_key`: `%s` failed extraction from `sub_value`: `%s`", sub_key, value)
+        return default
+    return value
+
+
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
 
@@ -3196,27 +3217,7 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
     if overrides is None:
         return default
 
-    if key is None:
-        return overrides
-
-    if key in overrides:
-        sub_value = overrides[key]
-    elif key in DYNAMIC_FIELD_SYNONYMS:
-        sub_value = None
-        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
-            if legacy_key in overrides:
-                sub_value = overrides[legacy_key]
-                break
-    else:
-        return default
-
-    if sub_key:
-        if isinstance(sub_value, Dict):
-            return sub_value.get(sub_key, default)
-        log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
-        return default
-
-    return sub_value
+    return _select_dynamic_value(overrides, key, default, sub_key)
 
 
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
@@ -3258,20 +3259,7 @@ class EffectiveModuleConfig:
         if self.source_pattern is None:
             return default
         fields = dict(self._fields)
-        if key is None:
-            return copy.deepcopy(fields)
-        if key in fields:
-            value = fields[key]
-        elif key in DYNAMIC_FIELD_SYNONYMS:
-            value = next((fields[legacy] for legacy in DYNAMIC_FIELD_SYNONYMS[key] if legacy in fields), None)
-        else:
-            return default
-        if sub_key:
-            if isinstance(value, Mapping):
-                return copy.deepcopy(value.get(sub_key, default))
-            log.info("QuantConfig: Dynamic `sub_key`: `%s` failed extraction from `sub_value`: `%s`", sub_key, value)
-            return default
-        return copy.deepcopy(value)
+        return copy.deepcopy(_select_dynamic_value(fields, key, default, sub_key))
 
 
 def resolve_effective_module_config(config: "BaseQuantizeConfig", module_name: str) -> EffectiveModuleConfig:

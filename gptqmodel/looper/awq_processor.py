@@ -268,7 +268,7 @@ class AWQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -415,11 +415,7 @@ class AWQProcessor(LoopProcessor):
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, effective=None):
         """Resolves the AWQ kernel after applying any dynamic format override."""
 
-        # Honor per-module dynamic format overrides when present.
-        format_override = effective.get("format", None) if effective is not None else (
-            self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
-        )
-        target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
+        target_format = self._module_format(module_name, effective=effective)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
@@ -469,6 +465,17 @@ class AWQProcessor(LoopProcessor):
             return int(self.qcfg.group_size)
         return int(override)
 
+    def _module_format(self, module_name: Optional[str], *, effective=None) -> FORMAT:
+        """Resolve the packing format this module is staged and packed with."""
+        if not module_name:
+            return resolve_quant_format(self.qcfg.format, self.qcfg.method)
+        override = effective.get("format", self.qcfg.format) if effective is not None else (
+            self.qcfg.dynamic_get(module_name, "format", self.qcfg.format)
+        )
+        if override is False or override is None:
+            override = self.qcfg.format
+        return resolve_quant_format(override, self.qcfg.method)
+
     def _full_module_name(self, layer_module: Optional[nn.Module], module: nn.Module) -> Optional[str]:
         """Build a model-level module name from a layer and one of its children."""
         try:
@@ -489,6 +496,14 @@ class AWQProcessor(LoopProcessor):
     ) -> int:
         """Resolve the effective group size of one layer child."""
         return self._module_group_size(
+            self._full_module_name(layer_module, module)
+        )
+
+    def _format_for(
+        self, layer_module: Optional[nn.Module], module: nn.Module
+    ) -> FORMAT:
+        """Resolve the effective packing format of one layer child."""
+        return self._module_format(
             self._full_module_name(layer_module, module)
         )
 
@@ -1773,6 +1788,8 @@ class AWQProcessor(LoopProcessor):
         group_sizes = [
             self._group_size_for(module, layer) for layer in layers
         ]
+        default_format = self._module_format(None)
+        formats = [self._format_for(module, layer) for layer in layers]
         w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
@@ -1840,6 +1857,15 @@ class AWQProcessor(LoopProcessor):
             fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
         # [STEP 4]: Compute loss
+        best_scale_kwargs = {
+            "replay_batch_size": replay_batch_size,
+            "prepared_forward": prepared_forward,
+            "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
+            "group_sizes": group_sizes,
+        }
+        if any(module_format != default_format for module_format in formats):
+            best_scale_kwargs["formats"] = formats
+
         best_scales, loss = self._compute_best_scale(
             inp,
             w_mean,
@@ -1848,10 +1874,7 @@ class AWQProcessor(LoopProcessor):
             layers,
             fp16_output,
             module_kwargs,
-            replay_batch_size=replay_batch_size,
-            prepared_forward=prepared_forward,
-            bits=[self._bits_for(module, layer) for layer in layers] if bits is None else bits,
-            group_sizes=group_sizes,
+            **best_scale_kwargs,
         )
 
         return (
@@ -1883,6 +1906,7 @@ class AWQProcessor(LoopProcessor):
                 input_feat[name],
                 bits=self._bits_for(layer, linear),
                 group_size=self._group_size_for(layer, linear),
+                format=self._format_for(layer, linear),
             )
             clip_list.append((name, max_val))
             move_to(linear, device=original_device)
@@ -1899,6 +1923,7 @@ class AWQProcessor(LoopProcessor):
             n_sample_token=512,
             bits: Optional[int] = None,
             group_size: Optional[int] = None,
+            format: Optional[FORMAT] = None,
     ):
         """Finds the clipping bound that minimizes reconstruction error for a weight tensor.
 
@@ -2030,12 +2055,17 @@ class AWQProcessor(LoopProcessor):
                 # stats inside `_pseudo_quantize_tensor_into` then reduce over
                 # the same `group_size` (or whole-row) axis as the per-step
                 # calls did, and `abs_max` flattens in the same order.
+                quantize_kwargs = {
+                    "abs_max": max_val,
+                    "bits": bits,
+                    "group_size": configured_group_size,
+                }
+                if format is not None and format != self._module_format(None):
+                    quantize_kwargs["format"] = format
                 self._pseudo_quantize_tensor_into(
                     clamp_slice.reshape(-1, 1, n_group, group_w),
                     quant_slice.reshape(-1, 1, n_group, group_w),
-                    abs_max=max_val,
-                    bits=bits,
-                    group_size=configured_group_size,
+                    **quantize_kwargs,
                 )
 
                 # (input_feat * quant).sum(-1) per candidate, sliced over tokens
@@ -2236,6 +2266,7 @@ class AWQProcessor(LoopProcessor):
         prepared_forward: Optional[Tuple[torch.Tensor, Dict]] = None,
         bits: Optional[int | List[int]] = None,
         group_sizes: Optional[int | List[int]] = None,
+        formats: Optional[FORMAT | List[FORMAT]] = None,
     ):
         """
         Compute loss and select best scales
@@ -2264,6 +2295,20 @@ class AWQProcessor(LoopProcessor):
             layer_group_sizes = list(group_sizes)
         if len(layer_group_sizes) != len(linears2scale):
             raise ValueError("AWQ scale search requires one group size per linear")
+        default_format = resolve_quant_format(self.qcfg.format, self.qcfg.method)
+        if formats is None:
+            layer_formats = [default_format] * len(linears2scale)
+        elif isinstance(formats, (FORMAT, str)):
+            layer_formats = [
+                resolve_quant_format(formats, self.qcfg.method)
+            ] * len(linears2scale)
+        else:
+            layer_formats = [
+                resolve_quant_format(module_format, self.qcfg.method)
+                for module_format in formats
+            ]
+        if len(layer_formats) != len(linears2scale):
+            raise ValueError("AWQ scale search requires one format per linear")
 
         # Stash a pristine master copy of every scaled linear once so the per-ratio
         # quantize/restore cycle never reaches back to host memory. The master stays on
@@ -2360,14 +2405,19 @@ class AWQProcessor(LoopProcessor):
             # `apply_scaled_weights` rebuilds the product from that master, so the
             # restore the previous iteration needed is folded into this step.
             apply_scaled_weights(scales_view)
-            for fc, module_bits, module_group_size in zip(
-                linears2scale, layer_bits, layer_group_sizes
+            for fc, module_bits, module_group_size, module_format in zip(
+                linears2scale, layer_bits, layer_group_sizes, layer_formats
             ):
+                quantize_kwargs = {
+                    "bits": module_bits,
+                    "group_size": module_group_size,
+                }
+                if module_format != default_format:
+                    quantize_kwargs["format"] = module_format
                 self._pseudo_quantize_tensor_into(
                     fc.weight,
                     fc.weight,
-                    bits=module_bits,
-                    group_size=module_group_size,
+                    **quantize_kwargs,
                 )
                 fc.weight.div_(scales_view)
 
@@ -2752,6 +2802,9 @@ class AWQProcessor(LoopProcessor):
             module_group_size = self._module_group_size(
                 named_module.full_name, effective=effective,
             )
+            module_format = self._module_format(
+                named_module.full_name, effective=effective,
+            )
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -2769,12 +2822,7 @@ class AWQProcessor(LoopProcessor):
                 weight_for_quant,
                 bits=module_bits,
                 group_size=module_group_size,
-                format=resolve_quant_format(
-                    (effective.get("format", self.qcfg.format) if effective is not None else
-                     self.qcfg.dynamic_get(named_module.full_name, "format", self.qcfg.format))
-                    or self.qcfg.format,
-                    self.qcfg.method,
-                ),
+                format=module_format,
             )
 
             from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar
@@ -2791,8 +2839,8 @@ class AWQProcessor(LoopProcessor):
                     wq, scales, zeros, groups, target=weight_for_quant.detach().float(),
                     bits=module_bits, config=gsq,
                     packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
-                             FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}[self.qcfg.format],
-                    scale_dtype=(scales.dtype if self.qcfg.format == FORMAT.GEMM and
+                             FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}[module_format],
+                    scale_dtype=(scales.dtype if module_format == FORMAT.GEMM and
                                  scales.dtype in (torch.float16, torch.bfloat16) else torch.float16),
                 )
                 wq, scales, zeros = fitted.weight, fitted.scales, fitted.zeros
@@ -3052,11 +3100,13 @@ class AWQProcessor(LoopProcessor):
         # generate complete, safe to move to cpu
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
-        with (self.lock):
-            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
-            if self.calculate_w_wq_diff:
-                module.weight.data = module.state.pop("wq").to(CPU)
+        # NamedModule attribute access takes the parent module lock. Do not hold
+        # the processor lock here, because create_quant_module/pack_module take
+        # these locks in the opposite order during EoRA finalization.
+        if self.calculate_w_wq_diff:
+            module.weight.data = module.state.pop("wq").to(CPU)
 
+        with self.lock:
             module.state.pop("w", None)  #
             module.state.pop("w_wq_diff", None)
 

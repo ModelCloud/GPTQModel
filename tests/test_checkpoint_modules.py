@@ -11,6 +11,8 @@ from gptqmodel.looper.checkpoint_modules import (
 from gptqmodel.looper.continuation import ContinuationCodec
 from gptqmodel.quantization.config import (
     _GGUF_BITS_ALIAS_INFO,
+    FORMAT,
+    AWQConfig,
     FP8Config,
     GGUFConfig,
     ParoConfig,
@@ -79,7 +81,7 @@ def test_dynamic_pack_settings_roundtrip_per_module():
         format=config.format,
         register_buffers=True,
     )
-    spec = packed_module_spec(module, config, module_name="proj")
+    spec = packed_module_spec(module, config)
     restored = restore_packed_module(
         spec,
         name="proj",
@@ -88,10 +90,37 @@ def test_dynamic_pack_settings_roundtrip_per_module():
         lm_head_name="lm_head",
     )
 
-    assert spec["dynamic"]["source_pattern"] == r"+:^proj$"
+    assert "dynamic" not in spec
     assert spec["pack_dtype"] == "int16"
     assert restored.bits == 8
     assert restored.pack_dtype is torch.int16
+
+
+def test_checkpoint_restores_dynamic_kernel_different_from_global_kernel():
+    from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+
+    config = AWQConfig(bits=8, group_size=32, format=FORMAT.GEMM)
+    module = AwqTorchLinear(
+        bits=8,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        format=FORMAT.GEMM,
+        register_buffers=True,
+    )
+    spec = packed_module_spec(module, config)
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=config,
+        kernel=AwqGEMMLinear,
+        lm_head_name="lm_head",
+    )
+
+    assert type(restored) is AwqTorchLinear
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
