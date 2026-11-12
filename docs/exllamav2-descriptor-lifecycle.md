@@ -37,6 +37,9 @@ flowchart TD
     LOAD -->|"raw checkpoint"| FINAL
     LOAD -->|"already finalized"| BIND
     LOAD -->|"AWQ raw qweight or qzeros alone"| PARTIAL["Raise RuntimeError before copying mixed layouts"]
+    EVENT -->|"AWQ qweight replaced directly"| SHAPE{"qweight still has native shape?"}
+    SHAPE -->|"no: raw checkpoint shape"| FINAL
+    SHAPE -->|"yes"| BIND
     EVENT -->|"_FusionGroup.install"| CLONE["FusionKernelSpec.combine: clone live descriptor into packed layer"]
     CLONE --> VIEWS["_share_operands: bind source views while descriptors stay live"]
     VIEWS --> RUN["Packed and direct source forwards use native GEMM"]
@@ -57,6 +60,7 @@ flowchart TD
 | Checkpoint load | Could treat raw AWQ words as finalized or write into a fused view | Detaches fused operands, restores checkpoint shape, resets native flags; AWQ repacks before its next bind |
 | Torch runtime `state_dict()` load | Reshuffled finalized GPTQ words | GPTQ stores layout in local state metadata; AWQ recognizes its distinct runtime shape and binds without reshuffling |
 | Partial AWQ checkpoint load | Could mix raw and repacked zeros/weights | Rejects raw qweight or qzeros alone after AWQ finalization; accepts matching runtime metadata |
+| Direct AWQ checkpoint-buffer replacement (`gptqmodel/nn_modules/qlinear/exllamav2_awq.py:195-210`) | `_awq_repacked` stayed true after raw words replaced native buffers; the next handle received raw layout | `_ensure_q_handle` detects the raw qweight shape, resets the native flags, and repacks before binding |
 | Fusion install | `FusionKernelSpec.combine` freed its new descriptor before `rebind` | Keeps the cloned descriptor; source views clone from live descriptors |
 | Fused source device or dtype move | A source descriptor still named the old GPU or scale buffer | Installed cache clear releases the changed source descriptor; direct execution rebinds before fusion resumes |
 | Fusion removal | Source handles could be freed before restoring independent operands | Rebinds each source to its restored packed allocation |
