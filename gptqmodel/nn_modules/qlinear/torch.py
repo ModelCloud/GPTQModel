@@ -29,7 +29,12 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
 from ._g_idx import validate_g_idx_bounds
-from ._numerics import _wants_fp32_reduce, autocast_active, matmul_fp32_reduce
+from ._numerics import (
+    _wants_fp32_reduce,
+    autocast_active,
+    linear_needs_wide_bias,
+    matmul_fp32_reduce,
+)
 from ._runtime_cache import tensor_cache_key
 
 
@@ -442,8 +447,15 @@ class TorchLinear(PackableQuantLinear):
                 # caller tensor during multi-device kernel validation; matmul still
                 # needs both operands on the same device and dtype.
                 weights = weights.to(device=x.device, dtype=x.dtype)
-            if bias is not None and (bias.device != x.device or bias.dtype != x.dtype):
-                bias = bias.to(device=x.device, dtype=x.dtype)
+            # Never narrow a stored wide bias here: rounding ``-65535`` to FP16
+            # turns it into ``-inf``, and a low-precision reduction can round
+            # away the partial sum the bias is supposed to cancel. The device
+            # move is safe; ``matmul_fp32_reduce`` keeps a wide bias out of the
+            # low-precision epilogue and both values meet in FP32.
+            if bias is not None and bias.device != x.device:
+                bias = bias.to(device=x.device)
+            if bias is not None and not linear_needs_wide_bias(x, bias):
+                bias = bias.to(dtype=x.dtype)
             out = matmul_fp32_reduce(x, weights, bias=bias).reshape(out_shape)
         del weights
 
@@ -599,12 +611,20 @@ class TorchLinear(PackableQuantLinear):
 
         compute_stream = torch.cuda.current_stream(device=device)
         wide_reduce = _wants_fp32_reduce(x)
+        # A stored bias wider than the activation dtype must stay out of the
+        # low-precision addmm epilogue, exactly like the eager path.
+        wide_bias = linear_needs_wide_bias(x, self.bias)
+        wide_epilogue = wide_reduce or wide_bias
         # Autocast narrows a fused `addmm` bias to the autocast dtype, so that
         # context keeps the post-loop addition, where type promotion applies.
-        fuse_bias = not wide_reduce and not autocast_active(device.type)
+        fuse_bias = not wide_epilogue and not autocast_active(device.type)
         bias = self.bias
-        if bias is not None and (bias.device != device or bias.dtype != x.dtype):
-            bias = bias.to(device=device, dtype=x.dtype)
+        if bias is not None and bias.device != device:
+            bias = bias.to(device=device)
+        # A bias that must stay wide keeps its stored dtype so the per-tile
+        # FP32 epilogue can add it; every other bias keeps the old cast.
+        if bias is not None and not wide_bias:
+            bias = bias.to(dtype=x.dtype)
         stream_dequant = self._stream_get_dequant_stream(device)
         zeros = self._stream_decode_qzeros()
         g_idx = self._stream_g_idx_long()
@@ -639,7 +659,7 @@ class TorchLinear(PackableQuantLinear):
             out_slice = out.narrow(1, start, width)
             weight_tile = buffers[buffer_idx].narrow(1, 0, width)
             tile_bias = bias.narrow(0, start, width) if bias is not None else None
-            if wide_reduce:
+            if wide_epilogue:
                 out_slice.copy_(matmul_fp32_reduce(x, weight_tile, bias=tile_bias))
             elif fuse_bias and tile_bias is not None:
                 # Fuse the bias into the GEMM epilogue; rounding `out` before
@@ -659,7 +679,7 @@ class TorchLinear(PackableQuantLinear):
         buffers.clear()
         out = out.reshape(out_shape)
 
-        if bias is not None and not wide_reduce and not fuse_bias:
+        if bias is not None and not wide_epilogue and not fuse_bias:
             out.add_(bias)
 
         if self.adapter:

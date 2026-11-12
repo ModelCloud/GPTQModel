@@ -114,6 +114,9 @@ PR #3753.
 | VPTQ packed bias copy, `nn_modules/qlinear/vptq_torch.py:463-474` | `.to(dtype=self.bias.dtype)` | FP32 copy with an exactness check |
 | VPTQ checkpoint reload, `models/loader.py` | Requested FP16/BF16 dtype could narrow the saved FP32 bias | Keep the bias FP32 during load and restore it from the checkpoint if Accelerate narrows BF16 buffers |
 | FP4 checkpoint decoder (`_build_fp4_forward_module`), `models/base.py:3871` | `bias.to(device=device, dtype=target_dtype)` before PR #3753 | Bias kept at its stored width, so the forward can still go wide |
+| Portable GPTQ fallback, `nn_modules/qlinear/torch.py:444-458` | `bias.to(device=x.device, dtype=x.dtype)` before `matmul_fp32_reduce` | Device move only; a bias `linear_needs_wide_bias` marks as wide is passed at its stored dtype |
+| Portable GPTQ streaming, `nn_modules/qlinear/torch.py:603-682` | Same narrowing cast before the per-tile `addmm` | Wide-bias calls take the per-tile FP32 epilogue; every other bias keeps the cast |
+| `matmul_fp32_reduce`, `nn_modules/qlinear/_numerics.py:108-147` | Narrow reductions on HIP/CPU rounded (or overflowed) the product before a wide bias was added | A wide bias routes to `linear_wide_bias`, so both values meet in FP32 |
 
 ## Dtype promotion contract
 
@@ -123,6 +126,48 @@ narrower floating dtype (`float16`/`bfloat16` into `float32`, or either into
 incomparable dtype is returned unchanged, and the caller must add it after the
 reduction. FP16 and BF16 are treated as equally wide because neither dtype
 contains the other: BF16 has the exponent range and FP16 has the mantissa.
+
+## Portable GPTQ fallback
+
+The Torch GPTQ backend uses `matmul_fp32_reduce` for its dequantize + matmul
+path and for each streaming tile. Its eager branch used to narrow the stored
+bias to the activation dtype (`nn_modules/qlinear/torch.py:446`), which lost the
+value before the reduction could be cancelled. A unit weight, `K=256`,
+`N=128`, `256` activations, and an FP32 bias of `-65535` therefore produced
+`-inf` in FP16 and `0` in BF16, while the fused GEMV/GEMM branches returned the
+correct `1`. The result depended on the batch size only because the row count
+selects the branch:
+
+```mermaid
+flowchart TD
+    A["TorchLinear forward"] --> B{"_should_use_streaming?"}
+    B -- "Yes" --> C["_forward_streaming"]
+    B -- "No" --> D["_forward_eager"]
+    D --> E{"_can_use_rocm_gemv or _can_use_rocm_gemm?"}
+    E -- "Yes" --> F["fused kernel; bias added in FP32 when wide"]
+    E -- "No" --> G["dequantize + matmul_fp32_reduce"]
+    G --> H{"linear_needs_wide_bias?"}
+    H -- "Yes" --> I["linear_wide_bias: FP32 sum, round once"]
+    H -- "No" --> J["narrow epilogue: cast bias to activation dtype"]
+    C --> H
+    K["Old flow: bias cast to activation dtype before matmul_fp32_reduce"] --> L["-65535 becomes -inf in FP16, -65536 in BF16"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class K,L failure
+```
+
+| Situation | Behaviour |
+| --- | --- |
+| Stored bias wider than the activation, eager fallback | Added after an FP32 reduction and rounded once |
+| Stored bias wider than the activation, streaming | Every tile uses the FP32 epilogue instead of `torch.addmm` on the output dtype |
+| Bias in the activation dtype or narrower | Unchanged narrow epilogue, no extra FP32 operand copy |
+| Bias outside the activation dtype's range | Kept wide; no `-inf`/rounded bias value is ever constructed |
+| Fused GEMV/GEMM branch | Unchanged; it already requests an FP32 output when a bias is present |
+| Temporary dequantized weight | Created per call and released, as before |
+
+Measured on 4096x4096 resident inputs, `M=17` decode costs `0.026 ms` with an
+FP16 bias and `0.024 ms` with the wide FP32 bias on one NVIDIA device, and
+`0.046 ms` against `0.051 ms` on one AMD device; the trade is a rounding point,
+not a new operand copy.
 
 ## Failure and ambiguity paths
 
@@ -160,6 +205,16 @@ between replays, so a graph that baked in the captured value — or cached the
 representability answer, which the version counter cannot see — is caught. FP4
 is deliberately not advertised on ROCm, so that test exercises the portable
 dequantize-plus-`linear_wide_bias` branch on HIP.
+
+The portable GPTQ fallback adds a second regression fixture:
+`tests/kernels/test_torch_wide_bias_fallback.py` runs the unit-weight case above
+at `M` in `1, 2, 16, 17, 65` for FP16 and BF16, on the eager and streaming
+paths and with the fused kernels gated off, and asserts the FP64 oracle exactly.
+Autocast and gradient cases pin the remaining branches. On the pre-fix tree 28
+of those 42 cases fail on the NVIDIA device and all 42 fail on the AMD device
+(there every row count reaches the fallback); after the fix all pass. The
+harness also tracks the dequantized tensor, so a retained dense weight would
+surface as a live reference or a new module buffer.
 
 A 4096x4096 layer with a representable FP32 bias was measured with resident
 inputs. Keying the epilogue off the buffer dtype alone opened the FP32 path for
