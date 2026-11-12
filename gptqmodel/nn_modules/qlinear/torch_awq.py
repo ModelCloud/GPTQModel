@@ -178,25 +178,19 @@ class AwqTorchLinear(AWQuantLinear):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # `dequantize_gemm` multiplies the integer codes by the scales, so the
-        # dequantized weight follows the scale dtype. This reference kernel
-        # contracts for a half-precision weight; a non-half activation (for
-        # example the ParoQuant dense fallback) must still dequantize at the
-        # stored half precision and only then widen the finished weight,
-        # instead of dequantizing at FP32 and tripping the check below.
-        dequant_dtype = dtype
-        if dequant_dtype not in (torch.float16, torch.bfloat16):
-            dequant_dtype = self.scales.dtype
-            if dequant_dtype not in (torch.float16, torch.bfloat16):
-                dequant_dtype = torch.float16
+        # weight follows the temporary scale dtype. The Torch AWQ forward uses
+        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # Keep FP32 scales in FP32 there: a half intermediate could underflow
+        # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self._scales_for_compute(device=x_flat.device, dtype=dequant_dtype),
+            scales=self._scales_for_compute(device=x_flat.device, dtype=dtype),
             bits=self.bits,
             group_size=self.group_size,
         )
-        if weight.dtype not in (torch.float16, torch.bfloat16):
-            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise AssertionError(f"weight {weight.dtype} is not float16, bfloat16, or float32")
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight

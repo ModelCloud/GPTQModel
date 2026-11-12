@@ -31,14 +31,14 @@ flowchart TD
     P["AwqTorchLinear.pack: keep source scales and bias dtypes"] --> A
     A --> B["_scales_for_compute: temporary activation-dtype copy"]
     B --> C["dequantize_gemm with the temporary scales"]
-    C --> D["temporary dequantized weight in the compute dtype"]
+    C --> D["temporary dequantized weight in the AWQ compute dtype"]
     D --> E["_bias_for_compute: move/contiguous only, keep stored dtype"]
     E --> F{"matmul_fp32_reduce"}
     F -- "bias wider or incomparable" --> G["linear_wide_bias: wide reduction, bias added in FP32"]
     F -- "same dtype" --> H["FP32-output addmm with bias"]
-    G --> I["single cast to activation dtype"]
+    G --> I["adapter.apply when present"]
     H --> I
-    I --> J["adapter, reshape, return"]
+    I --> J["cast to input dtype, reshape, return"]
     C -. "stored scales/bias unchanged" .-> K["checkpoint precision retained"]
     D -. "released after matmul" .-> K
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
@@ -54,10 +54,11 @@ never casts it. `matmul_fp32_reduce` selects `linear_wide_bias` whenever the
 bias cannot be represented exactly in the activation dtype, adds it to the
 FP32 reduction, and rounds once.
 
-The reference kernel contracts for a half-precision dequantized weight, so a
-non-half activation (for example the `ParoLinear` dense fallback) dequantizes
-at the stored half precision and widens the finished weight instead of
-dequantizing at FP32.
+`AwqTorchLinear.forward` uses an FP16 or BF16 compute dtype. The shared
+`_dequantize_weight_for_inference` helper also serves `ParoLinear._forward_dense`,
+which can receive FP32 activations. That path dequantizes in FP32 so an FP32
+checkpoint scale does not underflow or overflow in a half-precision
+intermediate. The dequantized weight is temporary in both paths.
 
 ## Before and after
 
@@ -96,10 +97,15 @@ oracle that decodes the packed INT4 words itself. On the pre-fix revision
 (`0` for BF16 without `post_init`), where the oracle is `1`, and the
 BF16-to-FP16-to-BF16 case left the scale at `0`. The fixed revision returns
 `1` for both dtypes and preserves the `9.1835e-41` scale. The same values were
-observed on NVIDIA CUDA and AMD ROCm devices; the test file passes on both.
+observed on NVIDIA CUDA and AMD ROCm devices; the original twelve test cases
+pass on both.
 The checkpoint-load and dense-pack regression cases cover the two earlier
 precision-loss boundaries for both scales and bias. They pass on NVIDIA CUDA
 and AMD ROCm.
+The FP32 dense-fallback regression checks scales of `1`, `1e-40`, and `65536`;
+the latter two became zero and infinity, respectively, when narrowed to FP16.
+The new FP32 cases pass on NVIDIA CUDA and CPU; they have not been rerun on
+AMD ROCm.
 
 This flow was introduced by the fix for the AWQ forward precision report in
 PR #3800.

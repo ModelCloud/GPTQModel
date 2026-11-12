@@ -341,15 +341,11 @@ def test_awq_torch_loader_preserves_checkpoint_operand_dtypes(tmp_path, checkpoi
     torch.testing.assert_close(model.layer(x.to(_AWQ_TEST_DEVICE)), expected, rtol=0, atol=0)
 
 
-def test_awq_torch_dequantize_supports_non_half_compute_dtype():
-    """The shared dequantize helper keeps its half-weight contract.
+@pytest.mark.parametrize("scale", [1.0, 1e-40, 65536.0])
+def test_awq_torch_dequantize_supports_non_half_compute_dtype(scale):
+    """ParoQuant's FP32 dense fallback must retain FP32 checkpoint scales."""
 
-    ``ParoLinear`` calls it with the activation dtype, which can be FP32 on the
-    dense fallback. The helper must dequantize at a half precision and then
-    widen the finished weight instead of raising.
-    """
-
-    scales = torch.ones((1, 8), dtype=torch.float32)
+    scales = torch.full((1, 8), scale, dtype=torch.float32)
     bias = torch.zeros(8, dtype=torch.float32)
     module = _make_unit_awq_module(scales=scales, bias=bias)
     module.post_init()
@@ -361,5 +357,5 @@ def test_awq_torch_dequantize_supports_non_half_compute_dtype():
     assert weight.dtype is torch.float32
     assert weight.shape == (16, 8)
     assert torch.equal(
-        weight, torch.ones((16, 8), dtype=torch.float32, device=_AWQ_TEST_DEVICE)
+        weight, torch.full((16, 8), scale, dtype=torch.float32, device=_AWQ_TEST_DEVICE)
     )
