@@ -122,8 +122,9 @@ class AwqTorchLinear(AWQuantLinear):
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         self.register_buffer("scales", scales.clone().to(scale_dtype))
         if linear.bias is not None:
-            bias_dtype = linear.bias.dtype if linear.bias.dtype in (torch.float16, torch.bfloat16) else scale_dtype
-            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
+            # The bias is added after a wide reduction, so keep the source
+            # precision even when AWQ scales are stored in half precision.
+            self.register_buffer("bias", linear.bias.clone())
         else:
             self.bias = None
 

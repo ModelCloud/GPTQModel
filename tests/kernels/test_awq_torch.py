@@ -5,12 +5,14 @@
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
+from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
@@ -152,13 +154,22 @@ def _make_unit_awq_module(*, scales, bias, device=None):
 def _awq_oracle(module, x):
     """Independent FP64 oracle over the stored checkpoint-precision buffers."""
 
-    weight = dequantize_gemm(
-        qweight=module.qweight.cpu(),
-        qzeros=module.qzeros.cpu(),
-        scales=module.scales.cpu().to(torch.float64),
-        bits=module.bits,
-        group_size=module.group_size,
-    )
+    assert module.bits == 4
+    order = (0, 2, 4, 6, 1, 3, 5, 7)
+
+    def unpack(packed):
+        packed = packed.cpu()
+        codes = torch.empty((packed.shape[0], packed.shape[1] * 8), dtype=torch.int32)
+        for column in range(packed.shape[1]):
+            for lane, source_column in enumerate(order):
+                codes[:, column * 8 + source_column] = (packed[:, column] >> (4 * lane)) & 15
+        return codes
+
+    codes = unpack(module.qweight).to(torch.float64)
+    zeros = unpack(module.qzeros).to(torch.float64)
+    scales = module.scales.cpu().to(torch.float64)
+    groups = torch.arange(codes.shape[0]) // module.group_size
+    weight = (codes - zeros[groups]) * scales[groups]
     return x.cpu().to(torch.float64) @ weight + module.bias.cpu().to(torch.float64)
 
 
@@ -187,6 +198,23 @@ def test_awq_torch_wide_checkpoint_bias_rounds_after_wide_accumulation(activatio
     torch.testing.assert_close(
         actual, expected.to(device=actual.device, dtype=activation_dtype), rtol=0, atol=0
     )
+
+
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_awq_torch_pack_keeps_fp32_source_bias(activation_dtype):
+    source = torch.nn.Linear(16, 8, bias=True, dtype=torch.float32)
+    source.weight.data.fill_(1)
+    source.bias.data.fill_(-65535)
+    module = AwqTorchLinear(
+        bits=4, group_size=16, sym=True, desc_act=False,
+        in_features=16, out_features=8, bias=True,
+    )
+    module.pack(source, torch.ones((8, 1), dtype=torch.float16), torch.zeros((8, 1)))
+    module.post_init()
+    x = torch.full((1, 16), 4096.0, dtype=activation_dtype)
+
+    assert module.bias.dtype is torch.float32
+    torch.testing.assert_close(module(x), _awq_oracle(module, x).to(activation_dtype), rtol=0, atol=0)
 
 
 def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
@@ -222,3 +250,60 @@ def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
     torch.testing.assert_close(
         actual, expected.to(device=actual.device, dtype=torch.bfloat16), rtol=0, atol=0
     )
+    # The dequantized [in_features, out_features] weight is call-local.
+    retained = list(vars(module).values()) + list(module.buffers()) + list(module.parameters())
+    assert not any(
+        isinstance(value, torch.Tensor) and value.shape == (16, 8)
+        for value in retained
+    )
+
+
+@pytest.mark.parametrize("checkpoint_dtype", [torch.float32, torch.bfloat16])
+def test_awq_torch_loader_preserves_checkpoint_operand_dtypes(tmp_path, checkpoint_dtype):
+    """The model loader must not narrow AWQ buffers before forward sees them."""
+
+    if checkpoint_dtype is torch.float32:
+        scales = torch.ones((1, 8), dtype=checkpoint_dtype)
+        bias = torch.full((8,), -65535.0, dtype=checkpoint_dtype)
+        x = torch.full((1, 16), 4096.0, dtype=torch.float16)
+    else:
+        scales = torch.full((1, 8), 1e-40, dtype=checkpoint_dtype)
+        bias = torch.zeros(8, dtype=checkpoint_dtype)
+        x = torch.ones((1, 16), dtype=torch.bfloat16)
+
+    source = _make_unit_awq_module(scales=scales, bias=bias, device=torch.device("cpu"))
+    expected = _awq_oracle(source, x).to(device=_AWQ_TEST_DEVICE, dtype=x.dtype)
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = AwqTorchLinear(
+                bits=4,
+                group_size=16,
+                sym=True,
+                desc_act=False,
+                in_features=16,
+                out_features=8,
+                bias=True,
+                register_buffers=True,
+            )
+
+        def tie_weights(self, **_kwargs):
+            pass
+
+    model = Model()
+    checkpoint = tmp_path / "model.safetensors"
+    save_file(
+        {f"layer.{name}": tensor.contiguous() for name, tensor in source.state_dict().items()},
+        str(checkpoint),
+        metadata={"format": "pt"},
+    )
+    load_checkpoint_in_model_then_tie_weights(
+        model, checkpoint=str(checkpoint), device_map={"": str(_AWQ_TEST_DEVICE)}, dtype=torch.float16
+    )
+
+    assert model.layer.scales.dtype is checkpoint_dtype
+    assert model.layer.bias.dtype is checkpoint_dtype
+    assert torch.equal(model.layer.scales.cpu(), scales)
+    assert torch.equal(model.layer.bias.cpu(), bias)
+    torch.testing.assert_close(model.layer(x.to(_AWQ_TEST_DEVICE)), expected, rtol=0, atol=0)

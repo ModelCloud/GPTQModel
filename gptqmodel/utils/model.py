@@ -2709,10 +2709,10 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
 
 
 def _restore_checkpoint_buffers(
-    model, checkpoint, dtypes: dict[str, torch.dtype],
+    model, checkpoint, dtypes: dict[str, torch.dtype | None],
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Restore checkpoint buffers one tensor at a time after Accelerate casts."""
+    """Restore buffers after Accelerate casts; ``None`` keeps the source dtype."""
     names = set(dtypes)
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -2754,7 +2754,10 @@ def _restore_checkpoint_buffers(
             raise RuntimeError(
                 f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
             )
-        module._buffers[buffer_name] = value.to(device=current.device, dtype=dtypes[name])
+        target_dtype = dtypes[name]
+        module._buffers[buffer_name] = value.to(
+            device=current.device, dtype=value.dtype if target_dtype is None else target_dtype
+        )
         restored.add(name)
 
     for path, selected in files.items():
@@ -2806,6 +2809,17 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         restore_dtypes = dict(packed_fp8_buffer_dtypes)
         if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
+        # Accelerate casts floating buffers to the requested model dtype even
+        # when the quantized module's forward needs the checkpoint precision.
+        # Restore only Torch AWQ's stored operands; its forward makes temporary
+        # activation-dtype copies without rewriting these buffers.
+        for name, module in model.named_modules():
+            if getattr(module, "QUANT_TYPE", None) != "awq_torch":
+                continue
+            prefix = f"{name}." if name else ""
+            for buffer_name in ("scales", "bias"):
+                if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                    restore_dtypes[f"{prefix}{buffer_name}"] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
