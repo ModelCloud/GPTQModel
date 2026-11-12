@@ -6,6 +6,7 @@
 import atexit
 import os
 import sys
+import threading
 
 
 # isort: off
@@ -226,6 +227,7 @@ from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 
 
 _DEVICE_THREAD_POOL = None
+_DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
@@ -281,20 +283,19 @@ def _build_device_thread_pool():
 def get_device_thread_pool():
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
-        _DEVICE_THREAD_POOL = _build_device_thread_pool()
-        # Worker threads call into CUDA; if they are still alive when the
-        # interpreter finalizes, the process aborts with
-        # "terminate called without an active exception" after every test passes.
-        # Joining them here runs before teardown, while the CUDA context is valid.
-        atexit.register(_shutdown_device_thread_pool)
+        with _DEVICE_THREAD_POOL_LOCK:
+            if _DEVICE_THREAD_POOL is None:
+                pool = _build_device_thread_pool()
+                # Register before publishing the pool so every caller that
+                # receives it has a matching exit cleanup. Capture this pool:
+                # a later replacement must not leave its workers unjoined.
+                atexit.register(_shutdown_device_thread_pool, pool)
+                _DEVICE_THREAD_POOL = pool
     return _DEVICE_THREAD_POOL
 
 
-def _shutdown_device_thread_pool() -> None:
+def _shutdown_device_thread_pool(pool: DeviceThreadPool) -> None:
     """Join pool workers at exit so finalization cannot abort."""
-    pool = _DEVICE_THREAD_POOL
-    if pool is None:
-        return
     try:
         pool.shutdown(wait=True)
     except Exception:
