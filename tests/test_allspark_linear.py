@@ -94,3 +94,110 @@ def test_allspark_linear_matches_dequant(m, dtype):
     rel = (out.double() - ref).abs().mean() / ref.abs().mean()
     assert torch.isfinite(out).all()
     assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
+
+
+def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128):
+    """AllSparkLinear with unit weights and an FP32 bias outside FP16 range."""
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    codes = torch.full((k, n), 0xFF, dtype=torch.int32, device="cuda")
+    scale = torch.full((1, n), 1.0 / 127.0, dtype=dtype, device="cuda")
+    shifts = (torch.arange(4, device="cuda", dtype=torch.int32) * 8).view(1, 4, 1)
+    qweight = (codes.view(k // 4, 4, n) << shifts).sum(dim=1).to(torch.int32)
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=dtype,
+    ).cuda().to(dtype)
+    mod.qweight.data.copy_(qweight.contiguous())
+    mod.scales.data.copy_(scale)
+    mod.bias.data.fill_(-32768.0)
+    mod.post_init()
+    return mod, k, n
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_linear_bias_added_before_output_rounding(dtype):
+    """The module keeps the bias wide and adds it inside the FP32 epilogue."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, k, n = _fp32_bias_module(dtype)
+    x = torch.full((2, k), 16.0, dtype=dtype, device="cuda")
+    out = mod(x)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all(), "bias was added after the FP16/BF16 rounding"
+    torch.testing.assert_close(out, torch.full_like(out, 16.0 * k - 32768.0),
+                               rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_linear_bias_does_not_expand_persistent_storage(dtype):
+    """Bias handling must not add a dense or FP32 weight cache."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, k, _ = _fp32_bias_module(dtype, k=256, n=128)
+    packed_bytes = (mod.qweight_packed.numel()
+                    + mod.scales_packed.numel() * mod.scales_packed.element_size())
+    bias_bytes = mod.bias.numel() * mod.bias.element_size()
+    before = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+    x = torch.full((4, k), 16.0, dtype=dtype, device="cuda")
+    for _ in range(3):
+        mod(x)
+        torch.cuda.synchronize()
+        after = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+        assert after == before
+    assert sum(before.values()) == packed_bytes + bias_bytes
+
+
+def _allspark_state(k: int, n: int, dtype: torch.dtype):
+    """A loadable AllSpark GPTQ-8bit state dict with an FP32-range bias."""
+    codes = torch.full((k, n), 0xFF, dtype=torch.int32)
+    scale = torch.full((1, n), 1.0 / 127.0, dtype=dtype)
+    shifts = (torch.arange(4, dtype=torch.int32) * 8).view(1, 4, 1)
+    qweight = (codes.view(k // 4, 4, n) << shifts).sum(dim=1).to(torch.int32)
+    bias = torch.full((n,), -100000.0, dtype=torch.float32)
+    return {"qweight": qweight, "scales": scale, "bias": bias}
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_bias_survives_checkpoint_reload_at_fp32_width(tmp_path, dtype):
+    """A loader cast must not narrow the bias the FP32 epilogue depends on."""
+    from safetensors.torch import save_file
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+    from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
+
+    k, n = 32, 128
+    state = _allspark_state(k, n, dtype)
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = AllSparkLinear(
+                bits=8, group_size=-1, desc_act=False, sym=True,
+                in_features=k, out_features=n, bias=True, dtype=dtype,
+            )
+
+        def tie_weights(self, **_kwargs):
+            pass
+
+    checkpoint = tmp_path / "model.safetensors"
+    save_file({f"proj.{name}": value for name, value in state.items()}, checkpoint,
+              metadata={"format": "pt"})
+    restored = Wrapper()
+    restored.proj.bias.zero_()
+    load_checkpoint_in_model_then_tie_weights(
+        restored,
+        checkpoint=str(checkpoint),
+        device_map={"": "cpu"},
+        dtype=dtype,
+        keep_in_fp32_modules=["proj.bias"],
+        fp32_bf16_buffer_names=["proj.bias"],
+    )
+    assert restored.proj.bias.dtype == torch.float32
+    assert restored.proj.bias[0].item() == -100000.0
+    torch.testing.assert_close(restored.proj.scales, state["scales"], rtol=0, atol=0)
+    torch.testing.assert_close(restored.proj.qweight, state["qweight"], rtol=0, atol=0)

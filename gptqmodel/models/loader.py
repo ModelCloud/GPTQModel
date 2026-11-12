@@ -43,6 +43,8 @@ from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoi
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear.allspark import AllSparkLinear
+from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -2364,10 +2366,11 @@ def ModelLoader(cls):
                 if getattr(module, "bias", None) is not None and (
                     getattr(module, "weight_scale_inv", None) is not None
                     or hasattr(module, "gguf_tensor_qtype")
-                    or isinstance(module, VPTQLinear)
+                    or isinstance(module, (VPTQLinear, AllSparkLinear, AllSparkAwqLinear))
                 ):
                     keep_in_fp32_modules.append(f"{prefix}bias")
-                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear, VPTQLinear)):
+                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear, VPTQLinear,
+                                          AllSparkLinear, AllSparkAwqLinear)):
                         fp32_bf16_buffer_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,

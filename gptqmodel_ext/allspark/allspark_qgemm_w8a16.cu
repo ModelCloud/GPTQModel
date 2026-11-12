@@ -8,7 +8,8 @@ torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
     torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
-    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
+    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder,
+    c10::optional<torch::Tensor> const& bias) {
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "allspark_w8a16_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -450,9 +451,29 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
       for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
   #pragma unroll
         for (int k_idx = 0; k_idx < 2; ++k_idx) {
-          FType low16 = static_cast<FType>(C_frag[m_idx][n_idx][k_idx * 2]);
-          FType high16 =
-              static_cast<FType>(C_frag[m_idx][n_idx][k_idx * 2 + 1]);
+          // Bias joins the FP32 accumulator before its only narrowing cast.
+          // Adding it to the stored FType output would round (and overflow)
+          // the partial sum first.
+          float v_low = C_frag[m_idx][n_idx][k_idx * 2];
+          float v_high = C_frag[m_idx][n_idx][k_idx * 2 + 1];
+          if (params.C_bias_ptr != nullptr) {
+            const int col_base = blockIdx.y * Ntile + warp_id * WARP_NTILE +
+                n_idx * 8 + (lane_id % 4) * 2;
+            if (col_base < params.N) {
+              v_low += params.C_bias_f32
+                  ? static_cast<const float*>(params.C_bias_ptr)[col_base]
+                  : static_cast<float>(
+                        static_cast<const FType*>(params.C_bias_ptr)[col_base]);
+            }
+            if (col_base + 1 < params.N) {
+              v_high += params.C_bias_f32
+                  ? static_cast<const float*>(params.C_bias_ptr)[col_base + 1]
+                  : static_cast<float>(
+                        static_cast<const FType*>(params.C_bias_ptr)[col_base + 1]);
+            }
+          }
+          FType low16 = static_cast<FType>(v_low);
+          FType high16 = static_cast<FType>(v_high);
           uint32_t tmp = (reinterpret_cast<uint32_t&>(low16) & 0xffff) |
                          (reinterpret_cast<uint32_t&>(high16) << 16);
           int sts_offset =
@@ -672,7 +693,7 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
     const FType* A, const QType* B, const FType* B_scale, const FType* B_zero,
     FType* C, const int M, const int N, const int K, void* workspace,
     const int sm_version, const BlockTileSplitkParams& fused_gemm_params,
-    cudaStream_t stream) {
+    cudaStream_t stream, const void* bias = nullptr, int bias32 = 0) {
   int Mtile = fused_gemm_params.Mtile;
   int grid_x = (M + Mtile - 1) / Mtile;
   int Ntile = fused_gemm_params.Ntile;
@@ -695,7 +716,7 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
                                stream));
     SM8x_GEMM_W8A16_Splitk_Params<FType, QType> params{
         A, B,      B_scale, B_zero, C,       M,     N,
-        K, SplitK, 0,       -1,     nullptr, C_tmp, red_count};
+        K, SplitK, 0,       -1,     nullptr, C_tmp, red_count, bias, bias32};
 
     if (false) {
     }
@@ -715,7 +736,7 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
     float* C_split = reinterpret_cast<float*>(workspace);
     SM8x_GEMM_W8A16_Splitk_Params<FType, QType> params{
         A, B,      B_scale, B_zero, C,       M,       N,
-        K, SplitK, 0,       -1,     C_split, nullptr, nullptr};
+        K, SplitK, 0,       -1,     C_split, nullptr, nullptr, bias, bias32};
 
     if (false) {
     }
@@ -733,7 +754,7 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
     __CALL_IF(64, 256, 256, false, true)
 
     // SplitK reduce
-    f16_gemm_splitk_reduce(C_split, C, M, N, grid_z, stream);
+    f16_gemm_splitk_reduce(C_split, C, M, N, grid_z, stream, bias, bias32);
   }
 }
 
@@ -873,13 +894,35 @@ void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
   }
 }
 
+// dequant + cuBLAS has no bias epilogue, so the FP32 product is written to a
+// scratch buffer and this kernel adds the bias before the single narrowing
+// cast. Casting the product to FType first is exactly the overflow the fused
+// kernels avoid (FP16 65536 + (-32768) must stay 32768).
+template <typename FType>
+__global__ void add_bias_cast_kernel(const float* __restrict__ src,
+                                     const void* bias, int bias32,
+                                     FType* __restrict__ out, int64_t total,
+                                     int n) {
+  const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= total) return;
+  float v = src[idx];
+  if (bias != nullptr) {
+    const int col = static_cast<int>(idx % n);
+    v += bias32
+        ? reinterpret_cast<const float*>(bias)[col]
+        : static_cast<float>(reinterpret_cast<const FType*>(bias)[col]);
+  }
+  out[idx] = static_cast<FType>(v);
+}
+
 template <typename FT, typename QT>
 void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
                           const FT* rhs_scales_ptr, const FT* rhs_zeros_ptr,
                           FT* out, void* workspace, const int M,
                           const int N_32align, const int N, const int K,
                           const int group_size, cudaStream_t stream,
-                          cublasHandle_t handle) {
+                          cublasHandle_t handle, const void* bias = nullptr,
+                          int bias32 = 0) {
   static_assert(
       std::is_same<FT, half>::value || std::is_same<FT, nv_bfloat16>::value,
       "only float16 and bfloat16 is supported");
@@ -900,10 +943,27 @@ void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
   } else {
     cuda_type = CUDA_R_16BF;
   }
+  if (bias == nullptr) {
+    CHECK_CUBLAS(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
+                              rhs_fdata_ptr, cuda_type, ldb, in, cuda_type, lda,
+                              &beta, out, cuda_type, ldc, CUDA_R_32F,
+                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    return;
+  }
+  // Biased: keep the cuBLAS result in FP32, add the bias there, cast once.
+  auto wide = torch::empty(
+      {static_cast<int64_t>(M), static_cast<int64_t>(N)},
+      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  float* wide_ptr = wide.data_ptr<float>();
   CHECK_CUBLAS(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
                             rhs_fdata_ptr, cuda_type, ldb, in, cuda_type, lda,
-                            &beta, out, cuda_type, ldc, CUDA_R_32F,
+                            &beta, wide_ptr, CUDA_R_32F, ldc, CUDA_R_32F,
                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+  const int64_t total = static_cast<int64_t>(M) * N;
+  const int block = 256;
+  const int grid = static_cast<int>((total + block - 1) / block);
+  add_bias_cast_kernel<FT><<<grid, block, 0, stream>>>(
+      wide_ptr, bias, bias32, out, total, N);
 }
 
 template <typename FType, typename QType>
@@ -912,15 +972,16 @@ void allspark_qgemm_w8a16_perc_ampere(
     FType* C, const int M, const int N_32align, const int N, const int K,
     void* workspace, const BlockTileSplitkParams& fused_gemm_params,
     const int group_size, int CUBLAS_M_THRESHOLD, const int sm_version,
-    cudaStream_t stream, cublasHandle_t handle) {
+    cudaStream_t stream, cublasHandle_t handle, const void* bias = nullptr,
+    int bias32 = 0) {
   if (M > CUBLAS_M_THRESHOLD) {
     w8a16_gemm_dq_cublas<FType, QType>(A, B, B_scale, B_zero, C, workspace, M,
                                        N_32align, N, K, group_size, stream,
-                                       handle);
+                                       handle, bias, bias32);
   } else {
     ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32K16_CN_splitk<
         FType, QType>(A, B, B_scale, B_zero, C, M, N, K, workspace, sm_version,
-                      fused_gemm_params, stream);
+                      fused_gemm_params, stream, bias, bias32);
   }
 }
 
@@ -930,7 +991,8 @@ torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
     torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
-    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
+    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder,
+    c10::optional<torch::Tensor> const& bias) {
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
@@ -969,6 +1031,25 @@ torch::Tensor allspark_w8a16_gemm(
     b_zero_ptr = reinterpret_cast<const void*>(b_qzeros.value().data_ptr());
   }
 
+  // The bias joins the FP32 accumulator before the output is narrowed. Adding
+  // it to the returned FP16/BF16 tensor would round (or overflow) the partial
+  // sum first, turning 65536 + (-32768) into inf instead of 32768.
+  const void* bias_ptr = nullptr;
+  int bias32 = 0;
+  if (bias.has_value()) {
+    const auto& b = bias.value();
+    TORCH_CHECK(b.device().is_cuda() && b.device() == a.device(),
+                "bias must be on the same device as A");
+    TORCH_CHECK(b.is_contiguous(), "bias is not contiguous");
+    TORCH_CHECK(b.dim() == 1 && b.size(0) == n,
+                "bias must hold one element per output channel");
+    TORCH_CHECK(b.scalar_type() == a.scalar_type() ||
+                    b.scalar_type() == at::ScalarType::Float,
+                "bias must be float16, bfloat16 or float32");
+    bias_ptr = reinterpret_cast<const void*>(b.data_ptr());
+    bias32 = b.scalar_type() == at::ScalarType::Float;
+  }
+
   auto c_options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({m, n}, c_options);
   void* c_ptr = reinterpret_cast<void*>(c.data_ptr());
@@ -999,7 +1080,7 @@ torch::Tensor allspark_w8a16_gemm(
         reinterpret_cast<const __half*>(b_zero_ptr),
         reinterpret_cast<__half*>(c_ptr), m, n_32align, n, k, ws,
         fused_gemm_params, group_size, CUBLAS_M_THRESHOLD, sm_version, stream,
-        handle);
+        handle, bias_ptr, bias32);
   } else if (a.dtype() == at::ScalarType::BFloat16) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__nv_bfloat16, uint8_t>(
         reinterpret_cast<const __nv_bfloat16*>(a_ptr), b_ptr,
@@ -1007,7 +1088,7 @@ torch::Tensor allspark_w8a16_gemm(
         reinterpret_cast<const __nv_bfloat16*>(b_zero_ptr),
         reinterpret_cast<__nv_bfloat16*>(c_ptr), m, n_32align, n, k, ws,
         fused_gemm_params, group_size, CUBLAS_M_THRESHOLD, sm_version, stream,
-        handle);
+        handle, bias_ptr, bias32);
   }
 
   return c;

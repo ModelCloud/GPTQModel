@@ -14,7 +14,8 @@ torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
     torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
-    int64_t cublas_m_threshold, bool has_zp, bool n32k16_reorder);
+    int64_t cublas_m_threshold, bool has_zp, bool n32k16_reorder,
+    c10::optional<torch::Tensor> const& bias);
 
 void rearrange_kn_weight_as_n32k16_order(
     torch::Tensor const& b_qweight, torch::Tensor const& b_scales,
@@ -40,7 +41,7 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
     torch::Tensor a, torch::Tensor b_qweight, torch::Tensor b_scales,
     std::optional<torch::Tensor> b_qzeros, int64_t n, int64_t group_size,
     int64_t sm_count, int64_t sm_version, int64_t cublas_m_threshold,
-    bool has_zp, bool n32k16_reorder) {
+    bool has_zp, bool n32k16_reorder, std::optional<torch::Tensor> bias) {
   TORCH_CHECK(a.is_cuda() && a.dim() == 2 && a.is_contiguous(),
               "A must be a contiguous CUDA matrix");
   TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16,
@@ -60,10 +61,20 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
   check_tensor(b_scales, a, a.scalar_type(), padded_n, "b_scales");
   TORCH_CHECK(has_zp == b_qzeros.has_value(), "has_zp must match b_qzeros");
   if (has_zp) check_tensor(*b_qzeros, a, a.scalar_type(), padded_n, "b_qzeros");
+  if (bias.has_value()) {
+    const auto& b = bias.value();
+    TORCH_CHECK(b.device() == a.device(), "bias must be on the same device as A");
+    TORCH_CHECK(b.is_contiguous(), "bias must be contiguous");
+    TORCH_CHECK(b.dim() == 1 && b.size(0) == n,
+                "bias must hold one element per output channel");
+    TORCH_CHECK(b.scalar_type() == a.scalar_type() ||
+                    b.scalar_type() == at::ScalarType::Float,
+                "bias must be float16, bfloat16 or float32");
+  }
   if (a.size(0) == 0) return torch::empty({0, n}, a.options());
   auto result = allspark_w8a16_gemm(a, b_qweight, b_scales, b_qzeros, n, group_size,
                              sm_count, sm_version, cublas_m_threshold, has_zp,
-                             n32k16_reorder);
+                             n32k16_reorder, bias);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return result;
 }
@@ -105,7 +116,8 @@ TORCH_LIBRARY(gptqmodel_allspark, m) {
   m.def(
       "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_qzeros, int n, int group_size, int sm_count, int sm_version, "
-      "int cublas_m_threshold, bool has_zp, bool n32k16_reorder) -> Tensor");
+      "int cublas_m_threshold, bool has_zp, bool n32k16_reorder, "
+      "Tensor? bias=None) -> Tensor");
   m.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_zeros, bool has_zp, Tensor(a!) b_qweight_reorder, "

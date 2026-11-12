@@ -269,6 +269,26 @@ __global__ __launch_bounds__(kBlock) void allspark_w8a16_kernel(
   const bool out32 = (p.C32_ptr != nullptr) && !store_split;
   const size_t split_stride = static_cast<size_t>(p.M) * p.N;
 
+  // Bias is added to the FP32 accumulator, never to an already rounded output:
+  // an FP16 partial sum of 65536 plus a -32768 bias is finite (32768), but
+  // rounding 65536 to FP16 first yields inf. Split-K partials stay unbiased
+  // (the reduce kernel applies it once), and C32 (test/diagnostic) keeps the
+  // plain accumulators so the oracle stays comparable.
+  const bool apply_bias = !store_split && !out32 && p.C_bias_ptr != nullptr;
+  const bool bias32 = p.C_bias_f32 != 0;
+  float bias_a = 0.0f, bias_b = 0.0f;
+  if (apply_bias) {
+    if (bias32) {
+      const float* bp = reinterpret_cast<const float*>(p.C_bias_ptr);
+      bias_a = c_col_a < p.N ? bp[c_col_a] : 0.0f;
+      bias_b = c_col_b < p.N ? bp[c_col_b] : 0.0f;
+    } else {
+      const FType* bp = reinterpret_cast<const FType*>(p.C_bias_ptr);
+      bias_a = c_col_a < p.N ? static_cast<float>(bp[c_col_a]) : 0.0f;
+      bias_b = c_col_b < p.N ? static_cast<float>(bp[c_col_b]) : 0.0f;
+    }
+  }
+
   if (store_split) {
     float* base = p.C_tmp_ptr + static_cast<size_t>(split) * split_stride;
 #pragma unroll
@@ -294,12 +314,14 @@ __global__ __launch_bounds__(kBlock) void allspark_w8a16_kernel(
       const int row = c_row0 + j;
       if (row < p.M) {
         if (c_col_a < p.N) {
+          const float v = apply_bias ? c0[j] + bias_a : c0[j];
           p.C_ptr[static_cast<size_t>(row) * p.N + c_col_a] =
-              static_cast<FType>(c0[j]);
+              static_cast<FType>(v);
         }
         if (c_col_b < p.N) {
+          const float v = apply_bias ? c1[j] + bias_b : c1[j];
           p.C_ptr[static_cast<size_t>(row) * p.N + c_col_b] =
-              static_cast<FType>(c1[j]);
+              static_cast<FType>(v);
         }
       }
     }
@@ -312,12 +334,19 @@ __global__ __launch_bounds__(kBlock) void allspark_w8a16_kernel(
 template <typename OType>
 __global__ void splitk_reduce_kernel(const float* __restrict__ csplit,
                                      OType* __restrict__ c, int total,
-                                     int splitk, int plane) {
+                                     int splitk, int plane, int n,
+                                     const void* bias, int bias32) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= total) return;
   float sum = 0.0f;
   for (int z = 0; z < splitk; ++z) {
     sum += csplit[static_cast<size_t>(z) * plane + idx];
+  }
+  // The bias joins the FP32 reduction here, before the only narrowing cast.
+  if (bias != nullptr) {
+    const int col = idx % n;
+    sum += bias32 ? reinterpret_cast<const float*>(bias)[col]
+                  : static_cast<float>(reinterpret_cast<const OType*>(bias)[col]);
   }
   c[idx] = static_cast<OType>(sum);
 }
@@ -439,7 +468,8 @@ int allspark_hip_pick_splitk(int M, int N, int N32, int K, int sm_count) {
 void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
                          const void* Bz, void* C, void* ws, int M, int N,
                          int N32, int K, int splitk, int dtype, int out_fp32,
-                         void* stream, uint32_t* ran) {
+                         const void* bias, int bias32, void* stream,
+                         uint32_t* ran) {
   hipStream_t s = reinterpret_cast<hipStream_t>(stream);
   const int kt_total = K / kKTile;
   const int kt_per_split = (kt_total + splitk - 1) / splitk;
@@ -464,6 +494,8 @@ void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
     (P).C32_ptr = out_fp32 ? reinterpret_cast<float*>(C) : nullptr;           \
     (P).red_count_ptr = nullptr;                                              \
     (P).N32 = N32;                                                            \
+    (P).C_bias_ptr = (bias);                                                  \
+    (P).C_bias_f32 = (bias32);                                                \
   } while (0)
 
   if (dtype == 0) {
@@ -490,15 +522,15 @@ void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
     if (out_fp32) {
       splitk_reduce_kernel<float><<<rgrid, block, 0, s>>>(
           reinterpret_cast<const float*>(ws), reinterpret_cast<float*>(C), total,
-          grid_z, total);
+          grid_z, total, N, bias, bias32);
     } else if (dtype == 0) {
       splitk_reduce_kernel<f16_t><<<rgrid, block, 0, s>>>(
           reinterpret_cast<const float*>(ws), reinterpret_cast<f16_t*>(C), total,
-          grid_z, total);
+          grid_z, total, N, bias, bias32);
     } else {
       splitk_reduce_kernel<__bf16><<<rgrid, block, 0, s>>>(
           reinterpret_cast<const float*>(ws), reinterpret_cast<__bf16*>(C),
-          total, grid_z, total);
+          total, grid_z, total, N, bias, bias32);
     }
   }
 }

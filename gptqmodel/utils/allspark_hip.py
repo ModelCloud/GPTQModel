@@ -292,16 +292,43 @@ def _validate_activation(a: torch.Tensor, group_size: int) -> int:
     return a.shape[-1]
 
 
+def _prepare_bias(a: torch.Tensor, bias: torch.Tensor | None, n: int) -> torch.Tensor | None:
+    """Validate the bias and give the kernel a matching or FP32 buffer.
+
+    The kernel reads either the activation dtype or FP32 (``bias32``). A
+    mismatched 16-bit bias is widened to FP32, which is lossless and keeps the
+    addition in the FP32 epilogue.
+    """
+    if bias is None:
+        return None
+    if bias.device != a.device:
+        raise ValueError("bias must be on the activation device")
+    if bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("bias must be float16, bfloat16 or float32")
+    if bias.dim() != 1 or bias.numel() != n:
+        raise ValueError("bias must hold one element per output channel")
+    if bias.dtype != a.dtype and bias.dtype != torch.float32:
+        bias = bias.to(torch.float32)
+    return bias
+
+
 def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,
-                      n: int, b_qzeros: torch.Tensor | None = None, group_size: int = -1):
+                      n: int, b_qzeros: torch.Tensor | None = None, group_size: int = -1,
+                      bias: torch.Tensor | None = None):
     """W8A16 GEMM against weights already in the HIP packed layout.
 
     ``b_qzeros`` is the packed zero-point buffer (AWQ). Scale and zero are
     per-output-channel; ``group_size`` accepts -1 or K for one full-K group.
+    ``bias`` is added inside the FP32 epilogue before the single cast to the
+    activation dtype, so a partial sum that only the bias brings back into range
+    never overflows the low-precision output first.
+
+    The kernel reads either an activation-dtype or an FP32 bias buffer.
     """
     k = _validate_activation(a, group_size)
     if b_scales.device != a.device or b_scales.dtype != a.dtype:
         raise ValueError("activation and scale devices/dtypes must match")
+    bias = _prepare_bias(a, bias, n)
     props = torch.cuda.get_device_properties(a.device)
     m = a.shape[0]
     if m <= ALLSPARK_HIP_MAX_M:
@@ -317,13 +344,21 @@ def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.
             1024,
             b_qzeros is not None,
             True,
+            bias,
         )
     # Prefill fallback: unpack per call and hand off to torch.matmul. The dense
     # tensor is a local temporary; nothing is cached on the module.
     w = torch.ops.gptqmodel_allspark_hip.allspark_hip_unpack(
         b_qweight, b_scales, n, k, b_qzeros
     )
-    return torch.matmul(a, w)
+    if bias is None:
+        return torch.matmul(a, w)
+    if bias.dtype == a.dtype:
+        # HIP addmm keeps the reduction and the bias in one FP32 epilogue.
+        return torch.addmm(bias, a, w)
+    # A bias wider than the activation dtype must not be narrowed first.
+    out = torch.matmul(a.float(), w.float())
+    return (out + bias.float()).to(a.dtype)
 
 
 def allspark_hip_gemm_f32(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,

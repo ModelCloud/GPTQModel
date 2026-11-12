@@ -151,8 +151,12 @@ class AllSparkLinear(GPTQQuantLinear):
             ),
         )
         if bias:
+            # Keep the checkpoint width. The kernel adds the bias to its FP32
+            # accumulator, so a value outside the activation dtype's finite
+            # range (an FP32 -65536 is -inf as FP16) must not be narrowed here;
+            # the loader preserves this buffer through an FP16/BF16 load.
             self.register_buffer(
-                "bias", torch.zeros((out_features), dtype=self.compute_dtype)
+                "bias", torch.zeros((out_features), dtype=torch.float32)
             )
         else:
             self.bias = None
@@ -198,13 +202,21 @@ class AllSparkLinear(GPTQQuantLinear):
             self.post_init()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features).contiguous()
+        # The bias is added inside the kernel's FP32 epilogue, never to the
+        # already narrowed output: FP16 65536 + (-32768) is 32768, while the
+        # narrowed partial sum is inf.
+        bias = self.bias
         if self._hip:
             out = allspark_hip_gemm(
-                x2d, self.qweight_packed, self.scales_packed, self.out_features
+                x2d,
+                self.qweight_packed,
+                self.scales_packed,
+                self.out_features,
+                bias=bias,
             )
         else:
-            out = allspark_gemm(x2d, self.qweight_packed, self.scales_packed, self.out_features)
-        out = out.reshape(shape)
-        if self.bias is not None:
-            out = out + self.bias
-        return out.to(x.dtype)
+            out = allspark_gemm(
+                x2d, self.qweight_packed, self.scales_packed, self.out_features,
+                bias=bias,
+            )
+        return out.reshape(shape).to(x.dtype)
