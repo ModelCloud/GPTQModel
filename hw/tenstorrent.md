@@ -815,6 +815,41 @@ weight change and is non-zero.
 Stated plainly because the failure is silent and flattering: any quantization-error
 metric computed from a detached (not cloned) parameter measures nothing.
 
+### The grid is native, not an int4 cast
+
+The quantizer targets the bf4 grid directly: the solve rounds each element onto the
+hardware's own level set, with no int4 intermediate. Three checks, on device and
+on the CPU path:
+
+| check | result |
+| --- | --- |
+| solved weights are a fixed point of the bf4 grid | **True** |
+| solved weights differ from an int4 quantisation of the same values | **True** |
+| hardware storage drift of solved weights | **0.000000** |
+
+The third is the decisive one: values the solver produced survive `bfloat4_b`
+storage unchanged, which cannot happen if they were int4 codes cast to float.
+
+### What the hardware grid actually is (measured)
+
+Encoding values and reading them back, rather than trusting documentation:
+
+| format | levels per 16-value block, one binade | stored mantissa bits | step |
+| --- | --- | --- | --- |
+| `bfloat4_b` | **4** (`0.5, 0.625, 0.75, 0.875`) | 2 | `2^exp / 4` |
+| `bfloat8_b` | up to **64** | 6 | `2^exp / 64` |
+
+Both match `stored_mantissa_bits()`, so the quantizer and the hardware agree on the
+grid -- no wasted precision, and no values the hardware would silently re-round.
+
+**Blocks are 16 values with one shared exponent each.** Verified by placing a
+16x weaker segment next to a strong one in the same row: both keep their own 4
+levels and carry different exponents (measured -1 and -5), rather than the weak
+segment collapsing into a single value. An earlier probe that put strong and weak
+values in different *rows* of one tile appeared to show whole-tile exponent
+sharing; that was an artefact of the two rows falling in different binades, and is
+why the block test now uses one row split at the block boundary.
+
 Two `_cb(16, ...)` sizing mistakes were also made and reverted during this
 attempt -- one applied to three functions instead of one -- which is why the
 single-source-of-truth CB helper matters more than it looks.

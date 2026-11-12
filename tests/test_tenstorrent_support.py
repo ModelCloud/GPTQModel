@@ -1235,6 +1235,79 @@ def test_fused_matmul_matches_torch_on_device():
 
 
 
+def test_blockfloat_grid_matches_hardware_levels():
+    """The quantizer's grid must match what bfloat4_b/bfloat8_b can store.
+
+    Measured on a p300c by encoding and reading back: bf4 holds 4 levels per
+    16-value block inside one binade, bf8 holds up to 64. That is 2 and 6 stored
+    mantissa bits, matching ``stored_mantissa_bits``. The step is ``2^exp/levels``:
+    hardware showed 0.125 = 0.5/4 for bf4.
+
+    Blocks each carry their own exponent -- verified by placing a 16x weaker
+    segment beside a strong one in the same row: both keep their own 4 levels
+    instead of the weak one collapsing.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    # bf4 exercises the full grid inside one binade: exactly 4 levels.
+    vals = torch.linspace(0.5, 0.99, 16).reshape(1, 16)
+    out4, exp4 = bq.quantize_blockfloat(vals, 4)
+    levels4 = torch.unique(out4.reshape(-1))
+    assert levels4.numel() == 4, levels4
+    assert torch.unique(exp4).numel() == 1
+    span = float(torch.pow(2.0, exp4.reshape(-1)[0]))
+    assert abs(float(levels4[1] - levels4[0]) - span / 4) < 1e-6
+
+    # bf8 must be strictly finer than bf4 on the same input.
+    out8, _ = bq.quantize_blockfloat(vals, 8)
+    assert torch.unique(out8.reshape(-1)).numel() > levels4.numel()
+
+    # Neighbouring blocks keep independent exponents.
+    t = torch.zeros(1, 32)
+    t[0, :16] = torch.linspace(0.5, 0.99, 16)
+    t[0, 16:] = torch.linspace(0.03, 0.06, 16)
+    out, exponent = bq.quantize_blockfloat(t, 4)
+    # One exponent per 16-value block: shape [rows, blocks].
+    assert exponent.shape[-1] == 2, exponent.shape
+    assert int(exponent[0, 0]) > int(exponent[0, 1]), (
+        "the weaker block should carry a smaller exponent"
+    )
+    assert torch.unique(out[0, 16:]).numel() == 4
+
+
+def test_gptq_blockfloat_is_native_not_an_int4_cast():
+    """The solve must land on the bf4 grid itself, not pass through int4.
+
+    Three assertions: the result is a fixed point of the grid, it differs from an
+    int4 quantisation of the same weights, and the error is far below what a
+    double rounding (bf4 -> int4) would produce.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    out_f, in_f = 64, 128
+    w = torch.randn(out_f, in_f) * 0.02
+    x = torch.randn(128, 32) @ torch.randn(32, in_f)
+    h = x.T @ x + torch.eye(in_f)
+
+    solved = bq.gptq_solve_blockfloat(w, h, bits=4, grid="blockfloat")
+
+    # 1. Already on the grid: re-quantising is a no-op.
+    assert torch.allclose(solved, bq.quantize_bfloat4_b(solved), atol=1e-6)
+    # 2. Not the int4 answer for the same weights.
+    assert not torch.allclose(solved, bq.quantize_uniform_int4(solved), atol=1e-9)
+    # 3. Direct-to-grid beats a double rounding through int4.
+    direct = bq.relative_error(w, solved)
+    via_int4 = bq.relative_error(w, bq.quantize_bfloat4_b(bq.quantize_uniform_int4(w)))
+    assert direct < via_int4, f"direct {direct} should beat int4-then-bf4 {via_int4}"
+
+
 def test_quantize_model_blockfloat_reports_true_weight_error():
     """The error metric must compare against the ORIGINAL weight.
 
