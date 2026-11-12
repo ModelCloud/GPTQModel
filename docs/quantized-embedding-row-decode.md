@@ -124,4 +124,4 @@ repeated forwards, and confirms a `qweight.zero_()` mutation changes the output.
   with `PYTHON_GIL=0` (8 threads x 4 iterations) across three separate
   processes; `pytorch_gil_0_compat.md` records the result.
 
-Introduced in PR #3794.
+Introduced in PR #3797.
