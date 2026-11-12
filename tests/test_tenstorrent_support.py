@@ -1090,6 +1090,155 @@ def test_gptq_blockfloat_is_competitive_with_uniform():
     assert bf4 < u4 * 1.25, f"4-bit block-float regressed: {bf4} vs uniform {u4}"
 
 
+def test_hessian_accumulation_stays_float32():
+    """A narrow Hessian was measured and rejected; it must not come back.
+
+    bf16 is 3.4x faster (0.09 s against 0.31 s for one 8192-wide ``X^T X`` over
+    2048 tokens) and only 0.27 % away from float32, yet OPT-125M quantized with it
+    produced NaN weights and NaN perplexity. fp16 was 84x slower (25.9 s) and
+    overflows on activation outliers. The accumulator therefore stays float32.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    width = 16
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.decoder = torch.nn.Module()
+            block = torch.nn.Module()
+            block.proj = torch.nn.Linear(width, 4, bias=False)
+            self.model.decoder.layers = torch.nn.ModuleList([block])
+
+        def forward(self, ids):
+            x = torch.ones(1, ids.shape[1], width)
+            self.model.decoder.layers[0].proj(x)
+            return None
+
+    class _Tok:
+        def __call__(self, _text, return_tensors=None):
+            class _Out:
+                input_ids = torch.arange(12).unsqueeze(0)
+
+            return _Out()
+
+    hessians = bq.collect_layer_hessians(
+        _Model(), _Tok(), text="ignored", nsamples=1, seqlen=12
+    )
+    h = hessians["0.proj"]
+    assert h.dtype is torch.float32
+    assert bool(torch.isfinite(h).all())
+
+
+def test_shared_input_layers_compute_one_hessian():
+    """q/k/v share one input, so their ``X^T X`` must be the same matrix.
+
+    The collector caches per distinct activation: without it the same square GEMM
+    is repeated for every projection that reads the same hidden state, which is
+    most of the replay cost on a wide model.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    width = 32
+
+    class _Block(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = torch.nn.Linear(width, 8, bias=False)
+            self.k = torch.nn.Linear(width, 8, bias=False)
+            self.v = torch.nn.Linear(width, 8, bias=False)
+            self.out = torch.nn.Linear(8, width, bias=False)
+            self.last_x = None
+
+        def forward(self, ids):
+            x = torch.ones(1, ids.shape[1], width)
+            self.last_x = x
+            self.q(x)
+            self.k(x)
+            self.v(x)
+            self.out(torch.ones(1, ids.shape[1], 8))
+            return None
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.decoder = torch.nn.Module()
+            self.block = _Block()
+            self.model.decoder.layers = torch.nn.ModuleList([self.block])
+
+        def forward(self, ids):
+            return self.block(ids)
+
+    class _Tok:
+        def __call__(self, _text, return_tensors=None):
+            class _Out:
+                input_ids = torch.arange(12).unsqueeze(0)
+
+            return _Out()
+
+    model = _Model()
+    hessians = bq.collect_layer_hessians(
+        model, _Tok(), text="ignored", nsamples=1, seqlen=12
+    )
+
+    expected = model.block.last_x.reshape(-1, width).T @ model.block.last_x.reshape(-1, width)
+    for name in ("0.q", "0.k", "0.v"):
+        assert torch.allclose(hessians[name], expected), name
+    assert torch.equal(hessians["0.q"], hessians["0.k"])
+
+
+def test_blocked_solve_is_exact_at_any_blocksize():
+    """Column blocking must not change the answer.
+
+    The block form is what makes wide layers affordable -- a per-column trailing
+    update rewrites the whole remaining matrix, so one 2048x8192 layer cost 52.6 s
+    against 3.7 s blocked. That speedup is only acceptable because the result is
+    identical, which holds for the upper Cholesky factor of H^-1 and not for the
+    dense inverse (the dense inverse double-counts across the block boundary).
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    out_f, in_f = 64, 256
+    w = torch.randn(out_f, in_f) * 0.02
+    x = torch.randn(4 * in_f, in_f)
+    h = x.T @ x
+
+    reference = bq.gptq_solve_blockfloat(w, h, bits=4, blocksize=1)
+    for blocksize in (2, 8, 64, 128):
+        blocked = bq.gptq_solve_blockfloat(w, h, bits=4, blocksize=blocksize)
+        assert torch.equal(reference, blocked), (
+            f"blocksize={blocksize} changed the solve"
+        )
+
+
+def test_solve_falls_back_when_the_hessian_cannot_be_factored():
+    """An ill-conditioned Hessian must still quantize, not raise or skip."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    w = torch.randn(32, 64) * 0.02
+    h = torch.eye(64)
+    h[0, 1] = h[1, 0] = 10.0  # indefinite: cholesky(inv(h)) cannot factor
+
+    solved = bq.gptq_solve_blockfloat(w, h, bits=4)
+    assert torch.allclose(solved, bq.quantize_bfloat4_b(solved), atol=1e-6)
+
+
 def test_gptq_blockfloat_rejects_mismatched_hessian():
     import importlib
 
@@ -1620,9 +1769,15 @@ def test_gptq_blockfloat_is_native_not_an_int4_cast():
     assert torch.allclose(solved, bq.quantize_bfloat4_b(solved), atol=1e-6)
     # 2. Not the int4 answer for the same weights.
     assert not torch.allclose(solved, bq.quantize_uniform_int4(solved), atol=1e-9)
-    # 3. Direct-to-grid beats a double rounding through int4.
-    direct = bq.relative_error(w, solved)
-    via_int4 = bq.relative_error(w, bq.quantize_bfloat4_b(bq.quantize_uniform_int4(w)))
+    # 3. Direct-to-grid beats a double rounding through int4 -- measured on the
+    #    layer output, which is what GPTQ optimises. Raw weight distance is not the
+    #    objective: the solve deliberately trades it for lower output error, so a
+    #    weight-distance assertion here would fail a *better* solution.
+    reference = x @ w.T
+    direct = bq.relative_error(reference, x @ solved.T)
+    via_int4 = bq.relative_error(
+        reference, x @ bq.quantize_bfloat4_b(bq.quantize_uniform_int4(w)).T
+    )
     assert direct < via_int4, f"direct {direct} should beat int4-then-bf4 {via_int4}"
 
 
