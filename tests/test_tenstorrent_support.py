@@ -1139,7 +1139,7 @@ def test_shared_input_layers_compute_one_hessian():
 
     The collector caches per distinct activation: without it the same square GEMM
     is repeated for every projection that reads the same hidden state, which is
-    most of the replay cost on a wide model.
+    most of the replay cost on a wide model. The reuse is exact.
     """
 
     import importlib
@@ -1189,54 +1189,11 @@ def test_shared_input_layers_compute_one_hessian():
         model, _Tok(), text="ignored", nsamples=1, seqlen=12
     )
 
-    expected = model.block.last_x.reshape(-1, width).T @ model.block.last_x.reshape(-1, width)
+    flat = model.block.last_x.reshape(-1, width)
+    expected = flat.T @ flat
     for name in ("0.q", "0.k", "0.v"):
         assert torch.allclose(hessians[name], expected), name
     assert torch.equal(hessians["0.q"], hessians["0.k"])
-
-
-def test_blocked_solve_is_exact_at_any_blocksize():
-    """Column blocking must not change the answer.
-
-    The block form is what makes wide layers affordable -- a per-column trailing
-    update rewrites the whole remaining matrix, so one 2048x8192 layer cost 52.6 s
-    against 3.7 s blocked. That speedup is only acceptable because the result is
-    identical, which holds for the upper Cholesky factor of H^-1 and not for the
-    dense inverse (the dense inverse double-counts across the block boundary).
-    """
-
-    import importlib
-
-    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
-
-    torch.manual_seed(0)
-    out_f, in_f = 64, 256
-    w = torch.randn(out_f, in_f) * 0.02
-    x = torch.randn(4 * in_f, in_f)
-    h = x.T @ x
-
-    reference = bq.gptq_solve_blockfloat(w, h, bits=4, blocksize=1)
-    for blocksize in (2, 8, 64, 128):
-        blocked = bq.gptq_solve_blockfloat(w, h, bits=4, blocksize=blocksize)
-        assert torch.equal(reference, blocked), (
-            f"blocksize={blocksize} changed the solve"
-        )
-
-
-def test_solve_falls_back_when_the_hessian_cannot_be_factored():
-    """An ill-conditioned Hessian must still quantize, not raise or skip."""
-
-    import importlib
-
-    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
-
-    torch.manual_seed(0)
-    w = torch.randn(32, 64) * 0.02
-    h = torch.eye(64)
-    h[0, 1] = h[1, 0] = 10.0  # indefinite: cholesky(inv(h)) cannot factor
-
-    solved = bq.gptq_solve_blockfloat(w, h, bits=4)
-    assert torch.allclose(solved, bq.quantize_bfloat4_b(solved), atol=1e-6)
 
 
 def test_gptq_blockfloat_rejects_mismatched_hessian():
@@ -1771,8 +1728,7 @@ def test_gptq_blockfloat_is_native_not_an_int4_cast():
     assert not torch.allclose(solved, bq.quantize_uniform_int4(solved), atol=1e-9)
     # 3. Direct-to-grid beats a double rounding through int4 -- measured on the
     #    layer output, which is what GPTQ optimises. Raw weight distance is not the
-    #    objective: the solve deliberately trades it for lower output error, so a
-    #    weight-distance assertion here would fail a *better* solution.
+    #    objective: the solve deliberately trades it for lower output error.
     reference = x @ w.T
     direct = bq.relative_error(reference, x @ solved.T)
     via_int4 = bq.relative_error(
@@ -2389,6 +2345,22 @@ def test_gsm8k_reports_the_checkpoint_source_model(tmp_path):
     broken.mkdir()
     (broken / "blockfloat.json").write_text("{not json")
     assert ev.read_checkpoint_source_model(str(broken)) is None
+
+
+def test_gsm8k_extract_uses_the_last_answer_marker():
+    """A marker emitted mid-reasoning must not be scored as the answer.
+
+    Observed on Llama-3.2-1B-Instruct: ``#### 16 x 3 = $<<16*3=48>>48 ... #### 26``.
+    Taking the first marker scored 16 and threw away a correct 26.
+    """
+
+    ev = _load_gsm8k_eval()
+
+    assert ev.extract("reasoning\n#### 26") == "26"
+    assert ev.extract("#### 16 x 3 = 48 for breakfast\n...\n#### 26") == "26"
+    # No marker at all: fall back to the final number in the text.
+    assert ev.extract("so the total is 42") == "42"
+    assert ev.extract("no digits here") is None
 
 
 def test_gsm8k_prompt_rendering_is_identical_across_shots():

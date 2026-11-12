@@ -53,16 +53,19 @@ def gold(answer: str) -> str:
     return answer.split("####")[-1].strip().replace(",", "")
 
 
-def build_prompt(rows: list, index: int, tok) -> str:
+def build_prompt(rows: list, index: int, tok, *, shots: list | None = None) -> str:
     """Build a five-shot prompt whose last line asks the question under test.
 
     Deterministic: the shots are always the five rows immediately preceding
-    ``index``, so every run scores the same prompt.
+    ``index``, so every run scores the same prompt. Pass ``shots`` to use a fixed
+    set of exemplars instead -- the usual choice when the evaluation split is
+    disjoint from the split the shots come from.
     """
 
     parts = []
-    for j in range(max(0, index - 5), index):
-        parts.append(f"Question: {rows[j]['question']}\nAnswer: {rows[j]['answer']}\n\n")
+    exemplars = shots if shots is not None else rows[max(0, index - 5):index]
+    for row in exemplars:
+        parts.append(f"Question: {row['question']}\nAnswer: {row['answer']}\n\n")
     parts.append(f"Question: {rows[index]['question']}\nAnswer:")
     return "".join(parts)
 
@@ -109,11 +112,16 @@ def read_checkpoint_source_model(checkpoint_dir: str) -> str | None:
 
 
 def extract(text: str) -> str | None:
-    """Pull the predicted numeric answer out of generated text."""
+    """Pull the predicted numeric answer out of generated text.
 
-    match = MARKER.search(text)
-    if match:
-        return match.group(1).replace(",", "").replace("$", "").rstrip(".")
+    The answer is the *last* ``#### N`` marker, not the first. Models slip and emit
+    a marker mid-reasoning -- observed: ``#### 16 x 3 = $<<16*3=48>>48 ... #### 26``
+    -- and scoring the first one measures the slip instead of the answer.
+    """
+
+    markers = MARKER.findall(text)
+    if markers:
+        return markers[-1].replace(",", "").replace("$", "").rstrip(".")
     found = NUM.findall(text)
     if not found:
         return None
@@ -126,7 +134,9 @@ def run_eval(
     *,
     native: str | None = None,
     max_new_tokens: int = 256,
+    max_prompt_tokens: int = 4096,
     rows_path: str | None = None,
+    shots_path: str | None = None,
     verbose: bool = True,
     chat_template: bool = False,
 ) -> dict:
@@ -175,17 +185,21 @@ def run_eval(
         )
 
     rows = load_rows(rows_path)
+    shots = load_rows(shots_path)[:5] if shots_path else None
     n = min(limit, len(rows))
     correct = 0
     started = time.time()
     with torch.no_grad():
         for i in range(n):
-            prompt = build_prompt(rows, i, tok)
+            prompt = build_prompt(rows, i, tok, shots=shots)
             prompt, _applied = apply_chat_template_to_prompt(
                 tok, prompt, enabled=chat_template
             )
             ids = tok(
-                prompt, return_tensors="pt", truncation=True, max_length=2048,
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_prompt_tokens,
             ).input_ids
             out = model.generate(
                 ids, max_new_tokens=max_new_tokens, do_sample=False,
@@ -214,6 +228,8 @@ def run_eval(
         "chat_template": chat_template,
         "tokenizer_has_template": templated,
         "checkpoint_source_model": checkpoint_source,
+        "rows_path": rows_path or os.environ.get("GSM8K_TEST_JSONL", "gsm8k_test.jsonl"),
+        "shots_path": shots_path,
     }
     if verbose:
         print(f"[E] RESULT {result}", flush=True)
@@ -232,7 +248,22 @@ def main(argv: list) -> int:
         limit = int(rest[0])
     if "--native" in argv:
         native = argv[argv.index("--native") + 1]
-    run_eval(model_id, limit, native=native, chat_template="--chat-template" in argv)
+    rows_path = argv[argv.index("--rows") + 1] if "--rows" in argv else None
+    shots_path = argv[argv.index("--shots") + 1] if "--shots" in argv else None
+    max_prompt_tokens = (
+        int(argv[argv.index("--max-prompt-tokens") + 1])
+        if "--max-prompt-tokens" in argv
+        else 4096
+    )
+    run_eval(
+        model_id,
+        limit,
+        native=native,
+        rows_path=rows_path,
+        shots_path=shots_path,
+        max_prompt_tokens=max_prompt_tokens,
+        chat_template="--chat-template" in argv,
+    )
     return 0
 
 
