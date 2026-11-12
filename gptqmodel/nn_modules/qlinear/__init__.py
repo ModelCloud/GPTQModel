@@ -1203,16 +1203,20 @@ class PackableQuantLinear(GPTQQuantLinear):
             buf.append(self.wf_unsqueeze_neg_one)
         return buf
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def unpack_zero_points(self) -> t.Tensor:
+        """Decode the packed zero points to `[num_groups, out_features]` codes.
+
+        This is the single owner of the zero-point layout for every GPTQ width
+        and format, including the continuous 3-bit (10-1-10-1-10) words and the
+        split-plane `gptq_p` words. The decoded table is metadata: it is small
+        (groups x out features) and may be cached, unlike unpacked weights.
+        """
         if self.planar:
-            zeros = planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
-            weight = planar_unpack_rows(self.qweight, self.bits)
-            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            return planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
 
         self._init_wf_unsqueeze_buffers()
         wf_zero = getattr(self, "wf_unsqueeze_zero", None)
-        wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
-        if wf_zero is None or wf_neg_one is None:
+        if wf_zero is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} requires wf unpack buffers for dequantization. "
                 "Enable `enable_wf_unsqueeze` and call post_init()."
@@ -1221,39 +1225,62 @@ class PackableQuantLinear(GPTQQuantLinear):
         if self.bits in [2, 4, 8]:
             zeros = _torch_right_shift(
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
+                wf_zero,
             ).to(self.dequant_dtype)
             zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
-            zeros = zeros[:, :self.scales.shape[1]]
+            return zeros[:, :self.scales.shape[1]]
 
+        if self.bits != 3:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not unpack zero points for {self.bits}-bit weights."
+            )
+
+        zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
+            -1, -1, -1, 12
+        )
+        zeros = _torch_right_shift(zeros, wf_zero)  # self.wf.unsqueeze(0)
+        zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | (_torch_left_shift(zeros[:, :, 1, 0], 2) & 0x4)
+        zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | (_torch_left_shift(zeros[:, :, 2, 0], 1) & 0x6)
+        zeros = zeros & 0x7
+        return t.cat(
+            [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
+            dim=2,
+        ).reshape(self.scales.shape)
+
+    def dequantize_weight(self, num_itr: int = 1):
+        zeros = self.unpack_zero_points()
+        if self.planar:
+            weight = planar_unpack_rows(self.qweight, self.bits)
+            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+
+        wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
+        if wf_neg_one is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} requires wf unpack buffers for dequantization. "
+                "Enable `enable_wf_unsqueeze` and call post_init()."
+            )
+
+        if self.bits in [2, 4, 8]:
             weight = t.bitwise_and(
                 _torch_right_shift(
                     t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
+                    wf_neg_one  # self.wf.unsqueeze(-1)
                 ).to(self.dequant_dtype),
                 self.maxq
             )
         elif self.bits == 3:
-            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
-                -1, -1, -1, 12
-            )
-            zeros = _torch_right_shift(zeros, self.wf_unsqueeze_zero)  # self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | (_torch_left_shift(zeros[:, :, 1, 0], 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | (_torch_left_shift(zeros[:, :, 2, 0], 1) & 0x6)
-            zeros = zeros & 0x7
-            zeros = t.cat(
-                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
-                dim=2,
-            ).reshape(self.scales.shape)
-
             weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
                 -1, -1, 12, -1
             )
-            weight = _torch_right_shift(weight, self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+            weight = _torch_right_shift(weight, wf_neg_one) & 0x7  # self.wf.unsqueeze(-1)
             weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | (_torch_left_shift(weight[:, 1, 0], 2) & 0x4)
             weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | (_torch_left_shift(weight[:, 2, 0], 1) & 0x6)
             weight = weight & 0x7
             weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
+        else:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not unpack {self.bits}-bit weights."
+            )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
         return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)

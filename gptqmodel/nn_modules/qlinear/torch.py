@@ -26,6 +26,7 @@ from ...utils.arch import is_ada as _arch_is_ada
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
 from ._g_idx import validate_g_idx_bounds
@@ -237,6 +238,9 @@ class TorchLinear(PackableQuantLinear):
         self._g_idx_long_cache_state = None
         self._zeros_cache = None
         self._zeros_cache_state = None
+        self._embedding_zeros = None
+        self._embedding_zeros_key = None
+        self._embedding_row_state = None
         self._stream_dequant_streams = {}
         self._cache_enabled = False
         triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
@@ -759,6 +763,9 @@ class TorchLinear(PackableQuantLinear):
         self._zeros_cache_state = None
         self._g_idx_long_cache = None
         self._g_idx_long_cache_state = None
+        self._embedding_zeros = None
+        self._embedding_zeros_key = None
+        self._embedding_row_state = None
 
     def _maybe_offload_g_idx_to_cpu(self):
         if self.training or self.g_idx is None:
@@ -1016,7 +1023,154 @@ class TorchQuantEmbeddings(TorchLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 
+    # Row decode reads the packed words that back the requested tokens and
+    # writes only those rows; whole-table decode writes and rereads the complete
+    # unquantized table. Both crossover points below are measured, not guessed.
+    #
+    # 1. Table size. A small table is cheaper to decode whole: the fixed launch
+    #    cost of the row gather dominates. Measured FP16 single-token decode on
+    #    an independent NVIDIA and an AMD ROCm host: full-table decode is 2.5x
+    #    faster at a 32 MiB table (68.5 us vs 27.5 us), the paths cross at
+    #    64 MiB (70.4 vs 89.3 us), and row decode is 2.7x faster at 128 MiB.
+    # 2. Token count. Every extra token adds gather + scratch traffic
+    #    proportional to its rows, while whole-table decode is constant. The
+    #    measured crossover is ~1K tokens for realistic vocabularies
+    #    (151936 x 3584: 83 us row vs 1615 us full at 1024 tokens; both ~1.5 ms
+    #    at 1025 tokens).
+    EMBEDDING_ROW_DECODE_LIMIT = 1024
+    EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 64 * 1024 * 1024
+
+    def _embedding_row_decode_state(self):
+        """Per-vocabulary index metadata for row decode, derived from packed tensors.
+
+        Everything here is indexing metadata (word row per token, intra-word
+        shift, group per token) plus the decoded zero-point table; no unpacked
+        weight is retained. The state is keyed on the packed tensors so a
+        replaced or mutated checkpoint invalidates it.
+        """
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.g_idx),
+            tensor_cache_key(self.qzeros),
+            self.bits,
+            self.planar,
+            self.pack_dtype,
+        )
+        state = getattr(self, "_embedding_row_state", None)
+        if state is not None and state[0] == key:
+            return state[1]
+
+        device = self.qweight.device
+        if self.g_idx.numel() != self.in_features:
+            return None
+
+        tokens = torch.arange(self.in_features, device=device, dtype=torch.int32)
+        word_rows = None
+        shifts = None
+        if not self.planar:
+            if self.bits in (2, 4, 8):
+                word_rows = (
+                    torch.div(tokens, 32, rounding_mode="floor") * self.bits
+                    + torch.div(tokens.remainder(32), self.pack_factor, rounding_mode="floor")
+                ).to(torch.int32)
+                shifts = (tokens.remainder(self.pack_factor) * self.bits).to(torch.int32)
+            else:
+                word_rows = (torch.div(tokens, 32, rounding_mode="floor") * 3).to(torch.int32)
+
+        groups = self.g_idx.to(device=device, dtype=torch.int32)
+        num_groups = self.scales.shape[0]
+        if int(groups.min()) < -num_groups or int(groups.max()) >= num_groups:
+            return None
+        if int(groups.min()) < 0:
+            groups = torch.where(groups < 0, groups + num_groups, groups)
+        groups = groups.to(torch.int32)
+
+        metadata = {
+            "word_rows": word_rows,
+            "shifts": shifts,
+            "groups": groups,
+            "zeros": self._embedding_zero_points(),
+        }
+        self._embedding_row_state = (key, metadata)
+        return metadata
+
+    def _embedding_zero_points(self) -> torch.Tensor:
+        """Decode the zero-point table once; it is permitted packed metadata.
+
+        Kept apart from ``_zeros_cache`` (the streaming/GEMV layout) so a
+        model that alternates between row decode and whole-table decode does
+        not invalidate either decoding.
+        """
+        key = (tensor_cache_key(self.qzeros), self.scales.shape, self.bits, self.planar)
+        if self._embedding_zeros is not None and self._embedding_zeros_key == key:
+            return self._embedding_zeros
+        self._embedding_zeros = self.unpack_zero_points()
+        self._embedding_zeros_key = key
+        return self._embedding_zeros
+
+    def _embedding_row_codes(self, rows: torch.Tensor, state) -> torch.Tensor:
+        """Decode packed codes for `rows` only, keeping `qweight` untouched."""
+        qweight = self.qweight
+
+        if self.planar:
+            return planar_decode_rows(qweight, rows, self.bits)
+
+        word_rows = state["word_rows"].index_select(0, rows)
+        if self.bits in (2, 4, 8):
+            words = qweight.index_select(0, word_rows)
+            shifts = state["shifts"].index_select(0, rows).view(-1, 1)
+            codes = torch.bitwise_and(words >> shifts, self.maxq)
+            return codes.to(self.dequant_dtype)
+
+        # Continuous 3-bit: 32 codes per 3-word block in the 10-1-10-1-10
+        # layout, so a handful of codes straddle two words. Only the requested
+        # rows are read; the neighbouring word is fetched per row.
+        base = qweight.index_select(0, word_rows)
+        word1 = qweight.index_select(0, word_rows + 1)
+        word2 = qweight.index_select(0, word_rows + 2)
+        idx = rows.remainder(32).view(-1, 1)
+        codes = (base >> (idx * 3)) & 0x7
+        codes = torch.where(idx == 10, ((base >> 30) & 0x3) | ((word1 & 0x1) << 2), codes)
+        codes = torch.where((idx >= 11) & (idx <= 20), (word1 >> (1 + (idx - 11) * 3)) & 0x7, codes)
+        codes = torch.where(idx == 21, ((word1 >> 31) & 0x1) | ((word2 & 0x3) << 1), codes)
+        codes = torch.where(idx >= 22, (word2 >> (2 + (idx - 22) * 3)) & 0x7, codes)
+        return codes.to(self.dequant_dtype)
+
+    def _dequantize_embedding_rows(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Dequantize only the requested embedding rows.
+
+        The result is transient scratch for this forward: only the packed
+        `qweight`/`qzeros`/`scales`/`g_idx` metadata persists afterwards.
+        """
+        self._init_wf_unsqueeze_buffers()
+        state = self._embedding_row_decode_state()
+        rows = input_ids.reshape(-1).to(device=self.qweight.device, dtype=torch.int32)
+
+        codes = self._embedding_row_codes(rows, state)
+        groups = state["groups"].index_select(0, rows)
+        scales = self.scales.index_select(0, groups)
+        zeros = state["zeros"].index_select(0, groups)
+        return scales * (codes - zeros)
+
     def forward(self, input_ids: torch.Tensor):
+        if input_ids.numel() == 0:
+            return torch.empty(
+                (*input_ids.shape, self.out_features),
+                dtype=self.scales.dtype,
+                device=self.scales.device,
+            )
+        if (
+            not self.training
+            and self.qweight is not None
+            and input_ids.numel() <= self.EMBEDDING_ROW_DECODE_LIMIT
+            and input_ids.dtype in (torch.int32, torch.int64)
+            and input_ids.device == self.qweight.device
+            and self.in_features * self.out_features * self.scales.element_size()
+            >= self.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES
+            and self._embedding_row_decode_state() is not None
+        ):
+            rows = self._dequantize_embedding_rows(input_ids)
+            return rows.reshape(*input_ids.shape, self.out_features)
         return F.embedding(input_ids, self.dequantize_weight())
 
 

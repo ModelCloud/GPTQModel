@@ -97,6 +97,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
+page explains how a token lookup reads only its packed rows, why small tables
+and large token counts still use whole-table decode, and what that means for
+packed-weight storage.
 The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
 rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
@@ -237,7 +241,9 @@ columns at a time and never retains a dense dequantized weight;
 Native backend availability, shape validation, wide activation inputs, and
 derived cache invalidation follow the
 [kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
-contract.
+contract. Opt-in AllSpark W8A16 keeps its GPTQ/AWQ checkpoint tensors
+authoritative and its N32K16/WMMA kernel layout a derived cache; see
+[AllSpark checkpoint layout](docs/allspark-checkpoint-layout.md).
 
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
