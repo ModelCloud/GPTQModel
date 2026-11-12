@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import random
 import statistics
 import time
 from dataclasses import dataclass
@@ -190,7 +191,7 @@ _FLUSH = None
 
 
 def flush_buffer(device: str) -> torch.Tensor:
-    """One 512 MiB fp32 buffer, allocated once.
+    """One 256 MiB fp32 buffer, allocated once.
 
     Random rather than zero filled: a compressible buffer can fail to evict the
     weights and turn a memory measurement into an L2 measurement.
@@ -305,18 +306,21 @@ def run(args) -> list[dict]:
             for name, k, n in (value.split(":") for value in args.shapes)
         )
 
-    # Round-robin passes: a config measured once per pass, so none of them is
-    # permanently penalised by whatever ran before it (allocator state, clocks).
-    best: dict[tuple[str, int], dict] = {}
-    for _ in range(args.passes):
-        for shape in shapes:
-            for m in args.m:
-                _best_of(best, (shape.name, m), _measure(shape, m, args, device, dtype))
+    # Measure each configuration once per pass. Shuffle with a fixed seed per
+    # pass so a shape does not always follow the same predecessor, while runs
+    # remain reproducible.
+    configs = [(shape, m) for shape in shapes for m in args.m]
+    best: dict[tuple[Shape, int], dict] = {}
+    for pass_index in range(args.passes):
+        order = configs.copy()
+        random.Random(pass_index).shuffle(order)
+        for shape, m in order:
+            _best_of(best, (shape, m), _measure(shape, m, args, device, dtype))
 
     rows = []
     for shape in shapes:
         for m in args.m:
-            row = best[(shape.name, m)]
+            row = best[(shape, m)]
             rows.append(row)
             print(
                 f"{row['shape']:16s} k={row['k']:5d} n={row['n']:5d} m={row['m']:2d} "
@@ -341,18 +345,15 @@ def run_fusions(args) -> list[dict]:
     rows = []
     for group in groups:
         for m in args.m:
-            part_rows = []
-            for shape in group.parts:
-                best = None
-                for _ in range(args.passes):
-                    row = _measure(shape, m, args, device, dtype)
-                    if best is None or row["cold_min_ms"] < best["cold_min_ms"]:
-                        best = row
-                part_rows.append(best)
-            fused_rows = []
-            for _ in range(args.passes):
-                fused_rows.append(_measure(group.fused, m, args, device, dtype))
-            fused = min(fused_rows, key=lambda r: r["cold_min_ms"])
+            variants = (*group.parts, group.fused)
+            best: dict[int, dict] = {}
+            for pass_index in range(args.passes):
+                order = list(enumerate(variants))
+                random.Random(pass_index).shuffle(order)
+                for index, shape in order:
+                    _best_of(best, index, _measure(shape, m, args, device, dtype))
+            part_rows = [best[index] for index in range(len(group.parts))]
+            fused = best[len(group.parts)]
 
             parts_ms = sum(r["cold_min_ms"] for r in part_rows)
             parts_bytes = sum(r["k"] * r["n"] for r in part_rows) * BITS / 8
@@ -389,17 +390,19 @@ def main() -> int:
     parser.add_argument("--preset", choices=sorted(PRESETS), default="qwen3_8b")
     parser.add_argument("--shapes", nargs="*", default=None, help="name:k:n overrides")
     parser.add_argument("--m", nargs="*", type=int, default=list(DEFAULT_M))
-    parser.add_argument("--m-max", type=int, default=None)
     parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="float16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--iters", type=int, default=100)
-    parser.add_argument("--passes", type=int, default=3, help="round-robin repeats")
+    parser.add_argument("--passes", type=int, default=3, help="shuffled repeats")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--fusion", action="store_true",
                         help="compare fused qkv / gate_up against the separate calls")
     parser.add_argument("--json", default=None, help="write rows to this path")
     args = parser.parse_args()
-    args.m_max = max(args.m) if args.m_max is None else args.m_max
+    if not args.m or any(m < 1 for m in args.m):
+        parser.error("--m requires one or more positive batch sizes")
+    if args.iters < 1 or args.passes < 1 or args.warmup < 0:
+        parser.error("--iters and --passes must be positive; --warmup cannot be negative")
 
     if not torch.cuda.is_available():
         print("CUDA device required")
