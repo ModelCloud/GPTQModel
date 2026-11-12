@@ -1069,12 +1069,16 @@ class TorchQuantEmbeddings(TorchLinear):
         shifts = None
         if not self.planar:
             if self.bits in (2, 4, 8):
-                word_rows = (
-                    torch.div(tokens, 32, rounding_mode="floor") * self.bits
-                    + torch.div(tokens.remainder(32), self.pack_factor, rounding_mode="floor")
+                # One storage word holds `pack_factor` consecutive codes, so the
+                # word row and the intra-word shift follow the actual
+                # `pack_dtype_bits` (8/16/32/64), not a fixed 32-bit width.
+                word_rows = torch.div(
+                    tokens, self.pack_factor, rounding_mode="floor"
                 ).to(torch.int32)
                 shifts = (tokens.remainder(self.pack_factor) * self.bits).to(torch.int32)
             else:
+                # Continuous 3-bit GPTQ packs 32 codes into three 32-bit words;
+                # `_validate()` admits this layout only for torch.int32 storage.
                 word_rows = (torch.div(tokens, 32, rounding_mode="floor") * 3).to(torch.int32)
 
         groups = self.g_idx.to(device=device, dtype=torch.int32)

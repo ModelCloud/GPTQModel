@@ -44,7 +44,7 @@ Supported packed layouts:
 
 | Format | Bits | Row decode |
 | --- | --- | --- |
-| `gptq_v2` / `gptq` (continuous) | 2, 4, 8 | One `int32` word per token per output column; field selected by shift |
+| `gptq_v2` / `gptq` (continuous) | 2, 4, 8 | One storage word (`int8`/`int16`/`int32`) per `pack_factor` tokens per output column; word row and shift derived from `pack_dtype_bits` |
 | `gptq_v2` / `gptq` (continuous) | 3 | Three words per 32 tokens in the 10-1-10-1-10 layout; straddling codes combine two words |
 | `gptq_p` (split-plane) | 2–8 | `planar_decode_rows` reads one word per plane for the requested rows only |
 
@@ -113,7 +113,13 @@ repeated forwards, and confirms a `qweight.zero_()` mutation changes the output.
 - `tests/test_quantized_embeddings.py` — exact equality against
   `F.embedding(ids, dequantize_weight())` for every supported bits/format pair in
   FP16 and BF16, boundary/repeated/shuffled ids, at and above the token limit,
-  packed-storage retention, and mutation invalidation.
+  packed-storage retention, and mutation invalidation. The 2/4/8-bit continuous
+  layout is covered for `int8`, `int16`, and `int32` storage words across
+  `gptq`, `gptq_v2`, and `gptq_p`, with ids at every word boundary and the
+  32-token boundary that a fixed 32-bit index gets wrong for narrower words.
+  An accelerator test repeats the 2/4/8-bit x `int8`/`int16`/`int32` x FP16/BF16
+  matrix when a device is available, and invalid 3-bit/planar storage-width
+  combinations are asserted to fail closed.
 - `tests/test_planar_bits_567.py` — `planar_decode_rows` equals
   `planar_unpack_rows(...).index_select(0, rows)` for all rows, shuffled and
   repeated subsets, and an empty selection.
