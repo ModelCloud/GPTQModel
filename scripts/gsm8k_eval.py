@@ -11,6 +11,10 @@ Usage::
 
     python scripts/gsm8k_eval.py <model-id-or-path> [limit] [--native CHECKPOINT]
 
+``--chat-template`` wraps each prompt as a single user turn. Only instruction
+tuned tokenizers have a template; base models (for example the non-Instruct
+Llama-3.2-1B) do not, and the run reports that rather than silently ignoring it.
+
 ``--native`` loads a ``tt-blockfloat`` checkpoint produced by
 :func:`gptqmodel.utils.tt_blockfloat_quant.save_blockfloat_checkpoint`, so the
 same harness scores the dense and the quantized model on identical prompts.
@@ -63,6 +67,30 @@ def build_prompt(rows: list, index: int, tok) -> str:
     return "".join(parts)
 
 
+def apply_chat_template_to_prompt(tok, prompt: str, *, enabled: bool) -> tuple[str, bool]:
+    """Wrap a prompt as a single user turn when the tokenizer has a template.
+
+    Returns ``(rendered, applied)``. The ``applied`` flag matters: the existing
+    harness in ``tests/eval.py`` silently returns the raw prompt when a tokenizer
+    has no template, which makes a mis-specified run look identical to a
+    correctly templated one. This reports the truth so a caller can assert it.
+    """
+
+    if not enabled:
+        return prompt, False
+    template = getattr(tok, "chat_template", None)
+    if not template or not hasattr(tok, "apply_chat_template"):
+        return prompt, False
+    rendered = tok.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    if not isinstance(rendered, str) or not rendered.strip():
+        return prompt, False
+    return rendered, True
+
+
 def extract(text: str) -> str | None:
     """Pull the predicted numeric answer out of generated text."""
 
@@ -83,6 +111,7 @@ def run_eval(
     max_new_tokens: int = 256,
     rows_path: str | None = None,
     verbose: bool = True,
+    chat_template: bool = False,
 ) -> dict:
     """Score ``model_id`` on GSM8K and return ``{"accuracy", "n", "correct", ...}``."""
 
@@ -106,15 +135,29 @@ def run_eval(
             print(f"[E] loaded {restored} layers from {native}", flush=True)
     model.eval()
 
+    # A chat template only makes sense for an instruction-tuned tokenizer; base
+    # models have none. Record whether it was actually applied so a run cannot
+    # silently claim to be templated when it is not.
+    templated = bool(getattr(tok, "chat_template", None))
+    if chat_template and not templated:
+        print(
+            f"[E] WARNING: --chat-template requested but {model_id} has no chat "
+            "template; prompts are sent untemplated.",
+            flush=True,
+        )
+
     rows = load_rows(rows_path)
     n = min(limit, len(rows))
     correct = 0
     started = time.time()
     with torch.no_grad():
         for i in range(n):
+            prompt = build_prompt(rows, i, tok)
+            prompt, _applied = apply_chat_template_to_prompt(
+                tok, prompt, enabled=chat_template
+            )
             ids = tok(
-                build_prompt(rows, i, tok), return_tensors="pt",
-                truncation=True, max_length=2048,
+                prompt, return_tensors="pt", truncation=True, max_length=2048,
             ).input_ids
             out = model.generate(
                 ids, max_new_tokens=max_new_tokens, do_sample=False,
@@ -140,6 +183,8 @@ def run_eval(
         "correct": correct,
         "accuracy": accuracy,
         "seconds": round(time.time() - started, 1),
+        "chat_template": chat_template,
+        "tokenizer_has_template": templated,
     }
     if verbose:
         print(f"[E] RESULT {result}", flush=True)
@@ -158,7 +203,7 @@ def main(argv: list) -> int:
         limit = int(rest[0])
     if "--native" in argv:
         native = argv[argv.index("--native") + 1]
-    run_eval(model_id, limit, native=native)
+    run_eval(model_id, limit, native=native, chat_template="--chat-template" in argv)
     return 0
 
 

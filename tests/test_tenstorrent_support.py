@@ -1956,6 +1956,68 @@ def _load_gsm8k_eval():
     return module
 
 
+def test_chat_template_is_only_applied_when_the_tokenizer_has_one():
+    """Base models have no chat template; the harness must say so, not pretend.
+
+    ``tests/eval.py`` silently falls back to the raw prompt when a tokenizer lacks
+    a template, which makes a mis-specified run indistinguishable from a correctly
+    templated one. This records whether the template was actually applied.
+    """
+
+    ev = _load_gsm8k_eval()
+
+    class _WithTemplate:
+        chat_template = "T"
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            assert messages == [{"role": "user", "content": "Q"}]
+            assert tokenize is False and add_generation_prompt is True
+            return "<templated>Q</templated>"
+
+    class _NoTemplate:
+        chat_template = None
+
+    raw, applied = ev.apply_chat_template_to_prompt(
+        _WithTemplate(), "Q", enabled=True
+    )
+    assert applied is True and raw == "<templated>Q</templated>"
+
+    raw, applied = ev.apply_chat_template_to_prompt(
+        _NoTemplate(), "Q", enabled=True
+    )
+    assert applied is False and raw == "Q"
+
+    # Disabled means never templated, even when a template exists.
+    raw, applied = ev.apply_chat_template_to_prompt(
+        _WithTemplate(), "Q", enabled=False
+    )
+    assert applied is False and raw == "Q"
+
+
+def test_gsm8k_prompt_rendering_is_identical_across_shots():
+    """Five-shot shots must be the rows immediately preceding the target.
+
+    Determinism matters more than the exact wording: if shot selection drifted
+    between the dense and quantized runs, the score difference would be confounded
+    by a different prompt rather than the quantization.
+    """
+
+    import types
+
+    ev = _load_gsm8k_eval()
+    rows = [{"question": f"q{i}", "answer": f"#### {i}"} for i in range(12)]
+
+    a = ev.build_prompt(rows, 9, tok=types.SimpleNamespace())
+    b = ev.build_prompt(rows, 9, tok=types.SimpleNamespace())
+    assert a == b, "prompt must be deterministic"
+
+    # Shots for index 9 are rows 4..8 inclusive.
+    for j in range(4, 9):
+        assert f"q{j}" in a
+    assert "q3" not in a, "a sixth shot leaked in"
+    assert "q10" not in a, "a future row leaked in"
+
+
 def test_gsm8k_answer_extraction_prefers_the_marker():
     """`#### N` is the gold answer format and must win over prose numbers."""
 
