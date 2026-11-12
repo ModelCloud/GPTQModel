@@ -28,6 +28,29 @@ def main(argv: list) -> int:
     parser.add_argument("model", help="model id or local path to quantize")
     parser.add_argument("--out", required=True, help="checkpoint output directory")
     parser.add_argument("--bits", type=int, default=4, choices=(4, 8))
+    parser.add_argument(
+        "--embed-bits",
+        type=int,
+        default=8,
+        choices=(4, 8),
+        help=(
+            "width for the (tied) input embedding and output head. 8 is the "
+            "default because a vocabulary-sized matrix tolerates far less "
+            "relative error than a decoder projection."
+        ),
+    )
+    parser.add_argument(
+        "--bits-map",
+        default=None,
+        help=(
+            "per-layer storage widths, e.g. "
+            "'q_proj=8,k_proj=8,v_proj=8,o_proj=8,down_proj=8'. Layers that do "
+            "not match keep --bits. bfloat8_b costs one byte per weight and is "
+            "close to lossless; bfloat4_b is roughly a 2.8-bit format, so the "
+            "extra byte is best spent on the layers that carry the most output "
+            "error rather than on all of them."
+        ),
+    )
     parser.add_argument("--nsamples", type=int, default=8)
     calibration_source = parser.add_mutually_exclusive_group(required=True)
     calibration_source.add_argument(
@@ -51,6 +74,20 @@ def main(argv: list) -> int:
     )
     args = parser.parse_args(argv)
 
+    bits = args.bits
+    if args.bits_map:
+        bits = {"*": args.bits}
+        for entry in args.bits_map.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            pattern, _, width = entry.partition("=")
+            if not pattern or width not in ("4", "8"):
+                parser.error(
+                    f"--bits-map entry {entry!r} must look like 'q_proj=8' with a width of 4 or 8"
+                )
+            bits[pattern.strip()] = int(width)
+
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     os.environ.setdefault("USE_TORCH_XLA", "0")
 
@@ -60,7 +97,7 @@ def main(argv: list) -> int:
     from gptqmodel.utils.tt_blockfloat_quant import (
         load_native_checkpoint_into_dense_model,
         quantize_model_blockfloat,
-        save_blockfloat_checkpoint,
+        save_blockfloat_model,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -96,7 +133,7 @@ def main(argv: list) -> int:
     report = quantize_model_blockfloat(
         model,
         tokenizer,
-        bits=args.bits,
+        bits=bits,
         nsamples=args.nsamples,
         text=calibration,
     )
@@ -114,10 +151,12 @@ def main(argv: list) -> int:
         print("[Q] ERROR: some layers are not on the block-float grid", flush=True)
         return 1
 
-    info = save_blockfloat_checkpoint(
+    info = save_blockfloat_model(
         model,
         args.out,
-        bits=args.bits,
+        bits=bits,
+        embed_bits=args.embed_bits,
+        tokenizer=tokenizer,
         metadata={
             "source_model": args.model,
             "tokenizer_has_chat_template": bool(
@@ -127,7 +166,9 @@ def main(argv: list) -> int:
     )
     print(
         f"[Q] saved {info['layers']} layers, "
-        f"{info['payload_bytes'] / 1024 / 1024:.1f} MiB -> {args.out}",
+        f"{info['payload_bytes'] / 1024 / 1024:.1f} MiB "
+        f"({'+'.join(str(w) for w in info['bits_per_layer'])}-bit linears, "
+        f"{args.embed_bits}-bit embed) -> {args.out}",
         flush=True,
     )
 

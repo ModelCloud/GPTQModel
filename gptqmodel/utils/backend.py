@@ -26,6 +26,10 @@ class BACKEND(str, Enum):
     GPTQ_TT_XLA = "gptq_tt_xla"  # Packed GPTQ through Torch/XLA on Tenstorrent PJRT
     GPTQ_TTNN = "gptq_ttnn"  # Packed GPTQ through native TTNN ops on Tenstorrent
     GPTQ_TT_BF8 = "gptq_tt_bf8"  # GPTQ weights re-stored as TT block-float bf8_b (hw unpack)
+    # Weights already stored natively as TT block-float (`bfloat4_b` /
+    # `bfloat8_b`). Unlike GPTQ_TT_BF8 there is no GPTQ layout to convert from:
+    # the checkpoint carries packed mantissa codes and one exponent per block.
+    TT_BLOCKFLOAT = "tt_blockfloat"
 
     # AllSpark kernels
     # A single backend covers both AllSpark sub-kernels. The quantization method

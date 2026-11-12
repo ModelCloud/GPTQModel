@@ -1674,6 +1674,155 @@ def test_native_checkpoint_records_its_source_model(tmp_path):
     assert meta["block"] == 16
 
 
+def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
+    """``GPTQModel.load`` must consume a native checkpoint, not just the helper.
+
+    The published artifact is only useful if the public loader can open it. A
+    ``tt-blockfloat`` directory has none of the GPTQ keys the quantized loader
+    binds, so without an explicit route every decoder layer reads as missing.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(7)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+
+    out = str(tmp_path / "ckpt")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+    from gptqmodel.quantization import METHOD
+
+    loaded = GPTQModel.load(out)
+    assert loaded.quantized is True
+    assert loaded.quantize_config.method == METHOD.TT_BLOCKFLOAT
+
+    q_proj = loaded.model.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, TTBlockfloatLinear)
+    # The module keeps codes, not a dense weight: 4-bit codes plus one int8
+    # exponent per 16 values is 0.5625 bytes per weight.
+    stored = q_proj.codes.numel() + q_proj.exponents.numel()
+    assert stored / (q_proj.out_features * q_proj.in_features) < 0.6
+
+    ids = torch.randint(0, 64, (1, 8))
+    with torch.no_grad():
+        logits = loaded.model(ids).logits
+    assert torch.isfinite(logits).all()
+    assert logits.shape[-1] == 64
+
+
+def test_blockfloat_exponent_search_beats_floor_log2():
+    """Per-block exponent selection must lower error without leaving the grid.
+
+    ``floor(log2(block_max))`` is not always the lowest-error exponent: the grid
+    only reaches ``(2 - 1/levels) * 2**exp``, so blocks whose maximum sits in the
+    top of a binade clip. Trying the neighbours and keeping the best one is a
+    pure win on the same grid, so it must not change what the grid can store.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(4)
+    weight = torch.randn(32, 64) * 0.02
+    quantized, exponents = bq.quantize_blockfloat(weight, 4)
+
+    # Every stored value must decompose exactly, which also proves the search
+    # landed on an exponent the format can encode.
+    codes, recovered = bq.decompose_blockfloat(quantized, 4)
+    assert torch.equal(
+        bq.recompose_blockfloat(codes, recovered, bits=4), quantized
+    ), "quantized weights are not exactly on the block-float grid"
+
+    # The search may pick a different exponent per block, so it must never be
+    # worse than the plain floor(log2(max)) rule on the same weights.
+    fixed = bq._block_exponents(weight, bq.BLOCKFLOAT_BLOCK)
+    plain = bq._round_with_exponents(weight, fixed.unsqueeze(-1), bits=4)
+    searched_err = (quantized - weight).pow(2).sum().item()
+    plain_err = (plain - weight).pow(2).sum().item()
+    assert searched_err <= plain_err, (searched_err, plain_err)
+
+
+def test_mixed_width_checkpoint_roundtrip(tmp_path):
+    """A checkpoint may store some layers at bf8 and the rest at bf4.
+
+    bfloat8_b costs one byte per weight and is close to lossless, while
+    bfloat4_b is roughly a 2.8-bit format. A real checkpoint wants the extra
+    byte only where it buys quality, so the format has to carry a width per
+    layer rather than one global value.
+    """
+
+    import importlib
+    import json
+    import os
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(5)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+
+    widths = {"*": 4, "q_proj": 8, "down_proj": 8}
+    with torch.no_grad():
+        for index, block in enumerate(model.model.layers):
+            for name, module in block.named_modules():
+                if getattr(module, "weight", None) is None or module.weight.dim() != 2:
+                    continue
+                bits = bq._layer_bits(widths, f"{index}.{name}")
+                module.weight.copy_(
+                    bq.quantize_blockfloat(module.weight.detach().float(), bits)[0]
+                )
+
+    out = str(tmp_path / "mixed")
+    info = bq.save_blockfloat_model(model, out, bits=widths, embed_bits=8)
+    assert sorted(info["bits_per_layer"]) == [4, 8]
+
+    with open(os.path.join(out, "blockfloat.json")) as handle:
+        meta = json.load(handle)
+    assert meta["mixed_bits"] is True
+    assert meta["layers"]["0.self_attn.q_proj"]["bits"] == 8
+    assert meta["layers"]["0.mlp.gate_proj"]["bits"] == 4
+
+    with open(os.path.join(out, "config.json")) as handle:
+        quant_config = json.load(handle)["quantization_config"]
+    assert quant_config["mixed_bits"] is True
+
+    loaded, restored = bq.load_blockfloat_model(out)
+    assert len(restored) == 2 * 7
+
+    # Each layer must come back at its own width, bit-exactly.
+    for index, block in enumerate(model.model.layers):
+        for name, module in block.named_modules():
+            if getattr(module, "weight", None) is None or module.weight.dim() != 2:
+                continue
+            key = f"model.layers.{index}.{name}.weight"
+            got = dict(loaded.named_parameters())[key].detach()
+            want = module.weight.detach()
+            assert torch.equal(got.float(), want.float()), key
+
+
 def test_native_checkpoint_resave_is_bit_identical(tmp_path):
     """checkpoint -> floats -> checkpoint must reproduce the same codes.
 

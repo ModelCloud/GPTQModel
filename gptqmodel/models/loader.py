@@ -890,6 +890,49 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
         return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
+def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remote_code=False):
+    """Build a native block-float model and wrap it as a ``BaseQModel``.
+
+    The checkpoint stores decoder weights as packed mantissa codes plus one
+    exponent per block of 16 values, on the grid the Tenstorrent hardware
+    unpacks natively. There is no GPTQ packing to bind, so the decoder linears
+    become ``TTBlockfloatLinear`` modules that keep that storage, and the
+    embedding, norms and head come from the checkpoint's own payloads.
+    """
+
+    from .tt_blockfloat_loader import (
+        build_tt_blockfloat_model,
+        quantize_config_from_checkpoint,
+    )
+
+    if not isinstance(dtype, torch.dtype):
+        dtype = torch.float32
+
+    model, restored, info = build_tt_blockfloat_model(model_local_path, dtype=dtype)
+
+    model_config = model.config.to_dict()
+    seq_len = find_config_seq_len(
+        model_config,
+        ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"],
+    )
+    model.seqlen = seq_len if seq_len is not None else 4096
+
+    qcfg = quantize_config_from_checkpoint(model_local_path)
+    log.info(
+        f"Loader: tt-blockfloat checkpoint: {len(restored)} decoder layers "
+        f"({info['bits']}-bit codes, block {info['block']}, "
+        f"{info['quantization_config'].get('embed_bits', '?')}-bit embedding)"
+    )
+    return model_cls(
+        model=model,
+        quantized=True,
+        quantize_config=qcfg,
+        load_quantized_model=True,
+        trust_remote_code=trust_remote_code,
+        model_local_path=model_local_path,
+    )
+
+
 def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
     """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
 
@@ -1605,6 +1648,20 @@ def ModelLoader(cls):
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
         native_support = has_native_transformers_causallm_support(model_local_path)
+
+        # A native block-float checkpoint carries none of the GPTQ keys this
+        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
+        # codes plus one exponent per block of 16 values. Route it before any
+        # GPTQ parsing, otherwise every decoder layer reads as missing.
+        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
+
+        if is_tt_blockfloat_checkpoint(model_local_path):
+            return _load_tt_blockfloat_model(
+                cls,
+                model_local_path=model_local_path,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
 
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code and not native_support:

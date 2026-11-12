@@ -528,6 +528,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.VPTQ,
         METHOD.NF12_AD,
         METHOD.EXL3,
+        METHOD.TT_BLOCKFLOAT,
     ):
         return True
 
@@ -543,6 +544,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.VPTQ,
         METHOD.NF12_AD,
         METHOD.EXL3,
+        METHOD.TT_BLOCKFLOAT,
     ):
         return True
 
