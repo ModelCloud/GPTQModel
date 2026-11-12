@@ -918,10 +918,17 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     model.seqlen = seq_len if seq_len is not None else 4096
 
     qcfg = quantize_config_from_checkpoint(model_local_path)
+    quantization_config = info.get("quantization_config") or {}
+    widths = quantization_config.get("bits_per_layer")
+    width_label = (
+        "/".join(str(w) for w in sorted(set(widths.values()))) + "-bit"
+        if isinstance(widths, dict) and widths
+        else f"{info['bits']}-bit"
+    )
     log.info(
         f"Loader: tt-blockfloat checkpoint: {len(restored)} decoder layers "
-        f"({info['bits']}-bit codes, block {info['block']}, "
-        f"{info['quantization_config'].get('embed_bits', '?')}-bit embedding)"
+        f"({width_label} codes, block {quantization_config.get('block', 16)}, "
+        f"{quantization_config.get('embed_bits', '?')}-bit embedding)"
     )
     return model_cls(
         model=model,

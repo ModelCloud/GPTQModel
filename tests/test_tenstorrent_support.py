@@ -1566,34 +1566,26 @@ def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
     """
 
     import importlib
-    import os
 
     import pytest
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
     torch.manual_seed(1)
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    config = LlamaConfig(
-        vocab_size=64, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
-        tie_word_embeddings=True,
-    )
-    model = LlamaForCausalLM(config)
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=False)
     with torch.no_grad():
-        for block in model.model.layers:
-            for _, module in block.named_modules():
-                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
-                    module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+        block.proj.weight.copy_(bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02))
 
-    out = str(tmp_path / "full")
-    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
 
-    # Strip the two payloads that make the directory self-contained.
-    for name in (bq.NORMS_PAYLOAD, bq.EMBED_PAYLOAD):
-        os.replace(os.path.join(out, name), os.path.join(str(tmp_path), f"moved-{name}"))
+    out = str(tmp_path / "overlay")
+    bq.save_blockfloat_checkpoint(model, out, bits=4)
 
+    # No model.safetensors and no index: nothing a standard HF loader could use.
     with pytest.raises(FileNotFoundError):
         bq.load_blockfloat_model(out)
 
@@ -1803,15 +1795,30 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
     info = bq.save_blockfloat_model(model, out, bits=widths, embed_bits=8)
     assert sorted(info["bits_per_layer"]) == [4, 8]
 
-    with open(os.path.join(out, "blockfloat.json")) as handle:
-        meta = json.load(handle)
-    assert meta["mixed_bits"] is True
-    assert meta["layers"]["0.self_attn.q_proj"]["bits"] == 8
-    assert meta["layers"]["0.mlp.gate_proj"]["bits"] == 4
+    # The directory is an ordinary HF model: shards plus the standard index, and
+    # no per-role payload or sidecar manifest.
+    assert os.path.isfile(os.path.join(out, bq.INDEX_FILE))
+    assert not os.path.exists(os.path.join(out, "blockfloat.json"))
+    assert not os.path.exists(os.path.join(out, "norms.safetensors"))
+    with open(os.path.join(out, bq.INDEX_FILE)) as handle:
+        weight_map = json.load(handle)["weight_map"]
+    shards = sorted(set(weight_map.values()))
+    assert shards and all(name.endswith(".safetensors") for name in shards)
+    for shard in shards:
+        assert os.path.isfile(os.path.join(out, shard))
+
+    # Quantized modules are named after their own buffers, so ``load_state_dict``
+    # needs no translation table; dense tensors keep a normal ``.weight``.
+    assert weight_map["model.layers.0.self_attn.q_proj.codes"] in shards
+    assert weight_map["model.layers.0.mlp.gate_proj.codes"] in shards
+    assert weight_map["model.norm.weight"] in shards
+    assert weight_map["model.embed_tokens.weight"] in shards
 
     with open(os.path.join(out, "config.json")) as handle:
         quant_config = json.load(handle)["quantization_config"]
     assert quant_config["mixed_bits"] is True
+    assert quant_config["bits_per_layer"]["model.layers.0.self_attn.q_proj"] == 8
+    assert quant_config["bits_per_layer"]["model.layers.0.mlp.gate_proj"] == 4
 
     loaded, restored = bq.load_blockfloat_model(out)
     assert len(restored) == 2 * 7
@@ -1821,10 +1828,12 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
         for name, module in block.named_modules():
             if getattr(module, "weight", None) is None or module.weight.dim() != 2:
                 continue
-            key = f"model.layers.{index}.{name}.weight"
-            got = dict(loaded.named_parameters())[key].detach()
-            want = module.weight.detach()
-            assert torch.equal(got.float(), want.float()), key
+            prefix = f"model.layers.{index}.{name}"
+            quantized = loaded.get_submodule(prefix)
+            assert quantized.bits == bq._layer_bits(widths, prefix)
+            got = quantized.dequantize()
+            want = module.weight.detach().float()
+            assert torch.equal(got, want), prefix
 
 
 def test_native_checkpoint_resave_is_bit_identical(tmp_path):

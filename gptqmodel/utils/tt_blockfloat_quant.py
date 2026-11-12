@@ -859,11 +859,132 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
                     module.bias.copy_(entry["bias"].to(module.bias.dtype))
                 restored[key] = list(entry["shape"])
     return restored
+# --- standard Hugging Face checkpoint layout -------------------------------
+#
+# A published checkpoint is an ordinary HF model directory: ``model.safetensors``
+# (or ``model-0000N-of-0000M.safetensors`` shards) plus
+# ``model.safetensors.index.json``. There is no per-role payload file and no
+# sidecar manifest -- the index is the manifest, exactly as it is for every other
+# HF checkpoint, and the loader reads it the same way.
+#
+# Tensor naming follows the module that owns it, which is what
+# ``load_state_dict`` already understands: a quantized linear stores
+# ``<prefix>.codes`` / ``.exponents`` / ``.code_shape`` (its buffer names) plus
+# ``.bias``, while everything dense stores a normal ``.weight``.
+
+INDEX_FILE = "model.safetensors.index.json"
+SINGLE_SHARD_FILE = "model.safetensors"
+SHARD_PATTERN = "model-{index:05d}-of-{total:05d}.safetensors"
+
+#: Shard size limit. HF's own default is 5 GiB, but a 1B-model checkpoint is well
+#: under 1 GiB, so the smaller default keeps the artifact in more than one shard
+#: and exercises the index on every save.
+DEFAULT_MAX_SHARD_BYTES = 500 * 1024**2
 
 
-#: Payload names for a self-contained checkpoint.
-EMBED_PAYLOAD = "embed_tokens.bf8.safetensors"
-NORMS_PAYLOAD = "norms.safetensors"
+def _quantized_prefixes(model) -> list:
+    """Module paths of the decoder linears, in model order."""
+
+    import torch.nn as nn
+
+    return [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and ".layers." in name
+    ]
+
+
+def _write_shards(tensors: dict, output_dir: str, max_shard_bytes: int) -> dict:
+    """Write HF-style shards plus the standard index. Returns the weight map."""
+
+    import json
+    import os
+
+    from safetensors.torch import save_file
+
+    names = sorted(tensors)
+    sizes = {name: tensors[name].numel() * tensors[name].element_size() for name in names}
+    total_bytes = sum(sizes.values())
+
+    shards, current, current_bytes = [], {}, 0
+    for name in names:
+        if current and current_bytes + sizes[name] > max_shard_bytes:
+            shards.append(current)
+            current, current_bytes = {}, 0
+        current[name] = tensors[name]
+        current_bytes += sizes[name]
+    if current:
+        shards.append(current)
+
+    total = len(shards)
+    weight_map = {}
+    for index, shard in enumerate(shards, start=1):
+        filename = (
+            SINGLE_SHARD_FILE
+            if total == 1
+            else SHARD_PATTERN.format(index=index, total=total)
+        )
+        save_file(
+            {key: value.contiguous() for key, value in shard.items()},
+            os.path.join(output_dir, filename),
+            metadata={"format": "pt"},
+        )
+        for key in shard:
+            weight_map[key] = filename
+
+    with open(os.path.join(output_dir, INDEX_FILE), "w") as handle:
+        json.dump(
+            {"metadata": {"total_size": total_bytes}, "weight_map": weight_map},
+            handle,
+            indent=2,
+        )
+    return {"weight_map": weight_map, "shards": total, "total_bytes": total_bytes}
+
+
+def read_hf_weight_map(checkpoint_dir: str) -> dict:
+    """Read ``model.safetensors.index.json``, or synthesise one for a single file."""
+
+    import json
+    import os
+
+    index_path = os.path.join(checkpoint_dir, INDEX_FILE)
+    if os.path.isfile(index_path):
+        with open(index_path) as handle:
+            weight_map = json.load(handle).get("weight_map") or {}
+        if weight_map:
+            return {str(key): str(value) for key, value in weight_map.items()}
+
+    single = os.path.join(checkpoint_dir, SINGLE_SHARD_FILE)
+    if os.path.isfile(single):
+        from safetensors import safe_open
+
+        with safe_open(single, framework="pt") as handle:
+            return dict.fromkeys(handle.keys(), SINGLE_SHARD_FILE)
+
+    raise FileNotFoundError(
+        f"{checkpoint_dir} has no {INDEX_FILE} and no {SINGLE_SHARD_FILE}"
+    )
+
+
+def load_hf_state_dict(checkpoint_dir: str) -> dict:
+    """Load every tensor named by the checkpoint's index."""
+
+    import os
+
+    from safetensors.torch import load_file
+
+    weight_map = read_hf_weight_map(checkpoint_dir)
+    by_shard: dict = {}
+    for name, shard in weight_map.items():
+        by_shard.setdefault(shard, []).append(name)
+
+    state = {}
+    for shard, names in by_shard.items():
+        tensors = load_file(os.path.join(checkpoint_dir, shard))
+        for name in names:
+            if name in tensors:
+                state[name] = tensors[name]
+    return state
 
 
 def save_blockfloat_model(
@@ -874,68 +995,79 @@ def save_blockfloat_model(
     embed_bits: int = 8,
     tokenizer=None,
     metadata: "Optional[dict]" = None,
+    max_shard_bytes: int = DEFAULT_MAX_SHARD_BYTES,
 ) -> dict:
-    """Write a self-contained checkpoint: linears, embedding, norms and config.
+    """Write a self-contained checkpoint in the standard HF layout.
 
-    :func:`save_blockfloat_checkpoint` stores the decoder blocks only, which makes a
-    checkpoint an overlay on the base model. This writes the rest as well, so the
-    directory loads on its own through :func:`load_blockfloat_model`.
+    The directory is an ordinary HF model: ``model.safetensors`` shards plus
+    ``model.safetensors.index.json``. There is no per-role payload file and no
+    sidecar manifest; the index is the manifest.
     """
 
     import json
     import os
 
-    from safetensors.torch import save_file
-
-    info = save_blockfloat_checkpoint(
-        model, output_dir, bits=bits, metadata=metadata
-    )
-    with open(os.path.join(output_dir, "blockfloat.json")) as handle:
-        stored_layers = list(json.load(handle)["layers"])
-
-    # Embedding. When ``tie_word_embeddings`` the output head is the same tensor, so
-    # quantising this covers both and lm_head must not be stored separately.
+    os.makedirs(output_dir, exist_ok=True)
+    tensors: dict = {}
+    layer_bits: dict = {}
+    default_bits = _default_bits(bits)
     tied = bool(getattr(model.config, "tie_word_embeddings", False))
+
+    # Decoder linears: packed codes plus one exponent per block, named after the
+    # buffers the module already owns so ``load_state_dict`` needs no mapping.
+    for prefix in _quantized_prefixes(model):
+        module = model.get_submodule(prefix)
+        layer_width = _layer_bits(bits, prefix)
+        weight = module.weight.detach().to(torch.float32)
+        try:
+            codes, exponents = decompose_blockfloat(weight, bits=layer_width)
+        except ValueError:
+            # Not on the grid (or not quantized): keep it dense like any other
+            # float tensor rather than claiming a format it does not have.
+            tensors[f"{prefix}.weight"] = weight.to(torch.float16).contiguous()
+            continue
+        tensors[f"{prefix}.codes"] = _pack_codes(codes, layer_width).contiguous()
+        tensors[f"{prefix}.code_shape"] = torch.tensor(
+            list(codes.shape), dtype=torch.int64
+        )
+        tensors[f"{prefix}.exponents"] = exponents.to(torch.int8).contiguous()
+        layer_bits[prefix] = layer_width
+        if getattr(module, "bias", None) is not None:
+            tensors[f"{prefix}.bias"] = module.bias.detach().to(torch.float16).contiguous()
+
+    # The embedding is a lookup table, so it is stored as a normal ``.weight``
+    # whose values are exactly on the block-float grid. That keeps it an ordinary
+    # HF tensor -- no per-role payload and no special-cased reader -- while losing
+    # nothing: the grid values are exactly representable in float16, so a device
+    # kernel can recover the codes from it without error.
     embedding = model.get_input_embeddings()
     if embedding is not None and embedding.weight is not None:
-        weight = embedding.weight.detach().to(torch.float32)
-        grid = quantize_blockfloat(weight, embed_bits)[0]
-        codes, exponents = decompose_blockfloat(grid, bits=embed_bits)
-        save_file(
-            {
-                "codes": _pack_codes(codes, embed_bits).contiguous(),
-                "code_shape": torch.tensor(list(codes.shape), dtype=torch.int64),
-                "exponents": exponents.to(torch.int8).contiguous(),
-            },
-            os.path.join(output_dir, EMBED_PAYLOAD),
-            metadata={
-                "format": "tt-blockfloat",
-                "bits": str(embed_bits),
-                "block": str(BLOCKFLOAT_BLOCK),
-                "tied": str(tied).lower(),
-            },
-        )
+        grid = quantize_blockfloat(
+            embedding.weight.detach().to(torch.float32), embed_bits
+        )[0]
+        tensors["model.embed_tokens.weight"] = grid.to(torch.float16).contiguous()
 
-    # Everything that is not a decoder linear and not the embedding: norms, and the
-    # head only when it is not tied to the embedding.
-    covered = {f"model.layers.{key}.weight" for key in stored_layers}
-    remaining = {}
+    # Everything else is dense: norms, and the head only when it is not tied.
+    quantized_prefixes = set(layer_bits)
     for name, param in model.named_parameters():
-        if name in covered or name.endswith("embed_tokens.weight"):
+        if name.endswith("embed_tokens.weight"):
             continue
         if name.endswith("lm_head.weight") and tied:
             continue
-        remaining[name] = param.detach().to(torch.float16).contiguous()
-    save_file(
-        remaining,
-        os.path.join(output_dir, NORMS_PAYLOAD),
-        metadata={"format": "pt", "dtype": "float16"},
-    )
+        if name in tensors:
+            continue
+        # A quantized module's parameters are already represented by its codes;
+        # writing its dense ``.weight`` too would ship both forms and make the
+        # loader reject the checkpoint for having nowhere to put the float one.
+        if name.rsplit(".", 1)[0] in quantized_prefixes:
+            continue
+        tensors[name] = param.detach().to(torch.float16).contiguous()
+
+    written = _write_shards(tensors, output_dir, max_shard_bytes)
 
     config = model.config.to_dict()
     config["torch_dtype"] = "float16"
-    default_bits = int(info["bits"])
-    config["quantization_config"] = {
+    quantization_config = {
         "quant_method": "tt-blockfloat",
         "checkpoint_format": "tt-blockfloat",
         "bits": default_bits,
@@ -948,17 +1080,14 @@ def save_blockfloat_model(
         "lm_head_quant_bits": embed_bits if tied else 0,
         "lm_head_tied_to_embedding": tied,
         "embed_bits": embed_bits,
+        "embed_on_grid": True,
         "meta": dict(metadata or {}),
     }
-    if len(info["bits_per_layer"]) > 1:
-        # Mixed widths: record which layers use which, so a reader does not
-        # have to open the payload to find out.
-        with open(os.path.join(output_dir, "blockfloat.json")) as handle:
-            layer_widths = {
-                key: entry["bits"] for key, entry in json.load(handle)["layers"].items()
-            }
-        config["quantization_config"]["mixed_bits"] = True
-        config["quantization_config"]["bits_per_layer"] = layer_widths
+    widths = sorted(set(layer_bits.values()))
+    if len(widths) > 1:
+        quantization_config["mixed_bits"] = True
+        quantization_config["bits_per_layer"] = layer_bits
+    config["quantization_config"] = quantization_config
     with open(os.path.join(output_dir, "config.json"), "w") as handle:
         json.dump(config, handle, indent=2)
 
@@ -966,70 +1095,133 @@ def save_blockfloat_model(
         tokenizer.save_pretrained(output_dir)
 
     return {
-        "layers": info["layers"],
-        "payload_bytes": info["payload_bytes"],
+        "layers": len(layer_bits),
+        "payload_bytes": written["total_bytes"],
+        "shards": written["shards"],
         "bits": default_bits,
-        "bits_per_layer": info["bits_per_layer"],
+        "bits_per_layer": widths,
         "embed_bits": embed_bits,
         "tied": tied,
-        "dense_tensors": len(remaining),
+        "dense_tensors": len(tensors) - 3 * len(layer_bits),
+    }
+
+
+def build_blockfloat_model(
+    checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
+) -> "tuple":
+    """Build the torch model for a checkpoint directory.
+
+    Returns ``(model, restored_layers, info)``. Shared by the library loader and
+    the ``GPTQModel.load`` route so both read the checkpoint identically.
+    """
+
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    # Read the index first: a directory with no standard HF weight files is not a
+    # checkpoint at all, and saying so is more useful than a config parse error.
+    state = load_hf_state_dict(checkpoint_dir)
+    if not state:
+        raise ValueError(f"{checkpoint_dir} has no tensors in its index")
+
+    config = AutoConfig.from_pretrained(checkpoint_dir)
+    model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
+
+    quantization_config = getattr(config, "quantization_config", None) or {}
+    if not isinstance(quantization_config, dict):
+        quantization_config = dict(quantization_config)
+    bits_per_layer = quantization_config.get("bits_per_layer") or {}
+    default_bits = int(quantization_config.get("bits", 4))
+    tied = bool(getattr(config, "tie_word_embeddings", False))
+
+    # Any tensor named ``<prefix>.codes`` marks a quantized module. The width is
+    # recoverable from the packed size even when the config omits it.
+    prefixes = sorted(
+        {name[: -len(".codes")] for name in state if name.endswith(".codes")}
+    )
+    if not prefixes:
+        raise ValueError(
+            f"{checkpoint_dir} has no block-float tensors; it is a dense checkpoint"
+        )
+
+    from ..nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+    from ..utils.backend import BACKEND
+
+    restored = {}
+    for prefix in prefixes:
+        dense = model.get_submodule(prefix)
+        codes = state[f"{prefix}.codes"]
+        shape = tuple(int(v) for v in state[f"{prefix}.code_shape"])
+        width = int(bits_per_layer.get(prefix, default_bits))
+        expected = shape[0] * shape[1] * width // 8
+        if codes.numel() != expected:
+            # 4-bit packs two codes per byte and 8-bit one, so a mismatch means
+            # the recorded width is wrong. Trust the payload over the config.
+            width = 8 if codes.numel() == shape[0] * shape[1] else 4
+        linear = TTBlockfloatLinear(
+            bits=width,
+            in_features=int(dense.in_features),
+            out_features=int(dense.out_features),
+            bias=f"{prefix}.bias" in state,
+            backend=BACKEND.TT_BLOCKFLOAT,
+            adapter=None,
+            name=prefix,
+            dtype=dtype,
+        )
+        parent_name, _, attr = prefix.rpartition(".")
+        setattr(model.get_submodule(parent_name), attr, linear)
+        # Size the buffers from the payload before ``load_state_dict``. They are
+        # allocated empty at construction, and a size-0 buffer rejects the copy
+        # even though the tensor is exactly what the module needs.
+        linear.codes = codes
+        linear.code_shape = state[f"{prefix}.code_shape"]
+        linear.exponents = state[f"{prefix}.exponents"]
+        restored[prefix] = list(shape)
+
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    unexpected = [
+        name
+        for name in unexpected
+        if not (name.endswith("lm_head.weight") and tied)
+    ]
+    if unexpected:
+        raise ValueError(
+            f"{checkpoint_dir} contains tensors this config has no home for: "
+            f"{sorted(unexpected)[:5]}"
+        )
+    required = [name for name in missing if not (name.endswith("lm_head.weight") and tied)]
+    if required:
+        raise ValueError(
+            f"{checkpoint_dir} does not supply {len(required)} required tensors, "
+            f"e.g. {sorted(required)[:5]}"
+        )
+
+    model.eval()
+    return model, restored, {
+        "bits": default_bits,
+        "quantization_config": quantization_config,
     }
 
 
 def load_blockfloat_model(
     checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
 ) -> "tuple":
-    """Load a self-contained checkpoint written by :func:`save_blockfloat_model`.
+    """Load a checkpoint written by :func:`save_blockfloat_model`.
 
-    Returns ``(model, restored_layers)``. The model is built from the checkpoint's
-    own ``config.json``; nothing is downloaded from the base model.
+    Reads the standard HF index, so nothing here depends on this project's file
+    naming: any tensor named ``<prefix>.codes`` swaps that module for the
+    block-float kernel, and everything else loads as an ordinary parameter.
     """
 
-    import os
-
-    from safetensors.torch import load_file, safe_open
-    from transformers import AutoConfig, AutoModelForCausalLM
-
-    config = AutoConfig.from_pretrained(checkpoint_dir)
-    model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
-
-    # A decoder-only directory (``save_blockfloat_checkpoint``) has neither of
-    # these. Loading it here would leave the embedding and every norm at their
-    # random initial values and still return a model, so refuse instead.
-    norms_path = os.path.join(checkpoint_dir, NORMS_PAYLOAD)
-    embed_path = os.path.join(checkpoint_dir, EMBED_PAYLOAD)
-    for path, name in ((norms_path, NORMS_PAYLOAD), (embed_path, EMBED_PAYLOAD)):
-        if not os.path.isfile(path):
-            raise FileNotFoundError(
-                f"{checkpoint_dir} has no {name}, so it is a decoder-only "
-                f"checkpoint from save_blockfloat_checkpoint(). Load it with "
-                f"load_blockfloat_into_model() against the base model instead."
-            )
-
-    _missing, unexpected = model.load_state_dict(load_file(norms_path), strict=False)
-    if unexpected:
-        raise ValueError(
-            f"{norms_path} contains tensors this config has no home for: "
-            f"{sorted(unexpected)[:5]}"
-        )
-
-    with safe_open(embed_path, framework="pt") as handle:
-        embed_bits = int((handle.metadata() or {}).get("bits", "8"))
-        codes = handle.get_tensor("codes")
-        shape = tuple(int(v) for v in handle.get_tensor("code_shape"))
-        exponents = handle.get_tensor("exponents")
-    weights = recompose_blockfloat(codes.reshape(shape), exponents, bits=embed_bits)
-    with torch.no_grad():
-        model.get_input_embeddings().weight.copy_(weights.to(dtype))
-
-    restored = load_native_checkpoint_into_dense_model(model, checkpoint_dir)
-    model.eval()
+    model, restored, _info = build_blockfloat_model(checkpoint_dir, dtype=dtype)
     return model, restored
 
 
 __all__ += [
-    "EMBED_PAYLOAD",
-    "NORMS_PAYLOAD",
+    "INDEX_FILE",
+    "SINGLE_SHARD_FILE",
+    "build_blockfloat_model",
     "load_blockfloat_model",
+    "load_hf_state_dict",
+    "read_hf_weight_map",
     "save_blockfloat_model",
 ]

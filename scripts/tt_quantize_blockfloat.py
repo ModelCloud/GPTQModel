@@ -105,7 +105,7 @@ def main(argv: list) -> int:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from gptqmodel.utils.tt_blockfloat_quant import (
-        load_native_checkpoint_into_dense_model,
+        build_blockfloat_model,
         quantize_model_blockfloat,
         save_blockfloat_model,
     )
@@ -199,12 +199,18 @@ def main(argv: list) -> int:
         flush=True,
     )
 
-    restored = load_native_checkpoint_into_dense_model(model, args.out)
+    # Reload through the same reader a consumer uses: the checkpoint is a plain
+    # HF directory, so this exercises the index and the module swap rather than a
+    # bespoke path.
+    reloaded_model, restored, _info = build_blockfloat_model(
+        args.out, dtype=torch.float32
+    )
     with torch.no_grad():
-        reloaded = model(ids).logits[0, -1].float()
+        reloaded = reloaded_model(ids).logits[0, -1].float()
     drift = float((reloaded - quantized).abs().max())
     print(
-        f"[Q] reloaded {len(restored)} layers, logits maxdiff={drift:.2e}",
+        f"[Q] reloaded {len(restored)} layers from the HF index, "
+        f"logits maxdiff={drift:.2e}",
         flush=True,
     )
     if drift != 0.0:
