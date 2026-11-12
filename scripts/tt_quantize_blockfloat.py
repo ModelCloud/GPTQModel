@@ -31,8 +31,13 @@ def main(argv: list) -> int:
     parser.add_argument("--nsamples", type=int, default=8)
     parser.add_argument(
         "--calibration",
-        default="The capital of France is Paris. " * 40,
-        help="calibration text used to build the per-layer Hessians",
+        required=True,
+        help=(
+            "calibration text for the per-layer Hessians. Required: a narrow "
+            "passage tunes GPTQ's error feedback to that passage, which is "
+            "catastrophic on other text (OPT-125M measured perplexity 296 from a "
+            "409-token synthetic passage against 20.3 from real text)."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -50,6 +55,15 @@ def main(argv: list) -> int:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
+
+    calibration_tokens = tokenizer(
+        args.calibration, return_tensors="pt"
+    ).input_ids.shape[1]
+    print(
+        f"[Q] calibration: {calibration_tokens} distinct tokens, "
+        f"{args.nsamples} windows of 256",
+        flush=True,
+    )
 
     probe = "The capital of France is"
     ids = tokenizer(probe, return_tensors="pt").input_ids

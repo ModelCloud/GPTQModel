@@ -726,11 +726,12 @@ def iter_calibration_windows(
         return
 
     span = total - seqlen + 1
-    if nsamples > span:
+    budget = nsamples * seqlen
+    if total < budget:
         log.warning(
-            f"calibration text yields only {span} distinct windows of {seqlen} "
-            f"tokens but nsamples={nsamples}; the last {nsamples - span} samples "
-            "repeat. Pass longer calibration text."
+            f"calibration text has {total} distinct tokens but {nsamples} windows "
+            f"of {seqlen} need {budget}: the windows overlap, so the Hessian "
+            f"describes only {total} tokens. Pass longer calibration text."
         )
     for index in range(nsamples):
         start = (index * seqlen) % span

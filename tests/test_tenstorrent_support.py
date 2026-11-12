@@ -27,6 +27,20 @@ from gptqmodel.utils.tt_packing import (
 
 BOUNDARY_WORDS = [4294967295, 305419896, 2141965807, 2147483648]
 
+# Calibration text is required by the block-float quantizer: a narrow passage
+# tunes GPTQ's error feedback to that passage and wrecks the model on other text.
+TT_CALIBRATION_TEXT = (
+    "The quick brown fox jumps over the lazy dog while the market stalls open. "
+    "Tenstorrent accelerators pair many small RISC-V cores with a matrix engine. "
+    "Quantization reduces the number of bits needed to store model weights. "
+    "A shop sells pencils in boxes of twelve and four boxes arrive on Monday. "
+    "The library opens at nine in the morning and closes at six in the evening. "
+    "Rain fell for three hours at two centimeters per hour and the gauge rose. "
+    "Sorting a list of numbers takes time proportional to n log n when efficient. "
+    "A recipe calls for two cups of flour for every three cups of milk, so nine "
+    "cups of milk require six cups of flour to keep the mixture consistent. "
+)
+
 
 def _signed_words(values):
     return torch.tensor(values, dtype=torch.uint32).view(torch.int32)
@@ -1644,7 +1658,9 @@ def test_quantize_model_blockfloat_reports_true_weight_error():
     orig = bq.collect_layer_hessians
     bq.collect_layer_hessians = fake.collect_layer_hessians
     try:
-        report = bq.quantize_model_blockfloat(model, tokenizer=None, bits=4)
+        report = bq.quantize_model_blockfloat(
+            model, tokenizer=None, bits=4, text=TT_CALIBRATION_TEXT
+        )
     finally:
         bq.collect_layer_hessians = orig
 
@@ -2035,7 +2051,9 @@ def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
     with torch.no_grad():
         dense_logits = model(ids).logits[0, -1].float().clone()
 
-    report = quantize_model_blockfloat(model, tok, bits=4, nsamples=4)
+    report = quantize_model_blockfloat(
+        model, tok, bits=4, nsamples=4, text=TT_CALIBRATION_TEXT
+    )
     assert len(report) >= 72, f"only {len(report)} layers quantized"
     assert all(entry["on_grid"] for entry in report.values()), "a layer left the grid"
     # Guard the aliasing bug: a detached reference made this read 0.0 everywhere.
@@ -2116,7 +2134,9 @@ def test_opt125m_native_bf4_matches_int4_quantized_checkpoint():
     with torch.no_grad():
         dense = model(ids).logits[0, -1].float().clone()
 
-    quantize_model_blockfloat(model, tok, bits=4, nsamples=4)
+    quantize_model_blockfloat(
+        model, tok, bits=4, nsamples=4, text=TT_CALIBRATION_TEXT
+    )
     with torch.no_grad():
         bf4 = model(ids).logits[0, -1].float().clone()
 

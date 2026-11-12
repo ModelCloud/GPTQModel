@@ -285,7 +285,6 @@ def gptq_solve_blockfloat(
 
 __all__ += [
     "BLOCKFLOAT_SAVE_FORMAT_VERSION",
-    "DEFAULT_CALIBRATION_TEXT",
     "decompose_blockfloat",
     "load_blockfloat_into_model",
     "recompose_blockfloat",
@@ -306,39 +305,11 @@ __all__ += [
 # against the grid. The result needs no inference-time dequant: the unpack stage
 # expands it in the data path.
 
-DEFAULT_CALIBRATION_TEXT = (
-    # Long enough to give distinct windows at the default 256-token stride: a short
-    # string silently collapses every sample onto one passage, which is how the
-    # block-float Hessian once ended up describing a single paragraph.
-    "The quick brown fox jumps over the lazy dog while the morning fog lifts off "
-    "the river and the market stalls open one by one along the narrow street. "
-    "Tenstorrent accelerators pair many small RISC-V cores with a matrix engine, "
-    "and each core owns a slice of memory beside its arithmetic unit. "
-    "Quantization reduces the number of bits needed to store model weights, so a "
-    "larger model fits in the same memory and moves less data per token. "
-    "A transformer layer projects hidden states through attention and feed-forward "
-    "blocks, and every projection is a matrix multiply over the same input row. "
-    "Numerical precision and memory bandwidth both bound inference throughput, and "
-    "which one binds depends on the batch size and the sequence length. "
-    "A shop sells pencils in boxes of twelve. If four boxes arrive on Monday and "
-    "three boxes are sold by Friday, how many pencils remain in the stockroom? "
-    "First multiply four boxes by twelve pencils to get forty-eight, then subtract "
-    "the thirty-six pencils that were sold, which leaves twelve pencils in total. "
-    "The library opens at nine in the morning and closes at six in the evening, so "
-    "a student who arrives at ten and leaves at four spends six hours reading. "
-    "Rain fell for three hours at two centimeters per hour, and the gauge already "
-    "held five centimeters, so the final reading was eleven centimeters. "
-    "The model reads a sentence, predicts the next token, and repeats until it "
-    "emits a stop marker or reaches the maximum length allowed by the caller. "
-    "Sorting a list of numbers takes time proportional to the product of its "
-    "length and the logarithm of that length when the algorithm is efficient. "
-    "Engineers measured the cable twice, once before the storm and once after, and "
-    "the second measurement was longer by the amount the supports had stretched. "
-    "A recipe calls for two cups of flour for every three cups of milk, so nine "
-    "cups of milk require six cups of flour to keep the mixture consistent. "
-    "When the test suite runs, each case reports whether it passed, failed, or was "
-    "skipped because the required hardware was not present on the machine. "
-)
+# There is deliberately no default calibration text. A single synthetic passage
+# still tunes GPTQ's error feedback to that passage even when the windows stride
+# correctly: on OPT-125M, 409 tokens of one passage gave perplexity 296 against
+# 18.3 dense, while real text at the same sample budget gave 20.3. Calibration
+# data is model- and domain-specific, so the caller must supply it.
 
 
 def _decoder_blocks(model) -> list:
@@ -364,7 +335,7 @@ def collect_layer_hessians(
     tokenizer,
     *,
     layers: Optional[list] = None,
-    text: str = DEFAULT_CALIBRATION_TEXT,
+    text: str,
     nsamples: int = 32,
     seqlen: int = 256,
 ) -> dict:
@@ -427,7 +398,7 @@ def quantize_model_blockfloat(
     bits: int = 4,
     damp: float = 0.01,
     nsamples: int = 32,
-    text: str = DEFAULT_CALIBRATION_TEXT,
+    text: str,
     verbose: bool = False,
 ) -> dict:
     """Quantize every decoder linear onto the TT block-float grid, in place.
