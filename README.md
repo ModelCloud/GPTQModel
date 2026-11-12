@@ -238,7 +238,9 @@ columns at a time and never retains a dense dequantized weight;
 Native backend availability, shape validation, wide activation inputs, and
 derived cache invalidation follow the
 [kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
-contract.
+contract. Opt-in AllSpark W8A16 keeps its GPTQ/AWQ checkpoint tensors
+authoritative and its N32K16/WMMA kernel layout a derived cache; see
+[AllSpark checkpoint layout](docs/allspark-checkpoint-layout.md).
 
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).

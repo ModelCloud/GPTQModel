@@ -94,3 +94,117 @@ def test_allspark_linear_matches_dequant(m, dtype):
     rel = (out.double() - ref).abs().mean() / ref.abs().mean()
     assert torch.isfinite(out).all()
     assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
+
+
+def _load_gptq_module(dtype, bias=True, k=256, n=512):
+    """A GPTQ AllSpark layer carrying real checkpoint tensors."""
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    torch.manual_seed(7)
+    weight = (torch.randn(k, n, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    qweight, scales, codes = _pack_gptq_8bit(weight)
+    module = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=bias, dtype=dtype,
+    ).cuda().to(dtype)
+    module.qweight.data.copy_(qweight)
+    module.scales.data.copy_(scales)
+    if bias:
+        module.bias.data.uniform_(-0.01, 0.01)
+    return module, qweight, scales, codes
+
+
+def test_fusion_rejects_checkpoint_sources_split_across_devices():
+    """A stale packed view must not make mixed-device sources fusion-eligible."""
+    from gptqmodel.models.fusion_kernels import kernel_specs
+
+    if not _kernel_supported():
+        pytest.skip("AllSpark requires compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    module, _, _, _ = _load_gptq_module(torch.float16)
+    module.post_init()
+    module.scales = torch.nn.Parameter(module.scales.detach().cpu(), requires_grad=False)
+
+    assert not module.packed_ready()
+    assert "one device" in kernel_specs()[type(module)].shape_error(module)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_module_export_keeps_checkpoint_layout(dtype):
+    """``post_init()`` must not drop the checkpoint tensors from the export.
+
+    The kernel layout is derived state; deleting ``qweight``/``scales`` left
+    ``state_dict()``/``get_state_dict_for_save()`` with only ``bias`` and made a
+    strict reload of the original checkpoint fail.
+    """
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    if not _kernel_supported():
+        pytest.skip("AllSpark requires compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    module, qweight, scales, codes = _load_gptq_module(dtype)
+    pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
+    assert set(pristine) == {"qweight", "scales", "bias"}
+
+    module.post_init()
+    assert {name: tuple(t.shape) for name, t in module.state_dict().items()} == pristine
+    assert {name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()} == pristine
+    # The kernel layout is derived, not part of the checkpoint.
+    assert set(dict(module.named_buffers())) == {"bias", "qweight_packed", "scales_packed"}
+    assert "qweight_packed" not in dict(module.state_dict())
+
+    x = (torch.randn(4, module.in_features, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    baseline = module(x).clone()
+
+    # A strict reload of the original checkpoint keeps working after a forward.
+    checkpoint = {name: tensor.clone() for name, tensor in module.state_dict().items()}
+    module.load_state_dict(checkpoint, strict=True)
+    restored = module(x)
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+    # The exported checkpoint must load into a fresh module without drop/extra
+    # keys: the reported failure mode was a strict load of a bias-only dict.
+    fresh, _, _, _ = _load_gptq_module(dtype)
+    fresh.load_state_dict(checkpoint, strict=True)
+    fresh.post_init()
+    torch.testing.assert_close(fresh(x).float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_runtime_state_dict_roundtrip_and_cache_invalidation(dtype):
+    """A self round-trip stays valid and stale kernel layout is never served."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark requires compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    module, qweight, scales, codes = _load_gptq_module(dtype)
+    module.post_init()
+    x = (torch.randn(2, module.in_features, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    baseline = module(x).clone()
+
+    runtime_state = {name: tensor.clone() for name, tensor in module.state_dict().items()}
+    module.load_state_dict(runtime_state, strict=True)
+    # ``load_state_dict`` retires the cache; the next forward re-derives it.
+    assert not module.packed_ready()
+    torch.testing.assert_close(module(x), baseline, rtol=2e-3, atol=2e-3)
+    assert module.packed_ready()
+
+    # Mutating the checkpoint scales must not leave a stale kernel layout.
+    with torch.no_grad():
+        module.scales.mul_(0.5)
+    assert not module.packed_ready()
+    ref = (
+        x.double() @ ((codes.double() - 128) * (scales.double() * 0.5)).to(dtype).double()
+        + module.bias.double()
+    )
+    torch.testing.assert_close(module(x), ref.to(dtype), rtol=2e-3, atol=2e-3)
+
+    # A device/dtype move keeps the checkpoint layout and rebuilds the cache.
+    module.to(torch.bfloat16 if dtype is torch.float16 else torch.float16)
+    assert {name: tensor.shape for name, tensor in module.state_dict().items()} == {
+        "qweight": torch.Size([64, 512]),
+        "scales": torch.Size([1, 512]),
+        "bias": torch.Size([512]),
+    }
