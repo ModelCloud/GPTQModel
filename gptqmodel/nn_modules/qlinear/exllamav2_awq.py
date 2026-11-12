@@ -135,11 +135,6 @@ class AwqExllamaV2Linear(AWQuantLinear):
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        if not self._awq_repacked:
-            self.qweight, self.qzeros = unpack_reorder_pack(
-                self.qweight, self.qzeros, self.bits
-            )
-            self._awq_repacked = True
         self._ensure_q_handle()
 
         super().post_init()
@@ -198,6 +193,15 @@ class AwqExllamaV2Linear(AWQuantLinear):
             return self.q_handle
         if self.scales.dtype != torch.float16:
             self.scales = self.scales.to(dtype=torch.float16)
+        native_shape = (self.in_features // self.pack_factor, self.out_features)
+        if self._awq_repacked and tuple(self.qweight.shape) != native_shape:
+            # A caller can replace the registered buffers with checkpoint
+            # words after a native handle was built. Clearing the handle does
+            # not reset the one-way flag, but the raw AWQ layout has a distinct
+            # shape. Repack it before binding another native descriptor.
+            self._release_q_handle()
+            self._awq_repacked = False
+            self._native_shuffled = False
         if not self._awq_repacked:
             # A state-dict load restores checkpoint words. Finalize them before
             # binding a new descriptor, just as post_init does on first load.

@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.exllamav2_awq as exllamav2_awq_module
+from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
 
 
 def _build_module(monkeypatch) -> exllamav2_awq_module.AwqExllamaV2Linear:
@@ -100,3 +102,40 @@ def test_exllamav2_awq_validate_once_surfaces_jit_error(monkeypatch):
     assert ok is False
     assert isinstance(err, ImportError)
     assert "missing exllamav2 awq jit ops" in str(err)
+
+
+@pytest.mark.parametrize("clear_before_rebind", [False, True])
+def test_replaced_awq_checkpoint_buffers_repack_before_handle_rebind(monkeypatch, clear_before_rebind):
+    module = _build_module(monkeypatch)
+    module.qweight = torch.full_like(module.qweight, 0x01234567)
+    module.qzeros = torch.full_like(module.qzeros, 0x12345678)
+    bound = []
+    freed = []
+
+    def make_handle(qweight, qzeros, _scales, **kwargs):
+        bound.append((qweight.clone(), qzeros.clone(), kwargs))
+        return len(bound)
+
+    monkeypatch.setattr(module, "ext_make_q_matrix_awq", make_handle)
+    monkeypatch.setattr(exllamav2_awq_module, "exllamav2_free_q_matrix",
+                        lambda handle, *, awq: freed.append((handle, awq)))
+    assert module._ensure_q_handle() == 1
+    assert module._awq_repacked
+    if clear_before_rebind:
+        module.clear_weight_cache()
+        assert freed == [(1, True)]
+
+    raw_weight = torch.full((module.in_features, module.out_features // module.pack_factor),
+                            0x76543210, dtype=torch.int32)
+    raw_zeros = torch.full_like(module.qzeros, 0x13572468)
+    expected_weight, expected_zeros = unpack_reorder_pack(raw_weight, raw_zeros, module.bits)
+    module.qweight = raw_weight
+    module.qzeros = raw_zeros
+
+    assert module._ensure_q_handle() == 2
+    assert freed == [(1, True)]
+    actual_weight, actual_zeros, kwargs = bound[-1]
+    assert torch.equal(actual_weight, expected_weight)
+    assert torch.equal(actual_zeros, expected_zeros)
+    assert kwargs == {}
+    assert module._awq_repacked
