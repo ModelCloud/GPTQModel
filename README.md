@@ -97,6 +97,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
+page explains how a token lookup reads only its packed rows, why small tables
+and large token counts still use whole-table decode, and what that means for
+packed-weight storage.
 The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
 rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the

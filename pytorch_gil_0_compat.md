@@ -170,6 +170,7 @@ results below for that build.
 | `torch.isfinite` | SAFE (concurrent) | NaN guards | - |
 | `torch.isnan` | SAFE (concurrent) | NaN guards | - |
 | `torch.bitwise_and` / `_or` / `_xor` | SAFE (concurrent) | quantization packing | - |
+| `Tensor.index_select` row gather | SAFE (concurrent), NVIDIA CUDA | quantized embedding row decode (packed word row, shift, and group gathers) | Probed 2026-11-12 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 8 threads x 4 iterations, three separate processes, all PASS. Each worker decoded 256 token rows on its assigned device from a golden-packed table built once and compared bit-exactly against a precomputed result; a torn or cross-thread read would differ. The AMD/HIP runtime is covered by the ROCm embedding row-decode test, not this CUDA probe. |
 | `torch.floor_divide` | SAFE (concurrent) | packing | - |
 | `torch.abs` / `exp` / `log` / `pow` | SAFE (concurrent) | math kernels | - |
 | `torch.save` + `torch.load` | SAFE (concurrent), process-wide | checkpoints | File I/O; safe but serializes on the filesystem. Write distinct paths per worker. |
