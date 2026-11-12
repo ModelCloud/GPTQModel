@@ -1278,6 +1278,57 @@ def test_blockfloat_grid_matches_hardware_levels():
     assert torch.unique(out[0, 16:]).numel() == 4
 
 
+def test_calibration_hessian_strides_through_the_text():
+    """Each calibration sample must see a different window of the text.
+
+    The Hessian used to be collected from ``ids[:, :seqlen]`` on every iteration,
+    so ``nsamples`` multiplied one passage instead of covering the calibration
+    text. The resulting error feedback is tuned to those 256 tokens, which is
+    measurably catastrophic on other text for a sensitive model.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    seqlen = 8
+    total = 4 * seqlen
+    seen = []
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.decoder = torch.nn.Module()
+            block = torch.nn.Module()
+            block.proj = torch.nn.Linear(4, 4, bias=False)
+            self.model.decoder.layers = torch.nn.ModuleList([block])
+
+        def forward(self, ids):
+            seen.append(ids[0].tolist())
+            x = torch.zeros(1, ids.shape[1], 4)
+            self.model.decoder.layers[0].proj(x)
+            return None
+
+    class _Tok:
+        def __call__(self, _text, return_tensors=None):
+            class _Out:
+                input_ids = torch.arange(total).unsqueeze(0)
+
+            return _Out()
+
+    bq.collect_layer_hessians(
+        _Model(), _Tok(), nsamples=4, seqlen=seqlen, text="ignored"
+    )
+
+    assert len(seen) == 4
+    windows = {tuple(window) for window in seen}
+    assert len(windows) == 4, "every calibration sample must use a distinct window"
+    assert all(len(window) == seqlen for window in seen)
+    # Strided, non-overlapping: the four windows partition the text.
+    assert seen[0][0] == 0 and seen[1][0] == seqlen and seen[3][0] == 3 * seqlen
+
+
 def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     """Saving codes and reading them back must reconstruct the same weights."""
 

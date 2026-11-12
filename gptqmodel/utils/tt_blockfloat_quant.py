@@ -379,10 +379,19 @@ def collect_layer_hessians(
         ids = tokenizer(text, return_tensors="pt").input_ids
         model.eval()
         with torch.no_grad():
+            # Stride through the text: one distinct window per sample. Reusing the
+            # first window (which this used to do) makes ``nsamples`` a multiplier
+            # on a single passage, so the Hessian describes 256 tokens of one text
+            # and the error feedback is tuned to it -- measurably catastrophic on
+            # other text. Wraparound keeps short calibration strings usable.
+            total = ids.shape[1]
             for i in range(nsamples):
-                window = ids[:, :seqlen]
-                if window.shape[1] < 8:
+                if total <= seqlen:
+                    # Text fits in one window: nothing to stride over.
                     window = ids
+                else:
+                    start = (i * seqlen) % (total - seqlen + 1)
+                    window = ids[:, start : start + seqlen]
                 model(window)
     finally:
         for handle in handles:
