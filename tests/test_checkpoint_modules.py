@@ -203,6 +203,54 @@ def test_fp8_scale_schema(scale):
     assert restored.weight_block_size == module.weight_block_size
 
 
+def test_checkpoint_persists_effective_dynamic_fp8_settings():
+    from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+
+    config = FP8Config(
+        weight_scale_method="row",
+        dynamic={
+            r"+:^proj$": {
+                "format": "float8_e5m2",
+                "weight_scale_method": "block",
+                "weight_block_size": [32, 32],
+            }
+        },
+    )
+    module = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        format="float8_e5m2",
+        weight_scale_method="block",
+        weight_block_size=(32, 32),
+        weight_scale_semantics=config.weight_scale_semantics,
+        register_buffers=True,
+    )
+    spec = packed_module_spec(module, config, module_name="proj")
+
+    assert spec["options"] == {
+        "format": "float8_e5m2",
+        "weight_scale_method": "block",
+        "weight_block_size": [32, 32],
+        "weight_scale_semantics": "inverse",
+    }
+
+    restored = restore_packed_module(
+        spec, name="proj", config=config, kernel=TorchFP8Linear, lm_head_name="lm_head"
+    )
+    assert restored.fp8_format == "float8_e5m2"
+    assert restored.weight_scale_method == "block"
+    assert restored.weight_block_size == (32, 32)
+    assert {
+        key: (value.shape, value.dtype) for key, value in module.state_dict().items()
+    } == {
+        key: (value.shape, value.dtype) for key, value in restored.state_dict().items()
+    }
+
+
 @pytest.mark.parametrize("bits", sorted(_GGUF_BITS_ALIAS_INFO))
 def test_gguf_bits_schema(bits):
     from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -300,3 +348,51 @@ def test_bitsandbytes_schema_under_meta_and_inference_context(compute_dtype):
     with torch.inference_mode():
         restored = assert_schema_roundtrip(module, config)
     assert restored.compute_dtype == compute_dtype
+
+
+def test_checkpoint_persists_effective_dynamic_bitsandbytes_settings():
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+        BITSANDBYTES_AVAILABLE,
+        BitsAndBytesLinear,
+    )
+    from gptqmodel.quantization.config import BitsAndBytesConfig
+
+    if not BITSANDBYTES_AVAILABLE:
+        pytest.skip("optional bitsandbytes dependency unavailable")
+
+    config = BitsAndBytesConfig(
+        bits=4,
+        block_size=64,
+        dynamic={r"+:^proj$": {"block_size": 32}},
+    )
+    module = BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        format=config.format,
+        block_size=32,
+        compress_statistics=config.compress_statistics,
+    )
+    module.pack_original(torch.nn.Linear(128, 128, bias=False), None, None)
+    spec = packed_module_spec(module, config, module_name="proj")
+
+    assert spec["options"]["block_size"] == 32
+    assert spec["options"]["compress_statistics"] == module.bnb_compress_statistics
+
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=config,
+        kernel=BitsAndBytesLinear,
+        lm_head_name="lm_head",
+    )
+    assert restored.bnb_block_size == 32
+    assert restored.bnb_compress_statistics == module.bnb_compress_statistics
+    assert {
+        key: (value.shape, value.dtype) for key, value in module.state_dict().items()
+    } == {
+        key: (value.shape, value.dtype) for key, value in restored.state_dict().items()
+    }

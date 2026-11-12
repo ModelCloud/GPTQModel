@@ -123,8 +123,24 @@ def packed_module_spec(module, config, *, module_name=None):
                 "auto_cache_bf16_rotation_dtype",
             )
         }
+    if getattr(module, "QUANT_TYPE", None) == "fp8":
+        spec["options"] = {
+            "format": module.fp8_format,
+            "weight_scale_method": module.weight_scale_method,
+            "weight_block_size": (
+                list(module.weight_block_size)
+                if module.weight_block_size is not None
+                else None
+            ),
+            "weight_scale_semantics": module.weight_scale_semantics,
+        }
     if getattr(module, "QUANT_TYPE", None) == "bitsandbytes":
         spec["compute_dtype"] = str(module.compute_dtype) if module.compute_dtype is not None else None
+        spec["options"] = {
+            "format": module.bnb_format,
+            "block_size": module.bnb_block_size,
+            "compress_statistics": module.bnb_compress_statistics,
+        }
         if module.is_4bit:
             # Packed QuantState JSON length depends on values, not dimensions.
             spec["quant_state_shape"] = list(module.weight_quant_state.shape)
@@ -179,7 +195,10 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             config,
             module_format,
         )
-        kwargs = {
+        # Global method defaults come first so the checkpoint's effective
+        # per-module settings always win during reconstruction.
+        kwargs = dict(config.quant_linear_init_kwargs())
+        kwargs.update({
             "pack_dtype": _deserialize_pack_dtype(
                 checkpoint_pack_dtype, config.pack_dtype
             ),
@@ -187,8 +206,7 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             "lm_head_name": lm_head_name,
             "format": module_format,
             "register_buffers": True,
-        }
-        kwargs.update(config.quant_linear_init_kwargs())
+        })
         kwargs.update(options)
         if has_compute_dtype and dtype_name is None:
             kwargs["dtype"] = None
