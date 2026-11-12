@@ -259,27 +259,27 @@ class ProcessorLifecycleConfig:
         return replace(self, forward=forward)
 
 
-def bind_effective_module_config(module, effective) -> None:
+def bind_resolved_module_config(module, resolved_cfg) -> None:
     """Attach one resolved dynamic snapshot to a real module or test adapter."""
     state = getattr(module, "state", None)
     if state is not None:
         try:
-            state["effective_module_config"] = effective
+            state["resolved_module_config"] = resolved_cfg
             return
         except (TypeError, AttributeError):
             pass
-    setattr(module, "effective_module_config", effective)
+    setattr(module, "resolved_module_config", resolved_cfg)
 
 
-def get_effective_module_config(module):
-    """Read the snapshot attached by ``bind_effective_module_config``."""
+def get_resolved_module_config(module):
+    """Read the snapshot attached by ``bind_resolved_module_config``."""
     state = getattr(module, "state", None)
     if state is not None:
         try:
-            return state.get("effective_module_config")
+            return state.get("resolved_module_config")
         except AttributeError:
             pass
-    return getattr(module, "effective_module_config", None)
+    return getattr(module, "resolved_module_config", None)
 
 
 # LoopProcessor is a singleton(), not per module instance

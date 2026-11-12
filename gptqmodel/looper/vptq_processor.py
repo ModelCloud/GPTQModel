@@ -17,8 +17,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -89,10 +89,10 @@ class VPTQProcessor(LoopProcessor):
         del kwargs
 
         # entire module is skipped
-        effective = self.qcfg.resolve_module_config(module.full_name)
-        if effective.excluded:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
 
@@ -265,7 +265,7 @@ class VPTQProcessor(LoopProcessor):
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
-                effective_module_config=get_effective_module_config(module),
+                resolved_module_config=get_resolved_module_config(module),
             )
 
         qmodule = model.model.get_submodule(module.full_name)

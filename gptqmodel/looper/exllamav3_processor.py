@@ -673,25 +673,25 @@ def clone_exllamav3_config_for_module(
     if not qcfg.module_is_included(module_full_name):
         return None
 
-    effective = qcfg.resolve_module_config(module_full_name)
-    if effective.excluded:
+    resolved_cfg = qcfg.resolve_module_config(module_full_name)
+    if resolved_cfg.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        qcfg_clone.bits = effective.get("bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = effective.get("head_bits", qcfg_clone.head_bits)
+        qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
+        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
-        out_scales_override = effective.get("out_scales", None)
+        out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
             qcfg_clone.out_scales = out_scales_override
 
-        codebook_override = effective.get("codebook", None)
+        codebook_override = resolved_cfg.get("codebook", None)
         if codebook_override is not None:
             qcfg_clone.codebook = codebook_override
 
-        calibration_override = effective.get("calibration", None)
+        calibration_override = resolved_cfg.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
@@ -2138,7 +2138,7 @@ class EXL3Processor(LoopProcessor):
                 )
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
-        """Builds the capture task and effective EXL3 config for one module."""
+        """Builds the capture task and resolved EXL3 config for one module."""
 
         del fallback, kwargs
 

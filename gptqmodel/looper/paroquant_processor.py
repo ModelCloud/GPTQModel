@@ -42,8 +42,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -320,9 +320,9 @@ class ParoQuantProcessor(LoopProcessor):
             return
         log.info("ParoQuant: prewarmed fused rotation extension.")
 
-    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, effective=None):
+    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, resolved_cfg=None):
         """Resolve per-module dynamic overrides while enforcing ParoQuant format."""
-        format_override = effective.get("format", None) if effective is not None else (
+        format_override = resolved_cfg.get("format", None) if resolved_cfg is not None else (
             self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
         )
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
@@ -390,12 +390,12 @@ class ParoQuantProcessor(LoopProcessor):
                 features[name] = tensors[0]
         return features
 
-    def _module_quant_params(self, module_name: str, *, effective=None) -> tuple[int, int, bool]:
-        """Read effective bit-width, group size, and symmetry for one module."""
-        effective = effective or self.qcfg.resolve_module_config(module_name)
-        bits = int(effective.get("bits", self.qcfg.runtime_bits))
-        group_size = int(effective.get("group_size", self.qcfg.group_size))
-        sym = bool(effective.get("sym", self.qcfg.sym))
+    def _module_quant_params(self, module_name: str, *, resolved_cfg=None) -> tuple[int, int, bool]:
+        """Read resolved bit-width, group size, and symmetry for one module."""
+        resolved_cfg = resolved_cfg or self.qcfg.resolve_module_config(module_name)
+        bits = int(resolved_cfg.get("bits", self.qcfg.runtime_bits))
+        group_size = int(resolved_cfg.get("group_size", self.qcfg.group_size))
+        sym = bool(resolved_cfg.get("sym", self.qcfg.sym))
         return bits, group_size, sym
 
     @staticmethod
@@ -475,7 +475,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> tuple[float, float]:
         """Optimize one module and stash its packed runtime tensors in `module.state`."""
         bits, group_size, sym = self._module_quant_params(
-            module.full_name, effective=get_effective_module_config(module),
+            module.full_name, resolved_cfg=get_resolved_module_config(module),
         )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
@@ -715,7 +715,7 @@ class ParoQuantProcessor(LoopProcessor):
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:
         """Materialize one ParoQuant optimizer wrapper from the current live module state."""
         bits, group_size, sym = self._module_quant_params(
-            module.full_name, effective=get_effective_module_config(module),
+            module.full_name, resolved_cfg=get_resolved_module_config(module),
         )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
@@ -2586,10 +2586,10 @@ class ParoQuantProcessor(LoopProcessor):
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""
-        effective = self.qcfg.resolve_module_config(module.full_name)
-        if effective.excluded:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
 
         self.fallback = normalize_fallback(fallback, self.qcfg.fallback)
         layer_state = self._get_layer_state(module.layer_index)
@@ -2703,8 +2703,8 @@ class ParoQuantProcessor(LoopProcessor):
             channel_scales = module.state.pop("channel_scales").clone()
 
         module.weight.data = move_to(pack_weight, device=CPU)
-        effective = get_effective_module_config(module)
-        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, effective=effective)
+        resolved_cfg = get_resolved_module_config(module)
+        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
@@ -2730,7 +2730,7 @@ class ParoQuantProcessor(LoopProcessor):
                     format=self.format,
                     register_buffers=False,
                     init_kwargs=self.qcfg.quant_linear_init_kwargs(),
-                    effective_module_config=effective,
+                    resolved_module_config=resolved_cfg,
                 )
 
         qmodule = model.model.get_submodule(module.full_name)

@@ -19,7 +19,7 @@ from .loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
+    bind_resolved_module_config,
 )
 from .weight_only_processor import WeightOnlyProcessor
 
@@ -59,13 +59,13 @@ class FP8GSQProcessor(WeightOnlyProcessor):
         super().release_calibration_dataset()
 
     def preprocess(self, module, **kwargs):
-        effective = self.qcfg.resolve_module_config(module.full_name)
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
         config = clone_weight_only_config_for_module(
-            self.qcfg, module.full_name, effective=effective,
+            self.qcfg, module.full_name, resolved_cfg=resolved_cfg,
         )
         if config is None:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
         if config.weight_scale_method == "tensor":
             raise ValueError("FP8 calibrated GSQ processor requires native activation replay for tensor scales")
         task = FP8GSQTask(module.weight, config) if gsq_enabled_for(config.gsq, module.full_name) else None

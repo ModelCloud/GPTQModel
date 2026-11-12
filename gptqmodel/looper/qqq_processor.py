@@ -19,8 +19,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -114,13 +114,13 @@ class QQQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
-        effective = self.qcfg.resolve_module_config(module.full_name)
-        if effective.excluded:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
-        apply_scalar_module_overrides(qcfg_clone, effective)
+        apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
@@ -319,7 +319,7 @@ class QQQProcessor(LoopProcessor):
                 format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 backend=backend,
                 register_buffers=False,
-                effective_module_config=get_effective_module_config(module),
+                resolved_module_config=get_resolved_module_config(module),
             )
 
         # pack module

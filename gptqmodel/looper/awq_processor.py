@@ -25,8 +25,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -412,17 +412,17 @@ class AWQProcessor(LoopProcessor):
         #     return AwqMarlinLinear
         raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
 
-    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, effective=None):
+    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, resolved_cfg=None):
         """Resolves the AWQ kernel after applying any dynamic format override."""
 
-        target_format = self._module_format(module_name, effective=effective)
+        target_format = self._module_format(module_name, resolved_cfg=resolved_cfg)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
         if target_format == FORMAT.GEMM:
             if (
-                self._module_bits(module_name, effective=effective) != 4
-                or self._module_group_size(module_name, effective=effective)
+                self._module_bits(module_name, resolved_cfg=resolved_cfg) != 4
+                or self._module_group_size(module_name, resolved_cfg=resolved_cfg)
                 not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
             ):
                 return AwqTorchLinear
@@ -432,7 +432,7 @@ class AWQProcessor(LoopProcessor):
                 return model_kernel
         return self._select_qlinear_kernel_for_format(target_format)
 
-    def _module_bits(self, module_name: Optional[str], *, effective=None) -> int:
+    def _module_bits(self, module_name: Optional[str], *, resolved_cfg=None) -> int:
         """Resolve the AWQ width this module is staged and packed at.
 
         AWQ stages affine codes in :meth:`pseudo_quantize_tensor` and packs them
@@ -444,7 +444,7 @@ class AWQProcessor(LoopProcessor):
         """
         if not module_name:
             return int(self.qcfg.runtime_bits)
-        override = effective.get("bits", self.qcfg.runtime_bits) if effective is not None else (
+        override = resolved_cfg.get("bits", self.qcfg.runtime_bits) if resolved_cfg is not None else (
             self.qcfg.dynamic_get(module_name, "bits", self.qcfg.runtime_bits)
         )
         # `dynamic_get` returns the raw override, which is `False` for an excluded
@@ -454,22 +454,22 @@ class AWQProcessor(LoopProcessor):
             return int(self.qcfg.runtime_bits)
         return int(override)
 
-    def _module_group_size(self, module_name: Optional[str], *, effective=None) -> int:
+    def _module_group_size(self, module_name: Optional[str], *, resolved_cfg=None) -> int:
         """Resolve the group size this module is staged and packed with."""
         if not module_name:
             return int(self.qcfg.group_size)
-        override = effective.get("group_size", self.qcfg.group_size) if effective is not None else (
+        override = resolved_cfg.get("group_size", self.qcfg.group_size) if resolved_cfg is not None else (
             self.qcfg.dynamic_get(module_name, "group_size", self.qcfg.group_size)
         )
         if override is False or override is None:
             return int(self.qcfg.group_size)
         return int(override)
 
-    def _module_format(self, module_name: Optional[str], *, effective=None) -> FORMAT:
+    def _module_format(self, module_name: Optional[str], *, resolved_cfg=None) -> FORMAT:
         """Resolve the packing format this module is staged and packed with."""
         if not module_name:
             return resolve_quant_format(self.qcfg.format, self.qcfg.method)
-        override = effective.get("format", self.qcfg.format) if effective is not None else (
+        override = resolved_cfg.get("format", self.qcfg.format) if resolved_cfg is not None else (
             self.qcfg.dynamic_get(module_name, "format", self.qcfg.format)
         )
         if override is False or override is None:
@@ -488,13 +488,13 @@ class AWQProcessor(LoopProcessor):
         return f"{layer_name}.{relative}" if relative else layer_name
 
     def _bits_for(self, layer_module: Optional[nn.Module], module: nn.Module) -> int:
-        """Resolve the effective width of one layer child."""
+        """Resolve the resolved width of one layer child."""
         return self._module_bits(self._full_module_name(layer_module, module))
 
     def _group_size_for(
         self, layer_module: Optional[nn.Module], module: nn.Module
     ) -> int:
-        """Resolve the effective group size of one layer child."""
+        """Resolve the resolved group size of one layer child."""
         return self._module_group_size(
             self._full_module_name(layer_module, module)
         )
@@ -502,7 +502,7 @@ class AWQProcessor(LoopProcessor):
     def _format_for(
         self, layer_module: Optional[nn.Module], module: nn.Module
     ) -> FORMAT:
-        """Resolve the effective packing format of one layer child."""
+        """Resolve the resolved packing format of one layer child."""
         return self._module_format(
             self._full_module_name(layer_module, module)
         )
@@ -2797,13 +2797,13 @@ class AWQProcessor(LoopProcessor):
             # Stage the codes at the width this module will be packed at. RCO
             # assigns widths per module through `dynamic`, so reading the global
             # `qcfg.bits` here would stage the wrong code range.
-            effective = get_effective_module_config(named_module)
-            module_bits = self._module_bits(named_module.full_name, effective=effective)
+            resolved_cfg = get_resolved_module_config(named_module)
+            module_bits = self._module_bits(named_module.full_name, resolved_cfg=resolved_cfg)
             module_group_size = self._module_group_size(
-                named_module.full_name, effective=effective,
+                named_module.full_name, resolved_cfg=resolved_cfg,
             )
             module_format = self._module_format(
-                named_module.full_name, effective=effective,
+                named_module.full_name, resolved_cfg=resolved_cfg,
             )
 
             tp_info = named_module.state.get("tp_pad_info")
@@ -2973,10 +2973,10 @@ class AWQProcessor(LoopProcessor):
         """Registers a module with its layer state and initializes input capture buckets."""
 
         # entire module is skipped
-        effective = self.qcfg.resolve_module_config(module.full_name)
-        if effective.excluded:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
 
         # Track the most recent preference so the processor can decide whether
         # to fall back to simple quantization when activations are missing.
@@ -3117,8 +3117,8 @@ class AWQProcessor(LoopProcessor):
             q_scales = module.state.pop("q_scales").clone()
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
-        effective = get_effective_module_config(module)
-        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, effective=effective)
+        resolved_cfg = get_resolved_module_config(module)
+        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: self.gptq_model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
@@ -3134,7 +3134,7 @@ class AWQProcessor(LoopProcessor):
                 create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
-                    bits=self._module_bits(module.full_name, effective=effective),
+                    bits=self._module_bits(module.full_name, resolved_cfg=resolved_cfg),
                     desc_act=self.qcfg.desc_act,
                     dynamic=self.qcfg.dynamic,
                     group_size=self.qcfg.group_size,
@@ -3147,7 +3147,7 @@ class AWQProcessor(LoopProcessor):
                     format=self.format,
                     register_buffers=False,
                     dtype=module.weight.dtype,
-                    effective_module_config=effective,
+                    resolved_module_config=resolved_cfg,
                 )
         if timer is not None and create_start is not None:
             timer.record(

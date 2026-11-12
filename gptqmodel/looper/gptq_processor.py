@@ -22,8 +22,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -53,11 +53,11 @@ from ..quantization.activation_floatx import (
 )
 from ..quantization.config import (
     METHOD,
-    EffectiveModuleConfig,
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
+    ResolvedModuleConfig,
     apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
@@ -134,24 +134,24 @@ def clone_gptq_config_for_module(
     module_full_name: str,
     *,
     fallback=None,
-    effective: Optional[EffectiveModuleConfig] = None,
+    resolved_cfg: Optional[ResolvedModuleConfig] = None,
 ) -> Optional[QuantizeConfig]:
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
-    effective = effective or qcfg.resolve_module_config(module_full_name)
-    if effective.excluded:
+    resolved_cfg = resolved_cfg or qcfg.resolve_module_config(module_full_name)
+    if resolved_cfg.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
-    apply_scalar_module_overrides(qcfg_clone, effective)
+    apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
     # Method-specific dynamic fields stay with GPTQ.
     if qcfg.dynamic is not None:
-        fallback_override = effective.get("fallback", None)
+        fallback_override = resolved_cfg.get("fallback", None)
         if fallback_override is not None:
             qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
-        hessian_override = effective.get("hessian", None)
+        hessian_override = resolved_cfg.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
                 qcfg_clone.hessian = HessianConfig(**hessian_override)
@@ -159,9 +159,9 @@ def clone_gptq_config_for_module(
                 qcfg_clone.hessian = hessian_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
-        gptaq_override = effective.get("gptaq", None)
-        foem_override = effective.get("foem", None)
-        qcfg_clone.gsq = normalize_gsq_config(effective.get("gsq", qcfg_clone.gsq))
+        gptaq_override = resolved_cfg.get("gptaq", None)
+        foem_override = resolved_cfg.get("foem", None)
+        qcfg_clone.gsq = normalize_gsq_config(resolved_cfg.get("gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
@@ -355,16 +355,16 @@ class GPTQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
 
-        effective = self.qcfg.resolve_module_config(module.full_name)
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
             module.full_name,
             fallback=fallback,
-            effective=effective,
+            resolved_cfg=resolved_cfg,
         )
         if qcfg_clone is None:
             return
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
@@ -906,7 +906,7 @@ class GPTQProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
-                    effective_module_config=get_effective_module_config(module),
+                    resolved_module_config=get_resolved_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record(

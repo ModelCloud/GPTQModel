@@ -195,7 +195,7 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             config,
             module_format,
         )
-        # Global method defaults come first so the checkpoint's effective
+        # Global method defaults come first so the checkpoint's resolved
         # per-module settings always win during reconstruction.
         kwargs = dict(config.quant_linear_init_kwargs())
         kwargs.update({

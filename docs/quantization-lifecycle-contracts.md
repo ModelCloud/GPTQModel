@@ -4,7 +4,7 @@ A quantization run now uses three explicit contracts:
 
 1. `QuantizationRunPlan` records the method, format, backends, batch size, and ordered processor chain.
 2. `ProcessorLifecycleConfig` declares replay behavior, calibration policies, and checkpoint support on each processor.
-3. `EffectiveModuleConfig` freezes the first matching `dynamic` rule and its values for one module.
+3. `ResolvedModuleConfig` freezes the first matching `dynamic` rule and its values for one module.
 
 The flow keeps quantization math and packing on the same resolved values while making unsupported processor chains fail before tensor work begins.
 
@@ -21,7 +21,7 @@ The redesign follows two rules:
 | `ProcessorLifecycleConfig.forward` | subset planning, layer replay, capture hooks | Multiple calibrated methods use the same replay decisions. |
 | `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, ParoQuant, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
 | `ProcessorLifecycleConfig.checkpointing` | checkpoint adapter and checkpoint preflight | Primary and EoRA adapter processors compose in the same continuation chain. |
-| `EffectiveModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
+| `ResolvedModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
 
 The three contracts do not introduce a generic quantization algorithm, a processor registry for every method, or a shared math interface. Those details remain local because they change for reasons unrelated to the common lifecycle.
 
@@ -42,7 +42,7 @@ flowchart TD
     I --> J["QuantizeConfig.resolve_module_config"]
     J --> K{"first rule excluded?"}
     K -- yes --> X2["skip module<br/>record dynamic exclusion"]
-    K -- no --> L["bind_effective_module_config"]
+    K -- no --> L["bind_resolved_module_config"]
     L --> M["quantize using snapshot"]
     L --> N["pack using same snapshot"]
     F --> O["QuantizationCheckpointAdapter.bind"]
@@ -175,9 +175,9 @@ excluded = config.resolve_module_config("model.layers.0.mlp.down_proj")
 assert excluded.excluded
 ```
 
-The snapshot is immutable and retains the ordered winning rule. Later edits to `config.dynamic` affect new resolutions; they do not change an existing snapshot. Processors bind the snapshot to `NamedModule.state["effective_module_config"]`, and `create_quant_module` consumes it during packing. This prevents quantization and packing from resolving different values after a concurrent or late dynamic edit.
+The snapshot is immutable and retains the ordered winning rule. Later edits to `config.dynamic` affect new resolutions; they do not change an existing snapshot. Processors bind the snapshot to `NamedModule.state["resolved_module_config"]`, and `create_quant_module` consumes it during packing. This prevents quantization and packing from resolving different values after a concurrent or late dynamic edit.
 
-Checkpointed quantization records the effective packing fields and winning rule for each completed packed module. The adapter restores each module with its own `bits`, `group_size`, `sym`, `desc_act`, `pack_dtype`, and format instead of reusing global settings. Dynamic exclusions remain dense source modules, and trailing excluded layers are omitted from the checkpoint execution plan.
+Checkpointed quantization records the resolved packing fields and winning rule for each completed packed module. The adapter restores each module with its own `bits`, `group_size`, `sym`, `desc_act`, `pack_dtype`, and format instead of reusing global settings. Dynamic exclusions remain dense source modules, and trailing excluded layers are omitted from the checkpoint execution plan.
 
 ## Before and after
 
@@ -187,7 +187,7 @@ Checkpointed quantization records the effective packing fields and winning rule 
 | Calibration input requirement | `stage_subset.py:233-235` matched a hard-coded processor class tuple. | `stage_subset.py:222` reads `ProcessorLifecycleConfig.calibration`. |
 | Checkpoint admission | `gptq_checkpoint.py:249-265` matched a hard-coded processor-type set. | `gptq_checkpoint.py:244` validates declared `checkpointing` values. |
 | Per-module settings | GPTQ repeated `dynamic_get` for each field (`gptq_processor.py:129-164` in the parent revision). | `resolve_module_config` caches the first ordered match and returns one immutable snapshot (`config.py:3238`). |
-| Pack settings | Packing called `create_quant_module` with the base dynamic mapping and re-resolved rules. | `create_quant_module(..., effective_module_config=snapshot)` uses the quantization snapshot (`utils/model.py:609`). |
+| Pack settings | Packing called `create_quant_module` with the base dynamic mapping and re-resolved rules. | `create_quant_module(..., resolved_module_config=snapshot)` uses the quantization snapshot (`utils/model.py:609`). |
 
 ## Failure and ambiguity contract
 

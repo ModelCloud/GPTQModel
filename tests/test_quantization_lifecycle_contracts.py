@@ -126,7 +126,7 @@ def test_lifecycle_use_returns_configured_copy():
     assert lifecycle.forward.capture_layer_context is False
 
 
-def test_effective_module_config_is_ordered_and_immutable():
+def test_resolved_module_config_is_ordered_and_immutable():
     config = QuantizeConfig(
         bits=4,
         group_size=128,
@@ -153,10 +153,10 @@ def test_one_module_snapshot_drives_clone_and_pack_settings():
         group_size=128,
         dynamic={r"+:^proj$": {"bits": 3, "group_size": 64}},
     )
-    effective = config.resolve_module_config("proj")
+    resolved_cfg = config.resolve_module_config("proj")
     config.dynamic[r"+:^proj$"] = {"bits": 2, "group_size": 32}
 
-    clone = clone_gptq_config_for_module(config, "proj", effective=effective)
+    clone = clone_gptq_config_for_module(config, "proj", resolved_cfg=resolved_cfg)
 
     assert clone.bits == 3
     assert clone.group_size == 64
@@ -168,7 +168,7 @@ def test_dynamic_pack_dtype_is_normalized_during_module_creation():
         group_size=32,
         dynamic={r"+:^proj$": {"bits": 8, "pack_dtype": "int16"}},
     )
-    effective = config.resolve_module_config("proj")
+    resolved_cfg = config.resolve_module_config("proj")
     model = torch.nn.Module()
     model.proj = torch.nn.Linear(128, 128, bias=False, dtype=torch.float16)
 
@@ -186,7 +186,7 @@ def test_dynamic_pack_dtype_is_normalized_during_module_creation():
         lm_head_name="lm_head",
         pack_dtype=torch.int32,
         format=FORMAT.GPTQ,
-        effective_module_config=effective,
+        resolved_module_config=resolved_cfg,
     )
 
     assert model.proj.bits == 8
@@ -195,7 +195,7 @@ def test_dynamic_pack_dtype_is_normalized_during_module_creation():
 
 def test_module_snapshot_cannot_leak_to_another_pack_name():
     config = QuantizeConfig(dynamic={r"+:^other$": {"bits": 3}})
-    effective = config.resolve_module_config("other")
+    resolved_cfg = config.resolve_module_config("other")
     model = torch.nn.Module()
     model.proj = torch.nn.Linear(16, 16, bias=False, dtype=torch.float16)
 
@@ -214,5 +214,5 @@ def test_module_snapshot_cannot_leak_to_another_pack_name():
             lm_head_name="lm_head",
             pack_dtype=torch.int32,
             format=FORMAT.GPTQ,
-            effective_module_config=effective,
+            resolved_module_config=resolved_cfg,
         )

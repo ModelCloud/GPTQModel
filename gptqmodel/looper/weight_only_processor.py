@@ -19,8 +19,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
-    bind_effective_module_config,
-    get_effective_module_config,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -122,13 +122,13 @@ class WeightOnlyProcessor(LoopProcessor):
     ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
-        effective = get_effective_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
+        resolved_cfg = get_resolved_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_weight_only_config_for_module(
-            self.qcfg, module.full_name, effective=effective,
+            self.qcfg, module.full_name, resolved_cfg=resolved_cfg,
         )
         if qcfg_clone is None:
             return None
-        bind_effective_module_config(module, effective)
+        bind_resolved_module_config(module, resolved_cfg)
         if device is not None:
             qcfg_clone.device = device
 
@@ -225,7 +225,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
                     register_buffers=False,
                     init_kwargs=active_qcfg.quant_linear_init_kwargs(),
-                    effective_module_config=get_effective_module_config(module),
+                    resolved_module_config=get_resolved_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)

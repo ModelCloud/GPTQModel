@@ -54,7 +54,7 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
     FORMAT_FIELD_CODE,
     METHOD,
-    EffectiveModuleConfig,
+    ResolvedModuleConfig,
     _normalize_bitsandbytes_block_size,
     _normalize_bitsandbytes_format,
     _normalize_fp8_fmt,
@@ -585,7 +585,7 @@ def make_quant(
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
 
     # Per-module kernel selection: each submodule picks the first candidate that
-    # validates against its effective (possibly dynamic-overridden) quant config.
+    # validates against its resolved (possibly dynamic-overridden) quant config.
     linear_cls = create_quant_layer(
         linear_candidates=quant_linear_candidates,
         bits=bits,
@@ -626,7 +626,7 @@ def create_quant_module(
     adapter: Optional[Adapter] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
-    effective_module_config: Optional[EffectiveModuleConfig] = None,
+    resolved_module_config: Optional[ResolvedModuleConfig] = None,
 
 ):
     # unwrap named module
@@ -687,12 +687,12 @@ def create_quant_module(
     tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
-    if effective_module_config is not None and effective_module_config.module_name != name:
-        raise ValueError("effective module config does not match quantized module name")
-    if dynamic is not None or effective_module_config is not None:
+    if resolved_module_config is not None and resolved_module_config.module_name != name:
+        raise ValueError("resolved module config does not match quantized module name")
+    if dynamic is not None or resolved_module_config is not None:
         overrides = (
-            False if effective_module_config.excluded else effective_module_config.overrides
-        ) if effective_module_config is not None else dynamic_get(dynamic=dynamic, module_name=name)
+            False if resolved_module_config.excluded else resolved_module_config.overrides
+        ) if resolved_module_config is not None else dynamic_get(dynamic=dynamic, module_name=name)
         # negative module match, skip this module
         if overrides == False:  # noqa: E712
             return
