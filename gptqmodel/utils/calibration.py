@@ -790,9 +790,11 @@ def iter_calibration_windows(
     reports a short calibration string instead of silently degrading into a single
     passage.
 
-    Windows are non-overlapping and stride through the text, wrapping around when
-    it is shorter than ``nsamples * seqlen`` so every sample still lands on a
-    different offset.
+    Windows are spread across the whole stream, so the sample budget covers the
+    corpus instead of only its beginning: the first window starts at the top, the
+    last ends at the bottom, and the rest are evenly spaced between. When the text
+    is shorter than ``nsamples * seqlen`` the windows necessarily overlap, and the
+    warning says so.
     """
 
     if seqlen < min_tokens:
@@ -838,7 +840,13 @@ def iter_calibration_windows(
             f"describes only {total} tokens. Pass longer calibration text."
         )
     for index in range(nsamples):
-        start = (index * seqlen) % span
+        # Spread the windows over the whole stream rather than packing them at
+        # ``index * seqlen``. Packing only ever reaches ``nsamples * seqlen``
+        # tokens, so a 32 x 256 budget read the first ~8k tokens of a
+        # 100k-token corpus and silently ignored the other 92 %. Every sample
+        # still lands on a distinct offset, and the last window ends at the end
+        # of the stream.
+        start = (index * span) // nsamples
         yield ids[:, start : start + seqlen]
 
 

@@ -58,11 +58,41 @@ def test_windows_stride_and_are_distinct():
     assert len(windows) == 4
     assert all(window.shape == (1, seqlen) for window in windows)
     starts = [int(window[0, 0]) for window in windows]
-    assert starts == [0, seqlen, 2 * seqlen, 3 * seqlen]
+    # span = 64 - 16 + 1 = 49, so the four windows sit at 0, 12, 24, 36.
+    assert starts == [0, 12, 24, 36]
     assert len({tuple(window[0].tolist()) for window in windows}) == 4
 
 
-def test_windows_wrap_around_without_repeating():
+def test_windows_cover_the_whole_corpus():
+    """The sample budget must reach the end of the text, not just its start.
+
+    Packing windows at ``index * seqlen`` caps the reach at
+    ``nsamples * seqlen``: 32 windows of 256 only ever read the first 8k tokens,
+    so a 100k-token calibration corpus was 92 % unused while the run reported the
+    full record count.
+    """
+
+    cal = _calibration()
+    seqlen, nsamples = 256, 32
+    total = 100_000
+    windows = list(
+        cal.iter_calibration_windows(
+            _Tok(total), "ignored", seqlen=seqlen, nsamples=nsamples
+        )
+    )
+
+    starts = [int(window[0, 0]) for window in windows]
+    assert len(set(starts)) == nsamples
+    # The old rule would have stopped at (nsamples - 1) * seqlen == 7936.
+    assert starts[-1] > 10 * (nsamples - 1) * seqlen
+    # The last window must still end inside the text.
+    assert starts[-1] + seqlen <= total
+    # Consecutive windows stay ordered and non-overlapping.
+    assert starts == sorted(starts)
+    assert all(b - a >= seqlen for a, b in zip(starts, starts[1:]))
+
+
+def test_overlapping_windows_stay_distinct():
     cal = _calibration()
     seqlen = 16
     total = 2 * seqlen + 5
@@ -72,7 +102,8 @@ def test_windows_wrap_around_without_repeating():
         )
     )
 
-    # Wraparound keeps every window full-length and every start distinct.
+    # When the budget exceeds the text the windows overlap, but every one must
+    # still start at a different offset and stay full length.
     assert all(window.shape == (1, seqlen) for window in windows)
     starts = [int(window[0, 0]) for window in windows]
     assert len(set(starts)) == 5
@@ -136,7 +167,8 @@ def test_windows_accept_records_from_a_dataset():
 
     # 8 + 12 + 8 = 28 ids concatenated, so the windows stride across records.
     assert [tuple(window.shape) for window in windows] == [(1, 8), (1, 8)]
-    assert [int(window[0, 0]) for window in windows] == [0, 8]
+    # span = 28 - 8 + 1 = 21, so the second window starts at 21 // 2 = 10.
+    assert [int(window[0, 0]) for window in windows] == [0, 10]
 
 
 def test_load_calibration_records_reads_json_gz(tmp_path):

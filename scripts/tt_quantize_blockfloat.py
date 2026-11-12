@@ -72,6 +72,16 @@ def main(argv: list) -> int:
             "nm-calibration parquet)"
         ),
     )
+    parser.add_argument(
+        "--calibration-rows",
+        type=int,
+        default=0,
+        help=(
+            "use only the first N calibration records (0 = all). The GPTQ test "
+            "harness calibrates on a fixed record count, so this is the knob that "
+            "aligns the two paths without changing the source file."
+        ),
+    )
     args = parser.parse_args(argv)
 
     bits = args.bits
@@ -112,15 +122,21 @@ def main(argv: list) -> int:
     else:
         from gptqmodel.utils.calibration import load_calibration_records
 
-        calibration = load_calibration_records(args.calibration_dataset)
+        calibration = load_calibration_records(
+            args.calibration_dataset, rows=args.calibration_rows
+        )
         calibration_tokens = sum(
             tokenizer(row, return_tensors="pt").input_ids.shape[1]
             for row in calibration
         )
         calibration_records = len(calibration)
+    # Report both numbers. They differ, and the difference is the point: the
+    # record count is what the source holds, the window budget is what the
+    # Hessian actually reads.
     print(
         f"[Q] calibration: {calibration_records} record(s), {calibration_tokens} "
-        f"tokens, {args.nsamples} windows of 256",
+        f"tokens; Hessian reads {args.nsamples} windows of 256 = "
+        f"{args.nsamples * 256} tokens spread across the stream",
         flush=True,
     )
 

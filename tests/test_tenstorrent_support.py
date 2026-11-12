@@ -1412,7 +1412,7 @@ def test_calibration_hessian_strides_through_the_text():
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
     seqlen = 8
-    total = 4 * seqlen
+    total = 8 * seqlen
     seen = []
 
     class _Model(torch.nn.Module):
@@ -1445,8 +1445,12 @@ def test_calibration_hessian_strides_through_the_text():
     windows = {tuple(window) for window in seen}
     assert len(windows) == 4, "every calibration sample must use a distinct window"
     assert all(len(window) == seqlen for window in seen)
-    # Strided, non-overlapping: the four windows partition the text.
-    assert seen[0][0] == 0 and seen[1][0] == seqlen and seen[3][0] == 3 * seqlen
+    # Spread across the whole text: the budget reaches the end instead of
+    # stopping at ``nsamples * seqlen``. span = 64 - 8 + 1 = 57, so the four
+    # windows start at 0, 14, 28 and 42 and do not overlap.
+    starts = [window[0] for window in seen]
+    assert starts == [0, 14, 28, 42]
+    assert all(b - a >= seqlen for a, b in zip(starts, starts[1:]))
 
 
 def test_tt_hessian_matches_core_gptq_accumulator():
