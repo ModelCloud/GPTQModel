@@ -1672,6 +1672,71 @@ def test_native_checkpoint_resave_is_bit_identical(tmp_path):
     assert not mismatched, mismatched[:5]
 
 
+def test_checkpoint_payload_is_safetensors(tmp_path):
+    """The writer must emit safetensors and no pickle payload.
+
+    safetensors is the repo-wide default for converted checkpoints; pickle is a
+    legacy read-only format. Asserting the container here keeps a future writer
+    change from silently reintroducing ``blockfloat.pt``.
+    """
+
+    import importlib
+    import os
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(12)
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=False)
+    with torch.no_grad():
+        block.proj.weight.copy_(bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02))
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = str(tmp_path / "ckpt")
+    bq.save_blockfloat_checkpoint(model, out, bits=4)
+
+    assert os.path.isfile(os.path.join(out, bq.BLOCKFLOAT_PAYLOAD))
+    assert not os.path.exists(os.path.join(out, bq.BLOCKFLOAT_PAYLOAD_LEGACY))
+
+
+def test_legacy_pickle_payload_still_loads(tmp_path):
+    """Checkpoints written before the switch must keep loading."""
+
+    import importlib
+    import os
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(13)
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=False)
+    with torch.no_grad():
+        block.proj.weight.copy_(bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02))
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = str(tmp_path / "ckpt")
+    bq.save_blockfloat_checkpoint(model, out, bits=4)
+
+    # Recreate the pre-change layout: pickle payload, no safetensors file.
+    tensors = bq._load_blockfloat_payload(out)
+    os.replace(
+        os.path.join(out, bq.BLOCKFLOAT_PAYLOAD),
+        os.path.join(str(tmp_path), "moved.safetensors"),
+    )
+    torch.save(tensors, os.path.join(out, bq.BLOCKFLOAT_PAYLOAD_LEGACY))
+
+    restored = bq.load_native_checkpoint_into_dense_model(model, out)
+    assert restored
+
+
 def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     """A fresh model populated from codes must match the saved weights."""
 
