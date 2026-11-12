@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import atexit
 import os
 import sys
+import threading
 
 
 # isort: off
@@ -225,6 +227,7 @@ from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 
 
 _DEVICE_THREAD_POOL = None
+_DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
@@ -280,8 +283,24 @@ def _build_device_thread_pool():
 def get_device_thread_pool():
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
-        _DEVICE_THREAD_POOL = _build_device_thread_pool()
+        with _DEVICE_THREAD_POOL_LOCK:
+            if _DEVICE_THREAD_POOL is None:
+                pool = _build_device_thread_pool()
+                # Register before publishing the pool so every caller that
+                # receives it has a matching exit cleanup. Capture this pool:
+                # a later replacement must not leave its workers unjoined.
+                atexit.register(_shutdown_device_thread_pool, pool)
+                _DEVICE_THREAD_POOL = pool
     return _DEVICE_THREAD_POOL
+
+
+def _shutdown_device_thread_pool(pool: DeviceThreadPool) -> None:
+    """Join pool workers at exit so finalization cannot abort."""
+    try:
+        pool.shutdown(wait=True)
+    except Exception:
+        # Exit cleanup must never turn a successful run into a failed one.
+        pass
 
 
 class _LazyDeviceThreadPoolProxy:
