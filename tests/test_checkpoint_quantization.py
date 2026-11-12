@@ -73,7 +73,7 @@ def assert_identical_tensors(expected, actual):
         ), name
 
 
-def run_guarded_driver(command, *, tmp_path, mode, timeout):
+def run_guarded_driver(command, *, tmp_path, mode, timeout, visible_devices=None):
     stdout_path = tmp_path / f"{mode}.stdout.log"
     stderr_path = tmp_path / f"{mode}.stderr.log"
     repo_root = str(Path(__file__).resolve().parents[1])
@@ -83,6 +83,8 @@ def run_guarded_driver(command, *, tmp_path, mode, timeout):
         "PYTHONHASHSEED": "0",
         "PYTHONPATH": os.pathsep.join((repo_root, pythonpath)) if pythonpath else repo_root,
     }
+    if visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
     # Files preserve diagnostics on timeout and avoid inherited pipe writers
     # keeping communicate() alive after a hostile kill of the driver.
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -165,6 +167,15 @@ def test_subprocess_recovery(
         native = Path(native_model)
     driver = Path(__file__).with_name("checkpoint_quantization_driver.py")
     audit = mode.startswith("kill-hessian")
+    visible_devices = None
+    if device.startswith("cuda") and not required_gpus:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        entries = visible.split(",") if visible else [
+            str(index) for index in range(torch.cuda.device_count())
+        ]
+        device_index = torch.device(device).index or 0
+        if device_index < len(entries):
+            visible_devices = entries[device_index]
 
     def run(mode, expected):
         output = tmp_path / mode
@@ -194,6 +205,7 @@ def test_subprocess_recovery(
             tmp_path=tmp_path,
             mode=mode,
             timeout=600 if native_model else 120,
+            visible_devices=visible_devices,
         )
         assert result.returncode == expected, (
             result.stdout.decode()[-10000:] + result.stderr.decode()[-10000:]
