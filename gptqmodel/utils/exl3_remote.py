@@ -871,6 +871,7 @@ class EXL3RemoteClient:
             prefix=f".{path.name}.",
             dir=path.parent,
         )
+        published = False
         try:
             with os.fdopen(descriptor, "wb") as target:
                 target.write(payload)
@@ -881,12 +882,17 @@ class EXL3RemoteClient:
             # an assignment published by another coordinator.
             os.link(temporary_name, path)
             self._fsync_directory(path.parent)
-        except BaseException:
+            published = True
+        finally:
+            # The temporary name and the published record share one inode.
+            # Keep only the authoritative name on success, and remove the
+            # unpublished file on every failure path.
             try:
                 os.unlink(temporary_name)
             except FileNotFoundError:
                 pass
-            raise
+            if published:
+                self._fsync_directory(path.parent)
 
     def _ensure_slot_lock_directory(self) -> Path:
         root = self._slot_lock_root
