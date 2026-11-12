@@ -11,7 +11,7 @@ from importlib import import_module
 from typing import Optional
 
 from ..quantization.config import FORMAT, METHOD, BaseQuantizeConfig
-from ..utils.backend import BACKEND
+from ..utils.backend import BACKEND, normalize_backend
 
 
 class ProcessorStep(str, Enum):
@@ -36,13 +36,18 @@ _CALIBRATED_PRIMARY = {
     METHOD.PARO: ProcessorStep.PARO,
     METHOD.EXL3: ProcessorStep.EXL3,
 }
-_CHECKPOINT_PRIMARY = {
-    ProcessorStep.GPTQ,
-    ProcessorStep.QQQ,
-    ProcessorStep.AWQ,
-    ProcessorStep.PARO,
-    ProcessorStep.EXL3,
-    ProcessorStep.WEIGHT_ONLY,
+# Declared checkpoint role per processor step. The values mirror each processor
+# class's `lifecycle.checkpointing`; `test_checkpoint_roles_match_processor_lifecycles`
+# keeps them in sync. Admission itself is decided by one shared predicate in
+# `looper.loop_processor`, so preflight and the adapter cannot disagree.
+_CHECKPOINT_ROLE_BY_STEP = {
+    ProcessorStep.GPTQ: "primary",
+    ProcessorStep.QQQ: "primary",
+    ProcessorStep.AWQ: "primary",
+    ProcessorStep.PARO: "primary",
+    ProcessorStep.EXL3: "primary",
+    ProcessorStep.WEIGHT_ONLY: "primary",
+    ProcessorStep.EORA: "secondary",
 }
 _PROCESSOR_TYPES = {
     ProcessorStep.NATIVE: ("native_processor", "NativeProcessor"),
@@ -65,12 +70,21 @@ def processor_class(step: ProcessorStep):
     return getattr(import_module(f"..looper.{module_name}", package=__package__), class_name)
 
 
+def _backend_name(backend) -> Optional[str]:
+    """Render a diagnostic backend without assuming the caller passed an enum."""
+    if backend is None:
+        return None
+    if isinstance(backend, BACKEND):
+        return backend.value
+    return str(backend)
+
+
 @dataclass(frozen=True)
 class QuantizationRunPlan:
     """One resolved method, format, backend pair, and ordered processor chain.
 
-    ``pack_backend`` selects the quantized kernel. ``loop_backend`` preserves the
-    explicit caller backend passed to the looper, including AUTO semantics.
+    ``pack_backend`` selects the quantized kernel. ``loop_backend`` is the
+    caller's backend after method-aware normalization, with AUTO preserved.
     """
 
     method: METHOD
@@ -133,12 +147,15 @@ class QuantizationRunPlan:
                 steps_list.append(ProcessorStep.EORA)
             steps = tuple(steps_list)
 
+        export_method = getattr(config, "export_quant_method", lambda: config.method)()
         return cls(
             method=config.method,
-            export_method=getattr(config, "export_quant_method", lambda: config.method)(),
+            export_method=export_method,
             format=format_code,
             pack_backend=pack_backend,
-            loop_backend=loop_backend,
+            # Store the normalized backend so diagnostics and downstream
+            # consumers see the same typed value. AUTO stays AUTO.
+            loop_backend=normalize_backend(loop_backend, quant_method=export_method),
             batch_size=batch_size,
             weight_only=weight_only,
             processors=steps,
@@ -146,11 +163,18 @@ class QuantizationRunPlan:
 
     @property
     def checkpoint_supported(self) -> bool:
-        return (
-            len(self.processors) in (1, 2)
-            and self.processors[0] in _CHECKPOINT_PRIMARY
-            and (len(self.processors) == 1 or self.processors[1] is ProcessorStep.EORA)
+        from ..looper.loop_processor import (
+            CheckpointSupport,
+            checkpoint_chain_supported,
         )
+
+        roles = tuple(
+            CheckpointSupport(
+                _CHECKPOINT_ROLE_BY_STEP.get(step, CheckpointSupport.UNSUPPORTED.value)
+            )
+            for step in self.processors
+        )
+        return checkpoint_chain_supported(roles)
 
     def describe(self) -> dict[str, object]:
         """Return the resolved choices without exposing mutable runtime objects."""
@@ -158,8 +182,8 @@ class QuantizationRunPlan:
             "method": self.method.value,
             "export_method": self.export_method.value,
             "format": self.format.value,
-            "pack_backend": self.pack_backend.value if self.pack_backend is not None else None,
-            "loop_backend": self.loop_backend.value if self.loop_backend is not None else None,
+            "pack_backend": _backend_name(self.pack_backend),
+            "loop_backend": _backend_name(self.loop_backend),
             "batch_size": self.batch_size,
             "weight_only": self.weight_only,
             "processors": [step.value for step in self.processors],

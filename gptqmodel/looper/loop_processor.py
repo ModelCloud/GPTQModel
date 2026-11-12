@@ -246,6 +246,19 @@ class CheckpointSupport(str, Enum):
     SECONDARY = "secondary"
 
 
+def checkpoint_chain_supported(roles) -> bool:
+    """Return whether an ordered processor role chain has a checkpoint adapter.
+
+    The run plan and the checkpoint adapter both admit a chain through this
+    predicate so preflight and adapter binding cannot disagree.
+    """
+
+    return tuple(roles) in {
+        (CheckpointSupport.PRIMARY,),
+        (CheckpointSupport.PRIMARY, CheckpointSupport.SECONDARY),
+    }
+
+
 @dataclass
 class ProcessorLifecycleConfig:
     """Mutable processor configuration consumed by the looper and checkpoint adapter."""
@@ -285,6 +298,11 @@ def get_resolved_module_config(module):
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
+
+    @property
+    def forward(self) -> ForwardConfig:
+        """Return the forward policy from the mutable lifecycle, never a stale copy."""
+        return self.lifecycle.forward
 
     def __init__(
             self,
@@ -332,8 +350,6 @@ class LoopProcessor:
                 self.lifecycle = default_lifecycle.use(
                     forward or default_lifecycle.forward
                 )
-        self.forward = self.lifecycle.forward
-
         self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _ThreadSafeDict()
 

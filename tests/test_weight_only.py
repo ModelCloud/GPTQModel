@@ -346,6 +346,34 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         torch.testing.assert_close(qmodule.g_idx.detach().cpu(), expected_g_idx)
 
 
+def test_baseqmodel_quantize_accepts_string_backend_and_describes_plan():
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+    qcfg = RTNConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        offload_to_disk=False,
+        device=device.type,
+    )
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    model.quantize(calibration=None, backend="torch")
+
+    assert model.quantized is True
+    described = model.quantization_run_plan.describe()
+    # RTN exports through the GPTQ layout, so method-aware normalization maps
+    # the "torch" alias to the GPTQ torch backend, matching pack selection.
+    assert described["loop_backend"] == BACKEND.GPTQ_TORCH.value
+    assert described["checkpoint_supported"] is True
+
+
 def test_baseqmodel_quantize_allows_rtn_awq_export():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device_type = device.type

@@ -33,7 +33,7 @@ from .checkpoint_modules import (
 )
 from .checkpoint_store import CheckpointError
 from .continuation import ContinuationCodec
-from .loop_processor import CheckpointSupport
+from .loop_processor import CheckpointSupport, checkpoint_chain_supported
 
 
 _CHECKPOINT_IDENTITY_VERSION = 3
@@ -313,10 +313,7 @@ class QuantizationCheckpointAdapter:
             getattr(getattr(processor, "lifecycle", None), "checkpointing", CheckpointSupport.UNSUPPORTED)
             for processor in context.processors
         )
-        if roles not in {
-            (CheckpointSupport.PRIMARY,),
-            (CheckpointSupport.PRIMARY, CheckpointSupport.SECONDARY),
-        }:
+        if not checkpoint_chain_supported(roles):
             raise NotImplementedError(
                 "checkpoint has no state adapter for this processor chain"
             )

@@ -52,6 +52,11 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
 
 
+# Distinguishes "planner supplied no extent" from a resolved ``None`` (no
+# trailing excluded layers), so the stage can consume the planner's decision.
+_UNRESOLVED_LAYER_EXTENT = object()
+
+
 def _log_cuda_memory_diagnostics(log, layer_index) -> None:
     """One line per visible CUDA device: allocator-active vs allocator-reserved bytes.
 
@@ -439,18 +444,20 @@ def run_layer_stage(
     start_layer_index: int = 0,
     embed_quant_mode: Optional[QuantizeEmbed] = None,
     embed_only: Optional[bool] = None,
+    last_quantized_layer_index: object = _UNRESOLVED_LAYER_EXTENT,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
     # Trailing layers whose tracked modules are all dynamically excluded never
     # need another forward or finalize pass, so the loop can stop once the
     # final eligible layer has been processed.
-    last_quantized_layer_index = find_last_quantized_layer_index(
-        looper.gptq_model.quantize_config,
-        layer_modules=layer_modules,
-        layer_names=layer_names,
-        layer_count=layer_count,
-    )
+    if last_quantized_layer_index is _UNRESOLVED_LAYER_EXTENT:
+        last_quantized_layer_index = find_last_quantized_layer_index(
+            looper.gptq_model.quantize_config,
+            layer_modules=layer_modules,
+            layer_names=layer_names,
+            layer_count=layer_count,
+        )
 
     log = logger or setup_logger()
     durable_progress_logs = live_renderables_suppressed()

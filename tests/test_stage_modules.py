@@ -1894,6 +1894,38 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
     assert looper.named_module_layers == [0]
     assert pb.close_calls == 1
 
+    # The planner's resolved extent is authoritative. Without dynamic
+    # exclusions a recomputation would allow every layer, but the supplied
+    # extent still stops the stage after layer 0.
+    calls.clear()
+    looper.named_module_layers.clear()
+    looper.gptq_model.quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        offload_to_disk=False,
+    )
+    pb.close_calls = 0
+
+    run_layer_stage(
+        looper,
+        layers=[torch.nn.Linear(64, 64) for _ in range(3)],
+        layer_modules=[["foo"]],
+        planning_layer_modules=[["foo"]],
+        layer_names=["model.layers.0", "model.layers.1", "model.layers.2"],
+        fallback=True,
+        shared_kv_cache_dict={},
+        pb=pb,
+        layer_count=3,
+        region_timer=None,
+        finalize_progress_cls=FinalizeProgressInfo,
+        last_quantized_layer_index=0,
+        logger=DummyLogger(),
+    )
+
+    assert calls == [0]
+    assert looper.named_module_layers == [0]
+    assert pb.close_calls == 1
+
 
 def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
     tensor = torch.zeros(1, 1, 1)

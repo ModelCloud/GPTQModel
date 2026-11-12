@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import subprocess
+import sys
 from inspect import signature
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,9 +22,32 @@ from gptqmodel.looper.loop_processor import (
 from gptqmodel.looper.stage_subset import _resolve_subset_calibration_coverage_policy
 from gptqmodel.models import ProcessorStep, QuantizationRunPlan
 from gptqmodel.models._const import DEVICE
+from gptqmodel.models.quantization_run_plan import (
+    _CHECKPOINT_ROLE_BY_STEP,
+    processor_class,
+)
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import create_quant_module
+
+
+def test_repro_issue_2326_script_imports_lifecycle_contracts():
+    """Diagnostics must track the lifecycle API, not the removed ExecutionConfig."""
+
+    script = Path(__file__).parents[1] / "scripts" / "repro_issue_2326.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        timeout=120,
+    )
+
+    assert "ImportError" not in result.stderr, result.stderr
+    # No visible CUDA device: the script exits with its documented precondition
+    # code instead of failing during import.
+    assert result.returncode == 2, result.stderr
 
 
 def test_run_plan_is_the_single_processor_chain_contract():
@@ -43,6 +70,60 @@ def test_run_plan_is_the_single_processor_chain_contract():
     assert plan.processors == (ProcessorStep.GPTQ,)
     assert plan.checkpoint_supported
     assert plan.describe()["format"] == FORMAT.GPTQ.value
+
+
+def test_run_plan_normalizes_string_backend_for_diagnostics():
+    config = QuantizeConfig(bits=4, group_size=128, method=METHOD.GPTQ)
+
+    plan = QuantizationRunPlan.build(
+        config,
+        format_code=FORMAT.GPTQ,
+        pack_backend=BACKEND.GPTQ_TORCH,
+        loop_backend="torch",
+        batch_size=1,
+        needs_lora=False,
+    )
+
+    assert plan.loop_backend is BACKEND.GPTQ_TORCH
+    assert plan.describe()["loop_backend"] == BACKEND.GPTQ_TORCH.value
+
+
+def test_run_plan_preserves_auto_backend_for_diagnostics():
+    config = QuantizeConfig(bits=4, group_size=128, method=METHOD.GPTQ)
+
+    plan = QuantizationRunPlan.build(
+        config,
+        format_code=FORMAT.GPTQ,
+        pack_backend=None,
+        loop_backend=BACKEND.AUTO,
+        batch_size=1,
+        needs_lora=False,
+    )
+
+    assert plan.loop_backend is BACKEND.AUTO
+    assert plan.describe()["loop_backend"] == BACKEND.AUTO.value
+
+
+def test_checkpoint_roles_match_processor_lifecycles():
+    for step, role in _CHECKPOINT_ROLE_BY_STEP.items():
+        declared = processor_class(step).lifecycle.checkpointing
+        assert declared.value == role, step
+
+    for step in set(ProcessorStep) - set(_CHECKPOINT_ROLE_BY_STEP):
+        declared = processor_class(step).lifecycle.checkpointing
+        assert declared is CheckpointSupport.UNSUPPORTED, step
+
+
+def test_processor_forward_delegates_to_mutable_lifecycle():
+    processor = GPTQProcessor(
+        tokenizer=None,
+        qcfg=QuantizeConfig(bits=4, group_size=128, method=METHOD.GPTQ),
+        calibration=CalibrationConfig(),
+    )
+
+    assert processor.forward.required is True
+    processor.lifecycle.forward = ForwardConfig(required=False)
+    assert processor.forward.required is False
 
 
 def test_lifecycle_calibration_policy_is_declared_by_processor():
@@ -148,6 +229,11 @@ def test_resolved_module_config_is_ordered_and_immutable():
 
 
 def test_one_module_snapshot_drives_clone_and_pack_settings():
+    from gptqmodel.looper.checkpoint_modules import (
+        packed_module_spec,
+        restore_packed_module,
+    )
+
     config = QuantizeConfig(
         bits=4,
         group_size=128,
@@ -160,6 +246,38 @@ def test_one_module_snapshot_drives_clone_and_pack_settings():
 
     assert clone.bits == 3
     assert clone.group_size == 64
+
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(128, 128, bias=False, dtype=torch.float16)
+    create_quant_module(
+        name="proj",
+        linear_cls=TorchLinear,
+        bits=config.bits,
+        desc_act=False,
+        dynamic=config.dynamic,
+        group_size=config.group_size,
+        module=model,
+        submodule=model.proj,
+        sym=True,
+        device=DEVICE.CPU,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ,
+        resolved_module_config=resolved_cfg,
+    )
+    assert model.proj.bits == 3
+    assert model.proj.group_size == 64
+
+    spec = packed_module_spec(model.proj, clone, module_name="proj")
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=clone,
+        kernel=TorchLinear,
+        lm_head_name="lm_head",
+    )
+    assert restored.bits == 3
+    assert restored.group_size == 64
 
 
 def test_dynamic_pack_dtype_is_normalized_during_module_creation():

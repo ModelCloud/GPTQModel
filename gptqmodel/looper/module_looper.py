@@ -1987,6 +1987,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             start_layer_index=start_layer_index,
             embed_quant_mode=self.embed_quant_mode,
             embed_only=self.embed_only,
+            last_quantized_layer_index=last_quantized_layer_index,
             logger=log,
         )
 
