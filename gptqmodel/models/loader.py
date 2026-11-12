@@ -926,7 +926,7 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
         else f"{info['bits']}-bit"
     )
     log.info(
-        f"Loader: tt-blockfloat checkpoint: {len(restored)} decoder layers "
+        f"Loader: tt-blockfloat checkpoint: {len(restored)} quantized modules "
         f"({width_label} codes, block {quantization_config.get('block', 16)}, "
         f"{quantization_config.get('embed_bits', '?')}-bit embedding)"
     )

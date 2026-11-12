@@ -1536,6 +1536,10 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
             for _, module in block.named_modules():
                 if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
                     module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0]
+        )
 
     ids = torch.randint(0, 64, (1, 8))
     with torch.no_grad():
@@ -1544,17 +1548,18 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
     out = str(tmp_path / "full")
     info = bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
     assert info["tied"] is True
-    assert info["layers"] == 2 * 7  # q,k,v,o,gate,up,down per layer
+    # q,k,v,o,gate,up,down per layer, plus the embedding.
+    assert info["layers"] == 2 * 7 + 1
 
     loaded, restored = bq.load_blockfloat_model(out)
-    assert len(restored) == 2 * 7
+    assert len(restored) == 2 * 7 + 1
 
     with torch.no_grad():
         after = loaded(ids).logits
-    # Only the embedding is re-quantised on save, so logits shift slightly; the
-    # decoder linears must come back exactly, which is what restored checks.
-    assert torch.isfinite(after).all()
-    assert after.shape == expected.shape
+    # Every weight was already on the grid, and codes are stored rather than
+    # re-derived, so the round trip must be bit-exact -- including the tied head,
+    # which reads the embedding's codes.
+    assert torch.equal(after, expected), float((after - expected).abs().max())
 
 
 def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
@@ -1790,10 +1795,17 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
                 module.weight.copy_(
                     bq.quantize_blockfloat(module.weight.detach().float(), bits)[0]
                 )
+        # The embedding is stored as bf8 codes too, so put it on the grid.
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0]
+        )
 
     out = str(tmp_path / "mixed")
     info = bq.save_blockfloat_model(model, out, bits=widths, embed_bits=8)
     assert sorted(info["bits_per_layer"]) == [4, 8]
+    # 2 layers x 7 linears + the embedding.
+    assert info["layers"] == 2 * 7 + 1
 
     # The directory is an ordinary HF model: shards plus the standard index, and
     # no per-role payload or sidecar manifest.
@@ -1812,7 +1824,27 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
     assert weight_map["model.layers.0.self_attn.q_proj.codes"] in shards
     assert weight_map["model.layers.0.mlp.gate_proj.codes"] in shards
     assert weight_map["model.norm.weight"] in shards
-    assert weight_map["model.embed_tokens.weight"] in shards
+    # The embedding is codes at bf8, not a dense table: 64 x 32 codes at 8 bits
+    # is 2048 bytes against 4096 for float16.
+    assert weight_map["model.embed_tokens.codes"] in shards
+    assert "model.embed_tokens.weight" not in weight_map
+    # The directory ships the modeling file plain ``transformers`` needs, and
+    # points its auto_map at it. Without both, ``from_pretrained`` leaves the
+    # decoder layers at their random initial values and still returns a model.
+    assert os.path.isfile(os.path.join(out, bq.MODELING_FILE))
+    with open(os.path.join(out, "config.json")) as handle:
+        saved_config = json.load(handle)
+    assert saved_config["auto_map"]["AutoModelForCausalLM"].endswith(
+        ".TTBlockfloatForCausalLM"
+    )
+    # At 8 bits a code is one byte, so the table is 2048 bytes instead of the
+    # 4096 a dense float16 copy would need.
+    from safetensors import safe_open
+
+    with safe_open(os.path.join(out, weight_map["model.embed_tokens.codes"]), framework="pt") as handle:
+        embed_codes = handle.get_tensor("model.embed_tokens.codes")
+    assert embed_codes.numel() == 64 * 32
+    assert embed_codes.dtype == torch.uint8
 
     with open(os.path.join(out, "config.json")) as handle:
         quant_config = json.load(handle)["quantization_config"]
@@ -1821,7 +1853,7 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
     assert quant_config["bits_per_layer"]["model.layers.0.mlp.gate_proj"] == 4
 
     loaded, restored = bq.load_blockfloat_model(out)
-    assert len(restored) == 2 * 7
+    assert len(restored) == 2 * 7 + 1
 
     # Each layer must come back at its own width, bit-exactly.
     for index, block in enumerate(model.model.layers):
@@ -1834,6 +1866,59 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
             got = quantized.dequantize()
             want = module.weight.detach().float()
             assert torch.equal(got, want), prefix
+
+
+def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
+    """Plain ``transformers`` must load the checkpoint correctly, not silently.
+
+    Without the shipped modeling file, ``AutoModelForCausalLM.from_pretrained``
+    reports the codes as unexpected, leaves the decoder layers at their random
+    initial values, and returns a model that generates garbage -- with no error.
+    The checkpoint therefore carries an ``auto_map`` plus the class it points at,
+    and this pins that the result is the same model the library loader builds.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(8)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bfloat4_b(module.weight.detach().float()))
+        embed = model.model.embed_tokens
+        embed.weight.copy_(bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0])
+
+    out = str(tmp_path / "ckpt")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+
+    from transformers import AutoModelForCausalLM
+
+    remote = AutoModelForCausalLM.from_pretrained(
+        out, dtype=torch.float32, trust_remote_code=True
+    )
+    assert type(remote).__name__ == "TTBlockfloatForCausalLM"
+    assert type(remote.model.embed_tokens).__name__ == "TTBlockfloatEmbedding"
+
+    from gptqmodel import GPTQModel
+
+    ours = GPTQModel.load(out).model
+
+    ids = torch.randint(0, 64, (1, 6))
+    with torch.no_grad():
+        a = remote(ids).logits
+        b = ours(ids).logits
+    assert torch.equal(a, b), float((a - b).abs().max())
 
 
 def test_native_checkpoint_resave_is_bit_identical(tmp_path):
