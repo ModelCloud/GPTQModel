@@ -282,7 +282,6 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
 
 
 def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatch):
-    import gptqmodel.models.base as base_module
     from gptqmodel.looper import module_looper
     from gptqmodel.models.quantization_run_plan import ProcessorStep
 
@@ -324,8 +323,7 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
             return self.processors[-1].calibration_dataset
 
     monkeypatch.setattr(
-        base_module,
-        "processor_class",
+        "gptqmodel.models.base.processor_class",
         lambda step: _StubPreprocessor if step is ProcessorStep.PREPROCESSOR else _StubPrimary,
     )
     monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
