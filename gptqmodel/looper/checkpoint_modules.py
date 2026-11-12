@@ -10,6 +10,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..nn_modules.qlinear.qqq import QQQLinear
 from ..quantization.config import resolve_quant_format, serialize_quant_bits
+from ..utils.importer import get_auto_backend_kernel_mapping
 from .checkpoint_store import CheckpointError
 
 
@@ -61,6 +62,26 @@ def _deserialize_pack_dtype(value, default):
     return dtype
 
 
+def _kernel_path(kernel):
+    return f"{kernel.__module__}.{kernel.__qualname__}"
+
+
+def _resolve_checkpoint_kernel(checkpoint_kernel, default_kernel, config, format_value):
+    if checkpoint_kernel is None:
+        return default_kernel
+    candidates = {default_kernel}
+    registry = get_auto_backend_kernel_mapping()
+    candidates.update(
+        registry.get(config.method, {}).get(format_value, {}).values()
+    )
+    for kernel in candidates:
+        if _kernel_path(kernel) == checkpoint_kernel:
+            return kernel
+    raise CheckpointError(
+        f"checkpoint module kernel is unavailable: {checkpoint_kernel}"
+    )
+
+
 def _dynamic_checkpoint_config(effective):
     if effective is None or (
         effective.source_pattern is None and not effective.excluded
@@ -110,7 +131,7 @@ def packed_module_spec(module, config, *, module_name=None, effective=None):
         ),
     }
     if is_packed_module(module):
-        spec["kernel"] = f"{type(module).__module__}.{type(module).__qualname__}"
+        spec["kernel"] = _kernel_path(type(module))
     dynamic = _dynamic_checkpoint_config(
         effective
         if effective is not None or module_name is None
@@ -178,21 +199,23 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         quant_state_shape = spec.pop("quant_state_shape", None)
         if kind == "paro":
             kernel = ParoLinear
-        expected_kernel = f"{kernel.__module__}.{kernel.__qualname__}"
-        if checkpoint_kernel is not None and checkpoint_kernel != expected_kernel:
-            raise CheckpointError(
-                f"checkpoint module `{name}` requires {checkpoint_kernel}, got {expected_kernel}"
-            )
+        module_format = resolve_quant_format(
+            checkpoint_format if checkpoint_format is not None else config.format,
+            config.method,
+        )
+        kernel = _resolve_checkpoint_kernel(
+            checkpoint_kernel,
+            kernel,
+            config,
+            module_format,
+        )
         kwargs = {
             "pack_dtype": _deserialize_pack_dtype(
                 checkpoint_pack_dtype, config.pack_dtype
             ),
             "name": name,
             "lm_head_name": lm_head_name,
-            "format": resolve_quant_format(
-                checkpoint_format if checkpoint_format is not None else config.format,
-                config.method,
-            ),
+            "format": module_format,
             "register_buffers": True,
         }
         kwargs.update(config.quant_linear_init_kwargs())
