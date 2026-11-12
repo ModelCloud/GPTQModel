@@ -243,6 +243,8 @@ GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `M
 AWQ FP16 boundary staging and packed decode follow the [AWQ affine range contract](docs/awq-affine-range.md).
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
+The [Marlin device-profile validator](docs/marlin-device-profile-validation.md)
+checks device ordinals before asking Torch or the extension for a profile.
 
 On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
 loads one Tensile library per (dtype, layout) pair on first use, and those one-time loads

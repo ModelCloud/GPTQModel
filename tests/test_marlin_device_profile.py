@@ -130,9 +130,10 @@ def test_out_of_range_index_raises_with_the_number_the_caller_passed():
 
 
 @requires_cuda
-def test_negative_index_is_rejected():
+@pytest.mark.parametrize("device", [-1, "cuda:-1"])
+def test_negative_index_is_rejected(device):
     with pytest.raises(ValueError, match="out of range"):
-        marlin_device_profile(-1)
+        marlin_device_profile(device)
 
 
 @requires_cuda
