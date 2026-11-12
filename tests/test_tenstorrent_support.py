@@ -1278,6 +1278,71 @@ def test_blockfloat_grid_matches_hardware_levels():
     assert torch.unique(out[0, 16:]).numel() == 4
 
 
+def test_native_checkpoint_roundtrip_via_codes(tmp_path):
+    """Saving codes and reading them back must reconstruct the same weights."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(5)
+    w = bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02)
+
+    # Build a throwaway model with one decoder-style block.
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(64, 32, bias=False)
+    with torch.no_grad():
+        block.proj.weight.copy_(w)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = str(tmp_path / "native")
+    info = bq.save_blockfloat_checkpoint(model, out, bits=4)
+    assert info["layers"] == 1
+    # 4-bit packs two codes per byte, so payload is half the element count plus
+    # one exponent per 16-value block.
+    assert info["payload_bytes"] < w.numel(), info
+
+    payload = bq.read_blockfloat_checkpoint(out)
+    assert payload["bits"] == 4 and payload["block"] == 16
+    expanded = bq.expand_native_layer(payload["layers"]["0.proj"])
+    assert expanded.shape == w.shape
+    assert expanded.equal(w), "codes must reconstruct the grid weights exactly"
+
+
+def test_native_checkpoint_restores_a_fresh_model(tmp_path):
+    """A fresh model populated from codes must match the saved weights."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(6)
+    w = bq.quantize_bfloat4_b(torch.randn(32, 64) * 0.02)
+
+    def make_model():
+        block = torch.nn.Module()
+        block.proj = torch.nn.Linear(64, 32, bias=False)
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.decoder = torch.nn.Module()
+        model.model.decoder.layers = torch.nn.ModuleList([block])
+        return model
+
+    src = make_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].proj.weight.copy_(w)
+    out = str(tmp_path / "native")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    fresh = make_model()
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
+    assert restored == {"0.proj": [32, 64]}
+    assert fresh.model.decoder.layers[0].proj.weight.detach().equal(w)
+
+
 def test_blockfloat_pack_roundtrips_exactly():
     """Codes plus exponents must reconstruct the grid weights bit-for-bit.
 

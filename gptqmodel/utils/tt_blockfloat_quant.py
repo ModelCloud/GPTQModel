@@ -287,6 +287,9 @@ __all__ += [
     "decompose_blockfloat",
     "load_blockfloat_into_model",
     "recompose_blockfloat",
+    "expand_native_layer",
+    "load_native_checkpoint_into_dense_model",
+    "read_blockfloat_checkpoint",
     "save_blockfloat_checkpoint",
     "collect_layer_hessians",
     "quantize_model_blockfloat",
@@ -652,4 +655,87 @@ def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
                 if bias is not None and getattr(module, "bias", None) is not None:
                     module.bias.copy_(bias.to(module.bias.dtype))
                 restored[key] = list(codes.shape)
+    return restored
+
+
+# --- serving a native checkpoint -------------------------------------------
+#
+# The point of saving codes instead of floats is that loading is arithmetic-free.
+# These helpers expose the saved format to a caller that wants to feed the device
+# directly, and provide a dense fallback so a native checkpoint is still usable
+# with ordinary PyTorch where a TT kernel is not appropriate.
+
+def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
+    """Read a native checkpoint into ``{layer_name: (codes, exponents, bias)}``.
+
+    Codes stay packed exactly as stored; use :func:`recompose_blockfloat` (or the
+    un-packed helper) to expand one layer.
+    """
+
+    import json
+    import os
+
+    meta_path = os.path.join(checkpoint_dir, "blockfloat.json")
+    with open(meta_path) as handle:
+        meta = json.load(handle)
+    if meta.get("format") != "tt-blockfloat":
+        raise ValueError(f"{meta_path} is not a tt-blockfloat checkpoint")
+    bits = int(meta["bits"])
+    tensors = torch.load(os.path.join(checkpoint_dir, "blockfloat.pt"), map_location="cpu")
+
+    layers = {}
+    for key in meta.get("layers", {}):
+        codes = tensors.get(f"{key}.blockfloat_codes")
+        exponents = tensors.get(f"{key}.blockfloat_exponents")
+        if codes is None or exponents is None:
+            continue
+        shape = tensors.get(f"{key}.blockfloat_code_shape")
+        if shape is not None:
+            codes = _unpack_codes(codes, bits, tuple(int(v) for v in shape))
+        layers[key] = {
+            "codes": codes,
+            "exponents": exponents,
+            "bias": tensors.get(f"{key}.bias"),
+            "shape": tuple(meta["layers"][key]["shape"]),
+            "bits": bits,
+        }
+    return {"bits": bits, "block": int(meta["block"]), "layers": layers, "meta": meta}
+
+
+def expand_native_layer(entry: dict) -> torch.Tensor:
+    """Expand one native layer's codes to float weights (exact, no rounding)."""
+
+    return recompose_blockfloat(
+        entry["codes"], entry["exponents"], bits=entry["bits"]
+    ).reshape(entry["shape"])
+
+
+def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
+    """Populate a dense model from a native checkpoint.
+
+    This is the bridge for paths that cannot consume codes directly: it reconstructs
+    the exact grid weights with no quantisation, so the result matches
+    :func:`load_blockfloat_into_model` bit-for-bit while allowing callers to build
+    the model however they like (for example on `meta` to skip a float allocation).
+    """
+
+    payload = read_blockfloat_checkpoint(checkpoint_dir)
+    bits = payload["bits"]
+    tensors = payload["layers"]
+    blocks = _decoder_blocks(model)
+    restored = {}
+    with torch.no_grad():
+        for index, block in enumerate(blocks):
+            for name, module in block.named_modules():
+                key = f"{index}.{name}"
+                entry = tensors.get(key)
+                if entry is None or getattr(module, "weight", None) is None:
+                    continue
+                weights = recompose_blockfloat(
+                    entry["codes"], entry["exponents"], bits=bits
+                ).reshape(entry["shape"])
+                module.weight.copy_(weights.to(module.weight.dtype))
+                if entry["bias"] is not None and getattr(module, "bias", None) is not None:
+                    module.bias.copy_(entry["bias"].to(module.bias.dtype))
+                restored[key] = list(entry["shape"])
     return restored

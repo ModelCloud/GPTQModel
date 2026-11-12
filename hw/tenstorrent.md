@@ -883,6 +883,26 @@ loads onto exactly the values the solver produced.
 A third, less subtle: `payload_bytes` initially reported the *unpacked* code count
 (86 MiB) while 45.56 MiB actually reached disk.
 
+### Serving from the native checkpoint
+
+`read_blockfloat_checkpoint` / `expand_native_layer` expose the saved codes, and
+`load_native_checkpoint_into_dense_model` populates any model without quantising.
+Measured on the saved OPT-125M:
+
+| | |
+| --- | --- |
+| layers restored from codes | **72 in 0.1 s** |
+| next token | `5` (" the"), **matches the dense model** |
+| logits cosine vs dense | **0.99897** |
+| one layer stored as `bfloat4_b` on device | drift **0.000000**, `norm_l1` 0.00656 |
+
+So the whole chain works end to end: dense model -> GPTQ onto the bf4 grid ->
+packed codes on disk -> restored weights -> device storage with zero drift.
+
+Restoring takes 0.1 s because it is only unpacking and reconstructing, with no
+calibration, no Hessian, and no solver -- which is the practical argument for
+storing codes rather than floats.
+
 Blocks are 16 values with one shared exponent each.** Verified by placing a
 16x weaker segment next to a strong one in the same row: both keep their own 4
 levels and carry different exponents (measured -1 and -5), rather than the weak
