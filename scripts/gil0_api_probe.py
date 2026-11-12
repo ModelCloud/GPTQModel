@@ -419,6 +419,41 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     embedding_row_next_device = [0]
     embedding_row_lock = threading.Lock()
 
+    awq_fp32_thread = threading.local()
+    awq_fp32_next_device = [0]
+    awq_fp32_lock = threading.Lock()
+    awq_fp32_state = {}
+
+    def awq_fp32_dequantize() -> bool:
+        """Exercise the shared AWQ FP32 dense fallback on two worker devices."""
+        from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+        with awq_fp32_lock:
+            if not hasattr(awq_fp32_thread, "device"):
+                awq_fp32_thread.device = awq_fp32_next_device[0] % 2
+                awq_fp32_next_device[0] += 1
+            device = awq_fp32_thread.device
+        torch.cuda.set_device(device)
+
+        with awq_fp32_lock:
+            if device not in awq_fp32_state:
+                # Eight one-codes per packed word; every decoded weight equals
+                # its FP32 scale. Both values would be lost through FP16.
+                qweight = torch.full((128, 16), 0x11111111, device="cuda", dtype=torch.int32)
+                qzeros = torch.zeros((1, 16), device="cuda", dtype=torch.int32)
+                scales = torch.empty((1, 128), device="cuda", dtype=torch.float32)
+                scales[:, ::2] = 1e-40
+                scales[:, 1::2] = 65536.0
+                awq_fp32_state[device] = (qweight, qzeros, scales)
+            qweight, qzeros, scales = awq_fp32_state[device]
+
+        with torch.inference_mode():
+            weight = dequantize_gemm(qweight, qzeros, scales, 4, 128)
+        torch.cuda.current_stream().synchronize()
+        if weight.dtype != torch.float32 or not torch.equal(weight, scales.expand(128, 128)):
+            raise AssertionError("concurrent AWQ FP32 dequantization changed checkpoint scales")
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -461,6 +496,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
+        "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -550,7 +586,8 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
-            or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12."))
+            or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
+            or name == "AWQ FP32 dequantize_gemm")
 
 
 def run_child(name: str) -> int:

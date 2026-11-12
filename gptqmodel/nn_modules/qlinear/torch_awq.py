@@ -177,6 +177,11 @@ class AwqTorchLinear(AWQuantLinear):
         *,
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        # `dequantize_gemm` multiplies the integer codes by the scales, so the
+        # weight follows the temporary scale dtype. The Torch AWQ forward uses
+        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # Keep FP32 scales in FP32 there: a half intermediate could underflow
+        # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
@@ -184,8 +189,8 @@ class AwqTorchLinear(AWQuantLinear):
             bits=self.bits,
             group_size=self.group_size,
         )
-        if weight.dtype not in (torch.float16, torch.bfloat16):
-            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise AssertionError(f"weight {weight.dtype} is not float16, bfloat16, or float32")
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight

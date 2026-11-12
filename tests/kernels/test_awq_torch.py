@@ -151,8 +151,14 @@ def _make_unit_awq_module(*, scales, bias, device=None):
     return module
 
 
-def _awq_oracle(module, x):
-    """Independent FP64 oracle over the stored checkpoint-precision buffers."""
+def _awq_oracle(*, module, x, scales, bias):
+    """Independent FP64 oracle over the original checkpoint-precision values.
+
+    The packed INT4 words are decoded here rather than by the module's
+    dequantizer. ``scales`` and ``bias`` are the values handed to the module,
+    not the live buffers: the bug under test corrupts those buffers, and an
+    oracle that read them would reproduce the corruption.
+    """
 
     assert module.bits == 4
     order = (0, 2, 4, 6, 1, 3, 5, 7)
@@ -167,11 +173,11 @@ def _awq_oracle(module, x):
 
     codes = unpack(module.qweight).to(torch.float64)
     zeros = unpack(module.qzeros).to(torch.float64)
-    scales = module.scales.cpu().to(torch.float64)
+    group_scales = scales.cpu().to(torch.float64)
     groups = torch.arange(codes.shape[0]) // module.group_size
-    weight = (codes - zeros[groups]) * scales[groups]
+    weight = (codes - zeros[groups]) * group_scales[groups]
     output = x.cpu().to(torch.float64) @ weight
-    return output if module.bias is None else output + module.bias.cpu().to(torch.float64)
+    return output if bias is None else output + bias.cpu().to(torch.float64)
 
 
 @pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
@@ -188,17 +194,17 @@ def test_awq_torch_wide_checkpoint_bias_rounds_after_wide_accumulation(activatio
     module = _make_unit_awq_module(scales=scales, bias=bias)
     module.post_init()
     x = torch.full((1, 16), 4096.0, dtype=activation_dtype, device=_AWQ_TEST_DEVICE)
-    expected = _awq_oracle(module, x)
+    expected = _awq_oracle(module=module, x=x, scales=scales, bias=bias)
 
     actual = module(x)
 
-    assert module.scales.dtype is torch.float32
-    assert module.bias.dtype is torch.float32
     assert actual.dtype is activation_dtype
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(
         actual, expected.to(device=actual.device, dtype=activation_dtype), rtol=0, atol=0
     )
+    assert module.scales.dtype is torch.float32
+    assert module.bias.dtype is torch.float32
 
 
 @pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
@@ -214,8 +220,12 @@ def test_awq_torch_pack_keeps_fp32_source_bias(activation_dtype):
     module.post_init()
     x = torch.full((1, 16), 4096.0, dtype=activation_dtype)
 
+    actual = module(x)
+    expected = _awq_oracle(
+        module=module, x=x, scales=torch.ones((1, 8), dtype=torch.float16), bias=source.bias.data
+    )
+    torch.testing.assert_close(actual, expected.to(activation_dtype), rtol=0, atol=0)
     assert module.bias.dtype is torch.float32
-    torch.testing.assert_close(module(x), _awq_oracle(module, x).to(activation_dtype), rtol=0, atol=0)
 
 
 def test_awq_torch_pack_keeps_fp32_source_scales():
@@ -231,13 +241,14 @@ def test_awq_torch_pack_keeps_fp32_source_scales():
     module.post_init()
     stored_scales = module.scales.clone()
 
-    assert module.scales.dtype is torch.float32
-    assert torch.equal(module.scales, scales.t())
     module(torch.ones((1, 16), dtype=torch.float16))
     x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16)
     actual = module(x_bf16)
+    expected = _awq_oracle(module=module, x=x_bf16, scales=scales.t(), bias=None)
+    torch.testing.assert_close(actual, expected.to(torch.bfloat16), rtol=0, atol=0)
+    assert module.scales.dtype is torch.float32
+    assert torch.equal(module.scales, scales.t())
     assert torch.equal(module.scales, stored_scales)
-    torch.testing.assert_close(actual, _awq_oracle(module, x_bf16).to(torch.bfloat16), rtol=0, atol=0)
 
 
 def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
@@ -256,23 +267,19 @@ def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
     stored_bias = module.bias.clone()
     x_fp16 = torch.ones((1, 16), dtype=torch.float16, device=_AWQ_TEST_DEVICE)
     x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16, device=_AWQ_TEST_DEVICE)
-    expected = _awq_oracle(module, x_bf16)
+    expected = _awq_oracle(module=module, x=x_bf16, scales=tiny, bias=bias)
 
     module(x_fp16)
 
-    assert module.scales.dtype is torch.bfloat16
-    assert torch.equal(module.scales, stored_scales)
-    assert torch.equal(module.bias, stored_bias)
-
     actual = module(x_bf16)
 
-    assert module.scales.dtype is torch.bfloat16
-    assert torch.equal(module.scales, stored_scales)
-    assert torch.equal(module.bias, stored_bias)
     assert actual.dtype is torch.bfloat16
     torch.testing.assert_close(
         actual, expected.to(device=actual.device, dtype=torch.bfloat16), rtol=0, atol=0
     )
+    assert module.scales.dtype is torch.bfloat16
+    assert torch.equal(module.scales, stored_scales)
+    assert torch.equal(module.bias, stored_bias)
     # The dequantized [in_features, out_features] weight is call-local.
     retained = list(vars(module).values()) + list(module.buffers()) + list(module.parameters())
     assert not any(
@@ -295,7 +302,9 @@ def test_awq_torch_loader_preserves_checkpoint_operand_dtypes(tmp_path, checkpoi
         x = torch.ones((1, 16), dtype=torch.bfloat16)
 
     source = _make_unit_awq_module(scales=scales, bias=bias, device=torch.device("cpu"))
-    expected = _awq_oracle(source, x).to(device=_AWQ_TEST_DEVICE, dtype=x.dtype)
+    expected = _awq_oracle(module=source, x=x, scales=scales, bias=bias).to(
+        device=_AWQ_TEST_DEVICE, dtype=x.dtype
+    )
 
     class Model(torch.nn.Module):
         def __init__(self):
@@ -330,3 +339,23 @@ def test_awq_torch_loader_preserves_checkpoint_operand_dtypes(tmp_path, checkpoi
     assert torch.equal(model.layer.scales.cpu(), scales)
     assert torch.equal(model.layer.bias.cpu(), bias)
     torch.testing.assert_close(model.layer(x.to(_AWQ_TEST_DEVICE)), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e-40, 65536.0])
+def test_awq_torch_dequantize_supports_non_half_compute_dtype(scale):
+    """ParoQuant's FP32 dense fallback must retain FP32 checkpoint scales."""
+
+    scales = torch.full((1, 8), scale, dtype=torch.float32)
+    bias = torch.zeros(8, dtype=torch.float32)
+    module = _make_unit_awq_module(scales=scales, bias=bias)
+    module.post_init()
+
+    weight = module._dequantize_weight_for_inference(
+        torch.ones((1, 16), dtype=torch.float32, device=_AWQ_TEST_DEVICE), dtype=torch.float32
+    )
+
+    assert weight.dtype is torch.float32
+    assert weight.shape == (16, 8)
+    assert torch.equal(
+        weight, torch.full((16, 8), scale, dtype=torch.float32, device=_AWQ_TEST_DEVICE)
+    )
