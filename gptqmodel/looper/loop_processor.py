@@ -223,6 +223,18 @@ class ForwardConfig:
     capture_layer_context: bool = False
 
 
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """Describe the data and preparation policy for one calibration run."""
+
+    dataset: Any = None
+    prepare_dataset: Optional[Callable] = None
+    concat_size: Optional[int] = None
+    sort: Optional[str] = None
+    concat_separator: Optional[str] = None
+    batch_size: int = 1
+
+
 class CalibrationTypes(str, Enum):
     NOT_REQUIRED = "not_required"
     EACH_MODULE_NEEDS_INPUT = "each_module_needs_input"
@@ -277,16 +289,17 @@ class LoopProcessor:
     def __init__(
             self,
             tokenizer, qcfg: QuantizeConfig,
-            calibration,
-            prepare_dataset_func: Optional[Callable] = None,
-            calibration_concat_size: Optional[int] = None,
-            calibration_sort: Optional[str] = None,
-            calibration_concat_separator: Optional[str] = None,
-            batch_size: int = 1,
+            calibration: Optional[CalibrationConfig] = None,
             forward: Optional[ForwardConfig] = None,
             lifecycle: Optional[ProcessorLifecycleConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
+
+        if calibration is None:
+            calibration = CalibrationConfig()
+        elif not isinstance(calibration, CalibrationConfig):
+            raise TypeError("calibration must be a CalibrationConfig")
+        self.calibration = calibration
 
         # process level lock
         self.lock = threading.Lock()
@@ -340,30 +353,31 @@ class LoopProcessor:
 
 
         # prepare dataset
-        if calibration is not None:
-            if len(calibration) == 0:
+        calibration_dataset = self.calibration.dataset
+        if calibration_dataset is not None:
+            if len(calibration_dataset) == 0:
                 raise ValueError("Calibration dataset must not be empty.")
 
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration) < min_calibration_dataset_size:
+            if len(calibration_dataset) < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                               f"Current: {len(calibration)}.")
+                               f"Current: {len(calibration_dataset)}.")
 
-            if prepare_dataset_func is None:
-                raise ValueError("prepare_dataset_func must be provided when calibration data is supplied.")
+            if self.calibration.prepare_dataset is None:
+                raise ValueError("CalibrationConfig.prepare_dataset must be provided when calibration data is supplied.")
 
-            calibration = prepare_dataset_func(
-                calibration_dataset=calibration,
-                calibration_dataset_concat_size=calibration_concat_size,
-                calibration_dataset_sort=calibration_sort,
-                batch_size=batch_size,
-                calibration_concat_separator=calibration_concat_separator,
+            calibration_dataset = self.calibration.prepare_dataset(
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=self.calibration.concat_size,
+                calibration_dataset_sort=self.calibration.sort,
+                batch_size=self.calibration.batch_size,
+                calibration_concat_separator=self.calibration.concat_separator,
             )
 
-            if len(calibration) == 0:
+            if len(calibration_dataset) == 0:
                 raise ValueError(
-                    "Calibration dataset is empty after prepare_dataset_func removed "
+                    "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
                     "all samples (for example, every input_ids was shorter than "
                     "calibration_data_min_length). Lower calibration_data_min_length "
                     "or provide longer calibration samples."
@@ -374,7 +388,7 @@ class LoopProcessor:
             # matters for MTP replay where one logical corpus expands to more
             # than a million causal positions.
             calibration_summary = getattr(
-                calibration, "gptqmodel_calibration_summary", None
+                calibration_dataset, "gptqmodel_calibration_summary", None
             )
             if calibration_summary is not None:
                 if not isinstance(calibration_summary, dict):
@@ -391,7 +405,7 @@ class LoopProcessor:
                 if (
                     isinstance(summary_batch_count, bool)
                     or not isinstance(summary_batch_count, int)
-                    or summary_batch_count != len(calibration)
+                    or summary_batch_count != len(calibration_dataset)
                     or isinstance(total_input_ids_length, bool)
                     or not isinstance(total_input_ids_length, int)
                     or total_input_ids_length < 0
@@ -405,7 +419,7 @@ class LoopProcessor:
             else:
                 total_input_ids_length = 0
                 max_input_id_length = 0
-                for row in calibration:
+                for row in calibration_dataset:
                     input_ids = row["input_ids"]
                     if isinstance(input_ids, torch.Tensor):
                         if input_ids.dim() <= 2:
@@ -420,14 +434,14 @@ class LoopProcessor:
                     if input_ids_length > max_input_id_length:
                         max_input_id_length = input_ids_length
                     total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration)
+            avg = total_input_ids_length / len(calibration_dataset)
 
             if avg < min_calibration_dataset_input_ids_avg_length:
                 log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                                f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
-            self.num_batches = len(calibration)
-            self.calibration_dataset = calibration
+            self.num_batches = len(calibration_dataset)
+            self.calibration_dataset = calibration_dataset
         else:
             self.num_batches = 0
             self.calibration_dataset = []

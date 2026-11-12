@@ -14,6 +14,7 @@ import torch
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
     LoopProcessor,
@@ -86,12 +87,7 @@ class WeightOnlyProcessor(LoopProcessor):
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            calibration_concat_separator=None,
-            batch_size=1,
+            calibration=CalibrationConfig(),
             lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
         self.lock = threading.Lock()

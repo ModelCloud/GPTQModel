@@ -242,12 +242,13 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
 
     class _StubProcessor:
         def __init__(self, **kwargs):
-            self.calibration_dataset = kwargs["prepare_dataset_func"](
-                calibration_dataset=kwargs["calibration"],
-                calibration_dataset_concat_size=kwargs["calibration_concat_size"],
-                calibration_dataset_sort=kwargs["calibration_sort"],
-                batch_size=kwargs["batch_size"],
-                calibration_concat_separator=kwargs["calibration_concat_separator"],
+            calibration = kwargs["calibration"]
+            self.calibration_dataset = calibration.prepare_dataset(
+                calibration_dataset=calibration.dataset,
+                calibration_dataset_concat_size=calibration.concat_size,
+                calibration_dataset_sort=calibration.sort,
+                batch_size=calibration.batch_size,
+                calibration_concat_separator=calibration.concat_separator,
             )
             prepared_datasets.append(self.calibration_dataset)
 

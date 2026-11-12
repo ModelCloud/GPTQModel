@@ -9,9 +9,14 @@ from typing import Any, Dict, List, Optional
 import torch
 import transformers
 
-from ..looper.loop_processor import ForwardConfig, LoopProcessor
+from ..looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import AutoModuleDecoderConfig, SmootherConfig, TensorParallelPadderConfig
+from ..quantization.config import (
+    AutoModuleDecoderConfig,
+    QuantizeConfig,
+    SmootherConfig,
+    TensorParallelPadderConfig,
+)
 
 
 def _get_number_of_rows_and_cols(layer: torch.nn.Module) -> tuple[int, int]:
@@ -29,22 +34,20 @@ class ModulePreProcessor(LoopProcessor):
 
     _TP_TARGETS = (2, 4, 8)
 
-    def __init__(self, *args, forward: Optional[ForwardConfig] = None, **kwargs):
+    def __init__(
+        self,
+        *,
+        qcfg: QuantizeConfig,
+        tokenizer=None,
+        calibration: Optional[CalibrationConfig] = None,
+        forward: Optional[ForwardConfig] = None,
+    ):
         """Initialize a no-forward planning processor for module preprocessors."""
 
-        kwargs = dict(kwargs)
-        kwargs.pop("calculate_w_wq_diff", None)
-        qcfg = kwargs.pop("qcfg")
-        tokenizer = kwargs.pop("tokenizer", None)
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            calibration_concat_separator=None,
-            batch_size=1,
+            calibration=calibration or CalibrationConfig(),
             forward=forward or ForwardConfig(
                 required=False,
                 replay_after_process=False,

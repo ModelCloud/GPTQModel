@@ -17,20 +17,9 @@ import sys
 from typing import Dict, List
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import ForwardConfig
+from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig
-
-
-def _dummy_prepare_dataset(
-        *,
-        calibration_dataset,
-        calibration_dataset_concat_size,
-        calibration_dataset_sort,
-        batch_size,
-        calibration_concat_separator=None,
-):
-    return calibration_dataset
 
 
 class _DummyProgressBar:
@@ -59,11 +48,7 @@ def _run_quant_on_device(device_index: int) -> torch.device:
     processor = GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=_dummy_prepare_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         forward=ForwardConfig(
             required=False,
             replay_after_process=True,

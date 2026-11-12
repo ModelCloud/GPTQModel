@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
@@ -59,18 +60,13 @@ def _make_processor(rotary: nn.Module, *, preserve_explicit_position_embeddings:
     return AWQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=types.SimpleNamespace(
             rotary_embedding=None,
             awq_preserve_explicit_position_embeddings=preserve_explicit_position_embeddings,
         ),
         model=model,
         calculate_w_wq_diff=False,
-        calibration_concat_separator=None,
     )
 
 

@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
@@ -274,11 +275,7 @@ def _processor_common_kwargs(qcfg):
     return {
         "tokenizer": None,
         "qcfg": qcfg,
-        "calibration": None,
-        "prepare_dataset_func": None,
-        "calibration_concat_size": None,
-        "calibration_sort": None,
-        "batch_size": 1,
+        "calibration": CalibrationConfig(),
     }
 
 

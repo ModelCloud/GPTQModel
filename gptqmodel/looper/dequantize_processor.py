@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 import torch
 
-from ..looper.loop_processor import ForwardConfig, LoopProcessor
+from ..looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchLinear
@@ -29,10 +29,7 @@ class DequantizeProcessor(LoopProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=None,
-            calibration=None,
-            calibration_concat_size=None,
-            prepare_dataset_func=None,
-            batch_size=1,
+            calibration=CalibrationConfig(),
             forward=forward or ForwardConfig(
                 required=False,
                 replay_after_process=False,

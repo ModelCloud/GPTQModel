@@ -19,6 +19,7 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -255,16 +256,11 @@ class AWQProcessor(LoopProcessor):
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
+        calibration: CalibrationConfig,
         gptq_model,
         model,
         forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes AWQ processing, layer tracking, and kernel selection."""
 
@@ -272,11 +268,6 @@ class AWQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
             lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 
@@ -284,7 +275,7 @@ class AWQProcessor(LoopProcessor):
         self.avg_losses = []
         self.nsamples = 0
         self._nsamples_total = 0
-        self._quant_batch_size = batch_size
+        self._quant_batch_size = self.calibration.batch_size
 
         self._layer_states: Dict[int, _AWQLayerState] = {}
         self._layer_states_lock = threading.Lock()

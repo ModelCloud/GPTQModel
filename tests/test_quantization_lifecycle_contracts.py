@@ -9,6 +9,7 @@ import torch
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.looper.loop_processor import (
+    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -69,7 +70,32 @@ def test_processor_constructor_accepts_forward_config():
     parameters = signature(GPTQProcessor).parameters
 
     assert parameters["forward"].default is None
+    assert "calibration" in parameters
+    assert "prepare_dataset_func" not in parameters
+    assert "calibration_concat_size" not in parameters
+    assert "calibration_sort" not in parameters
+    assert "calibration_concat_separator" not in parameters
+    assert "batch_size" not in parameters
     assert "require_fwd" not in parameters
+
+
+def test_calibration_config_groups_dataset_pipeline_settings():
+    prepare = object()
+    config = CalibrationConfig(
+        dataset=["sample"],
+        prepare_dataset=prepare,
+        concat_size=2048,
+        sort="desc",
+        concat_separator="\n",
+        batch_size=4,
+    )
+
+    assert config.dataset == ["sample"]
+    assert config.prepare_dataset is prepare
+    assert config.concat_size == 2048
+    assert config.sort == "desc"
+    assert config.concat_separator == "\n"
+    assert config.batch_size == 4
 
 
 def test_lifecycle_use_returns_configured_copy():

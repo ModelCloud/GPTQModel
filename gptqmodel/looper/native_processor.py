@@ -8,7 +8,12 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import ForwardConfig, LoopProcessor, ProcessorLifecycleConfig
+from ..looper.loop_processor import (
+    CalibrationConfig,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
@@ -36,13 +41,8 @@ class NativeProcessor(LoopProcessor):
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
+        calibration: CalibrationConfig,
         forward: Optional[ForwardConfig] = None,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes the processor and enables single-pass input capture."""
 
@@ -50,11 +50,6 @@ class NativeProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
             lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 

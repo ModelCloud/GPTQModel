@@ -14,7 +14,7 @@ import torch
 
 from gptqmodel.looper import gptq_processor as gptq_processor_module
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import ForwardConfig
+from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import QuantizeConfig
@@ -145,11 +145,7 @@ def test_submodule_finalize_timing():
     processor = GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=_dummy_prepare_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         forward=ForwardConfig(
             required=False,
             replay_after_process=True,
@@ -362,11 +358,7 @@ def test_submodule_finalize_threadpool_serialization(cpu_workers):
     processor = GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=_dummy_prepare_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         forward=ForwardConfig(
             required=False,
             replay_after_process=True,

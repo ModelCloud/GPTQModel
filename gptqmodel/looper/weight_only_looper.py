@@ -25,6 +25,7 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.loop_processor import CalibrationConfig
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
@@ -948,12 +949,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             preprocessor = ModulePreProcessor(
                 tokenizer=self.gptq_model.tokenizer,
                 qcfg=quant_config,
-                calibration=None,
-                prepare_dataset_func=None,
-                calibration_concat_size=None,
-                calibration_sort=None,
-                calibration_concat_separator=None,
-                batch_size=1,
+                calibration=CalibrationConfig(),
             )
 
         last_quantized_layer_index = find_last_quantized_layer_index(

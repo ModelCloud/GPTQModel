@@ -25,6 +25,7 @@ import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 import gptqmodel.utils.paroquant as paroquant_utils_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
@@ -2920,11 +2921,7 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
     processor = ParoQuantProcessor(
         tokenizer=None,
         qcfg=ParoConfig(bits=4, group_size=128, opt_scope=opt_scope),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=None,
         model=None,
     )

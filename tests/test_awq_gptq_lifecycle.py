@@ -11,6 +11,7 @@ from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _compute_awq_weight_mean
 from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -46,11 +47,7 @@ def _awq_processor(qcfg: QuantizeConfig) -> AWQProcessor:
     return AWQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=model,
         model=nn.Module(),
     )
@@ -92,11 +89,7 @@ def test_awq_capture_is_pre_forward_and_gptq_does_not_receive_the_hook():
     gptq_probe = GPTQProcessor(
         tokenizer=None,
         qcfg=QuantizeConfig(method=METHOD.GPTQ),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
     assert gptq_probe.register_moe_root_capture_hook(root, "mlp", []) is False
 
@@ -110,11 +103,7 @@ def test_gptq_lifecycle_collects_normalized_hessian_without_awq_feature_state():
     processor = GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     named_module = _named_linear("mlp.experts.0.gate_proj")

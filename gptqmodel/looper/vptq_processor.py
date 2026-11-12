@@ -12,6 +12,7 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
     CalibrationTypes,
     ForwardConfig,
     LoopProcessor,
@@ -61,14 +62,9 @@ class VPTQProcessor(LoopProcessor):
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
+        calibration: CalibrationConfig,
         forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes VPTQ processing and optional weight-delta tracking."""
 
@@ -76,11 +72,6 @@ class VPTQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
             lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
 

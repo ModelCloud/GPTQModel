@@ -89,6 +89,7 @@ Processors declare lifecycle behavior instead of being recognized through class 
 
 ```python
 from gptqmodel.looper.loop_processor import (
+    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -107,8 +108,14 @@ class ExampleProcessor(LoopProcessor):
         checkpointing=CheckpointSupport.PRIMARY,
     )
 
-    def __init__(self, forward: ForwardConfig | None = None, **kwargs):
+    def __init__(
+        self,
+        calibration: CalibrationConfig,
+        forward: ForwardConfig | None = None,
+        **kwargs,
+    ):
         super().__init__(
+            calibration=calibration,
             **kwargs,
             lifecycle=self.lifecycle.use(
                 forward or self.lifecycle.forward
@@ -116,7 +123,31 @@ class ExampleProcessor(LoopProcessor):
         )
 ```
 
-Processor constructors accept one complete `ForwardConfig`; they do not expose its fields as separate parameters. `ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
+Processor constructors accept one complete `ForwardConfig` and one complete `CalibrationConfig`; they do not expose their fields as separate parameters.
+
+```python
+calibration = CalibrationConfig(
+    dataset=dataset,
+    prepare_dataset=model.prepare_dataset,
+    concat_size=2048,
+    sort="desc",
+    concat_separator=None,
+    batch_size=1,
+)
+
+processor = ExampleProcessor(
+    tokenizer=model.tokenizer,
+    qcfg=model.quantize_config,
+    calibration=calibration,
+    forward=ForwardConfig(
+        required=True,
+        replay_after_process=True,
+        subset_early_stop=True,
+    ),
+)
+```
+
+`ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationConfig` contains the dataset and its preparation policy. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
 
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 

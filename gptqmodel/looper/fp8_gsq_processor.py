@@ -15,6 +15,7 @@ from ..quantization.config import FP8Config, clone_weight_only_config_for_module
 from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
 from .loop_processor import (
+    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -28,16 +29,20 @@ class FP8GSQProcessor(WeightOnlyProcessor):
 
     lifecycle = ProcessorLifecycleConfig(forward=ForwardConfig(required=True))
 
-    def __init__(self, tokenizer, qcfg, calibration, prepare_dataset_func,
-                 calibration_concat_size=None, calibration_sort=None, batch_size=1,
-                 calibration_concat_separator=None, forward: Optional[ForwardConfig] = None):
+    def __init__(
+        self,
+        tokenizer,
+        qcfg,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
+    ):
         if not isinstance(qcfg, FP8Config):
             raise TypeError('FP8 GSQ processor requires FP8Config')
         LoopProcessor.__init__(
-            self, tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
-            prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
-            batch_size=batch_size,
+            self,
+            tokenizer=tokenizer,
+            qcfg=qcfg,
+            calibration=calibration,
             lifecycle=self.lifecycle.use(forward if forward is not None else self.lifecycle.forward),
         )
         self.lock = threading.Lock()
