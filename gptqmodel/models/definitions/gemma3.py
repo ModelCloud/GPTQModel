@@ -36,11 +36,11 @@ class Gemma3QModel(LlamaQModel):
         {
             "input_layernorm": ("input_layernorm:!:norm",),
             "self_attn": (
-                "q_norm:!",
                 "q_proj:0:q:in=x",
-                "k_norm:!",
                 "k_proj:0:k:in=x",
                 "v_proj:0:v:in=x",
+                "q_norm:!",
+                "k_norm:!",
                 "o_proj:1:o",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
@@ -141,11 +141,11 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_norm:!",
                 "q_proj:0:q",
-                "k_norm:!",
                 "k_proj:0:k",
                 "v_proj:0:v",
+                "q_norm:!",
+                "k_norm:!",
                 "o_proj:1:o",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

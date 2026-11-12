@@ -345,11 +345,21 @@ def test_dense_norm_blocks_keep_the_decoder_forward_order(family_case):
         assert "post_attention_layernorm" in flat[:gate_up]
     if "post_feedforward_layernorm" in case.added_dense:
         assert flat.index("post_feedforward_layernorm") == down + 1
-    # Per-head Q/K norms are interleaved with their projections in one block
-    # (they consume the projection output), so only block membership matters.
+    # The norms consume projected Q/K. Preserve the order of the real attention
+    # forward within the block, including the different Gemma 3/OLMo 2 layouts.
     for attention_norm in ("self_attn.q_norm", "self_attn.k_norm"):
         if attention_norm in case.added_dense:
             assert flat.index(attention_norm) < flat.index("self_attn.o_proj")
+    if case.model_type in {"gemma3", "gemma3_text"}:
+        assert [name for name in flat if name.startswith("self_attn.")][:5] == [
+            "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
+            "self_attn.q_norm", "self_attn.k_norm",
+        ]
+    elif case.model_type == "olmo2":
+        assert [name for name in flat if name.startswith("self_attn.")][:5] == [
+            "self_attn.q_proj", "self_attn.q_norm", "self_attn.k_proj",
+            "self_attn.k_norm", "self_attn.v_proj",
+        ]
 
 
 def test_llama_control_does_not_declare_the_family_specific_norms():
