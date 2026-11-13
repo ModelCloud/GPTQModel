@@ -307,6 +307,8 @@ def test_cuda_sync_graph_replays_changed_inputs(m, n, k, static_weights):
 @pytest.mark.parametrize("n,k", [(384, 5120), (512, 5120), (5120, 5120), (129280, 5120), (128, 2048)])
 def test_staged_b1_matches_independent_rows_and_torch(n, k):
     device = _cuda()
+    if (n, k) == (128, 2048) and torch.cuda.get_device_capability(device) != (10, 3):
+        pytest.skip("the 128x2048 staged-B1 GEMV route requires SM103")
     if n >= 129280 and torch.cuda.mem_get_info(device)[0] < 4_000_000_000:
         pytest.skip("full vocabulary head needs at least 4 GB free GPU memory")
     generator = torch.Generator(device=device).manual_seed(851 + n)
