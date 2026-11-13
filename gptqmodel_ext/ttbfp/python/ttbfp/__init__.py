@@ -15,7 +15,8 @@ from pathlib import Path
 import numpy as np
 
 __all__ = [
-    "TTBF8", "TTBF4", "TTBF2", "BFP8", "BFP4", "BFP2", "pack", "unpack", "matmul", "matmul_bf16",
+    "BF8_B", "BF4_B", "BF2_B", "TTBF8", "TTBF4", "TTBF2",
+    "BFP8", "BFP4", "BFP2", "pack", "unpack", "matmul", "matmul_bf16",
     "pack_transposed", "transpose_packed", "matmul_prepacked",
     "matmul_prepacked_bf16", "convert_s8", "prepack_s8",
     "matmul_prepacked_s8", "matmul_prepacked_s8_bf16",
@@ -23,15 +24,20 @@ __all__ = [
     "tile_bytes", "version", "cpu_features", "lib",
 ]
 
-TTBF8 = 8
-TTBF4 = 4
-TTBF2 = 2
-# Deprecated TT-internal spellings, kept as aliases.
-BFP8 = TTBF8
-BFP4 = TTBF4
-BFP2 = TTBF2
+# Canonical names follow hw/dtypes.md.
+BF8_B = 8
+BF4_B = 4
+BF2_B = 2
+# Deprecated spellings, kept as aliases.
+TTBF8 = BF8_B
+TTBF4 = BF4_B
+TTBF2 = BF2_B
+BFP8 = BF8_B
+BFP4 = BF4_B
+BFP2 = BF2_B
 
 _FMT = {8: 8, 4: 4, 2: 2,
+        "bf8_b": 8, "bf4_b": 4, "bf2_b": 2,
         "ttbf8": 8, "ttbf4": 4, "ttbf2": 2,
         "bfp8_b": 8, "bfp8": 8, "BFP8_B": 8,
         "bfp4_b": 4, "bfp4": 4, "BFP4_B": 4,
@@ -46,7 +52,7 @@ def _fmt(fmt) -> int:
 
 
 def _db(f: int) -> int:
-    """Datum bytes per 16-element block (16 / 8 / 4 for ttbf8 / ttbf4 / ttbf2)."""
+    """Datum bytes per 16-element block (16 / 8 / 4 for bf8_b / bf4_b / bf2_b)."""
     return 16 if f == 8 else (8 if f == 4 else 4)
 
 
@@ -159,7 +165,7 @@ def cpu_features() -> str:
     return _lib.ttbfp_cpu_features().decode()
 
 
-def pack(x, fmt=TTBF8):
+def pack(x, fmt=BF8_B):
     """Quantize a row-major [rows, cols] fp32 array.
 
     Returns (exps, data): uint8 arrays of shape (rows, nblk) and
@@ -179,7 +185,7 @@ def pack(x, fmt=TTBF8):
     return exps, data
 
 
-def unpack(exps, data, fmt=TTBF8, cols: int | None = None, ftz: bool = True):
+def unpack(exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
     """Decode packed BFP data to a row-major fp32 array."""
     f = _fmt(fmt)
     exps = np.ascontiguousarray(exps, dtype=np.uint8)
@@ -197,7 +203,7 @@ def unpack(exps, data, fmt=TTBF8, cols: int | None = None, ftz: bool = True):
     return out
 
 
-def matmul(a, exps, data, fmt=TTBF8, cols: int | None = None, ftz: bool = True):
+def matmul(a, exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
     """C = A @ dequant(B) with B kept packed (fused dequant + GEMM).
 
     a: (M, K) float32; exps: (K, nblk); data: (K, nblk*db).
@@ -222,7 +228,7 @@ def matmul(a, exps, data, fmt=TTBF8, cols: int | None = None, ftz: bool = True):
     return out
 
 
-def matmul_bf16(a_bf16, exps, data, fmt=TTBF8, cols: int | None = None,
+def matmul_bf16(a_bf16, exps, data, fmt=BF8_B, cols: int | None = None,
                 ftz: bool = True):
     """Like matmul(), with A given as bf16 bit patterns (uint16)."""
     f = _fmt(fmt)
@@ -241,7 +247,7 @@ def matmul_bf16(a_bf16, exps, data, fmt=TTBF8, cols: int | None = None,
     return out
 
 
-def transpose_packed(exps, data, fmt=TTBF8):
+def transpose_packed(exps, data, fmt=BF8_B):
     """Convert the flat packed layout to the block-major (streaming) layout.
 
     exps (K, nblk) -> (nblk, K);  data (K, nblk*db) -> (nblk, K*db).
@@ -262,13 +268,13 @@ def transpose_packed(exps, data, fmt=TTBF8):
     return exps_t, data_t
 
 
-def pack_transposed(x, fmt=TTBF8):
+def pack_transposed(x, fmt=BF8_B):
     """Quantize and return the block-major packed layout (best for matmul)."""
     e, d = pack(x, fmt)
     return transpose_packed(e, d, fmt)
 
 
-def matmul_prepacked(a, exps_t, data_t, fmt=TTBF8, cols: int | None = None,
+def matmul_prepacked(a, exps_t, data_t, fmt=BF8_B, cols: int | None = None,
                      ftz: bool = True):
     """C = A @ dequant(B) with B in the block-major layout.
 
@@ -294,7 +300,7 @@ def matmul_prepacked(a, exps_t, data_t, fmt=TTBF8, cols: int | None = None,
     return out
 
 
-def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=TTBF8,
+def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=BF8_B,
                           cols: int | None = None, ftz: bool = True):
     """Like matmul_prepacked(), with A as bf16 bit patterns (uint16)."""
     f = _fmt(fmt)
@@ -312,7 +318,7 @@ def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=TTBF8,
     return out
 
 
-def convert_s8(exps, data, fmt=TTBF8):
+def convert_s8(exps, data, fmt=BF8_B):
     """Convert the flat packed layout to the int8 kernel-native layout.
 
     Returns (exps_t, s8) with shapes (nblk, K) and (nblk, K*16).  The values
@@ -332,13 +338,13 @@ def convert_s8(exps, data, fmt=TTBF8):
     return exps_t, s8
 
 
-def prepack_s8(x, fmt=TTBF8):
+def prepack_s8(x, fmt=BF8_B):
     """Quantize straight into the int8 kernel-native block-major layout."""
     e, d = pack(x, fmt)
     return convert_s8(e, d, fmt)
 
 
-def matmul_prepacked_s8(a, exps_t, s8, fmt=TTBF8, cols: int | None = None,
+def matmul_prepacked_s8(a, exps_t, s8, fmt=BF8_B, cols: int | None = None,
                         ftz: bool = True):
     """C = A @ dequant(B) with B in the int8 kernel-native layout."""
     f = _fmt(fmt)
@@ -362,7 +368,7 @@ def matmul_prepacked_s8(a, exps_t, s8, fmt=TTBF8, cols: int | None = None,
     return out
 
 
-def matmul_prepacked_s8_bf16(a_bf16, exps_t, s8, fmt=TTBF8,
+def matmul_prepacked_s8_bf16(a_bf16, exps_t, s8, fmt=BF8_B,
                              cols: int | None = None, ftz: bool = True):
     """Like matmul_prepacked_s8(), with A as bf16 bit patterns (uint16)."""
     f = _fmt(fmt)
@@ -380,7 +386,7 @@ def matmul_prepacked_s8_bf16(a_bf16, exps_t, s8, fmt=TTBF8,
     return out
 
 
-def tile_pack(tile, fmt=TTBF8):
+def tile_pack(tile, fmt=BF8_B):
     """Pack a logical 32x32 fp32 tile into the TT L1 byte layout."""
     f = _fmt(fmt)
     t = _f32(tile)
@@ -392,7 +398,7 @@ def tile_pack(tile, fmt=TTBF8):
     return out
 
 
-def tile_unpack(blob, fmt=TTBF8, ftz: bool = True):
+def tile_unpack(blob, fmt=BF8_B, ftz: bool = True):
     """Unpack a TT L1 byte-layout tile back to a 32x32 fp32 tile."""
     f = _fmt(fmt)
     b = np.ascontiguousarray(blob, dtype=np.uint8)

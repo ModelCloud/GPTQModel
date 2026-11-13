@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp - CPU kernels for Tenstorrent block floats (ttbf8 / ttbf4 / ttbf2).
+ * ttbfp - CPU kernels for Tenstorrent block floats (bf8_b / bf4_b / bf2_b).
  *
  * Bit-exact port of the packing/unpacking semantics used by tt-metal's
  * tt-llk reference helpers:
@@ -10,10 +10,10 @@
  *
  * Format summary
  * --------------
- *   ttbf8 (Tenstorrent Bfp8_b / BLOCKFP8):
+ *   bf8_b (Tenstorrent Bfp8_b / BLOCKFP8):
  *           16-element blocks, one shared 8-bit exponent per block,
  *           each datum is 8 bits: 1 sign + 7 magnitude bits.
- *   ttbf4  (Tenstorrent Bfp4_b / BLOCKFP4):
+ *   bf4_b  (Tenstorrent Bfp4_b / BLOCKFP4):
  *           16-element blocks, one shared 8-bit exponent per block,
  *           each datum is 4 bits: 1 sign + 3 magnitude bits,
  *           two datums per byte (even datum in the low nibble).
@@ -32,15 +32,15 @@
  *   stored as:
  *
  *       exps[rows * nblk]                  (nblk = ceil(cols / 16))
- *       data[rows * nblk * 16]             (ttbf8)
- *       data[rows * nblk * 8]              (ttbf4)
+ *       data[rows * nblk * 16]             (bf8_b)
+ *       data[rows * nblk * 8]              (bf4_b)
  *
  *   `exps` and `data` are separate buffers (struct-of-arrays).  Padding in
  *   a partial final block is encoded as zero.
  *
  *   Tile: ttbfp_tile_pack()/ttbfp_tile_unpack() use the exact 32x32 L1 tile
- *   byte layout: 64 exponent bytes followed by 1024 (ttbf8) or 512
- *   (ttbf4) datum bytes.  Faces are 16x16 row-major in the order
+ *   byte layout: 64 exponent bytes followed by 1024 (bf8_b) or 512
+ *   (bf4_b) datum bytes.  Faces are 16x16 row-major in the order
  *   (top-left, top-right, bottom-left, bottom-right), i.e. the layout
  *   produced by tt-metal's `tilize_block`.
  *
@@ -80,18 +80,23 @@ extern "C" {
  * NOT the OCP MX (microscaling) formats.  We therefore expose them with a
  * "tt" prefix:
  *
- *   TTBFP_TTBF8  == TT Bfp8_b == BLOCKFP8  (E8M6: 8-bit shared exponent)
- *   TTBFP_TTBF4  == TT Bfp4_b == BLOCKFP4  (E8M2: 8-bit shared exponent)
- *   TTBFP_TTBF2  == TT Bfp2_b == BLOCKFP2  (E8M0: 8-bit shared exponent)
+ *   TTBFP_BF8_B  == TT Bfp8_b == BLOCKFP8  (E8M6: 8-bit shared exponent)
+ *   TTBFP_BF4_B  == TT Bfp4_b == BLOCKFP4  (E8M2: 8-bit shared exponent)
+ *   TTBFP_BF2_B  == TT Bfp2_b == BLOCKFP2  (E8M0: 8-bit shared exponent)
+ *
+ * The canonical names match hw/dtypes.md; the tt* spellings are aliases.
  *
  * The TT-internal spellings are kept as deprecated aliases.
  * The 5-bit-exponent FP16-family variants (TT Bfp8/Bfp4/Bfp2, a.k.a.
  * BFP8a/BFP4a/BFP2a) are not part of this library yet.
  */
 typedef enum {
-    TTBFP_TTBF8 = 8,
-    TTBFP_TTBF4 = 4,
-    TTBFP_TTBF2 = 2,
+    TTBFP_BF8_B = 8, /* canonical: bf8_b (hw/dtypes.md) */
+    TTBFP_BF4_B = 4, /* canonical: bf4_b */
+    TTBFP_BF2_B = 2, /* canonical: bf2_b */
+    TTBFP_TTBF8 = 8, /* deprecated alias */
+    TTBFP_TTBF4 = 4, /* deprecated alias */
+    TTBFP_TTBF2 = 2, /* deprecated alias */
     TTBFP_BFP8_B = 8, /* deprecated alias */
     TTBFP_BFP4_B = 4, /* deprecated alias */
     TTBFP_BFP2_B = 2  /* deprecated alias */
@@ -105,7 +110,7 @@ size_t ttbfp_exps_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 size_t ttbfp_data_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 size_t ttbfp_packed_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 
-/* Bytes per 32x32 tile: 1088 (ttbf8), 576 (ttbf4) or 320 (ttbf2). */
+/* Bytes per 32x32 tile: 1088 (bf8_b), 576 (bf4_b) or 320 (bf2_b). */
 size_t ttbfp_tile_bytes(ttbfp_fmt fmt);
 
 /* ---- pack / unpack --------------------------------------------------- */
@@ -196,7 +201,7 @@ void ttbfp_matmul_prepacked_bf16(ttbfp_fmt fmt,
  * Kernel-native layout: same values, datums stored as signed int8.
  *
  * The TT on-device datum is sign-magnitude (1 sign bit + magnitude bits),
- * which costs 8 uops to decode for ttbf8 and 12 for ttbf4.  Storing
+ * which costs 8 uops to decode for bf8_b and 12 for bf4_b.  Storing
  * sign*magnitude as a two's-complement int8 instead makes the decode
  * vpmovsxbd + vcvtdq2ps + vmulps, i.e. 3 uops, and the decoded values are
  * identical, so every path stays bitwise equal.
@@ -204,11 +209,11 @@ void ttbfp_matmul_prepacked_bf16(ttbfp_fmt fmt,
  * This is the same move ATen makes for _weight_int4pack_mm /
  * _weight_int8pack_mm: pack the weights into whatever shape makes the inner
  * loop cheapest.  It matters most when the kernel is decode-bound, i.e. for
- * small M (autoregressive decode): ~1.5x for ttbf8 and ~2x for ttbf4 at M=1.
+ * small M (autoregressive decode): ~1.5x for bf8_b and ~2x for bf4_b at M=1.
  *
  * Layout (block-major, one int8 per datum):
  *     exps_t[j * K + k]        s8_t[(j * K + k) * 16]
- * ttbf8 needs 16 bytes per block either way; ttbf4 doubles from 8 to 16.
+ * bf8_b needs 16 bytes per block either way; bf4_b doubles from 8 to 16.
  */
 void ttbfp_convert_s8(ttbfp_fmt fmt,
                       const uint8_t *exps, const uint8_t *data,

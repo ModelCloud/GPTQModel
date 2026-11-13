@@ -12,7 +12,7 @@ Tenstorrent block floats are **not** an industry-standard format.  Block
 floating point is an old, generic idea, but the TT encoding differs from the
 standardized block-scaled formats (OCP MX and friends):
 
-| Property | TT `ttbf8` / `ttbf4` / `ttbf2` | OCP MXFP8 / MXFP4 |
+| Property | TT `bf8_b` / `bf4_b` / `bf2_b` | OCP MXFP8 / MXFP4 |
 |---|---|---|
 | Block size | 16 elements | 32 elements |
 | Shared exponent | 8 bits, bias 127 | 8 bits, bias 127 |
@@ -20,9 +20,10 @@ standardized block-scaled formats (OCP MX and friends):
 | Element bits | 8 / 4 / 2 | 8 / 4 (E4M3/E2M1) |
 | Exponent in datum | none (block shared) | none (block shared) |
 
-Because the names are Tenstorrent-specific, the public API uses `ttbf8`,
-`ttbf4` and `ttbf2`.  `BFP8`/`BFP4`/`BFP2` remain deprecated aliases.  Do not
-rename them to `bf8`/`bf4`/`bf2`.
+The canonical names are `bf8_b`, `bf4_b` and `bf2_b`, matching
+[`hw/dtypes.md`](../hw/dtypes.md).  The library's older
+`ttbf8`/`ttbf4`/`ttbf2` and `BFP8`/`BFP4`/`BFP2` spellings remain
+deprecated aliases.
 
 The P300C (Blackhole) native formats covered here are `Bfp8_b` (BLOCKFP8),
 `Bfp4_b` (BLOCKFP4) and `Bfp2_b` (BLOCKFP2); `README.md` section 2 in the extension documents the full
@@ -34,9 +35,9 @@ Two invariants drive every implementation decision:
 
 1. **The quantizer matches tt-llk bit-for-bit.**  fp32→bf16 truncation, block
    max exponent, guard-bit round-to-nearest/ties-away, magnitude truncation for
-   `ttbf4`, sign dropped when magnitude is zero, and FTZ below `FLT_MIN` when
+   `bf4_b`, sign dropped when magnitude is zero, and FTZ below `FLT_MIN` when
    `e < 7`.  `tools/verify_against_tt.py` checks 200 seeds x 4 distributions x
-   2 formats against the verbatim upstream helpers.
+   3 formats against the verbatim upstream helpers.
 2. **Every execution path is bitwise identical.**  Scalar, AVX2, AVX-512,
    sign-magnitude vs int8 datums, every tile shape and every thread count
    accumulate over `k` in the same order.  The test suite asserts this, and
@@ -70,7 +71,7 @@ changes the `k` order, so every branch above is bitwise equal.
 | block-major | `j*K + k` | `(j*K + k)*db` | recommended for matmul |
 | int8 block-major | `j*K + k` | `(j*K + k)*16` | fastest at every M |
 
-`db` is 16 bytes for `ttbf8` and 8 for `ttbf4`.  The int8 layout stores
+`db` is 16 bytes for `bf8_b`, 8 for `bf4_b` and 4 for `bf2_b`.  The int8 layout stores
 `sign*magnitude` as a signed int8, which turns the decode into
 `vpmovsxbd` + `vcvtdq2ps` + `vmulps`; the decoded values are unchanged.
 
@@ -80,9 +81,9 @@ Single thread, `K = N = 4096`, process CPU time:
 
 | format | M=1 | M=4 | M=16 | M=64 |
 |---|---|---|---|---|
-| `ttbf8` int8 | 0.80 ms | 1.60 ms | 6.48 ms | 25.64 ms |
-| `ttbf4` int8 | 0.80 ms | 1.60 ms | 6.40 ms | 25.93 ms |
-| `ttbf2` int8 | 0.80 ms | 1.60 ms | 6.50 ms | 25.74 ms |
+| `bf8_b` int8 | 0.80 ms | 1.60 ms | 6.48 ms | 25.64 ms |
+| `bf4_b` int8 | 0.80 ms | 1.60 ms | 6.40 ms | 25.93 ms |
+| `bf2_b` int8 | 0.80 ms | 1.60 ms | 6.50 ms | 25.74 ms |
 
 The pure FMA path (no decode, no scale, no broadcast) runs a 16x4096x16 panel
 in ~0.0178 ms, i.e. ~118 GFLOP/s or ~18.2 ms for the whole M=64 problem.  The

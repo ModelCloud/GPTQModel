@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp_cuda - CUDA kernels for Tenstorrent ttbf8 / ttbf4 / ttbf2.
+ * ttbfp_cuda - CUDA kernels for Tenstorrent bf8_b / bf4_b / bf2_b.
  *
  * Numerics match src/ttbfp_cpu.cpp and the tt-llk reference packers:
- *   ttbf8 = Bfp8_b (E8M6), ttbf4 = Bfp4_b (E8M2), ttbf2 = Bfp2_b (E8M0)
+ *   bf8_b = Bfp8_b (E8M6), bf4_b = Bfp4_b (E8M2), bf2_b = Bfp2_b (E8M0)
  *   16-element blocks, one shared 8-bit exponent (bias 127), sign-magnitude.
  *
  * Layouts are identical to the CPU API:
@@ -24,11 +24,11 @@
 namespace {
 
 __device__ __forceinline__ int magnitude_bits_dev(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 7 : (fmt == TTBFP_TTBF4 ? 3 : 1);
+    return fmt == TTBFP_BF8_B ? 7 : (fmt == TTBFP_BF4_B ? 3 : 1);
 }
 
 __device__ __forceinline__ int datum_bytes_dev(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 16 : (fmt == TTBFP_TTBF4 ? 8 : 4);
+    return fmt == TTBFP_BF8_B ? 16 : (fmt == TTBFP_BF4_B ? 8 : 4);
 }
 
 __device__ __forceinline__ float decode_datum(ttbfp_fmt fmt, const uint8_t *data,
@@ -40,9 +40,9 @@ __device__ __forceinline__ float decode_datum(ttbfp_fmt fmt, const uint8_t *data
     const int sbit = 1 << mb;
     const int db = datum_bytes_dev(fmt);
     uint8_t v;
-    if (fmt == TTBFP_TTBF8) {
+    if (fmt == TTBFP_BF8_B) {
         v = data[block_index * db + lane];
-    } else if (fmt == TTBFP_TTBF4) {
+    } else if (fmt == TTBFP_BF4_B) {
         uint8_t b = data[block_index * db + (lane >> 1)];
         v = (lane & 1) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0F);
     } else {

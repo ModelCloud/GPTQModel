@@ -14,13 +14,13 @@ multiplies it. `E8M0` is a scale only — it never appears as a weight value.
 
 ## 1. Naming policy
 
-- **`bf4_b` / `bf8_b`** are this repository's names for the two Tenstorrent
-  block-float formats (§8). They are the vendor spelling `bfloat4_b` /
-  `bfloat8_b` with `bfloat` shortened to `bf`; the `_b` suffix is **kept**
-  because it is load-bearing, not decoration (§8.5). No other provider claims
-  `bf4_b`/`bf8_b` today, and the ttnn spelling lives in one place,
+- **`bf2_b` / `bf4_b` / `bf8_b`** are this repository's names for the three
+  Tenstorrent block-float formats (§8). They are the vendor spelling
+  `bfloat2_b` / `bfloat4_b` / `bfloat8_b` with `bfloat` shortened to `bf`; the
+  `_b` suffix is **kept** because it is load-bearing, not decoration (§8.5).
+  No other provider claims `bf2_b`/`bf4_b`/`bf8_b` today, and the ttnn spelling lives in one place,
   `TT_BLOCKFLOAT_VENDOR_ATTRS` in `gptqmodel/utils/tt_blockfloat_quant.py`.
-- **Vendor spellings** (`bfloat4_b`, `bfloat8_b`) appear only at the
+- **Vendor spellings** (`bfloat2_b`, `bfloat4_b`, `bfloat8_b`) appear only at the
   `getattr(ttnn, ...)` call site.
 - **Standard names are not renamed.** `fp32`, `bf16`, `fp8_e4m3`, `mxfp4` and
   `nvfp4` mean what their specifications say.
@@ -138,12 +138,12 @@ i.e. 16 bytes of packed E2M1 plus one `E8M0` byte.
 The effective NVFP4 multiplier is `local_e4m3 · global`, so it is not a power of
 two and cannot be expressed as an MX scale. A `nvfp4` checkpoint is therefore
 not loadable as `mxfp4` even though both hold E2M1 values, and neither is
-loadable as `bf4_b`/`bf8_b`.
+loadable as `bf2_b`/`bf4_b`/`bf8_b`.
 
 `nvfp8` is dequantized by the same FP8 path as plain `fp8`; the name records the
 checkpoint's declared scale semantics, not a distinct kernel.
 
-## 8. Tenstorrent block floats: `bf4_b` and `bf8_b`
+## 8. Tenstorrent block floats: `bf2_b`, `bf4_b` and `bf8_b`
 
 This is the format this repository quantizes *into*. It is **not** an industry
 format, and the exact definition follows.
@@ -158,17 +158,20 @@ format, and the exact definition follows.
 
 | name | stored mantissa | significant bits | levels per binade | step | codes | representable range |
 | --- | --- | --- | --- | --- | --- | --- |
+| `bf2_b` | 0 | 1 | 1 | `2^e` | 0…2 (3) | `±1 · 2^e` |
 | `bf4_b` | 2 | 3 | 4 | `2^e / 4` | 0…14 (15) | `±1.75 · 2^e` |
 | `bf8_b` | 6 | 7 | 64 | `2^e / 64` | 0…254 (255) | `±1.984375 · 2^e` |
 
-So `bf4_b` holds **4 levels inside one binade** — `0.5, 0.625, 0.75, 0.875`
-times `2^e` for the binade starting at `2^e` — and `bf8_b` holds 64.
+So `bf2_b` holds a single nonzero magnitude inside one binade — just
+`1 · 2^e`, with the two signs and zero giving three codes — `bf4_b` holds
+**4 levels inside one binade** — `0.5, 0.625, 0.75, 0.875` times `2^e` for the
+binade starting at `2^e` — and `bf8_b` holds 64.
 
 ### 8.2 Exact encode / decode
 
 ```
-offset = 2 · levels − 1              # 7 for bf4_b, 127 for bf8_b
-levels = 2^(stored mantissa bits)     # 4 for bf4_b, 64 for bf8_b
+offset = 2 · levels − 1              # 1 for bf2_b, 7 for bf4_b, 127 for bf8_b
+levels = 2^(stored mantissa bits)     # 1 for bf2_b, 4 for bf4_b, 64 for bf8_b
 
 decode:  value = (code − offset) / levels · 2^exponent
 encode:  code  = clamp(round(value / 2^exponent · levels), −offset, +offset) + offset
@@ -181,12 +184,13 @@ round-to-nearest-even, matching the unpack stage.
 
 | name | bits per value | exponent amortized | effective bytes/weight |
 | --- | --- | --- | --- |
+| `bf2_b` | 2 | 8 / 16 = 0.5 | **0.3125** |
 | `bf4_b` | 4 | 8 / 16 = 0.5 | **0.5625** |
 | `bf8_b` | 8 | 8 / 16 = 0.5 | **1.0625** |
 
 ### 8.4 Weights versus calculations
 
-`bf4_b` and `bf8_b` are **storage formats only**. The Blackhole unpack stage expands
+`bf2_b`, `bf4_b` and `bf8_b` are **storage formats only**. The Blackhole unpack stage expands
 them to BF16 in the data path (`L1 → unpack → source registers → FPU`), so there
 is no dequant op in the graph — but there is also no block-float arithmetic
 unit. The multiply is always BF16 or FP32. This is measured, not assumed: see
@@ -242,8 +246,10 @@ call site `bfloat8_b` reads like an 8-bit bfloat — there is no such type — a
 easily mistaken for OCP FP8 E4M3, which it is not; hence the short form here.
 
 `bfloat2_b` (`Bfp2_b`, BFP2) exists in the C++ enum and in Tenstorrent
-documentation, but the `ttnn` build on this host does not expose it, so it is
-not defined here.
+documentation, but the `ttnn` build on this host does not expose it, so the
+TTNN backend does not use it. The CPU kernels in
+[`gptqmodel_ext/ttbfp/`](../gptqmodel_ext/ttbfp/) do implement it as `bf2_b`;
+see [`docs/tt-blockfloat-cpu.md`](../docs/tt-blockfloat-cpu.md).
 
 ### 8.6 `bf2_b`, the degenerate member
 
@@ -260,7 +266,9 @@ unpack — so the cost of the grid can be measured.
 
 `ttnn` exposes no `bfloat2_b` attribute, so there is no vendor spelling and no
 checkpoint can contain it. The HIP emulation kernels do not implement it, and a
-`bits == 2` module takes the torch path.
+`bits == 2` module takes the torch path. The CPU kernels in
+[`gptqmodel_ext/ttbfp/`](../gptqmodel_ext/ttbfp/) do implement `bf2_b`, so the
+format can also be executed and timed without Tenstorrent hardware.
 
 ## 9. `nf12`
 
@@ -291,7 +299,7 @@ implement. They are numerically the same dtype, computed differently:
 | FP8 | SM89+, and via TTNN unpack for storage | widened to BF16/FP32 before the multiply |
 | FP4 (E2M1) | SM100+ | unpacked to BF16, or decoded through a lookup table |
 | MX/NV formats | SM100+ (NVFP4), limited elsewhere | dequantized to the target dtype on CPU or GPU |
-| `bf4_b`/`bf8_b` | never (storage only) | hardware unpack to BF16 |
+| `bf2_b`/`bf4_b`/`bf8_b` | never (storage only) | hardware unpack to BF16 |
 
 An emulated multiply is **not** bit-identical to a native one: the emulation
 rounds to the compute dtype at the widening step, so results can differ in the

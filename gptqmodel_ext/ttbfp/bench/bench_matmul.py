@@ -48,7 +48,7 @@ def bench_matmul(fmt, M, K, N):
     t_deq = cpu_ms(lambda: ttbfp.unpack(e, d, fmt, cols=N), reps)
     t_blas = cpu_ms(lambda: a @ b, reps)
 
-    name = "ttbf8" if fmt == 8 else "ttbf4"
+    name = "bf8_b" if fmt == 8 else "bf4_b"
     flops = 2.0 * M * K * N
     print(f"{name}  M={M:<4} K={K:<5} N={N:<5}")
     print(f"  row-major packed   : {t_row:8.3f} ms  {flops/(t_row*1e6):7.2f} GFLOP/s")
@@ -68,7 +68,7 @@ def bench_pack(fmt, rows=4096, cols=4096):
     t_tr = cpu_ms(lambda: ttbfp.transpose_packed(e, d, fmt), 5)
     t_unpack = cpu_ms(lambda: ttbfp.unpack(e, d, fmt, cols=cols), 5)
     mb = x.nbytes / 1e6
-    name = "ttbf8" if fmt == 8 else "ttbf4"
+    name = "bf8_b" if fmt == 8 else "bf4_b"
     print(f"pack    {name} {rows}x{cols}: {t_pack:8.3f} ms ({mb/t_pack/1e3:6.2f} GB/s in)")
     print(f"prepack {name} {rows}x{cols}: {t_tr:8.3f} ms")
     print(f"unpack  {name} {rows}x{cols}: {t_unpack:8.3f} ms ({mb/t_unpack/1e3:6.2f} GB/s out)")
@@ -79,11 +79,11 @@ def main():
           f"omp_threads={os.environ.get('OMP_NUM_THREADS', 'default')}  "
           f"wait_policy={os.environ.get('OMP_WAIT_POLICY', 'default')}")
     print()
-    for fmt in (ttbfp.TTBF8, ttbfp.TTBF4):
+    for fmt in (ttbfp.BF8_B, ttbfp.BF4_B):
         for M in (1, 4, 16, 64):
             bench_matmul(fmt, M, 4096, 4096)
             print()
-    for fmt in (ttbfp.TTBF8, ttbfp.TTBF4):
+    for fmt in (ttbfp.BF8_B, ttbfp.BF4_B):
         bench_pack(fmt)
         print()
 

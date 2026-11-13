@@ -501,15 +501,14 @@ Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`
 ### Tenstorrent block floats on CPU
 
 [`gptqmodel_ext/ttbfp/`](gptqmodel_ext/ttbfp/) is a standalone, bit-exact CPU
-implementation of Tenstorrent's `ttbf8` / `ttbf4` / `ttbf2` block-float
+implementation of Tenstorrent's `bf8_b` / `bf4_b` / `bf2_b` block-float
 formats, so models and kernels that use them can run without Tenstorrent
-hardware.  It ships a quantizer validated against the upstream `tt-llk`
+hardware. It ships a quantizer validated against the upstream `tt-llk`
 helpers, fused dequantize+GEMM microkernels for scalar / AVX2+FMA / AVX-512,
-block-major and int8 kernel-native layouts, and a 252-test bitwise-parity
-suite.  It is not
-built by `setup.py` and is not imported by `gptqmodel`; build it with
-`make -C gptqmodel_ext/ttbfp`.  See
-[`docs/ttbfp-cpu-kernels.md`](docs/ttbfp-cpu-kernels.md) for the dtype
+block-major and int8 kernel-native layouts, and a 280-test bitwise-parity
+suite. It is not built by `setup.py` and is not imported by `gptqmodel`; build
+it with `make -C gptqmodel_ext/ttbfp`. See
+[`docs/tt-blockfloat-cpu.md`](docs/tt-blockfloat-cpu.md) for the dtype
 naming, dispatch flow and measured performance.
 
 ### Native MLX quantization on Apple silicon

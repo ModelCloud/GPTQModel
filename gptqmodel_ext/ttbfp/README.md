@@ -10,11 +10,11 @@ standalone library: `setup.py` does not build it and it is not imported by the
 
 It provides:
 
-* bit-exact **quantize / dequantize** for `ttbf8`, `ttbf4` and `ttbf2`;
+* bit-exact **quantize / dequantize** for `bf8_b`, `bf4_b` and `bf2_b`;
 * a fused **dequantize + GEMM** (`C = A @ dequant(B)`) that never materializes
   the weights in fp32;
-* exact **32×32 TT L1 tile** pack/unpack (1088 B for `ttbf8`, 576 B for
-  `ttbf4`, 320 B for `ttbf2`);
+* exact **32×32 TT L1 tile** pack/unpack (1088 B for `bf8_b`, 576 B for
+  `bf4_b`, 320 B for `bf2_b`);
 * portable scalar, x86 AVX2+FMA, and x86 AVX-512 paths selected at runtime;
 * OpenMP parallelism over independent output tiles / rows.
 * optional PyTorch CPU helpers (`ttbfp.torch_ops`);
@@ -27,24 +27,27 @@ helpers (`pack.py`, `unpack.py`, `bfp_format_utils.py`) over 200 random seeds ×
 
 ---
 
-## 1. Naming: why `ttbf8` / `ttbf4` / `ttbf2`
+## 1. Naming: `bf8_b` / `bf4_b` / `bf2_b`
 
 Tenstorrent's block floats are **not** an industry-standard format.  Block
 floating point itself is an old, generic idea, but the specific TT encoding
 differs from the standardized block-scaled formats:
 
-| | Tenstorrent `ttbf8` | OCP MXFP8 (industry standard) |
+| | Tenstorrent `bf8_b` | OCP MXFP8 (industry standard) |
 |---|---|---|
 | block size | **16** datums | 32 datums |
 | scale | shared **8-bit exponent**, bias 127 (or 5-bit/bias 15 for the `a` variants) | **E8M0** scale byte per 32 |
 | element | sign + magnitude, 7 magnitude bits, **no exponent field** | FP8 E4M3 or E5M2 (sign + exponent + mantissa) |
 | packing | exponents stored separately, then mantissas | scale section + element bytes |
-| rounding | bf16 truncation, then block-normalize + guard-bit round-to-nearest/ties-away; `ttbf4` truncates the 7-bit magnitude to 3 bits | RNE to the element format |
+| rounding | bf16 truncation, then block-normalize + guard-bit round-to-nearest/ties-away; `bf4_b` truncates the 7-bit magnitude to 3 bits | RNE to the element format |
 
 Consequences:
 
-* `ttbf8`/`ttbf4` are **vendor-specific**; do not call them `bf8`/`bf4` in a
-  portable API (those names collide with FP8/other vendors' formats).
+* `bf8_b`/`bf4_b`/`bf2_b` are **vendor-specific** and are this repository's
+  canonical names, defined in `hw/dtypes.md`.  The `_b` suffix is
+  load-bearing: the un-suffixed `Bfp8`/`Bfp4`/`Bfp2` are the 5-bit-exponent
+  FP16 family.  The older `ttbf8`/`ttbf4`/`ttbf2` spellings are deprecated
+  aliases.
 * The OCP **MX** formats (`mxfp8_e4m3`, `mxfp8_e5m2`, `mxfp4_e2m1`, `mxint8`,
   …) are the industry-standard block-scaled family — and they are **not native
   to P300C** (they are Quasar-specific in `tt-llk`).
@@ -53,11 +56,11 @@ Consequences:
 
 Recommended names:
 
-| portable | TT software name | TT marketing | meaning |
+| canonical | TT software name | TT marketing | meaning |
 |---|---|---|---|
-| `ttbf8` | `Bfp8_b` | BLOCKFP8 | 8-bit shared exp, 1+7 bits/datum, block 16 |
-| `ttbf4` | `Bfp4_b` | BLOCKFP4 | 8-bit shared exp, 1+3 bits/datum, block 16 |
-| `ttbf2` | `Bfp2_b` | BLOCKFP2 | 8-bit shared exp, 1+1 bits/datum, block 16 |
+| `bf8_b` | `Bfp8_b` | BLOCKFP8 | 8-bit shared exp, 1+7 bits/datum, block 16 |
+| `bf4_b` | `Bfp4_b` | BLOCKFP4 | 8-bit shared exp, 1+3 bits/datum, block 16 |
+| `bf2_b` | `Bfp2_b` | BLOCKFP2 | 8-bit shared exp, 1+1 bits/datum, block 16 |
 | `ttbf8a` | `Bfp8` | BFP8a | 5-bit shared exp (FP16 family), 1+7 bits/datum |
 | `ttbf4a` | `Bfp4` | BFP4a | 5-bit shared exp, 1+3 bits/datum |
 | `ttbf2a` | `Bfp2` | BFP2a | 5-bit shared exp, 1+1 bits/datum |
@@ -87,14 +90,14 @@ Vector                VTF19, VFP32
 Expanded, with the standard/non-standard classification:
 
 > This table is about the **hardware**.  The library in this repository
-> implements `ttbf8`, `ttbf4` and `ttbf2`; the other rows are context for naming and
+> implements `bf8_b`, `bf4_b` and `bf2_b`; the other rows are context for naming and
 > for deciding what is safe to call "standard".
 
 | portable name | TT name(s) | native P300C Tensix? | industry standard? | notes |
 |---|---|---|---|---|
-| `ttbf8` | `Bfp8_b`, BLOCKFP8 | **yes** | **no — TT-specific** | E8M6, 16-datum block |
-| `ttbf4` | `Bfp4_b`, BLOCKFP4 | **yes** | **no — TT-specific** | E8M2 |
-| `ttbf2` | `Bfp2_b`, BLOCKFP2 | **yes** | **no — TT-specific** | E8M0 |
+| `bf8_b` | `Bfp8_b`, BLOCKFP8 | **yes** | **no — TT-specific** | E8M6, 16-datum block |
+| `bf4_b` | `Bfp4_b`, BLOCKFP4 | **yes** | **no — TT-specific** | E8M2 |
+| `bf2_b` | `Bfp2_b`, BLOCKFP2 | **yes** | **no — TT-specific** | E8M0 |
 | `ttbf8a` | `Bfp8` (BFP8a) | yes (LLK enum) | **no — TT-specific** | E5M6, FP16-family |
 | `ttbf4a` | `Bfp4` (BFP4a) | yes (LLK enum) | **no — TT-specific** | E5M2 |
 | `ttbf2a` | `Bfp2` (BFP2a) | yes (LLK enum) | **no — TT-specific** | E5M0 |
@@ -146,14 +149,14 @@ decode:  value = sign * magnitude * 2^(E - 126 - magnitude_bits)
 
 | format | datum bits | magnitude bits | exponent offset | bytes / 16 datums |
 |---|---|---|---|---|
-| `ttbf8` | 8 | 7 | 133 | 16 |
-| `ttbf4` | 4 | 3 | 129 | 8 |
-| `ttbf2` | 2 | 1 | 127 | 4 |
+| `bf8_b` | 8 | 7 | 133 | 16 |
+| `bf4_b` | 4 | 3 | 129 | 8 |
+| `bf2_b` | 2 | 1 | 127 | 4 |
 
-`ttbf4` packs two datums per byte, **even index in the low nibble**.
-`ttbf2` packs four datums per byte, lowest index in the low bits.
+`bf4_b` packs two datums per byte, **even index in the low nibble**.
+`bf2_b` packs four datums per byte, lowest index in the low bits.
 
-Packing (`ttbf8`; `ttbf4`/`ttbf2` truncate the 7-bit magnitude afterwards):
+Packing (`bf8_b`; `bf4_b`/`bf2_b` truncate the 7-bit magnitude afterwards):
 
 1. truncate fp32 to bf16 (drop the low 16 bits);
 2. extract sign, 8-bit exponent, and a 7-bit mantissa `((bf16 & 0x7F) >> 1) | 0x40`;
@@ -161,7 +164,7 @@ Packing (`ttbf8`; `ttbf4`/`ttbf2` truncate the 7-bit magnitude afterwards):
 4. `delta = shared - elem_exp`; `shift = min(delta, 8)`;
    `guard = (mant >> min(delta-1, 8)) & 1` when `delta > 0`;
 5. `q8 = ((mant >> shift) + guard) & 0x7F`;
-6. `ttbf4`: `q4 = q8 >> 4`; `ttbf2`: `q2 = q8 >> 6`;
+6. `bf4_b`: `q4 = q8 >> 4`; `bf2_b`: `q2 = q8 >> 6`;
 7. datum = `(sign << magnitude_bits) | q`, but **a zero magnitude drops the
    sign bit** (a sign-only datum decodes to −0 / −inf in hardware).
 
@@ -178,8 +181,8 @@ For a row-major `[rows, cols]` tensor, `nblk = ceil(cols / 16)`:
 
 ```
 exps[rows * nblk]                 # one byte per 16-element block
-data[rows * nblk * 16]            # ttbf8
-data[rows * nblk * 8]             # ttbf4
+data[rows * nblk * 16]            # bf8_b
+data[rows * nblk * 8]             # bf4_b
 ```
 
 `exps` and `data` are separate buffers (struct-of-arrays).  Padding in a
@@ -203,8 +206,8 @@ Now the k loop is a sequential stream, and the kernel runs ~1.4-1.5x faster
 for realistic batch sizes.  Pack once, multiply many times:
 
 ```c
-ttbfp_transpose_packed(TTBFP_TTBF8, exps, data, K, N, exps_t, data_t);
-ttbfp_matmul_prepacked(TTBFP_TTBF8, A, lda, exps_t, data_t, M, K, N, C, ldc, 1);
+ttbfp_transpose_packed(TTBFP_BF8_B, exps, data, K, N, exps_t, data_t);
+ttbfp_matmul_prepacked(TTBFP_BF8_B, A, lda, exps_t, data_t, M, K, N, C, ldc, 1);
 ```
 
 The byte counts are identical to the flat layout (it is a pure permutation).
@@ -212,7 +215,7 @@ The byte counts are identical to the flat layout (it is a pure permutation).
 ### int8 kernel-native layout (fastest at every M)
 
 The TT datum is sign-magnitude: one sign bit plus magnitude bits, which costs
-8 instructions to decode for ttbf8 and 12 for ttbf4.  Storing `sign*magnitude`
+8 instructions to decode for bf8_b and 12 for bf4_b.  Storing `sign*magnitude`
 as a two's-complement int8 instead makes the decode `vpmovsxbd` + `vcvtdq2ps` +
 `vmulps` — 3 instructions — and the decoded values are identical, so every path
 stays bitwise equal.
@@ -225,22 +228,22 @@ registers and issue slots to use a 4x4 tile, which cuts A-panel traffic 4x.
 Measured 1.2x over the sign-magnitude layout at M >= 16 and 1.7x at M = 1:
 
 ```c
-ttbfp_convert_s8(TTBFP_TTBF8, exps, data, K, N, exps_t, s8);   /* once */
-ttbfp_matmul_prepacked_s8(TTBFP_TTBF8, A, lda, exps_t, s8, M, K, N, C, ldc, 1);
+ttbfp_convert_s8(TTBFP_BF8_B, exps, data, K, N, exps_t, s8);   /* once */
+ttbfp_matmul_prepacked_s8(TTBFP_BF8_B, A, lda, exps_t, s8, M, K, N, C, ldc, 1);
 ```
 
 ```python
-exps_t, s8 = ttbfp.prepack_s8(w, "ttbf4")
-c = ttbfp.matmul_prepacked_s8(a, exps_t, s8, "ttbf4", cols=N)
+exps_t, s8 = ttbfp.prepack_s8(w, "bf4_b")
+c = ttbfp.matmul_prepacked_s8(a, exps_t, s8, "bf4_b", cols=N)
 ```
 
-ttbf8 needs 16 bytes per block either way; ttbf4 doubles from 8 to 16, which is
+bf8_b needs 16 bytes per block either way; bf4_b doubles from 8 to 16, which is
 hidden at large M (compute-bound) and still wins at small M.
 
 ### TT tile layout
 
 `ttbfp_tile_pack` / `ttbfp_tile_unpack` use the exact 32×32 L1 tile layout:
-64 exponent bytes followed by 1024 (`ttbf8`) or 512 (`ttbf4`) datum bytes.
+64 exponent bytes followed by 1024 (`bf8_b`) or 512 (`bf4_b`) datum bytes.
 Faces are 16×16 row-major in the order top-left, top-right, bottom-left,
 bottom-right — the layout produced by tt-metal's `tilize_block`.
 
@@ -292,18 +295,18 @@ the actual tt-llk reference implementation.
 ```c
 #include "ttbfp.h"
 
-size_t eb = ttbfp_exps_bytes(TTBFP_TTBF8, rows, cols);
-size_t db = ttbfp_data_bytes(TTBFP_TTBF8, rows, cols);
+size_t eb = ttbfp_exps_bytes(TTBFP_BF8_B, rows, cols);
+size_t db = ttbfp_data_bytes(TTBFP_BF8_B, rows, cols);
 
-ttbfp_quantize(TTBFP_TTBF8, src, rows, cols, exps, data);
-ttbfp_dequantize(TTBFP_TTBF8, exps, data, rows, cols, dst, 1);
+ttbfp_quantize(TTBFP_BF8_B, src, rows, cols, exps, data);
+ttbfp_dequantize(TTBFP_BF8_B, exps, data, rows, cols, dst, 1);
 
 // C[M,N] = A[M,K] @ dequant(B)[K,N], B packed (row-major layout)
-ttbfp_matmul(TTBFP_TTBF8, A, K, exps, data, M, K, N, C, N, 1);
+ttbfp_matmul(TTBFP_BF8_B, A, K, exps, data, M, K, N, C, N, 1);
 
 // Same, with B in the block-major layout: ~1.4-1.5x faster.
-ttbfp_transpose_packed(TTBFP_TTBF8, exps, data, K, N, exps_t, data_t);
-ttbfp_matmul_prepacked(TTBFP_TTBF8, A, K, exps_t, data_t, M, K, N, C, N, 1);
+ttbfp_transpose_packed(TTBFP_BF8_B, exps, data, K, N, exps_t, data_t);
+ttbfp_matmul_prepacked(TTBFP_BF8_B, A, K, exps_t, data_t, M, K, N, C, N, 1);
 ```
 
 `ttbfp_matmul_bf16` takes A as bf16 bit patterns (`uint16_t`).
@@ -314,15 +317,15 @@ ttbfp_matmul_prepacked(TTBFP_TTBF8, A, K, exps_t, data_t, M, K, N, C, N, 1);
 import numpy as np, ttbfp
 
 w = np.random.randn(4096, 4096).astype(np.float32)
-exps, data = ttbfp.pack(w, ttbfp.TTBF8)       # or "ttbf8"
-w_hat = ttbfp.unpack(exps, data, ttbfp.TTBF8, cols=4096)
+exps, data = ttbfp.pack(w, ttbfp.BF8_B)       # or "bf8_b"
+w_hat = ttbfp.unpack(exps, data, ttbfp.BF8_B, cols=4096)
 
 a = np.random.randn(1, 4096).astype(np.float32)
-c = ttbfp.matmul(a, exps, data, ttbfp.TTBF8, cols=4096)
+c = ttbfp.matmul(a, exps, data, ttbfp.BF8_B, cols=4096)
 
 # Faster: prepack B once into the block-major layout.
-exps_t, data_t = ttbfp.pack_transposed(w, ttbfp.TTBF8)
-c = ttbfp.matmul_prepacked(a, exps_t, data_t, ttbfp.TTBF8, cols=4096)
+exps_t, data_t = ttbfp.pack_transposed(w, ttbfp.BF8_B)
+c = ttbfp.matmul_prepacked(a, exps_t, data_t, ttbfp.BF8_B, cols=4096)
 ```
 
 `ttbfp.pack` returns `exps (rows, nblk)` and `data (rows, nblk*16 or nblk*8)`.
@@ -336,9 +339,9 @@ import torch
 from ttbfp import torch_ops
 
 w = torch.randn(4096, 4096)
-exps, data = torch_ops.pack(w, "ttbf8")
-y = torch_ops.unpack(exps, data, "ttbf8", cols=4096)
-c = torch_ops.matmul(torch.randn(1, 4096), exps, data, "ttbf8", cols=4096)
+exps, data = torch_ops.pack(w, "bf8_b")
+y = torch_ops.unpack(exps, data, "bf8_b", cols=4096)
+c = torch_ops.matmul(torch.randn(1, 4096), exps, data, "bf8_b", cols=4096)
 ```
 
 `torch_ops.pack_transposed` / `torch_ops.matmul_prepacked` are the
@@ -353,9 +356,9 @@ dequantize, and fused-matmul kernels for NVIDIA GPUs.  Device pointers and a
 library:
 
 ```c
-ttbfp_cuda_quantize(TTBFP_TTBF8, d_src, rows, cols, d_exps, d_data, stream);
-ttbfp_cuda_dequantize(TTBFP_TTBF8, d_exps, d_data, rows, cols, d_dst, 1, stream);
-ttbfp_cuda_matmul(TTBFP_TTBF8, d_A, K, d_exps, d_data, M, K, N, d_C, N, 1, stream);
+ttbfp_cuda_quantize(TTBFP_BF8_B, d_src, rows, cols, d_exps, d_data, stream);
+ttbfp_cuda_dequantize(TTBFP_BF8_B, d_exps, d_data, rows, cols, d_dst, 1, stream);
+ttbfp_cuda_matmul(TTBFP_BF8_B, d_A, K, d_exps, d_data, M, K, N, d_C, N, 1, stream);
 ```
 
 The CUDA source is compile-checked (PTX) in this repository, but it has not
@@ -410,29 +413,29 @@ Single thread, `K = N = 4096`, process CPU time, same process, same data:
 
 | format | M | before | row-major | block-major | int8 | speedup |
 |---|---|---|---|---|---|---|
-| ttbf8 | 1 | 4.60 ms | 2.22 ms | 1.34 ms | **0.79 ms** | **5.8x** |
-| ttbf8 | 4 | 3.87 ms | 2.74 ms | 2.21 ms | **1.67 ms** | **2.3x** |
-| ttbf8 | 16 | 15.55 ms | 10.76 ms | 7.58 ms | **6.52 ms** | **2.4x** |
-| ttbf8 | 64 | 62.12 ms | 43.48 ms | 30.27 ms | **26.10 ms** | **2.4x** |
-| ttbf4 | 1 | 2.84 ms | 1.92 ms | 1.81 ms | **0.80 ms** | **3.6x** |
-| ttbf4 | 4 | 3.41 ms | 2.75 ms | 2.59 ms | **1.67 ms** | **2.0x** |
-| ttbf4 | 16 | 13.70 ms | 10.78 ms | 7.35 ms | **6.47 ms** | **2.1x** |
-| ttbf4 | 64 | 54.73 ms | 43.25 ms | 29.31 ms | **25.90 ms** | **2.1x** |
+| bf8_b | 1 | 4.60 ms | 2.22 ms | 1.34 ms | **0.79 ms** | **5.8x** |
+| bf8_b | 4 | 3.87 ms | 2.74 ms | 2.21 ms | **1.67 ms** | **2.3x** |
+| bf8_b | 16 | 15.55 ms | 10.76 ms | 7.58 ms | **6.52 ms** | **2.4x** |
+| bf8_b | 64 | 62.12 ms | 43.48 ms | 30.27 ms | **26.10 ms** | **2.4x** |
+| bf4_b | 1 | 2.84 ms | 1.92 ms | 1.81 ms | **0.80 ms** | **3.6x** |
+| bf4_b | 4 | 3.41 ms | 2.75 ms | 2.59 ms | **1.67 ms** | **2.0x** |
+| bf4_b | 16 | 13.70 ms | 10.78 ms | 7.35 ms | **6.47 ms** | **2.1x** |
+| bf4_b | 64 | 54.73 ms | 43.25 ms | 29.31 ms | **25.90 ms** | **2.1x** |
 
 With 8 threads and `bench/ab_compare.py`, the int8 layout against the original
-row-major release gives 4.5x / 2.2x / 2.2x / 2.4x for ttbf8 at M = 1 / 4 /
-16 / 64, and 3.5x / 2.1x / 2.2x / 2.2x for ttbf4.  All variants are bitwise
+row-major release gives 4.5x / 2.2x / 2.2x / 2.4x for bf8_b at M = 1 / 4 /
+16 / 64, and 3.5x / 2.1x / 2.2x / 2.2x for bf4_b.  All variants are bitwise
 equal.
 
-`ttbf2` (`Bfp2_b`) was added after the original release, so it has no "before"
+`bf2_b` (`Bfp2_b`) was added after the original release, so it has no "before"
 column.  Same host, same shape:
 
 | format | M | block-major | int8 |
 |---|---|---|---|
-| ttbf2 | 1 | 2.33 ms | **0.80 ms** |
-| ttbf2 | 4 | 3.70 ms | **1.60 ms** |
-| ttbf2 | 16 | 8.08 ms | **6.50 ms** |
-| ttbf2 | 64 | 30.89 ms | **25.74 ms** |
+| bf2_b | 1 | 2.33 ms | **0.80 ms** |
+| bf2_b | 4 | 3.70 ms | **1.60 ms** |
+| bf2_b | 16 | 8.08 ms | **6.50 ms** |
+| bf2_b | 64 | 30.89 ms | **25.74 ms** |
 
 The int8 layout stores 16 bytes per block for every format, so its cost is the
 same for all three; the sign-magnitude layout shrinks with the datum and its
@@ -498,8 +501,8 @@ uses `time.process_time`, which is stable.  Two OpenMP settings matter:
 
 ## 7. Limitations / roadmap
 
-* Only the 8-bit-exponent `_b` variants are implemented (`ttbf8`, `ttbf4`).
-  The 5-bit-exponent `ttbf8a`/`ttbf4a`/`ttbf2a` variants and `ttbf2` are
+* All three 8-bit-exponent `_b` variants are implemented (`bf8_b`, `bf4_b`,
+  `bf2_b`).  The 5-bit-exponent `ttbf8a`/`ttbf4a`/`ttbf2a` variants are
   straightforward extensions of the same block quantizer.
 * No sub-tile geometries (TT pads sub-tiles to 16 exponent bytes; this
   library assumes 16-element blocks and a full 32×32 tile for tile helpers).

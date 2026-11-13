@@ -50,7 +50,7 @@ SHAPES = [(1, 16), (2, 1), (1, 15), (3, 16), (5, 17), (7, 31), (4, 32),
           (9, 48), (32, 32), (33, 80), (6, 33)]
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_pack_matches_reference(fmt, shape, seed):
@@ -64,7 +64,7 @@ def test_pack_matches_reference(fmt, shape, seed):
     np.testing.assert_array_equal(d_c, d_ref)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("ftz", [True, False])
 def test_unpack_matches_reference(fmt, shape, ftz):
@@ -76,7 +76,7 @@ def test_unpack_matches_reference(fmt, shape, ftz):
     np.testing.assert_array_equal(bits(y_c), bits(y_ref))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_pack_is_stable_on_zeros(fmt):
     x = np.zeros((4, 64), dtype=np.float32)
     e, d = ttbfp.pack(x, fmt)
@@ -241,7 +241,7 @@ def tempfile_dir():
     return tempfile.mkdtemp(prefix="ttbfp-test-")
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 @pytest.mark.parametrize("shape", [(4, 64, 48), (1, 32, 16), (7, 33, 80),
                                    (16, 96, 128), (5, 17, 31)])
 def test_prepacked_matches_rowmajor(fmt, shape):
@@ -257,7 +257,7 @@ def test_prepacked_matches_rowmajor(fmt, shape):
     np.testing.assert_array_equal(bits(c1), bits(c0))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_transpose_packed_roundtrip(fmt):
     rng = np.random.default_rng(11)
     w = rng.standard_normal((37, 53)).astype(np.float32)
@@ -275,7 +275,7 @@ def test_transpose_packed_roundtrip(fmt):
     np.testing.assert_array_equal(d2, d)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_pack_transposed_matches_reference(fmt):
     rng = np.random.default_rng(12)
     w = rng.standard_normal((9, 40)).astype(np.float32)
@@ -287,7 +287,7 @@ def test_pack_transposed_matches_reference(fmt):
         dt, d.reshape(9, -1, db).transpose(1, 0, 2).reshape(-1, 9 * db))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 @pytest.mark.parametrize("shape", [(1, 64, 64), (2, 33, 48), (4, 128, 256),
                                    (7, 17, 31), (16, 96, 80), (5, 1, 16),
                                    (33, 48, 32)])
@@ -307,7 +307,7 @@ def test_prepacked_s8_matches_rowmajor(fmt, shape):
     np.testing.assert_array_equal(bits(c2), bits(c0))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_convert_s8_preserves_values(fmt):
     """int8 datums must decode to exactly the same floats."""
     rng = np.random.default_rng(3)

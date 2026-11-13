@@ -9,7 +9,7 @@ import ttbfp
 from ttbfp import torch_ops
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_torch_pack_unpack_matches_numpy(fmt):
     rng = np.random.default_rng(0)
     w = rng.standard_normal((7, 33)).astype(np.float32)
@@ -22,7 +22,7 @@ def test_torch_pack_unpack_matches_numpy(fmt):
     np.testing.assert_array_equal(y_t.numpy(), y_np)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_torch_matmul_matches_numpy(fmt):
     rng = np.random.default_rng(1)
     a = rng.standard_normal((3, 64)).astype(np.float32)
@@ -34,7 +34,7 @@ def test_torch_matmul_matches_numpy(fmt):
     np.testing.assert_array_equal(c_t.numpy(), c_np)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_torch_prepacked_matches_numpy(fmt):
     rng = np.random.default_rng(2)
     a = rng.standard_normal((5, 64)).astype(np.float32)
@@ -49,7 +49,7 @@ def test_torch_prepacked_matches_numpy(fmt):
     np.testing.assert_array_equal(c_t.numpy(), c_np)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
 def test_torch_prepacked_s8_matches_numpy(fmt):
     rng = np.random.default_rng(4)
     a = rng.standard_normal((3, 64)).astype(np.float32)

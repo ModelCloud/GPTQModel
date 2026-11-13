@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp_cuda - optional CUDA kernels for ttbf8 / ttbf4 / ttbf2.
+ * ttbfp_cuda - optional CUDA kernels for bf8_b / bf4_b / bf2_b.
  *
  * These kernels reproduce exactly the same numerics as src/ttbfp_cpu.cpp.
  * They are intended for non-Tenstorrent NVIDIA GPUs; the CPU library remains

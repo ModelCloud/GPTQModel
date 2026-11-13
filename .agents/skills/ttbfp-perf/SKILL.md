@@ -1,6 +1,6 @@
 ---
 name: ttbfp-perf
-description: Measure, profile, or optimize the ttbfp CPU kernels (Tenstorrent ttbf8/ttbf4/ttbf2 block floats) under gptqmodel_ext/ttbfp/ - running the suite, reporting throughput, A/B comparing builds, or editing gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp. Use when a task concerns ttbfp performance, thread or tile tuning, or a reported slowdown. Not for questions about the TT block-float bit layout or dtype naming; those are answered in gptqmodel_ext/ttbfp/README.md.
+description: Measure, profile, or optimize the ttbfp CPU kernels (Tenstorrent bf8_b/bf4_b/bf2_b block floats) under gptqmodel_ext/ttbfp/ - running the suite, reporting throughput, A/B comparing builds, or editing gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp. Use when a task concerns ttbfp performance, thread or tile tuning, or a reported slowdown. Not for questions about the TT block-float bit layout or dtype naming; those are answered in gptqmodel_ext/ttbfp/README.md.
 ---
 
 # ttbfp performance work
@@ -52,8 +52,8 @@ figure without them is not reproducible.
 - **Quantizer stays bit-exact with tt-llk.** After touching encode/decode,
   run `gptqmodel_ext/ttbfp/tools/verify_against_tt.py` (needs torch); it compares against the
   real upstream packers.
-- **Names are `ttbf8` / `ttbf4`.** They are Tenstorrent-specific, not OCP MX.
-  Do not rename them to `bf8`/`bf4`.
+- **Names are `bf8_b` / `bf4_b` / `bf2_b`.** They are Tenstorrent-specific,
+  not OCP MX. Do not rename them to `bf8`/`bf4`/`bf2`.
 
 ## Where the time goes
 
@@ -136,7 +136,7 @@ TTBFP_FORCE_SCALAR=1 ...                         # reference path
 
 ```bash
 make -C gptqmodel_ext/ttbfp            # libttbfp.so
-make -C gptqmodel_ext/ttbfp test       # 174 tests, includes bitwise parity
+make -C gptqmodel_ext/ttbfp test       # 252 tests, includes bitwise parity
 make -C gptqmodel_ext/ttbfp bench      # microbenchmarks
 make -C gptqmodel_ext/ttbfp cuda       # optional CUDA library (needs nvcc + GPU)
 ```
