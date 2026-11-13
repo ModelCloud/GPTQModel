@@ -25,6 +25,7 @@ from typing import Optional
 import torch
 
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -92,6 +93,7 @@ _EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
