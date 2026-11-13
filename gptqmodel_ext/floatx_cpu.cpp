@@ -1,16 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
-#include <ATen/Parallel.h>
-#include <c10/util/BFloat16.h>
-#include <c10/util/Float8_e4m3fn.h>
-#include <c10/util/Float8_e4m3fnuz.h>
-#include <c10/util/Float8_e5m2.h>
-#include <c10/util/Float8_e5m2fnuz.h>
-#include <c10/util/Float8_e8m0fnu.h>
-#include <c10/util/Half.h>
-#include <torch/extension.h>
-#include <torch/library.h>
+#include "torch_stable_compat.h"
 
 #include <algorithm>
 #include <array>
@@ -191,12 +182,12 @@ ScaleSpec1D make_scale_spec_1d(
   TORCH_CHECK(scale.is_contiguous(), "scale tensor must be contiguous");
 
   spec.ptr = scale.const_data_ptr<float>();
-  if (scale.ndimension() == 0) {
+  if (scale.dim() == 0) {
     spec.layout = ScaleLayout1D::kScalar;
     return spec;
   }
 
-  TORCH_CHECK(scale.ndimension() == 1, "1D dequantization only supports scalar or 1D scale tensors");
+  TORCH_CHECK(scale.dim() == 1, "1D dequantization only supports scalar or 1D scale tensors");
   spec.length = scale.numel();
   if (spec.length == result_len) {
     spec.layout = ScaleLayout1D::kVector;
@@ -225,12 +216,12 @@ ScaleSpec2D make_scale_spec_2d(
   TORCH_CHECK(scale.is_contiguous(), "scale tensor must be contiguous");
 
   spec.ptr = scale.const_data_ptr<float>();
-  if (scale.ndimension() == 0) {
+  if (scale.dim() == 0) {
     spec.layout = ScaleLayout2D::kScalar;
     return spec;
   }
 
-  if (scale.ndimension() == 1) {
+  if (scale.dim() == 1) {
     const int64_t count = scale.size(0);
     const int64_t resolved_axis = axis_is_none ? 0 : axis;
     if (resolved_axis == 0) {
@@ -248,7 +239,7 @@ ScaleSpec2D make_scale_spec_2d(
     return spec;
   }
 
-  TORCH_CHECK(scale.ndimension() == 2, "2D dequantization only supports scale tensors up to rank 2");
+  TORCH_CHECK(scale.dim() == 2, "2D dequantization only supports scale tensors up to rank 2");
   spec.scale_rows = scale.size(0);
   spec.scale_cols = scale.size(1);
   if (spec.scale_rows == rows && spec.scale_cols == cols) {
@@ -1756,7 +1747,7 @@ void dequantize_fp8_2d(
   const uint8_t* src = reinterpret_cast<const uint8_t*>(source.const_data_ptr());
 
   if (output.scalar_type() == at::kBFloat16) {
-    c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
+    c10::BFloat16* dst = output.mutable_data_ptr<c10::BFloat16>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
     const bool prefer_avx2_bf16_fp8 = cpu_prefers_avx2_fp8_bf16();
     if (cpu_supports_avx512bf16() && !prefer_avx2_bf16_fp8) {
@@ -1870,7 +1861,7 @@ void dequantize_fp8_2d(
     return;
   }
 
-  c10::Half* dst = output.data_ptr<c10::Half>();
+  c10::Half* dst = output.mutable_data_ptr<c10::Half>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
   if (cpu_supports_avx512fp16()) {
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
@@ -2169,23 +2160,23 @@ at::Tensor dequantize_fp8_cpu(
     int64_t format_value,
     int64_t threads) {
   TORCH_CHECK(source.device().is_cpu(), "FP8 source tensor must reside on CPU");
-  TORCH_CHECK(source.ndimension() == 1 || source.ndimension() == 2, "FP8 fast path only supports 1D or 2D tensors");
+  TORCH_CHECK(source.dim() == 1 || source.dim() == 2, "FP8 fast path only supports 1D or 2D tensors");
   TORCH_CHECK(source.element_size() == 1, "FP8 fast path expects one byte per source element");
 
   const ScaleMode scale_mode = static_cast<ScaleMode>(scale_mode_value);
   const TargetKind target_kind = static_cast<TargetKind>(target_dtype_value);
   const Fp8Format format = static_cast<Fp8Format>(format_value);
 
-  at::Tensor src = source.contiguous();
+  at::Tensor src = at::contiguous(source);
   at::Tensor output = empty_target_like(src, target_kind);
   const auto& table = fp8_table(format, target_kind);
 
-  if (src.ndimension() == 1) {
+  if (src.dim() == 1) {
     const int64_t length = src.size(0);
     const ScaleSpec1D spec = make_scale_spec_1d(scale, length, axis, axis_is_none);
     const uint8_t* src_ptr = reinterpret_cast<const uint8_t*>(src.const_data_ptr());
     if (output.scalar_type() == at::kBFloat16) {
-      c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
+      c10::BFloat16* dst = output.mutable_data_ptr<c10::BFloat16>();
       const int64_t grain = std::max<int64_t>(1, length / clamped_threads(threads));
       at::parallel_for(0, length, grain, [&](int64_t begin, int64_t end) {
         for (int64_t idx = begin; idx < end; ++idx) {
@@ -2198,7 +2189,7 @@ at::Tensor dequantize_fp8_cpu(
         }
       });
     } else {
-      c10::Half* dst = output.data_ptr<c10::Half>();
+      c10::Half* dst = output.mutable_data_ptr<c10::Half>();
       const int64_t grain = std::max<int64_t>(1, length / clamped_threads(threads));
       at::parallel_for(0, length, grain, [&](int64_t begin, int64_t end) {
         for (int64_t idx = begin; idx < end; ++idx) {
@@ -2228,23 +2219,23 @@ at::Tensor dequantize_fp4_cpu(
     int64_t target_dtype_value,
     int64_t threads) {
   TORCH_CHECK(source.device().is_cpu(), "FP4 source tensor must reside on CPU");
-  TORCH_CHECK(source.ndimension() == 1 || source.ndimension() == 2, "FP4 fast path only supports 1D or 2D tensors");
+  TORCH_CHECK(source.dim() == 1 || source.dim() == 2, "FP4 fast path only supports 1D or 2D tensors");
   TORCH_CHECK(source.element_size() == 1, "FP4 fast path expects packed one-byte storage");
 
   const ScaleMode scale_mode = static_cast<ScaleMode>(scale_mode_value);
   const TargetKind target_kind = static_cast<TargetKind>(target_dtype_value);
 
-  at::Tensor src = source.contiguous();
+  at::Tensor src = at::contiguous(source);
   at::Tensor output = empty_target_for_fp4(src, target_kind);
   const auto& table = fp4_table(target_kind);
 
-  if (src.ndimension() == 1) {
+  if (src.dim() == 1) {
     const int64_t packed = src.size(0);
     const int64_t length = packed * 2;
     const ScaleSpec1D spec = make_scale_spec_1d(scale, length, axis, axis_is_none);
     const uint8_t* src_ptr = reinterpret_cast<const uint8_t*>(src.const_data_ptr());
     if (output.scalar_type() == at::kBFloat16) {
-      c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
+      c10::BFloat16* dst = output.mutable_data_ptr<c10::BFloat16>();
       const int64_t grain = std::max<int64_t>(1, length / clamped_threads(threads));
       at::parallel_for(0, length, grain, [&](int64_t begin, int64_t end) {
         for (int64_t idx = begin; idx < end; ++idx) {
@@ -2254,7 +2245,7 @@ at::Tensor dequantize_fp4_cpu(
         }
       });
     } else {
-      c10::Half* dst = output.data_ptr<c10::Half>();
+      c10::Half* dst = output.mutable_data_ptr<c10::Half>();
       const int64_t grain = std::max<int64_t>(1, length / clamped_threads(threads));
       at::parallel_for(0, length, grain, [&](int64_t begin, int64_t end) {
         for (int64_t idx = begin; idx < end; ++idx) {
@@ -2272,10 +2263,10 @@ at::Tensor dequantize_fp4_cpu(
   const ScaleSpec2D spec = make_scale_spec_2d(scale, rows, packed_cols * 2, axis, axis_is_none);
   const uint8_t* src_ptr = reinterpret_cast<const uint8_t*>(src.const_data_ptr());
   if (output.scalar_type() == at::kBFloat16) {
-    c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
+    c10::BFloat16* dst = output.mutable_data_ptr<c10::BFloat16>();
     dequantize_fp4_vectorized(src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads);
   } else {
-    c10::Half* dst = output.data_ptr<c10::Half>();
+    c10::Half* dst = output.mutable_data_ptr<c10::Half>();
     dequantize_fp4_vectorized(src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads);
   }
   return output;
@@ -2283,14 +2274,14 @@ at::Tensor dequantize_fp4_cpu(
 
 } // namespace gptqmodel_floatx
 
-TORCH_LIBRARY(gptqmodel_floatx, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_floatx, m) {
   m.def(
       "dequantize_fp8_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int format_code, int threads) -> Tensor");
   m.def(
       "dequantize_fp4_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int threads) -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_floatx, CPU, m) {
-  m.impl("dequantize_fp8_cpu", TORCH_FN(gptqmodel_floatx::dequantize_fp8_cpu));
-  m.impl("dequantize_fp4_cpu", TORCH_FN(gptqmodel_floatx::dequantize_fp4_cpu));
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_floatx, CPU, m) {
+  m.impl("dequantize_fp8_cpu", TORCH_BOX(&gptqmodel_floatx::dequantize_fp8_cpu));
+  m.impl("dequantize_fp4_cpu", TORCH_BOX(&gptqmodel_floatx::dequantize_fp4_cpu));
 }

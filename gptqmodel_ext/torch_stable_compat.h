@@ -161,6 +161,15 @@ inline Tensor empty_like(const Tensor& self) {
   return torch::stable::empty_like(self);
 }
 
+inline Tensor empty_like(const Tensor& self, const TensorOptions& options) {
+  return torch::stable::empty(
+      self.sizes(),
+      options.dtype().value_or(self.scalar_type()),
+      options.layout(),
+      options.device().value_or(self.device()),
+      options.pinned_memory());
+}
+
 inline Tensor zeros_like(const Tensor& self) {
   Tensor out = torch::stable::empty_like(self);
   return torch::stable::zero_(out);
