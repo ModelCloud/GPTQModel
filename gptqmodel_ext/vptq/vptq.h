@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <torch/extension.h>
+#include "../torch_stable_compat.h"
 
 namespace gptqmodel::vptq {
 

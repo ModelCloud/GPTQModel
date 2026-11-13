@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
-#include <torch/library.h>
+#include "../torch_stable_compat.h"
 
 #include "vptq.h"
 
@@ -97,7 +97,7 @@ at::Tensor vptq_linear_dispatch(
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_vptq, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_vptq, m) {
   m.def(
       "vptq_dequantize("
       "Tensor indices, Tensor centroids, Tensor? res_centroids, "
@@ -118,7 +118,7 @@ TORCH_LIBRARY(gptqmodel_vptq, m) {
       ") -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_vptq, CUDA, m) {
-  m.impl("vptq_dequantize", &vptq_dequantize_dispatch);
-  m.impl("vptq_linear", &vptq_linear_dispatch);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_vptq, CUDA, m) {
+  m.impl("vptq_dequantize", TORCH_BOX(&vptq_dequantize_dispatch));
+  m.impl("vptq_linear", TORCH_BOX(&vptq_linear_dispatch));
 }

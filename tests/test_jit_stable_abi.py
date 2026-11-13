@@ -23,6 +23,7 @@ from gptqmodel.utils import marlin
 from gptqmodel.utils import paroquant
 from gptqmodel.utils import qqq
 from gptqmodel.utils import tt_blockfloat_cuda
+from gptqmodel.utils import vptq_cuda
 
 
 def _assert_stable(loader) -> None:
@@ -105,3 +106,7 @@ def test_allspark_uses_stable_abi():
 
 def test_tt_blockfloat_cuda_uses_stable_abi():
     _assert_stable(tt_blockfloat_cuda._EXTENSION)
+
+
+def test_vptq_cuda_uses_stable_abi():
+    _assert_stable(vptq_cuda._VPTQ_TORCH_OPS_EXTENSION)

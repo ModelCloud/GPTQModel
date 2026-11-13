@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     default_jit_cflags,
     default_jit_cuda_cflags,
@@ -60,6 +61,7 @@ _VPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
