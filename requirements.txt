@@ -1,5 +1,6 @@
 accelerate>=1.15.0
-torch>=2.14.1
+torch>=2.14.1; python_version < "3.11"
+torch>=2.15.0; python_version >= "3.11"
 safetensors>=0.8.0
 filelock>=4.1.0; python_version < "3.11"
 filelock>=4.2.4; python_version >= "3.11"
