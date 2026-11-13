@@ -106,6 +106,42 @@ regression report and rationale.
 | `device=("cuda:1", "cuda")` | Both used all four | `ValueError` for the ambiguous mix |
 | `device=("cuda:1", "cuda:1")` | Quantization used `cuda:1`; loader map used all four | Both use only `cuda:1` |
 
+## Forward device selection
+
+`ForwardExecutor.run` expands the base device to its family through
+`select_forward_devices`, then applies `compute_device_filter` before choosing
+between the data-parallel and serial paths. The serial path is also the
+single-survivor fallback when the filter leaves exactly one device, so it must
+stage inputs and rehome the module on that survivor rather than on the
+pre-filter base device.
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run"] --> B["select_forward_devices cur_layer_device"]
+    B --> C["_filter_forward_devices"]
+    C --> D{"Filtered device count"}
+    D -- "0" --> E["Keep cur_layer_device"]
+    D -- "1" --> F["single_device = devices[0]"]
+    D -- "2+" --> G["run_parallel devices"]
+    E --> H["run_single cur_layer_device"]
+    F --> H
+    H --> I["Stage inputs and rehome module on cur_layer_device"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E failure;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Sole-survivor dispatch (`gptqmodel/looper/forward_executor.py:232-248`) | Filtered list selected `run_single`, but the original `cur_layer_device` was forwarded | `run_single` receives the surviving filtered device |
+| Input staging and module rehome (`ForwardExecutor.run_single`) | Used the pre-filter base device | Uses the surviving filtered device |
+| Empty filtered list (`ForwardExecutor._filter_forward_devices`) | Returned the unfiltered pool | Unchanged: returns the unfiltered pool |
+
+The regression is covered by
+`tests/test_compute_device_filter.py::test_serial_fallback_stages_on_sole_surviving_filtered_device`.
+The failure path is an empty filtered list, which `_filter_forward_devices`
+already resolves by keeping the unfiltered pool; `run` then falls back to
+`cur_layer_device`.
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path
