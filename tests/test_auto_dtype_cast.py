@@ -18,6 +18,7 @@ from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 from gptqmodel.quantization import AutoDtypeCast, QuantizeConfig
 from gptqmodel.utils import auto_dtype_cast
+from gptqmodel.utils.model import move_module_to_cpu_pinned
 
 
 def _bits_equal(actual: torch.Tensor, expected: torch.Tensor) -> bool:
@@ -603,6 +604,28 @@ def test_registered_hook_removal_survives_cast_and_restore(monkeypatch):
     assert all(output.count_nonzero().item() == 0 for output in outputs)
     assert not pre_calls
     assert not forward_calls
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_pinned_cpu_offload_preserves_bits_and_pins_large_tensors():
+    module = nn.Module()
+    module.large = nn.Linear(2048, 2048, bias=False, device="cuda", dtype=torch.bfloat16)
+    module.small = nn.Linear(64, 64, bias=False, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        module.large.weight.copy_(torch.randn_like(module.large.weight))
+        module.small.weight.copy_(torch.randn_like(module.small.weight))
+    expected_large = module.large.weight.detach().cpu()
+    expected_small = module.small.weight.detach().cpu()
+
+    moved = move_module_to_cpu_pinned(module)
+
+    assert moved is module
+    assert module.large.weight.device.type == "cpu"
+    assert module.small.weight.device.type == "cpu"
+    assert module.large.weight.is_pinned()
+    assert not module.small.weight.is_pinned()
+    assert _bits_equal(module.large.weight, expected_large)
+    assert _bits_equal(module.small.weight, expected_small)
 
 
 def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):

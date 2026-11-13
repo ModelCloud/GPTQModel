@@ -178,17 +178,68 @@ memory was reset immediately before quantization.
 | --- | ---: | ---: |
 | Cast projection modules | 112 | 0 |
 | Peak allocated memory | 1,458.342 MiB | 1,458.342 MiB |
-| Warm median quantization time | 5.874719 s | 6.126948 s |
+| Warm median quantization time | 5.318339 s | 5.500630 s |
 
 All six final checkpoints, three per policy, contained 482 state tensors, and
 every corresponding tensor was bit identical. On a held-out 4,096-token
 WikiText split, both quantized policies scored NLL
 3.1000067591667175 and perplexity 22.198101321602206.
 
-After warming the kernels, `AUTO_NF12` was 4.12% faster at the median. The
-checkpoint and held-out score remained exact. End-to-end peak allocation was
-equal because the GPTQ Hessian and inverse/damping workspace, rather than
-resident source weights, determined the peak.
+After warming the kernels, `AUTO_NF12` was 3.43% faster at the median. Relative
+to the previous implementation, absolute warm quantization time fell 9.47% for
+`AUTO_NF12` and 10.22% for `OFF`. The checkpoint and held-out score remained
+exact. End-to-end peak allocation was equal because the GPTQ Hessian and
+inverse/damping workspace, rather than resident source weights, determined the
+peak.
+
+The 10–15% target was not reached for the `AUTO_NF12`-versus-`OFF` ratio. Most
+of the remaining calibration time is GPTQ processing and dense Hessian
+workspace, while NF12 packing now costs about 0.12 seconds in total.
+
+### SM89 calibration schedules
+
+Quantization used 512-token calibration blocks, so the earlier M=1/4/8/16
+decode tuning did not cover this path. A sweep of the existing SM89 large-M
+kernel table found these bit-identical schedules:
+
+| Projection `(N, K)` | Previous NF12 | Tuned NF12 | NF12 improvement | Dense BF16 |
+| --- | ---: | ---: | ---: | ---: |
+| `2048×2048` | 30.010 µs | 27.583 µs | 8.80% | 26.062 µs |
+| `512×2048` | 16.988 µs | 15.183 µs | 11.88% | 11.307 µs |
+| `2048×8192` | 91.065 µs | 86.317 µs | 5.50% | 93.956 µs |
+
+The `8192×2048` gate/up projection and `128256×2048` vocabulary projection
+already selected the fastest tested schedule and remain unchanged.
+
+### Layer offload transfers
+
+Nsight Systems attributed about 590 ms of the original 4K quantization run to
+2.499 GiB of pageable D2H copies. `BaseQModel.post_quantize()` now uses
+`move_module_to_cpu_pinned()`:
+
+```mermaid
+flowchart TD
+    A[Quantized layer on accelerator] --> B{Tensor at least 8 MiB?}
+    B -- No --> C[Pageable CPU tensor]
+    B -- Yes --> D[Allocate pinned CPU result]
+    D --> E[Queue bounded D2H chunks]
+    E --> F[Next tensor on same device stream]
+    F --> G{Module apply complete?}
+    G -- No --> B
+    G -- Yes --> H[Synchronize once per device stream]
+    H --> I[Layer is ready for finalize or disk offload]
+```
+
+Small tensors remain pageable to avoid pinning metadata and scalar state.
+Queued copies use the same current stream and are synchronized once at the
+module boundary, before any CPU consumer can read them.
+
+Checkpoint H2D remains on the existing path. Direct `safe_open(..., device="cuda")`
+was slower for large Llama tensors in this environment, and adding a
+CPU-to-pinned staging copy did not improve the mmap-backed safetensors path.
+Native NF12 encoding now runs directly on accelerator-resident BF16 weights;
+parallel CPU encoding was not added because all 112 native encodes total about
+0.12 seconds and cannot provide the requested end-to-end gain.
 
 ### Memory and timing attribution
 

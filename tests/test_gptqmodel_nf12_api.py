@@ -252,6 +252,12 @@ _CUDA_SYNC_SHAPES = [
     (9, 512, 512),    # outside specialized M range
 ]
 
+_SM89_CALIBRATION_SHAPES = [
+    (2048, 2048),
+    (512, 2048),
+    (2048, 8192),
+]
+
 
 @pytest.mark.parametrize("m,n,k", _CUDA_SYNC_SHAPES)
 @pytest.mark.parametrize("static_weights", [False, True])
@@ -272,6 +278,28 @@ def test_cuda_sync_linear_matches_twin_and_torch(m, n, k, static_weights):
     oracle = F.linear(x.double(), dense.double(), bias.double())
     torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
     assert torch.equal(nf12.linear(x, packed, bias, static_weights=static_weights), actual)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("n,k", _SM89_CALIBRATION_SHAPES)
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_sm89_calibration_schedule_matches_bf16_twin_and_torch(n, k, static_weights):
+    device = _cuda()
+    if torch.cuda.get_device_capability(device) != (8, 9):
+        pytest.skip("the calibration schedule override is specific to SM89")
+    generator = torch.Generator(device=device).manual_seed(20261116 + n + k)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0], dense[-1, -1] = -0.0, 2.0**-20
+    packed = nf12.encode(dense)
+    x = (torch.randn((512, k), generator=generator, device=device) * 0.05).bfloat16()
+    bias = (torch.randn((n,), generator=generator, device=device) * 0.01).bfloat16()
+
+    actual = nf12.linear(x, packed, bias, static_weights=static_weights)
+    twin = torch.ops.nf12.linear_bf16t(x, nf12.pack_bf16t(dense), bias)
+
+    assert torch.equal(actual.view(torch.int16), twin.view(torch.int16))
+    oracle = F.linear(x.double(), dense.double(), bias.double())
+    torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 

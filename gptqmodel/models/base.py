@@ -84,6 +84,7 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
     get_module_name,
+    move_module_to_cpu_pinned,
     move_to,
     warn_fused_unit_dynamic_conflicts,
 )
@@ -3318,7 +3319,7 @@ class BaseQModel(nn.Module):
                 return result
 
             return module._apply(to_cpu_bounded)
-        return move_to(module, device=CPU)
+        return move_module_to_cpu_pinned(module)
 
     def after_quantize(self) -> None:
         """Run model-specific finalization after the complete quantization loop."""
