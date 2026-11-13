@@ -280,12 +280,15 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     if any(isinstance(item, _dynamo_exception("TorchDynamoException")) for item in chain):
         return True
     if isinstance(exc, RuntimeError):
-        # Compile workers run outside the frame that dynamo wraps, so their
-        # RuntimeError can surface directly. Attribute it by origin.
-        compiler_dirs = ("/_dynamo/", "/_inductor/", "/_functorch/")
+        # Dynamo's own frame sits between the caller and the traced body, so a
+        # "contains a compiler frame" test would also match user code raising
+        # RuntimeError. Only the innermost frame identifies where it came from:
+        # compile workers raise outside the traced frame.
+        frames = traceback.extract_tb(exc.__traceback__)
+        origin = (frames[-1].filename or "") if frames else ""
         return any(
-            any(token in (frame.filename or "") for token in compiler_dirs)
-            for frame in traceback.extract_tb(exc.__traceback__)
+            token in origin
+            for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
         )
     return False
 

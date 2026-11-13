@@ -68,10 +68,14 @@ flowchart TD
 | `torch._dynamo.exc.TorchRuntimeError` | yes | A backend runtime failure wrapped by dynamo |
 | other `TorchDynamoException` (e.g. `Unsupported`) | only when `fullgraph=False` | A capture failure is soft unless the caller demanded one graph |
 | any exception under `fullgraph=True` | no | The single-graph contract must fail closed |
-| `RuntimeError` whose traceback is inside `torch/_dynamo`, `torch/_inductor`, or `torch/_functorch` | yes | Compile workers raise outside the traced frame |
-| `RuntimeError` from traced user code | no | Retrying would run the body twice and hide the real error |
+| `RuntimeError` whose innermost frame is inside `torch/_dynamo/`, `torch/_inductor/`, or `torch/_functorch/` | yes | Compile workers raise outside the traced frame |
+| `RuntimeError` from traced user code | no | Its innermost frame is the user body; retrying would run it twice and hide the real error |
 | `ValueError` / `TypeError` from traced user code | no | Not a compiler failure |
 | `KeyboardInterrupt` / `SystemExit` | no | Control flow must always propagate |
+
+Dynamo's `eval_frame.compile_wrapper` frame sits between the caller and the
+traced body, so "the traceback contains a compiler frame" would also match user
+code raising `RuntimeError`. Only the innermost frame identifies the origin.
 
 The fallback is armed lazily and permanently: the first compiler failure drops
 the compiled callable, logs once, and runs `dequantize_weight` / the module

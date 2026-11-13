@@ -91,15 +91,25 @@ def test_compile_failure_runs_eager_only_once_per_call(monkeypatch):
     assert executions == [1], "a compiler failure must not also double-run eager code"
 
 
-@pytest.mark.parametrize("error", [ValueError("bad input"), TypeError("bad dtype")])
-def test_user_code_errors_still_propagate(monkeypatch, error):
-    def eager(_value):
+@pytest.mark.parametrize("error", [
+    ValueError("bad input"),
+    TypeError("bad dtype"),
+    RuntimeError("user body failed"),
+])
+def test_user_code_errors_still_propagate(error):
+    """A raising body must not be retried: dynamo's own frame sits in the traceback."""
+    executions = []
+
+    def eager(value):
+        executions.append(value)
         raise error
 
-    _dynamo_compile(monkeypatch, error)
     compiled = torch_utils.torch_compile(eager)
     with pytest.raises(type(error), match=str(error)):
         compiled(1)
+    # If the origin check misread the user error as a compiler failure, eager
+    # would run a second time and the caller would see the retry, not the first.
+    assert executions == [1]
 
 
 @pytest.mark.parametrize("control_error", [KeyboardInterrupt, SystemExit])
