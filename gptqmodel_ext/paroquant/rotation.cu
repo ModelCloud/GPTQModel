@@ -7,10 +7,7 @@
  ******************************************************************************/
 
 #include "rotation.cuh"
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_stable_compat.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -18,7 +15,6 @@
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <torch/extension.h>
 #include <unordered_map>
 #include <vector>
 
@@ -100,16 +96,16 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
 
 #define LAUNCH_ROTATE(CUDA_T, TORCH_T)                                                               \
   {                                                                                                  \
-    auto *x_p = reinterpret_cast<CUDA_T *>(x.data_ptr<TORCH_T>());                                   \
-    auto *o_p = reinterpret_cast<CUDA_T *>(out.data_ptr<TORCH_T>());                                 \
-    auto *t_p = reinterpret_cast<CUDA_T *>(theta_cast.data_ptr<TORCH_T>());                          \
+    auto *x_p = reinterpret_cast<CUDA_T *>(x.mutable_data_ptr<TORCH_T>());                                   \
+    auto *o_p = reinterpret_cast<CUDA_T *>(out.mutable_data_ptr<TORCH_T>());                                 \
+    auto *t_p = reinterpret_cast<CUDA_T *>(theta_cast.mutable_data_ptr<TORCH_T>());                          \
     if (has_scale) {                                                                                 \
-      auto *s_p = reinterpret_cast<CUDA_T *>(scales_cast.data_ptr<TORCH_T>());                       \
+      auto *s_p = reinterpret_cast<CUDA_T *>(scales_cast.mutable_data_ptr<TORCH_T>());                       \
       rotate_kernel<CUDA_T, CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(    \
-          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);                      \
+          x_p, o_p, idx_ij.mutable_data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);                      \
     } else {                                                                                         \
       rotate_kernel<CUDA_T, CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(   \
-          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);                  \
+          x_p, o_p, idx_ij.mutable_data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);                  \
     }                                                                                                \
     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                   \
     break;                                                                                           \
@@ -125,28 +121,28 @@ torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_i
   int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
   int seq_len = x.numel() / x.size(-1);
-  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  auto options = torch::TensorOptions().dtype(x.scalar_type()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   bool has_scale = scales.defined() && scales.numel() > 0;
 
-  auto theta_cast = theta.scalar_type() == at::kBFloat16 ? theta : theta.to(at::kBFloat16);
+  auto theta_cast = theta.scalar_type() == at::kBFloat16 ? theta : at::to(theta, at::kBFloat16);
   auto scales_cast = !has_scale                       ? at::Tensor()
                      : scales.scalar_type() == at::kBFloat16 ? scales
-                                                             : scales.to(at::kBFloat16);
+                                                             : at::to(scales, at::kBFloat16);
 
   dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
   dim3 block(pn);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  auto *x_p = reinterpret_cast<__nv_bfloat16 *>(x.data_ptr<c10::BFloat16>());
-  auto *o_p = reinterpret_cast<__nv_bfloat16 *>(out.data_ptr<c10::BFloat16>());
-  auto *t_p = reinterpret_cast<__nv_bfloat16 *>(theta_cast.data_ptr<c10::BFloat16>());
+  auto *x_p = reinterpret_cast<__nv_bfloat16 *>(x.mutable_data_ptr<c10::BFloat16>());
+  auto *o_p = reinterpret_cast<__nv_bfloat16 *>(out.mutable_data_ptr<c10::BFloat16>());
+  auto *t_p = reinterpret_cast<__nv_bfloat16 *>(theta_cast.mutable_data_ptr<c10::BFloat16>());
   if (has_scale) {
-    auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.data_ptr<c10::BFloat16>());
+    auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.mutable_data_ptr<c10::BFloat16>());
     rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
-        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);
+        x_p, o_p, idx_ij.mutable_data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);
   } else {
     rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
-        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);
+        x_p, o_p, idx_ij.mutable_data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
@@ -161,15 +157,15 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
   int seq_len = x.numel() / x.size(-1);
-  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  auto options = torch::TensorOptions().dtype(x.scalar_type()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   bool has_scale = scales.defined() && scales.numel() > 0;
 
   auto dtype = x.scalar_type();
-  auto theta_cast = theta.scalar_type() == dtype ? theta : theta.to(x.dtype());
+  auto theta_cast = theta.scalar_type() == dtype ? theta : at::to(theta, x.scalar_type());
   auto scales_cast = !has_scale                      ? at::Tensor()
                      : scales.scalar_type() == dtype ? scales
-                                                     : scales.to(x.dtype());
+                                                     : at::to(scales, x.scalar_type());
 
   dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
   dim3 block(pn);
@@ -286,12 +282,12 @@ std::tuple<at::Tensor, at::Tensor> rotate_pair_launcher(at::Tensor x, at::Tensor
   const int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
   const int seq_len = static_cast<int>(x.numel() / x.size(-1));
-  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  auto options = torch::TensorOptions().dtype(x.scalar_type()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   at::Tensor out2 = torch::empty(x.sizes(), options);
 
   const at::ScalarType dtype = x.scalar_type();
-  auto theta_cast = theta.scalar_type() == dtype ? theta : theta.to(dtype);
+  auto theta_cast = theta.scalar_type() == dtype ? theta : at::to(theta, dtype);
 
   dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row * 2);
   dim3 block(pn);
@@ -300,16 +296,16 @@ std::tuple<at::Tensor, at::Tensor> rotate_pair_launcher(at::Tensor x, at::Tensor
   switch (dtype) {
   case at::kFloat:
     rotate_pair_kernel<float, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
-        x.data_ptr<float>(), x2.data_ptr<float>(), out.data_ptr<float>(), out2.data_ptr<float>(),
-        idx_ij.data_ptr<int16_t>(), theta_cast.data_ptr<float>(), seq_len, h);
+        x.mutable_data_ptr<float>(), x2.mutable_data_ptr<float>(), out.mutable_data_ptr<float>(), out2.mutable_data_ptr<float>(),
+        idx_ij.mutable_data_ptr<int16_t>(), theta_cast.mutable_data_ptr<float>(), seq_len, h);
     break;
   case at::kHalf:
     rotate_pair_kernel<__half, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __half *>(x.data_ptr<c10::Half>()),
-        reinterpret_cast<const __half *>(x2.data_ptr<c10::Half>()),
-        reinterpret_cast<__half *>(out.data_ptr<c10::Half>()),
-        reinterpret_cast<__half *>(out2.data_ptr<c10::Half>()), idx_ij.data_ptr<int16_t>(),
-        reinterpret_cast<const __half *>(theta_cast.data_ptr<c10::Half>()), seq_len, h);
+        reinterpret_cast<const __half *>(x.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<const __half *>(x2.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<__half *>(out.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<__half *>(out2.mutable_data_ptr<c10::Half>()), idx_ij.mutable_data_ptr<int16_t>(),
+        reinterpret_cast<const __half *>(theta_cast.mutable_data_ptr<c10::Half>()), seq_len, h);
     break;
   default:
     TORCH_CHECK(false, "rotate_pair supports Float and Half, got ", dtype);
@@ -511,14 +507,14 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   constexpr int pn = GROUP_SIZE / 2;
   const int seq_len = static_cast<int>(x.numel() / x.size(-1));
   const int row_tiles = std::max(1, (seq_len + CTA_M - 1) / CTA_M);
-  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  auto options = torch::TensorOptions().dtype(x.scalar_type()).device(x.device());
   at::Tensor out_x = torch::empty(x.sizes(), options);
   at::Tensor out_g = torch::empty(x.sizes(), options);
-  at::Tensor partials = at::empty({KROT, row_tiles, h / 2}, x.options().dtype(at::kFloat));
-  at::Tensor grad = at::empty({KROT, h / 2}, x.options().dtype(at::kFloat));
+  at::Tensor partials = at::empty({KROT, row_tiles, h / 2}, at::TensorOptions().dtype(at::kFloat).device(x.device()));
+  at::Tensor grad = at::empty({KROT, h / 2}, at::TensorOptions().dtype(at::kFloat).device(x.device()));
 
   const at::ScalarType dtype = x.scalar_type();
-  auto theta_cast = theta.scalar_type() == dtype ? theta : theta.to(dtype);
+  auto theta_cast = theta.scalar_type() == dtype ? theta : at::to(theta, dtype);
 
   dim3 grid(row_tiles, groups_per_row);
   dim3 block(pn);
@@ -527,18 +523,18 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   switch (dtype) {
   case at::kFloat:
     rotate_pair_grad_kernel<float, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
-        x.data_ptr<float>(), g.data_ptr<float>(), out_x.data_ptr<float>(), out_g.data_ptr<float>(),
-        idx_ij.data_ptr<int16_t>(), theta_cast.data_ptr<float>(), partials.data_ptr<float>(),
+        x.mutable_data_ptr<float>(), g.mutable_data_ptr<float>(), out_x.mutable_data_ptr<float>(), out_g.mutable_data_ptr<float>(),
+        idx_ij.mutable_data_ptr<int16_t>(), theta_cast.mutable_data_ptr<float>(), partials.mutable_data_ptr<float>(),
         seq_len, h, row_tiles);
     break;
   case at::kHalf:
     rotate_pair_grad_kernel<__half, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __half *>(x.data_ptr<c10::Half>()),
-        reinterpret_cast<const __half *>(g.data_ptr<c10::Half>()),
-        reinterpret_cast<__half *>(out_x.data_ptr<c10::Half>()),
-        reinterpret_cast<__half *>(out_g.data_ptr<c10::Half>()), idx_ij.data_ptr<int16_t>(),
-        reinterpret_cast<const __half *>(theta_cast.data_ptr<c10::Half>()),
-        partials.data_ptr<float>(), seq_len, h, row_tiles);
+        reinterpret_cast<const __half *>(x.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<const __half *>(g.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<__half *>(out_x.mutable_data_ptr<c10::Half>()),
+        reinterpret_cast<__half *>(out_g.mutable_data_ptr<c10::Half>()), idx_ij.mutable_data_ptr<int16_t>(),
+        reinterpret_cast<const __half *>(theta_cast.mutable_data_ptr<c10::Half>()),
+        partials.mutable_data_ptr<float>(), seq_len, h, row_tiles);
     break;
   default:
     TORCH_CHECK(false, "rotate_pair_grad supports Float and Half, got ", dtype);
@@ -549,7 +545,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   const int reduce_block = 256;
   const int reduce_grid = static_cast<int>((total + reduce_block - 1) / reduce_block);
   rotate_grad_reduce_kernel<<<reduce_grid, reduce_block, 0, stream>>>(
-      partials.data_ptr<float>(), grad.data_ptr<float>(), row_tiles, h / 2, total);
+      partials.mutable_data_ptr<float>(), grad.mutable_data_ptr<float>(), row_tiles, h / 2, total);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return {out_x, out_g, grad};
@@ -955,7 +951,7 @@ at::Tensor build_dummy_pairs(const at::Tensor &x, int64_t group_size, int64_t kr
   auto options = torch::TensorOptions().dtype(at::kShort).device(x.device());
   const int64_t groups = x.size(-1) / group_size;
   const auto local_pairs = at::arange(group_size, options);
-  return local_pairs.repeat({groups}).unsqueeze(0).repeat({krot, 1}).contiguous();
+  return at::contiguous(at::repeat(torch::stable::unsqueeze(at::repeat(local_pairs, {groups}), 0), {krot, 1}));
 }
 
 LaunchConfig resolve_runtime_launch_config(const at::Tensor &x, const at::Tensor &idx,
@@ -984,8 +980,8 @@ LaunchConfig resolve_query_launch_config(const at::Tensor &x, int64_t krot, bool
     return *cached;
   }
   at::Tensor dummy_idx = build_dummy_pairs(x, group_size, krot);
-  at::Tensor dummy_theta = at::zeros({krot, x.size(-1) / 2}, x.options());
-  at::Tensor dummy_scales = has_scale ? at::ones({1, x.size(-1)}, x.options()) : at::Tensor();
+  at::Tensor dummy_theta = at::zeros({krot, x.size(-1) / 2}, at::TensorOptions().dtype(x.scalar_type()).device(x.device()));
+  at::Tensor dummy_scales = has_scale ? at::ones({1, x.size(-1)}, at::TensorOptions().dtype(x.scalar_type()).device(x.device())) : at::Tensor();
   LaunchConfig measured = autotune_launch_config(x, dummy_idx, dummy_theta, dummy_scales, group_size, krot);
   return store_autotune_cache(key, measured);
 }
@@ -1015,13 +1011,13 @@ void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
   TORCH_CHECK(x.is_contiguous() && idx.is_contiguous() && theta.is_contiguous() &&
                   (!has_scale || scales.is_contiguous()),
               "ParoQuant rotation tensors must be contiguous.");
-  TORCH_CHECK(x.is_floating_point() && x.dim() >= 1,
+  TORCH_CHECK(at::is_floating_point(x) && x.dim() >= 1,
               "ParoQuant rotation input must be a floating-point tensor with at least one dimension.");
   TORCH_CHECK(idx.scalar_type() == at::kShort && idx.dim() == 2,
               "ParoQuant rotation indices must be contiguous int16 pairs.");
-  TORCH_CHECK(theta.is_floating_point() && theta.dim() == 2,
+  TORCH_CHECK(at::is_floating_point(theta) && theta.dim() == 2,
               "ParoQuant rotation theta must be a 2D floating-point tensor.");
-  TORCH_CHECK(!has_scale || (scales.is_floating_point() && scales.dim() >= 1),
+  TORCH_CHECK(!has_scale || (at::is_floating_point(scales) && scales.dim() >= 1),
               "ParoQuant rotation scales must be floating-point.");
 }
 
@@ -1054,7 +1050,7 @@ std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool h
                                           int64_t row_pad = -1) {
   TORCH_CHECK(x.is_cuda(), "ParoQuant rotation launch config requires a CUDA input tensor.");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  TORCH_CHECK(x.is_contiguous() && x.is_floating_point() && x.dim() >= 1,
+  TORCH_CHECK(x.is_contiguous() && at::is_floating_point(x) && x.dim() >= 1,
               "ParoQuant rotation launch config expects contiguous floating-point input.");
   const LaunchConfig config = resolve_query_launch_config(
       x, krot, has_scale, group_size, static_cast<int>(cta_m), static_cast<int>(row_pad));
@@ -1186,7 +1182,7 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
   TORCH_CHECK(sin_t.numel() == h && cos_t.numel() == h,
               "ParoQuant grad_theta sin/cos tables must match the index length.");
 
-  at::Tensor out = at::zeros({h}, rot.options());
+  at::Tensor out = at::zeros({h}, at::TensorOptions().dtype(rot.scalar_type()).device(rot.device()));
   if (h == 0 || batch == 0) {
     return out;
   }
@@ -1195,17 +1191,17 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
                   static_cast<unsigned>((batch + GRAD_THETA_B_CHUNK - 1) / GRAD_THETA_B_CHUNK));
   const dim3 block(GRAD_THETA_E_TILE);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  grad_theta_kernel<<<grid, block, 0, stream>>>(rot.data_ptr<float>(), grad.data_ptr<float>(),
-                                                idx_i.data_ptr<int64_t>(), idx_j.data_ptr<int64_t>(),
-                                                sin_t.data_ptr<float>(), cos_t.data_ptr<float>(),
-                                                out.data_ptr<float>(),
+  grad_theta_kernel<<<grid, block, 0, stream>>>(rot.mutable_data_ptr<float>(), grad.mutable_data_ptr<float>(),
+                                                idx_i.mutable_data_ptr<int64_t>(), idx_j.mutable_data_ptr<int64_t>(),
+                                                sin_t.mutable_data_ptr<float>(), cos_t.mutable_data_ptr<float>(),
+                                                out.mutable_data_ptr<float>(),
                                                 static_cast<int>(batch), static_cast<int>(hidden),
                                                 static_cast<int>(h));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
-TORCH_LIBRARY(gptqmodel_paroquant, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1, int reverse=0) -> Tensor");
   m.def("rotate_pair(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor)");
   m.def("rotate_pair_grad(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor, Tensor)");
@@ -1215,15 +1211,15 @@ TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("grad_theta(Tensor rot, Tensor grad, Tensor idx_i, Tensor idx_j, Tensor sin_t, Tensor cos_t) -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
-  m.impl("rotate", &rotate_dynamic);
-  m.impl("rotate_pair", &rotate_pair);
-  m.impl("rotate_pair_grad", &rotate_pair_grad);
-  m.impl("launch_config", &rotate_launch_config);
-  m.impl("grad_theta", &grad_theta);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
+  m.impl("rotate", TORCH_BOX(&rotate_dynamic));
+  m.impl("rotate_pair", TORCH_BOX(&rotate_pair));
+  m.impl("rotate_pair_grad", TORCH_BOX(&rotate_pair_grad));
+  m.impl("launch_config", TORCH_BOX(&rotate_launch_config));
+  m.impl("grad_theta", TORCH_BOX(&grad_theta));
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CatchAll, m) {
-  m.impl("clear_autotune_cache", &clear_rotation_autotune_cache);
-  m.impl("autotune_cache_size", &rotation_autotune_cache_size);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CompositeExplicitAutograd, m) {
+  m.impl("clear_autotune_cache", TORCH_BOX(&clear_rotation_autotune_cache));
+  m.impl("autotune_cache_size", TORCH_BOX(&rotation_autotune_cache_size));
 }
