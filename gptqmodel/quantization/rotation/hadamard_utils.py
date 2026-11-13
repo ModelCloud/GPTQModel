@@ -127,7 +127,15 @@ class _TorchHadamardTransform:
         if not is_pow2(n):
             raise ValueError(f"Torch Hadamard fallback requires a power-of-two width, got {n}.")
         original_shape = x.shape
-        result = x.contiguous()
+        original_dtype = x.dtype
+        # A half-precision butterfly can overflow before the final 1/sqrt(n)
+        # normalization even when every input and normalized output fits: a
+        # constant FP16 row of width 8192 and amplitude 8 reaches 65536 in the
+        # DC lane, but the normalized value is only 724. Accumulate and scale
+        # in FP32, then cast back once, so the intermediate range is not
+        # limited by the input dtype.
+        compute_dtype = torch.float32 if original_dtype in (torch.float16, torch.bfloat16) else original_dtype
+        result = x.to(compute_dtype).contiguous()
         stride = 1
         while stride < n:
             pairs = result.reshape(*original_shape[:-1], -1, 2, stride)
@@ -135,7 +143,8 @@ class _TorchHadamardTransform:
             right = pairs[..., 1, :]
             result = torch.cat((left + right, left - right), dim=-1).reshape(original_shape)
             stride *= 2
-        return result * torch.as_tensor(scale, device=x.device, dtype=x.dtype)
+        scale = torch.as_tensor(scale, device=x.device, dtype=compute_dtype)
+        return (result * scale).to(original_dtype)
 
 
 class _TritonHadamardTransform:
