@@ -18,8 +18,9 @@ multiplies it. `E8M0` is a scale only — it never appears as a weight value.
   Tenstorrent block-float formats (§8). They are the vendor spelling
   `bfloat2_b` / `bfloat4_b` / `bfloat8_b` with `bfloat` shortened to `bf`; the
   `_b` suffix is **kept** because it is load-bearing, not decoration (§8.5).
-  No other provider claims `bf2_b`/`bf4_b`/`bf8_b` today, and the ttnn spelling lives in one place,
-  `TT_BLOCKFLOAT_VENDOR_ATTRS` in `gptqmodel/utils/tt_blockfloat_quant.py`.
+  No other provider claims `bf2_b`/`bf4_b`/`bf8_b` today, and the ttnn spelling
+  lives in one place, `TT_BLOCKFLOAT_VENDOR_ATTRS` in
+  `gptqmodel/utils/tt_blockfloat_quant.py`.
 - **Vendor spellings** (`bfloat2_b`, `bfloat4_b`, `bfloat8_b`) appear only at the
   `getattr(ttnn, ...)` call site.
 - **Standard names are not renamed.** `fp32`, `bf16`, `fp8_e4m3`, `mxfp4` and
@@ -190,11 +191,11 @@ round-to-nearest-even, matching the unpack stage.
 
 ### 8.4 Weights versus calculations
 
-`bf2_b`, `bf4_b` and `bf8_b` are **storage formats only**. The Blackhole unpack stage expands
-them to BF16 in the data path (`L1 → unpack → source registers → FPU`), so there
-is no dequant op in the graph — but there is also no block-float arithmetic
-unit. The multiply is always BF16 or FP32. This is measured, not assumed: see
-`hw/tenstorrent.md` §3.
+`bf2_b`, `bf4_b` and `bf8_b` are **storage formats only**. The Blackhole unpack
+stage expands them to BF16 in the data path (`L1 → unpack → source registers →
+FPU`), so there is no dequant op in the graph — but there is also no
+block-float arithmetic unit. The multiply is always BF16 or FP32. This is
+measured, not assumed: see `hw/tenstorrent.md` §3.
 
 Consequences that shape kernels:
 
