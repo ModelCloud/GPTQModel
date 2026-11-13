@@ -683,15 +683,15 @@ dispatch to these kernels when the module is on a ROCm device and fall back to
 torch otherwise. See `gptqmodel_ext/tt_blockfloat_hip/README.md` for the
 standalone `hipcc` validation harness and the measured R9700 numbers: ~18 us
 for a 4096x4096 bf4 decode, which is 91% of the card's measured read bandwidth
-once exponents are counted and therefore at the roofline, and 39 us for a
-32x4096x4096 bf16 prefill (185 us at 512 tokens). Prefill throughput is set by
+once exponents are counted and therefore at the roofline, and 35 us for a
+32x4096x4096 bf16 prefill (186 us at 512 tokens). Prefill throughput is set by
 two tile properties: the M block fixes how many times the packed weight is
 re-read (once per block, and the 9 MiB weight no longer fits the 8 MiB L2), and
 the warp block fixes LDS traffic per WMMA (1 KiB at 16x16, 512 B at 32x32).
-Choosing both per shape raised the large-M rate from 38 to 93 TFLOP/s. Small-M
+Choosing both per shape raised the large-M rate from 38 to 92 TFLOP/s. Small-M
 prefill is parallelism-limited rather than arithmetic-limited: 16 tokens is 256
 output tiles and 32 tokens is 512, so the card only gets 8 and 16 warps per CU,
-giving 12 TFLOP/s at 16 tokens and 27 at 32. Larger warp blocks do not help
+giving 17 TFLOP/s at 16 tokens and 31 at 32. Larger warp blocks do not help
 there -- at 32 tokens a 32x32 warp block halves LDS traffic but leaves four
 warps on the card and measured slower -- so that ceiling needs a split-K
 workspace, which is not implemented.
@@ -703,7 +703,14 @@ may request 64 KB of LDS and a CU has 128 KB, so a 128x128 block at K = 64
 (64x32) drop the warp count from 48 to 24 and measure slower, and a depth-2
 register prefetch that would hide the staging latency needs a second set of
 staging registers and falls to two CTAs per CU.  Both were measured on the
-R9700: 207-208 us and 262 us against 185 us.
+R9700: 207-208 us and 262 us against 185 us at the time.
+
+Any `in_features` that is a multiple of 16 is supported, including one that is
+not a multiple of the tile width: the last tile of such a `k` stages a partial
+span, and the kernel zero-fills past `k` instead of dropping the span. The
+quantiser likewise takes its base exponent candidate unconditionally, so a block
+whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
+reference codes rather than zeros.
 
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the

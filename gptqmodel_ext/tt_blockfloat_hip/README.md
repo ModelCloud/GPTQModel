@@ -125,12 +125,12 @@ bf8 linear bf16 m=32 (WMMA) norm_l1=0                PASS
 bf4 embedding gather bit-exact                       PASS
 decode 4096x4096 bf4: ~18 us/call, ~490 GB/s on the code stream
 prefill 4096x4096 bf4 bf16, by token count:
-   m=16    46 us   12 TFLOP/s
-   m=32    39 us   27 TFLOP/s
-   m=64    44 us   49 TFLOP/s
-   m=128   58 us   74 TFLOP/s
-   m=256   94 us   91 TFLOP/s
-   m=512  185 us   93 TFLOP/s
+   m=16    32 us   17 TFLOP/s
+   m=32    35 us   31 TFLOP/s
+   m=64    43 us   50 TFLOP/s
+   m=128   54 us   79 TFLOP/s
+   m=256   93 us   92 TFLOP/s
+   m=512  186 us   92 TFLOP/s
 prefill m=32 fp32 (no matrix cores): 686 us, 1.6 TFLOP/s
 ```
 
@@ -167,7 +167,7 @@ one W fragment -- 1 KiB -- for a single WMMA, and at 128 B/cycle that is eight
 cycles, longer than the WMMA itself, so the kernel was LDS-bandwidth bound
 rather than matrix-core bound.  A 32x32 warp block reuses each fragment across
 two quadrants and halves it to 512 B, which is what took `m = 512` from 58 to
-93 TFLOP/s.
+92 TFLOP/s.
 
 `K` still matters, for a different reason: a bf4 weight row is `k/2` bytes, so a
 32-wide tile gives a warp 16 bytes per row and it touches eight 128-byte lines
@@ -180,7 +180,7 @@ The call has `(m / 16) * (n / 16)` output tiles -- 256 and 512 -- and a 16x16
 warp block owns one tile, so the whole card gets 8 and 16 warps per CU however
 the blocks are cut.  That is a hard ceiling for these shapes.  The tradeoff is
 real, not theoretical: at `m = 32` a 32x32 warp block halves LDS traffic but
-leaves only four warps on the card, and it measured 52.4 us against 39.4 us.
+leaves only four warps on the card, and it measured 58 us against 35 us.
 The only way past the ceiling is to split K across CTAs, which needs a
 partial-sum workspace and a reduction pass; it is not implemented.
 
@@ -188,10 +188,33 @@ Two things that looked plausible were measured and made no difference, so they
 are not in the kernel: an `asm volatile` fence between the prefetch and the
 matrix-core block (39.38 us against 39.37 us), and a barrier-free variant that
 dequantises straight into the WMMA fragment instead of staging a shared tile.
-The latter is 15.7 TFLOP/s rather than 27: a lane's 4-byte code load is
+The latter is 15.7 TFLOP/s rather than 31: a lane's 4-byte code load is
 uncoalesced once the shared tile's row-major layout is gone.  Four accumulator
 banks instead of two were also measured and are not better (40.1 us against
-39.4 us at `m = 32`).
+39.4 us at `m = 32`, measured before the staging rewrite below).
+
+### Correctness of partial tiles
+
+Two staging paths had to be fixed after review, and both are covered by the
+harness now.
+
+The API only promises `k % 16 == 0`, but a thread stages a `kCodes`-wide span
+(16, 32, 64 or 128 depending on the tile), so a `k` that is not a multiple of
+the tile width ends the last tile mid-span.  The kernel used to zero the whole
+span in that case, which dropped the valid leading columns with it: at `n = 3`
+a `k = 16` bf4 layer returned 0 instead of the full dot product.  Partial spans
+now zero-fill past `k` and keep the columns below it.
+
+The quantiser took the base candidate only when its squared error compared
+strictly below infinity.  For inputs near `FLT_MAX` every candidate's error
+overflows to infinity, so the winning codes were never initialised and the
+result was zero.  The base candidate is now taken unconditionally, matching the
+Torch reference, and the harness checks a `1e30` block against it.
+
+Hoisting the per-element `w_ok` test out of the staging loop while fixing the
+first one also helped the shapes with the widest spans, where the store loop is
+the largest share of the work: `m = 16` went from 45 us to 32 us and `m = 32`
+from 39 us to 35 us.  The other shapes are unchanged within run-to-run noise.
 
 At large `m` the kernel sits on two hard limits rather than a tuning miss: the
 64 KB of shared memory a workgroup may request, and 128 VGPRs per thread at the
@@ -225,19 +248,24 @@ Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
 | K tile tuned per shape, barrier removed | 39 us | 444 us |
 | 64-row M block (half the weight re-reads) | 39 us | 296 us |
 | 128x128 block, 32x32 warp tile | 39 us | 185 us |
+| partial-tile fix, staging test hoisted out of the loop | 35 us | 186 us |
 
 ## Limitations
 
 * The checkpoint layout is row-major, as GPT-QModel writes it. The Tenstorrent
   runtime still has to permute codes into 32x32 face order; that is a device
   layout concern and is not part of the dtype emulation.
-* `in_features` must be a multiple of 16 (the hardware block size).
-* `bfloat2_b` is **not** implemented by these kernels.  The grid is defined in
+* `in_features` must be a multiple of 16 (the hardware block size).  Any such
+  value works, including one that is not a multiple of the tile width: the last
+  tile stages a partial span and zero-fills past `k`.
+* `bf2_b` is **not** implemented by these kernels.  The grid is defined in
   `gptqmodel.utils.tt_blockfloat_quant` (a sign bit and one magnitude bit, so
-  `{-1, 0, +1} x 2**exponent` per 16-value block), but `ttnn` does not expose
-  `bfloat2_b` as a data type, so no checkpoint can contain it and there is no
-  oracle to validate a kernel against.  A module with `bits == 2` takes the
-  torch path.
+  `{-1, 0, +1} x 2**exponent` per 16-value block), but `ttnn` exposes no
+  `bfloat2_b` attribute, so no checkpoint can contain it and there is no oracle
+  to validate a kernel against.  A module with `bits == 2` takes the torch path.
+* Storage with a `block` wider than 16 also stays on the torch path: the
+  kernels bind exactly one exponent per 16 values.  `hip_dispatch` checks the
+  block size as well as the device and dtype.
 * Accumulation is fp32. On `gfx1200`/`gfx1201`, bf16 activations use the
   `v_wmma_f32_16x16x16_bf16` matrix-core path; bf8/bf4 values are exact in
   bf16, so this changes only the accumulation order. fp16 and fp32 activations
@@ -246,7 +274,7 @@ Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
   block, warp block and K tile chosen by token count as in the table above.
 * Small-M prefill is parallelism-limited, not arithmetic-limited.  At `m = 32`
   the call is 512 output tiles, so the card gets 16 warps per CU and reaches
-  about 27 TFLOP/s, against 93 TFLOP/s at `m = 512`.  Splitting K across CTAs
+  about 31 TFLOP/s, against 92 TFLOP/s at `m = 512`.  Splitting K across CTAs
   would raise the warp count but needs a partial-sum workspace and a reduction
   pass; it is not implemented.
 * The WMMA path is selected at runtime from `gcnArchName`; other ROCm targets
