@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../torch_stable_compat.h"
+
 #include "machete_prepack_kernel.cuh"
 #include "cutlass_extensions/torch_utils.hpp"
 #include "core/scalar_type.hpp"
@@ -24,11 +26,11 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   auto B_ptr = static_cast<ElementB const*>(B.const_data_ptr());
   // elements per storage item for B
   auto eles_per_storage =
-      (B.dtype().itemsize() * 8) / cute::sizeof_bits_v<ElementB>;
+      (B.element_size() * 8) / cute::sizeof_bits_v<ElementB>;
 
   // torch B passed in is/should be (packed_K,N), the kernel expects (N,K,L) (to
   // match cutlass using (N,K,L) for B), so we transpose B to (N,packed_K,L)
-  auto Bt_packed = B.t();
+  auto Bt_packed = at::t(B);
 
   TORCH_CHECK(
       (B.size(0) * eles_per_storage) % size<1>(PPBlockShape_NK{}) == 0,
@@ -61,7 +63,7 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   // clang-format on
 
   // Allocate output
-  torch::Tensor D = torch::empty_like(B, {}, at::MemoryFormat::Contiguous);
+  torch::Tensor D = at::empty_like_contiguous(B);
 
   prepack_B_template<PrepackedLayoutB>(
       stream, B_ptr, layout_Bt, static_cast<ElementB*>(D.mutable_data_ptr()));

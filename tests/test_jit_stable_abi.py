@@ -17,6 +17,7 @@ from gptqmodel.utils import cpp
 from gptqmodel.utils import awq
 from gptqmodel.utils import exllamav2
 from gptqmodel.utils import hadamard
+from gptqmodel.utils import machete
 from gptqmodel.utils import marlin
 from gptqmodel.utils import paroquant
 from gptqmodel.utils import qqq
@@ -90,3 +91,7 @@ def test_exllamav3_uses_stable_abi():
 
 def test_gptq_block_uses_stable_abi():
     _assert_stable(gptq_cuda._EXTENSION)
+
+
+def test_machete_uses_stable_abi():
+    _assert_stable(machete._MACHETE_TORCH_OPS_EXTENSION)

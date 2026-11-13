@@ -25,6 +25,7 @@
 #include <torch/csrc/stable/version.h>
 #include <torch/headeronly/core/DeviceType.h>
 #include <torch/headeronly/core/Layout.h>
+#include <torch/headeronly/core/MemoryFormat.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/BFloat16.h>
 #include <torch/headeronly/util/Float4_e2m1fn_x2.h>
@@ -62,6 +63,7 @@ namespace c10 {
 using ScalarType = torch::headeronly::ScalarType;
 using DeviceType = torch::headeronly::DeviceType;
 using Layout = torch::headeronly::Layout;
+using MemoryFormat = torch::headeronly::MemoryFormat;
 using Device = torch::stable::Device;
 using StreamId = torch::stable::accelerator::StreamId;
 using DeviceIndex = int32_t;
@@ -285,6 +287,12 @@ inline Tensor empty_like(const Tensor& self, const TensorOptions& options) {
       options.pinned_memory());
 }
 
+/// Contiguous equivalent of `empty_like(self, memory_format=Contiguous)`.
+inline Tensor empty_like_contiguous(const Tensor& self) {
+  return torch::stable::empty(
+      self.sizes(), self.scalar_type(), std::nullopt, self.device());
+}
+
 inline Tensor zeros_like(const Tensor& self) {
   Tensor out = torch::stable::empty_like(self);
   return torch::stable::zero_(out);
@@ -334,6 +342,14 @@ inline Tensor div(const Tensor& lhs, const Tensor& rhs) {
       torch::stable::detail::from(lhs), torch::stable::detail::from(rhs)};
   STABLE_TORCH_ERROR_CODE_CHECK(
       torch_call_dispatcher("aten::div", "Tensor", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+/// aten::t: reverse the dimensions of a (2-D) tensor.
+inline Tensor t(const Tensor& self) {
+  std::array<StableIValue, 1> stack{torch::stable::detail::from(self)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::t", "", stack.data(), TORCH_ABI_VERSION));
   return torch::stable::detail::to<Tensor>(stack[0]);
 }
 
@@ -425,6 +441,7 @@ inline constexpr ScalarType kInt8 = ScalarType::Char;
 inline constexpr ScalarType kLong = ScalarType::Long;
 inline constexpr ScalarType kShort = ScalarType::Short;
 inline constexpr ScalarType kByte = ScalarType::Byte;
+inline constexpr ScalarType kU8 = ScalarType::Byte;
 inline constexpr ScalarType kChar = ScalarType::Char;
 inline constexpr ScalarType kBool = ScalarType::Bool;
 
@@ -458,6 +475,7 @@ using at::device_of;
 // ---------------------------------------------------------------------------
 #define TORCH_CHECK(...) STD_TORCH_CHECK(__VA_ARGS__)
 #define TORCH_INTERNAL_ASSERT(...) STD_TORCH_CHECK(__VA_ARGS__)
+#define TORCH_CHECK_NOT_IMPLEMENTED(...) STD_TORCH_CHECK(false, __VA_ARGS__)
 #define AT_ERROR(...) STD_TORCH_CHECK(false, __VA_ARGS__)
 #define TORCH_WARN(...) \
   do {                  \
