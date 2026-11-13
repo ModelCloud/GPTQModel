@@ -19,5 +19,18 @@ class GraniteSWAQModel(LlamaQModel):
     # modeled by the current fused qkv/gate_up executor.
     fusable = None
 
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!:norm",),
+            # Exclude the direct sink parameter, while quantizing the linears.
+            "self_attn:!": ("q_proj:0:q:in=x", "k_proj:0:k:in=x", "v_proj:0:v:in=x", "o_proj:1:o"),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
+        },
+    ]
+
 
 __all__ = ["GraniteSWAQModel"]
