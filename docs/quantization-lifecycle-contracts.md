@@ -208,7 +208,8 @@ loading. QQQ also needs fixed permutation tables for packing and unpacking.
 `QQQLinear._get_perms()` now inverts the Python permutation first, then builds
 those small, device-independent tables explicitly on CPU. They remain real
 while packed buffers are meta, and inference moves them to the packed weight's
-device when needed.
+device when needed. The four tensor tables hold 2,144 int64 indices (17,152
+bytes) per module; they are format metadata, not expanded weights.
 
 ```mermaid
 flowchart TD
