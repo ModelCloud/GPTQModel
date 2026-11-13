@@ -88,6 +88,7 @@ AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
+Remote calibration images are fetched under one wall-clock deadline that covers headers, redirects, body streaming, and decoding; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
 Torch compilation is best-effort: a `torch.compile` failure at first use (for
