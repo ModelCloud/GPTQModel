@@ -173,10 +173,21 @@ _EXTENSION = TorchOpsJitExtension(
 
 _SELFTESTED = False
 _EXTENSION_READY = False
-_LINEAR_OP = None
-_EMBEDDING_OP = None
-_ROWMAJOR_PACK_OP = None
-_ROWMAJOR_EMBEDDING_OP = None
+
+
+class _OperatorCache:
+    """Resolved dispatcher handles for the hot-path operator calls."""
+
+    __slots__ = ("linear", "embedding", "rowmajor_pack", "rowmajor_embedding")
+
+    def __init__(self) -> None:
+        self.linear = None
+        self.embedding = None
+        self.rowmajor_pack = None
+        self.rowmajor_embedding = None
+
+
+_OPERATORS = _OperatorCache()
 
 
 def nf12_hip_supported(device: torch.device | None = None) -> bool:
@@ -197,7 +208,6 @@ def nf12_hip_supported(device: torch.device | None = None) -> bool:
 def prewarm_nf12_hip_extension() -> bool:
     """Build and self-test the extension once per process."""
 
-    global _EMBEDDING_OP, _ROWMAJOR_PACK_OP, _ROWMAJOR_EMBEDDING_OP
     global _EXTENSION_READY, _SELFTESTED
     if not nf12_hip_supported():
         return False
@@ -212,10 +222,10 @@ def prewarm_nf12_hip_extension() -> bool:
             )
         _SELFTESTED = True
     _EXTENSION_READY = True
-    if _EMBEDDING_OP is None:
-        _EMBEDDING_OP = torch.ops.nf12_hip.embedding
-        _ROWMAJOR_PACK_OP = torch.ops.nf12_hip.rowmajor_pack
-        _ROWMAJOR_EMBEDDING_OP = torch.ops.nf12_hip.rowmajor_embedding
+    if _OPERATORS.embedding is None:
+        _OPERATORS.embedding = torch.ops.nf12_hip.embedding
+        _OPERATORS.rowmajor_pack = torch.ops.nf12_hip.rowmajor_pack
+        _OPERATORS.rowmajor_embedding = torch.ops.nf12_hip.rowmajor_embedding
     return True
 
 
@@ -269,19 +279,19 @@ def linear(
 ) -> torch.Tensor:
     """Decode-then-GEMM on RDNA4 (SPEC.md 6.5)."""
 
-    global _LINEAR_OP, _EXTENSION_READY
+    global _EXTENSION_READY
     if not _EXTENSION_READY:
         if not _EXTENSION.load():
             raise RuntimeError(
                 _EXTENSION.last_error_message() or "nf12_hip extension is unavailable"
             )
         _EXTENSION_READY = True
-    op = _LINEAR_OP
+    op = _OPERATORS.linear
     if op is None:
         # The dispatcher handle is immutable and safe to publish from concurrent
         # free-threaded callers, as for the embedding operators below.
         op = torch.ops.nf12_hip.linear
-        _LINEAR_OP = op
+        _OPERATORS.linear = op
     return op(x, packed, escapes, int(exp_base), bias)
 
 
@@ -298,18 +308,18 @@ def embedding(
     are decoded, and no dense weight is retained between calls.
     """
 
-    global _EMBEDDING_OP, _EXTENSION_READY
+    global _EXTENSION_READY
     if not _EXTENSION_READY:
         if not _EXTENSION.load():
             raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
         _EXTENSION_READY = True
-    op = _EMBEDDING_OP
+    op = _OPERATORS.embedding
     if op is None:
         # Assigning the same registered OpOverload from concurrent threads is
         # safe on the free-threaded interpreter; it is an immutable dispatcher
         # handle, not mutable state.
         op = torch.ops.nf12_hip.embedding
-        _EMBEDDING_OP = op
+        _OPERATORS.embedding = op
     return op(ids, packed, escapes, int(exp_base))
 
 
@@ -320,15 +330,15 @@ def rowmajor_pack(
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     """Convert canonical NF12 to the embedding-only row-major layout."""
 
-    global _ROWMAJOR_PACK_OP, _EXTENSION_READY
+    global _EXTENSION_READY
     if not _EXTENSION_READY:
         if not _EXTENSION.load():
             raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
         _EXTENSION_READY = True
-    op = _ROWMAJOR_PACK_OP
+    op = _OPERATORS.rowmajor_pack
     if op is None:
         op = torch.ops.nf12_hip.rowmajor_pack
-        _ROWMAJOR_PACK_OP = op
+        _OPERATORS.rowmajor_pack = op
     row_packed, row_escapes, original, collisions = op(
         packed, escapes, int(exp_base)
     )
@@ -343,15 +353,15 @@ def rowmajor_embedding(
 ) -> torch.Tensor:
     """Gather exact BF16 rows from the row-major embedding layout."""
 
-    global _ROWMAJOR_EMBEDDING_OP, _EXTENSION_READY
+    global _EXTENSION_READY
     if not _EXTENSION_READY:
         if not _EXTENSION.load():
             raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
         _EXTENSION_READY = True
-    op = _ROWMAJOR_EMBEDDING_OP
+    op = _OPERATORS.rowmajor_embedding
     if op is None:
         op = torch.ops.nf12_hip.rowmajor_embedding
-        _ROWMAJOR_EMBEDDING_OP = op
+        _OPERATORS.rowmajor_embedding = op
     return op(ids, row_packed, row_escapes, int(exp_base))
 
 

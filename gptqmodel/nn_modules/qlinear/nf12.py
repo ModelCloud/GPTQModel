@@ -419,6 +419,11 @@ class NF12Linear(WeightOnlyQuantLinear):
             return None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x)
+
+    def _forward_impl(self, x: torch.Tensor, *, apply_rotation: bool = True) -> torch.Tensor:
+        """Run the packed GEMM, optionally consuming a pre-rotated operand."""
+
         bias = getattr(self, "bias", None)
         if x.device.type == "meta":
             # Metadata-only modules (lazy load, offload shells) have packed
@@ -430,7 +435,7 @@ class NF12Linear(WeightOnlyQuantLinear):
             # `empty_linear_output` already applies the adapter, exactly once.
             return self.empty_linear_output(x)
 
-        if self.online_full_had or self.online_partial_had:
+        if apply_rotation and (self.online_full_had or self.online_partial_had):
             x = self._apply_rotation_to_input(x)
 
         if self.input_rows(x) == 0:

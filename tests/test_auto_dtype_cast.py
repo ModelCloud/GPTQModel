@@ -338,6 +338,148 @@ def test_processor_task_releases_dense_storage_then_rebinds_exact_source(monkeyp
     assert _bits_equal(task.module.bias, expected_bias)
 
 
+def test_hooked_linear_cast_preserves_transformed_hook_operand(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.hooked_linear.apply_online_hadamard",
+        lambda value, **_kwargs: value.flip(-1),
+    )
+    monkeypatch.setattr(
+        NF12Linear,
+        "_apply_rotation_to_input",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rotation applied twice")),
+    )
+
+    source = HookedLinear.from_linear(
+        nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    )
+    source.online_full_had = True
+    seen = []
+    source.forward_hook = lambda _module, args, _output: seen.append(args[0].clone())
+    packed = auto_dtype_cast.AutoNF12HookedLinear.from_linear(source)
+    x = torch.zeros(1, 64, dtype=torch.bfloat16)
+    x[0, 0] = 1
+
+    source(x)
+    packed(x)
+
+    assert _bits_equal(seen[0], x.flip(-1))
+    assert _bits_equal(seen[1], seen[0])
+
+
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+def test_hooked_linear_cast_preserves_w4a_replay_semantics(monkeypatch, mode):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.hooked_linear.apply_online_hadamard",
+        lambda value, **_kwargs: value.flip(-1),
+    )
+
+    source = HookedLinear.from_linear(
+        nn.Linear(64, 64, bias=False, dtype=torch.bfloat16)
+    )
+    with torch.no_grad():
+        source.weight.copy_(torch.eye(64, dtype=torch.bfloat16))
+    source.online_full_had = True
+    source._w4a_stream_replay_mode = mode
+    source._w4a_stream_replay_recipe = "least_squares" if mode == "w4a_nvfp4" else None
+    source._w4a_replay_model_dtype = torch.bfloat16
+    seen = []
+    source.forward_hook = lambda _module, args, _output: seen.append(args[0].clone())
+    packed = auto_dtype_cast.AutoNF12HookedLinear.from_linear(source)
+    x = torch.linspace(-3, 3, 128, dtype=torch.bfloat16).reshape(2, 64)
+
+    expected = source(x)
+    actual = packed(x)
+
+    assert len(seen) == 2
+    assert _bits_equal(seen[0], seen[1])
+    assert _bits_equal(actual, expected)
+
+
+def test_restore_hooked_linear_preserves_runtime_metadata_and_forward(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.hooked_linear.apply_online_hadamard",
+        lambda value, **_kwargs: value.flip(-1),
+    )
+
+    source = HookedLinear.from_linear(
+        nn.Linear(64, 16, bias=True, dtype=torch.bfloat16)
+    )
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+        source.bias.copy_(torch.randn_like(source.bias))
+    source.online_full_had = True
+    source.online_partial_had = False
+    source.had_dim = -1
+    source.had_K = None
+    source.K = 1
+    source.groups = 2
+    source.module_name = "proj"
+    source.full_name = "layer.proj"
+    source.name = "proj"
+    source.forward_hook_last = False
+    source._w4a_replay_disabled = True
+    source._w4a_norm_preapplied = False
+    source._w4a_stream_replay_mode = "w4afp8"
+    source._w4a_stream_replay_recipe = None
+    source._w4a_replay_model_dtype = torch.bfloat16
+    source._w4a_stream_replay_pre_hook = True
+    source._w4a_replay_input_hook_active = True
+    source._w4a_rotation_preapplied = False
+    source._w4a_activation_global_scale = 0.25
+    source._w4a_headroom_probe = True
+    custom_hook_seen = []
+    source.forward_hook = lambda _module, args, _output: custom_hook_seen.append(args[0].clone())
+    registered_hook_seen = []
+    source.register_forward_hook(
+        lambda _module, _args, _output: registered_hook_seen.append(True)
+    )
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
+    x = torch.randn(3, 64, dtype=torch.bfloat16)
+
+    expected = source(x)
+    actual = restored(x)
+
+    assert type(restored) is HookedLinear
+    assert _bits_equal(restored.weight, source.weight)
+    assert _bits_equal(restored.bias, source.bias)
+    for name in (
+        "online_full_had",
+        "online_partial_had",
+        "had_dim",
+        "had_K",
+        "K",
+        "groups",
+        "module_name",
+        "forward_hook",
+        "forward_hook_last",
+        "full_name",
+        "name",
+        "_w4a_replay_disabled",
+        "_w4a_norm_preapplied",
+        "_w4a_stream_replay_mode",
+        "_w4a_stream_replay_recipe",
+        "_w4a_replay_model_dtype",
+        "_w4a_stream_replay_pre_hook",
+        "_w4a_replay_input_hook_active",
+        "_w4a_rotation_preapplied",
+        "_w4a_activation_global_scale",
+        "_w4a_headroom_probe",
+    ):
+        assert getattr(restored, name) == getattr(source, name)
+    assert _bits_equal(actual, expected)
+    assert len(custom_hook_seen) == 2
+    assert len(registered_hook_seen) == 2
+
+
 def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):
     """Exercise the live module-installation boundary used by the quantizer."""
 

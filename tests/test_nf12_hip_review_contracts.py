@@ -33,7 +33,7 @@ def test_hip_linear_reuses_cached_extension_dispatcher(monkeypatch):
         return args[0]
 
     monkeypatch.setattr(nf12_hip, "_EXTENSION_READY", True)
-    monkeypatch.setattr(nf12_hip, "_LINEAR_OP", fake_linear)
+    monkeypatch.setattr(nf12_hip._OPERATORS, "linear", fake_linear)
     monkeypatch.setattr(
         nf12_hip._EXTENSION,
         "load",

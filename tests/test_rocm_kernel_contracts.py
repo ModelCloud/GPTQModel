@@ -16,7 +16,7 @@ from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
-from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear  # noqa: F401
+from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -49,7 +49,10 @@ OTHER_KERNELS = set("""
     XLALinear
     TTNNLinear TTNNBlockFloat8Linear
 """.split())
-KERNELS = sorted([*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings], key=lambda c: c.__name__)
+KERNELS = sorted(
+    [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
+    key=lambda c: c.__name__,
+)
 
 
 @pytest.fixture

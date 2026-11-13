@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import copy
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
@@ -24,6 +25,144 @@ class StopForward(Exception):
     pass
 
 STOP_FORWARD_EXCEPTION = StopForward("Forwarding stopped")
+
+_HOOKED_LINEAR_RUNTIME_ATTRIBUTES = (
+    "online_full_had",
+    "online_partial_had",
+    "had_dim",
+    "had_K",
+    "K",
+    "groups",
+    "module_name",
+    "forward_hook",
+    "forward_hook_last",
+    "full_name",
+    "name",
+    "_w4a_replay_disabled",
+    "_w4a_norm_preapplied",
+    "_w4a_stream_replay_mode",
+    "_w4a_stream_replay_recipe",
+    "_w4a_replay_model_dtype",
+    "_w4a_stream_replay_pre_hook",
+    "_w4a_rotation_preapplied",
+    "_w4a_activation_global_scale",
+    "_w4a_headroom_probe",
+)
+
+_REGISTERED_HOOK_ATTRIBUTES = (
+    "_forward_hooks",
+    "_forward_pre_hooks",
+    "_backward_hooks",
+    "_backward_pre_hooks",
+    "_forward_hooks_with_kwargs",
+    "_forward_pre_hooks_with_kwargs",
+    "_forward_hooks_always_called",
+)
+
+
+@dataclass(frozen=True)
+class PreparedHookedLinearInput:
+    """The operand and output contract shared by dense and packed linears."""
+
+    value: torch.Tensor
+    replay_mode: str | None
+    replay_output_dtype: torch.dtype | None
+
+
+def copy_hooked_linear_runtime(
+    source: nn.Module,
+    target: nn.Module,
+    *,
+    copy_registered_hooks: bool,
+) -> nn.Module:
+    """Transfer the behavior-bearing state that ``nn.Linear`` does not own."""
+
+    for name in _HOOKED_LINEAR_RUNTIME_ATTRIBUTES:
+        if hasattr(source, name):
+            setattr(target, name, getattr(source, name))
+    if copy_registered_hooks:
+        for name in _REGISTERED_HOOK_ATTRIBUTES:
+            value = getattr(source, name, None)
+            if value is not None:
+                setattr(target, name, value.copy() if isinstance(value, dict) else value)
+        target._w4a_replay_input_hook_active = getattr(
+            source, "_w4a_replay_input_hook_active", False
+        )
+    else:
+        # The caller replaces a dense module whose registered PyTorch hooks are
+        # not being transferred, so an active hook-derived replay operand is no
+        # longer valid on the replacement.
+        target._w4a_replay_input_hook_active = False
+    if not hasattr(target, "groups"):
+        target.groups = 1
+    return target
+
+
+def prepare_hooked_linear_input(
+    module: nn.Module,
+    input: torch.Tensor,
+) -> PreparedHookedLinearInput:
+    """Apply the exact dense replay and rotation transforms used before GEMM."""
+
+    replay_mode = (
+        None
+        if getattr(module, "_w4a_replay_disabled", False)
+        else getattr(module, "_w4a_stream_replay_mode", None)
+    )
+    replay_recipe = getattr(module, "_w4a_stream_replay_recipe", None)
+    replay_scale = getattr(module, "_w4a_activation_global_scale", None)
+    headroom_probe = bool(getattr(module, "_w4a_headroom_probe", False))
+    rotation_preapplied = bool(getattr(module, "_w4a_rotation_preapplied", False))
+    if replay_mode is not None:
+        from .qlinear.w4a_llama_replay import round_w4a_activation, round_w4a_replay_operand
+
+    if (
+        replay_mode is not None
+        and not rotation_preapplied
+        and not headroom_probe
+        and not getattr(module, "_w4a_norm_preapplied", False)
+        and not getattr(module, "_w4a_replay_input_hook_active", False)
+    ):
+        input = round_w4a_replay_operand(
+            input,
+            replay_mode,
+            replay_recipe,
+            replay_scale,
+            rounder=round_w4a_activation,
+        )
+    if not rotation_preapplied:
+        input = apply_online_hadamard(
+            input,
+            online_full_had=getattr(module, "online_full_had", False),
+            online_partial_had=getattr(module, "online_partial_had", False),
+            had_K=getattr(module, "had_K", None),
+            K=getattr(module, "K", 1),
+            had_dim=getattr(module, "had_dim", -1),
+        )
+    # A rotated down projection consumes a newly encoded hardware operand.
+    # The incoming W4A carrier has already been rounded at the nonlinear
+    # boundary, so replay the decode -> Hadamard -> encode sequence exactly.
+    if (
+        replay_mode is not None
+        and not headroom_probe
+        and not rotation_preapplied
+        and (
+            getattr(module, "online_full_had", False)
+            or getattr(module, "online_partial_had", False)
+        )
+    ):
+        input = round_w4a_replay_operand(
+            input,
+            replay_mode,
+            replay_recipe,
+            rounder=round_w4a_activation,
+        )
+    output_dtype = (
+        getattr(module, "_w4a_replay_model_dtype", None)
+        if replay_mode is not None
+        else None
+    )
+    return PreparedHookedLinearInput(input, replay_mode, output_dtype)
 
 
 def _restore_output_device(output: torch.Tensor, original_device: torch.device) -> torch.Tensor:
@@ -244,44 +383,39 @@ class HookedLinear(torch.nn.Linear):
         self.in_features = in_features
         self.out_features = out_features
 
+        self.online_full_had = False
+        self.online_partial_had = False
+        self.had_dim = -1
+        self.had_K = None
+        self.K = 1
+        self.groups = 1
         self.forward_hook = None
         self.forward_hook_last = False
         self.module_name = None
+        self._w4a_replay_disabled = False
+        self._w4a_norm_preapplied = False
+        self._w4a_stream_replay_mode = None
+        self._w4a_stream_replay_recipe = None
+        self._w4a_replay_model_dtype = torch.bfloat16
+        self._w4a_stream_replay_pre_hook = False
+        self._w4a_replay_input_hook_active = False
+        self._w4a_rotation_preapplied = False
+        self._w4a_activation_global_scale = None
+        self._w4a_headroom_probe = False
 
     @staticmethod
     def from_linear(linear: torch.nn.Linear):
         custom_linear = HookedLinear(linear.in_features, linear.out_features)
         custom_linear.weight = linear.weight
         custom_linear.bias = linear.bias
-        custom_linear.online_full_had = getattr(linear, "online_full_had", False)
-        custom_linear.online_partial_had = getattr(linear, "online_partial_had", False)
-        custom_linear.had_dim = getattr(linear, "had_dim", -1)
-        custom_linear.had_K = getattr(linear, "had_K", None)
-        custom_linear.K = getattr(linear, "K", 1)
-        # W4A calibration installs its policy before the layer looper replaces
-        # dense modules with HookedLinear. Preserve the policy explicitly;
-        # PyTorch forward hooks belong to the replaced module and do not move
-        # with its parameters.
-        custom_linear._w4a_replay_disabled = getattr(linear, "_w4a_replay_disabled", False)
-        custom_linear._w4a_norm_preapplied = getattr(linear, "_w4a_norm_preapplied", False)
-        custom_linear._w4a_stream_replay_mode = getattr(linear, "_w4a_stream_replay_mode", None)
-        custom_linear._w4a_stream_replay_recipe = getattr(linear, "_w4a_stream_replay_recipe", None)
-        custom_linear._w4a_replay_model_dtype = getattr(linear, "_w4a_replay_model_dtype", linear.weight.dtype)
-        custom_linear._w4a_stream_replay_pre_hook = getattr(
-            linear, "_w4a_stream_replay_pre_hook", False
+        custom_linear._w4a_replay_model_dtype = getattr(
+            linear, "_w4a_replay_model_dtype", linear.weight.dtype
         )
-        # Module replacement does not copy the dense module's actual hooks.
-        custom_linear._w4a_replay_input_hook_active = False
-        custom_linear._w4a_rotation_preapplied = getattr(
-            linear, "_w4a_rotation_preapplied", False
+        return copy_hooked_linear_runtime(
+            linear,
+            custom_linear,
+            copy_registered_hooks=False,
         )
-        custom_linear._w4a_activation_global_scale = getattr(
-            linear, "_w4a_activation_global_scale", None
-        )
-        custom_linear._w4a_headroom_probe = getattr(
-            linear, "_w4a_headroom_probe", False
-        )
-        return custom_linear
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -297,43 +431,15 @@ class HookedLinear(torch.nn.Linear):
         )
         if original_device != target_device:
             input = safe_move_to(input, target_device)
-        replay_mode = (None if getattr(self, "_w4a_replay_disabled", False)
-                       else getattr(self, "_w4a_stream_replay_mode", None))
-        replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)
-        replay_scale = getattr(self, "_w4a_activation_global_scale", None)
-        headroom_probe = bool(getattr(self, "_w4a_headroom_probe", False))
-        rotation_preapplied = bool(getattr(self, "_w4a_rotation_preapplied", False))
-        if replay_mode is not None:
-            from .qlinear.w4a_llama_replay import round_w4a_activation, round_w4a_replay_operand
-        if (replay_mode is not None and not rotation_preapplied and not headroom_probe
-                and not getattr(self, "_w4a_norm_preapplied", False)
-                and not getattr(self, "_w4a_replay_input_hook_active", False)):
-            input = round_w4a_replay_operand(input, replay_mode, replay_recipe, replay_scale,
-                                             rounder=round_w4a_activation)
-        if not rotation_preapplied:
-            input = apply_online_hadamard(
-                input,
-                online_full_had=getattr(self, "online_full_had", False),
-                online_partial_had=getattr(self, "online_partial_had", False),
-                had_K=getattr(self, "had_K", None),
-                K=getattr(self, "K", 1),
-                had_dim=getattr(self, "had_dim", -1),
-            )
-        # A rotated down projection consumes a newly encoded hardware operand.
-        # The incoming W4A carrier has already been rounded at the nonlinear
-        # boundary, so replay the decode -> Hadamard -> encode sequence exactly.
-        if replay_mode is not None and not headroom_probe and not rotation_preapplied and (
-            getattr(self, "online_full_had", False) or getattr(self, "online_partial_had", False)
-        ):
-            input = round_w4a_replay_operand(input, replay_mode, replay_recipe,
-                                             rounder=round_w4a_activation)
-        if replay_mode is not None:
+        prepared = prepare_hooked_linear_input(self, input)
+        input = prepared.value
+        if prepared.replay_mode is not None:
             # Replay carries a compute-precision operand, so the GEMM runs in
             # FP32 and returns the model dtype instead of relying on a
             # matching-dtype `super().forward`.
             output = torch.nn.functional.linear(input.float(), self.weight.float(),
                                                  self.bias.float() if self.bias is not None else None)
-            output = output.to(getattr(self, "_w4a_replay_model_dtype", self.weight.dtype))
+            output = output.to(prepared.replay_output_dtype)
         else:
             output = super().forward(input)
         if self.forward_hook:

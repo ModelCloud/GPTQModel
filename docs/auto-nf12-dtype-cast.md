@@ -71,6 +71,28 @@ the row-major lookup layout documented in
 keep the canonical 16-row super-atom layout. Unsupported devices or shapes stay
 dense.
 
+### Hook and replay contract
+
+`HookedLinear` and `AutoNF12HookedLinear` share
+`prepare_hooked_linear_input`. The helper applies the selected W4A replay and
+online Hadamard transforms exactly once. The packed wrapper then calls
+`NF12Linear._forward_impl(..., apply_rotation=False)` and gives its calibration
+hook the transformed operand that the GEMM consumes.
+
+```mermaid
+flowchart LR
+    A[HookedLinear input] --> B[prepare_hooked_linear_input]
+    B --> C[W4A replay and online Hadamard]
+    C --> D[AutoNF12HookedLinear packed GEMM]
+    D --> E[forward_hook sees transformed operand]
+    F[restore_source_module] --> G[HookedLinear]
+    G --> H[Copy hooks and replay metadata]
+```
+
+Restoring a packed hooked source therefore preserves its class, registered
+hooks, online-rotation settings, and W4A replay state. Subsequent quantization
+replay executes the same forward behavior as the original source.
+
 ## Previous behavior
 
 | Mechanism | Previous behavior | New behavior |

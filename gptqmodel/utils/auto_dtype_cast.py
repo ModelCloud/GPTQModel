@@ -9,7 +9,13 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, HookedLinear
+from ..nn_modules.hooked_linear import (
+    STOP_FORWARD_EXCEPTION,
+    HookedLinear,
+    _restore_output_device,
+    copy_hooked_linear_runtime,
+    prepare_hooked_linear_input,
+)
 from ..nn_modules.qlinear.nf12 import NF12Linear
 from ..quantization.nf12 import quantize_nf12_weight
 from . import nf12_codec
@@ -220,57 +226,30 @@ class AutoNF12HookedLinear(NF12Linear):
             device=source.weight.device,
         )
         layer.pack_original(source)
-        for name in (
-            "online_full_had",
-            "online_partial_had",
-            "had_dim",
-            "had_K",
-            "K",
-            "groups",
-            "module_name",
-            "forward_hook",
-            "forward_hook_last",
-            "full_name",
-            "name",
-            "_w4a_replay_disabled",
-            "_w4a_norm_preapplied",
-            "_w4a_stream_replay_mode",
-            "_w4a_stream_replay_recipe",
-            "_w4a_replay_model_dtype",
-            "_w4a_stream_replay_pre_hook",
-            "_w4a_rotation_preapplied",
-            "_w4a_activation_global_scale",
-            "_w4a_headroom_probe",
-        ):
-            if hasattr(source, name):
-                setattr(layer, name, getattr(source, name))
-        if not hasattr(layer, "groups"):
-            layer.groups = 1
-        for name in (
-            "_forward_hooks",
-            "_forward_pre_hooks",
-            "_backward_hooks",
-            "_backward_pre_hooks",
-            "_forward_hooks_with_kwargs",
-            "_forward_pre_hooks_with_kwargs",
-            "_forward_hooks_always_called",
-        ):
-            if hasattr(source, name):
-                setattr(layer, name, getattr(source, name))
-
+        copy_hooked_linear_runtime(
+            source,
+            layer,
+            copy_registered_hooks=True,
+        )
         return layer.eval()
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
         if input.device != self.nf12_packed.device:
-            input = input.to(self.nf12_packed.device)
-        output = super().forward(input)
+            from .p2p import safe_move_to
+
+            input = safe_move_to(input, self.nf12_packed.device)
+        prepared = prepare_hooked_linear_input(self, input)
+        output = self._forward_impl(prepared.value, apply_rotation=False)
+        if prepared.replay_mode is not None:
+            output = output.to(prepared.replay_output_dtype)
         hook = getattr(self, "forward_hook", None)
         if hook is not None:
-            hook(self, (input,), output)
+            hook(self, (prepared.value,), output)
             if getattr(self, "forward_hook_last", False):
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        return output if output.device == original_device else output.to(original_device)
+        return _restore_output_device(output, original_device)
 
 
 def cast_source_module(module: nn.Module, spec: SourceModuleSpec) -> nn.Module:
@@ -308,6 +287,16 @@ def restore_source_module(
             device="meta",
             dtype=spec.dtype,
         )
+    elif spec.kind == "hooked_linear":
+        module = HookedLinear(k, n)
+        copy_hooked_linear_runtime(
+            packed,
+            module,
+            copy_registered_hooks=True,
+        )
+        module.bias = None
+        if spec.bias:
+            module.bias = nn.Parameter(packed.bias.detach().to(target).clone(), requires_grad=False)
     else:
         module = nn.Linear(k, n, bias=spec.bias, device="meta", dtype=spec.dtype)
         if spec.bias:
