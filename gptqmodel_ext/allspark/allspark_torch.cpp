@@ -4,11 +4,8 @@
 // Torch bindings for the AllSpark Ampere W8A16 fused GEMM.
 // Kernel sources are vendored from vLLM (vllm-project/vllm#12931, Apache-2.0).
 
-#include <torch/extension.h>
-#include <torch/library.h>
+#include "../torch_stable_compat.h"
 #include <optional>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
 
 torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
@@ -71,7 +68,10 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
                     b.scalar_type() == at::ScalarType::Float,
                 "bias must be float16, bfloat16 or float32");
   }
-  if (a.size(0) == 0) return torch::empty({0, n}, a.options());
+  if (a.size(0) == 0)
+    return torch::empty(
+        {0, n},
+        torch::TensorOptions().dtype(a.scalar_type()).device(a.device()));
   auto result = allspark_w8a16_gemm(a, b_qweight, b_scales, b_qzeros, n, group_size,
                              sm_count, sm_version, cublas_m_threshold, has_zp,
                              n32k16_reorder, bias);
@@ -112,7 +112,7 @@ void rearrange_kn_weight_as_n32k16_order_dispatch(
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_allspark, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_allspark, m) {
   m.def(
       "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_qzeros, int n, int group_size, int sm_count, int sm_version, "
@@ -125,8 +125,8 @@ TORCH_LIBRARY(gptqmodel_allspark, m) {
       "int n_32align) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_allspark, CUDA, m) {
-  m.impl("allspark_w8a16_gemm", &allspark_w8a16_gemm_dispatch);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_allspark, CUDA, m) {
+  m.impl("allspark_w8a16_gemm", TORCH_BOX(&allspark_w8a16_gemm_dispatch));
   m.impl("rearrange_kn_weight_as_n32k16_order",
-         &rearrange_kn_weight_as_n32k16_order_dispatch);
+         TORCH_BOX(&rearrange_kn_weight_as_n32k16_order_dispatch));
 }

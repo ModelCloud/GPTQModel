@@ -428,6 +428,7 @@ using TensorOptions = at::TensorOptions;
 using ScalarType = torch::headeronly::ScalarType;
 using IntArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
 using Device = torch::stable::Device;
+using DeviceType = torch::headeronly::DeviceType;
 
 inline constexpr ScalarType kFloat32 = ScalarType::Float;
 inline constexpr ScalarType kFloat16 = ScalarType::Half;
@@ -444,6 +445,8 @@ inline constexpr ScalarType kByte = ScalarType::Byte;
 inline constexpr ScalarType kU8 = ScalarType::Byte;
 inline constexpr ScalarType kChar = ScalarType::Char;
 inline constexpr ScalarType kBool = ScalarType::Bool;
+inline constexpr DeviceType kCPU = DeviceType::CPU;
+inline constexpr DeviceType kCUDA = DeviceType::CUDA;
 
 using at::empty;
 using at::empty_like;
