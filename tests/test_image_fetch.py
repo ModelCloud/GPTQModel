@@ -7,6 +7,7 @@ that used to make a bad image URL hang a quantization run forever.
 """
 
 import ast
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,7 +49,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path
-        if path == "/ok":
+        if path == "/endless-headers":
+            self.server.header_started.set()
+            try:
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Drip: ")
+                self.wfile.flush()
+                while not self.server.release_hang.wait(0.02):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+            except OSError:
+                # Only the client can end this stream before fixture teardown.
+                self.server.header_disconnected.set()
+        elif path == "/ok":
             self._send(200, PNG, {"Content-Type": "image/png", "Content-Length": str(len(PNG))})
         elif path == "/http-error":
             self._send(404, b"missing")
@@ -144,6 +156,8 @@ def image_server():
     server.daemon_threads = True
     server.hits = 0
     server.release_hang = threading.Event()
+    server.header_started = threading.Event()
+    server.header_disconnected = threading.Event()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -163,24 +177,34 @@ def test_fetch_image_http_url_returns_decoded_image(image_server):
 
 
 def test_load_image_from_url_uses_bounded_timeout(image_server, monkeypatch):
-    base, server = image_server
+    base, _ = image_server
     observed = {}
-    original_get = image_utils.requests.get
+    original_download = image_utils._download_image_bytes
 
-    def spy_get(url, **kwargs):
+    def spy_download(url, **kwargs):
         observed["kwargs"] = kwargs
-        return original_get(url, **kwargs)
+        return original_download(url, **kwargs)
 
-    monkeypatch.setattr(image_utils.requests, "get", spy_get)
+    monkeypatch.setattr(image_utils, "_download_image_bytes", spy_download)
     load_image_from_url(f"{base}/ok", timeout=(1, 2))
-    assert observed["kwargs"]["stream"] is True
     assert observed["kwargs"]["timeout"] == (1.0, 2.0)
-
-    # The public wrapper must also pass a timeout instead of relying on the
-    # requests default (which is "wait forever").
     observed.clear()
     fetch_image({"image_url": f"{base}/ok"})
     assert observed["kwargs"]["timeout"] is not None
+
+    # Check the network side of the subprocess boundary independently too.
+    original_get = image_utils.requests.get
+
+    def spy_get(url, **kwargs):
+        observed["request"] = kwargs
+        return original_get(url, **kwargs)
+
+    monkeypatch.setattr(image_utils.requests, "get", spy_get)
+    image_utils._download_image_bytes_in_worker(
+        f"{base}/ok", timeout=(1.0, 2.0), max_bytes=1024,
+        deadline=time.monotonic() + 10, total_timeout=10,
+    )
+    assert observed["request"] == {"stream": True, "timeout": (1.0, 2.0)}
 
 
 def test_hanging_server_is_bounded_by_read_timeout(image_server):
@@ -215,13 +239,14 @@ def test_retries_transient_http_failures(image_server):
 
 def test_permanent_request_errors_are_not_retried(monkeypatch):
     calls = []
+    original_download = image_utils._download_image_bytes
 
-    def fail(url, **kwargs):
+    def spy(url, **kwargs):
         calls.append(url)
-        raise image_utils.requests.exceptions.MissingSchema("boom")
+        return original_download(url, **kwargs)
 
-    monkeypatch.setattr(image_utils.requests, "get", fail)
-    with pytest.raises(ImageFetchError):
+    monkeypatch.setattr(image_utils, "_download_image_bytes", spy)
+    with pytest.raises(ImageFetchError, match="request failed"):
         load_image_from_url("not-a-url", attempts=3, backoff_seconds=0)
     assert len(calls) == 1
 
@@ -319,6 +344,67 @@ def test_header_drip_is_bounded_by_total_timeout(image_server):
         )
     assert "total time limit" in str(excinfo.value)
     assert time.monotonic() - started < 0.8
+
+
+def test_header_deadlines_release_workers_and_sockets(image_server, monkeypatch):
+    base, server = image_server
+    children = []
+    original_popen = subprocess.Popen
+
+    def track_child(*args, **kwargs):
+        child = original_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", track_child)
+    prior_threads = {t.ident for t in threading.enumerate() if t.name == "gptqmodel-image-fetch"}
+    for _ in range(3):
+        server.header_started.clear()
+        server.header_disconnected.clear()
+        with pytest.raises(ImageFetchError, match="total time limit"):
+            load_image_from_url(
+                f"{base}/endless-headers", timeout=(0.3, 0.3),
+                total_timeout=0.6, attempts=1,
+            )
+        # Ensure this exercised a live header reader, not just process startup.
+        assert server.header_started.is_set()
+        assert server.header_disconnected.wait(0.5), "timed-out request still owns its socket"
+        assert {t.ident for t in threading.enumerate() if t.name == "gptqmodel-image-fetch"} == prior_threads
+        assert children and all(child.returncode is not None for child in children)
+        assert all(child.stdin.closed and child.stdout.closed and child.stderr.closed for child in children)
+    assert len(children) == 3
+    # Cancellation must not poison subsequent requests.
+    assert load_image_from_url(f"{base}/ok").size == (8, 8)
+
+
+def test_fetch_worker_is_reaped_on_caller_interrupt(image_server, monkeypatch):
+    base, server = image_server
+    children = []
+    original_popen = subprocess.Popen
+
+    def interrupt_child(*args, **kwargs):
+        child = original_popen(*args, **kwargs)
+        children.append(child)
+        communicate = child.communicate
+
+        def interrupted(*args, **kwargs):
+            child.communicate = communicate
+            # Submit the request, then interrupt while the peer is still open.
+            child.stdin.write(args[0])
+            child.stdin.close()
+            child.stdin = None
+            assert server.header_started.wait(3)
+            raise KeyboardInterrupt
+
+        child.communicate = interrupted
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", interrupt_child)
+    with pytest.raises(KeyboardInterrupt):
+        load_image_from_url(f"{base}/endless-headers", total_timeout=10)
+    assert server.header_disconnected.wait(0.5)
+    assert children[0].returncode is not None
+    assert children[0].stdout.closed and children[0].stderr.closed
 
 
 def test_decode_time_is_bounded_by_total_timeout(image_server, monkeypatch):

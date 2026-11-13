@@ -3,71 +3,89 @@
 
 # Remote image fetch bounds
 
-`gptqmodel.utils.image.load_image_from_url` is the only network path used by
-multimodal calibration: `fetch_image` dispatches `http://`/`https://` inputs to
-it, and `InternS1QModel` / `Ovis2_5QModel` call it directly. Its
-`total_timeout` is an absolute wall-clock budget for one `load_image_from_url`
-call, covering every retry attempt, the request/redirect/header phase, the body
-stream, and image decoding. The deadline contract was introduced in #3483.
+`gptqmodel.utils.image.load_image_from_url` is the network entry point for
+multimodal calibration. `fetch_image`, `InternS1QModel`, and `Ovis2_5QModel`
+use it. Each network attempt runs in a fresh Python subprocess so the caller
+can terminate a request even before `requests` exposes a response socket.
+The caller kills and reaps an unfinished child before returning an error.
+This closes the header-reader resource leak reported in #3854, following the
+caller-deadline fix in #3848.
 
-## New flow
+One absolute `total_timeout` budget covers worker startup, DNS, connection/TLS
+setup, headers, redirects, body transfer, retries and backoff. Image decoding
+stays in the caller: the budget is checked before and after decoding, but a
+running Pillow decoder is not forcibly interrupted. Process teardown adds a
+small scheduling/reaping interval after the network deadline.
 
 ```mermaid
 flowchart TD
-    A[load_image_from_url] --> B[deadline = monotonic + total_timeout]
-    B --> C{remaining > 0}
-    C -- no --> Z[ImageFetchError: total time limit]
-    C -- yes --> D[_get_response: worker thread + deadline]
-    D -- deadline --> Z
-    D -- response --> E[deadline check after headers]
-    E -- expired --> Z
-    E --> F[body read with watchdog at deadline]
-    F -- expired --> Z
-    F --> G[deadline check after body]
-    G -- expired --> Z
-    G --> H[Image.open + pixel limit]
-    H --> I[image.load]
-    I --> J{deadline expired}
-    J -- yes --> K[image.close + ImageFetchError]
-    J -- no --> L[return image]
-
+    A["load_image_from_url: compute absolute deadline"] --> B{"Budget remains?"}
+    B -- no --> Z["ImageFetchError: total time limit"]
+    B -- yes --> C["_download_image_bytes: launch fresh interpreter"]
+    C --> D["_image_fetch_worker: read JSON options"]
+    D --> E["_download_image_bytes_in_worker: requests.get and bounded body read"]
+    E --> F["Return image bytes or JSON failure; exit"]
+    C --> G["communicate: wait only for remaining budget"]
+    F --> G
+    G -- deadline or caller interruption --> H["kill child; communicate drains pipes and reaps child"]
+    H --> I["Raise timeout or propagate caller interruption"]
+    G -- success --> J["Image.open: check pixel limit; image.load"]
+    J --> K{"Deadline expired after decoding?"}
+    K -- yes --> L["Close image; ImageFetchError"]
+    K -- no --> M["Return decoded image"]
+    G -- retryable failure --> N["Backoff within same deadline"]
+    N --> B
+    G -- permanent or exhausted failure --> O["ImageFetchError with reason"]
     classDef fail fill:#f8d7da,stroke:#b02a37,color:#000;
-    class Z,K fail;
+    class Z,H,I,L,O fail;
 ```
 
-## Before / after
+## Before and after
 
-| Concern | Before | After |
+References in the before column are to `gptqmodel/utils/image.py` at
+`d831ba08b8b64c362f990d38fa7d6e779e417f10`.
+
+| Concern | Before | Current behavior |
 | --- | --- | --- |
-| Request/header phase | `requests.get(...)` ran before any watchdog (`gptqmodel/utils/image.py:157` on pre-fix `main`) | `_get_response` runs the blocking call on a daemon thread and stops waiting at the absolute deadline |
-| Redirect chains | Followed inside `requests` with per-read timeouts only | The same absolute deadline bounds the whole chain |
-| Per-read timeout | Passed through unchanged | `_clamp_timeout` caps connect/read at the remaining budget |
-| Body stream | Watchdog created after headers with a fresh budget (`gptqmodel/utils/image.py:189-193`) | Watchdog is scheduled from the shared deadline |
-| Decode | Returned without rechecking the budget (`gptqmodel/utils/image.py:326`) | Checked after the body and after `image.load()` |
+| Request/header phase | `_get_response`, lines 160–213: a daemon thread returns control at the deadline but cannot cancel `requests.get` during headers | One owned subprocess includes the entire request; timeout kills and reaps it |
+| Cancellation race | Lines 185–208: cancellation and response publication can race; no response exists during headers | No response object crosses the process boundary; child exit releases network resources |
+| Body stream | Lines 284–293: a separate watchdog searches private response socket attributes | The same subprocess deadline covers body reads without private socket access |
+| Error/retry state | Request exceptions handled in the calling process | Worker serializes only reason and retryability as JSON; caller keeps the retry policy |
+| Decoding | Deadline checked around Pillow calls | Same caller-side checks and pixel cap; no interruptible-decoder claim |
 
-## Failure contract
+## Failure and lifecycle contract
 
-| Situation | Result |
-| --- | --- |
-| Budget expires during connect, headers, or redirects | `ImageFetchError` with `total time limit`; not retried |
-| Budget expires during body streaming | socket aborted by the watchdog; `ImageFetchError`; not retried |
-| Budget expires after the body or during decoding | `ImageFetchError`; image closed |
-| Server returns a full response inside the budget | decoded `PIL.Image` returned |
-| Retryable HTTP/transport failure before the deadline | retried with exponential backoff, bounded by the same deadline |
+- Network deadlines never retry. Per-read stalls and permanent request errors
+  also stop immediately; transient HTTP/transport failures may retry within
+  the shared budget.
+- Successful responses, failures, timeouts and caller interruptions all reap
+  their child and close the IPC pipes. Process exit closes sockets even if
+  DNS, TLS or header parsing never returned a `requests.Response`.
+- A child handles one attempt and retains no connection pool for the next.
+  Startup costs apply to each attempt and count against `total_timeout`.
+- The child executes this installed Python file with `runpy.run_path`; it
+  imports requests and Pillow, not the GPT-QModel model registry. User-site
+  and `PYTHONPATH` dependency discovery are preserved without placing the
+  utility directory (which contains `inspect.py`) on the import path. The
+  worker does not reuse the model interpreter or initialize accelerator state.
+- URL and options travel on stdin, not the command line. Image bytes and JSON
+  errors travel on stdout; no pickle or checkpoint files are involved.
+- The existing byte limit is enforced while streaming and the pixel limit
+  before allocating the decoded image. Proxy and certificate configuration
+  used by requests still applies inside the child.
+- Failure to start the interpreter, or an unexpected worker exit, is a
+  terminal diagnostic error. There is no uncancellable thread fallback.
 
-The helper thread is a daemon. When the caller gives up it is cancelled: if the
-response has already arrived it is closed immediately; a request still blocked
-inside `requests` is released as soon as the server completes or closes the
-connection.
+## Regression coverage
 
-## Tests
+`tests/test_image_fetch.py` checks real localhost requests for normal responses,
+retries, byte/pixel bounds, invalid data, slow headers, redirect chains and slow
+bodies. `test_header_deadlines_release_workers_and_sockets` repeats three
+requests to a peer that never completes its headers. It verifies the peer
+observes disconnect, no abandoned fetch thread remains, and every child and
+pipe has been reaped/closed before the next request. The same test fails on
+`d831ba08` because the socket remains open.
 
-`tests/test_image_fetch.py` pins the contract:
-
-| Test | Invariant |
-| --- | --- |
-| `test_slow_headers_are_bounded_by_total_timeout` | delayed headers cannot exceed the budget |
-| `test_redirect_chain_is_bounded_by_total_timeout` | individually fast redirects share one deadline |
-| `test_header_drip_is_bounded_by_total_timeout` | trickled headers cannot reset the budget |
-| `test_decode_time_is_bounded_by_total_timeout` | decoding is inside the budget |
-| `test_slow_drip_body_is_bounded_by_total_timeout` | body streaming is inside the budget |
+`test_fetch_worker_is_reaped_on_caller_interrupt` interrupts a live header read
+and verifies socket and child cleanup. Decode tests cover deadline checks after
+Pillow returns, not preemption of a running decoder.
