@@ -11,20 +11,25 @@ requiring a GPU or a compiler.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from gptqmodel.exllamav3 import ext as exllamav3
 from gptqmodel.quantization import gptq_cuda
-from gptqmodel.utils import allspark
-from gptqmodel.utils import awq
-from gptqmodel.utils import cpp
-from gptqmodel.utils import exllamav2
-from gptqmodel.utils import hadamard
-from gptqmodel.utils import machete
-from gptqmodel.utils import marlin
-from gptqmodel.utils import paroquant
-from gptqmodel.utils import qqq
-from gptqmodel.utils import rco_cpp
-from gptqmodel.utils import tt_blockfloat_cuda
-from gptqmodel.utils import vptq_cuda
+from gptqmodel.utils import (
+    allspark,
+    awq,
+    cpp,
+    exllamav2,
+    hadamard,
+    machete,
+    marlin,
+    paroquant,
+    qqq,
+    rco_cpp,
+    tt_blockfloat_cuda,
+    vptq_cuda,
+)
 
 
 def _assert_stable(loader) -> None:
@@ -119,3 +124,41 @@ def test_rco_dp_uses_stable_abi():
 
 def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
     _assert_stable(cpp._int4_qzero_group_scaled_cpu_extension())
+
+
+def test_every_jit_loader_declares_the_stable_abi():
+    """Any product JIT loader must opt into the stable ABI.
+
+    The HIP loaders are the only exceptions: their compat/device layer has not
+    been ported because this repository has no ROCm build in CI here.
+    """
+
+    root = Path(__file__).resolve().parents[1] / "gptqmodel"
+    rocm_only = {
+        "gptqmodel/utils/allspark_hip.py",
+        "gptqmodel/utils/nf12_hip.py",
+        "gptqmodel/utils/tt_blockfloat_hip.py",
+    }
+    missing = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "TorchOpsJitExtension(" not in text:
+            continue
+        relative = path.relative_to(root.parent).as_posix()
+        if relative in rocm_only:
+            continue
+        for match in re.finditer(r"TorchOpsJitExtension\(", text):
+            depth = 0
+            index = match.end() - 1
+            while index < len(text):
+                if text[index] == "(":
+                    depth += 1
+                elif text[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            if "torch_stable_abi_target" not in text[match.end():index]:
+                missing.append(relative)
+                break
+    assert not missing, f"JIT loaders missing torch_stable_abi_target: {missing}"
