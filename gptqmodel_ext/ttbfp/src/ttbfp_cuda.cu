@@ -49,8 +49,16 @@ __device__ __forceinline__ float decode_datum(ttbfp_fmt fmt, const uint8_t *data
         uint8_t b = data[block_index * db + (lane >> 2)];
         v = (uint8_t)((b >> ((lane & 3) * 2)) & 0x03);
     }
-    float scale = ldexpf(1.0f, (int)e - (126 + mb));
-    float f = (float)(v & mask) * scale;
+    const int sh = (int)e - (126 + mb);
+    float f;
+    if (sh < -126) {
+        // The direct scale is subnormal; split off 2^-6 so the first
+        // multiply stays normal even with FTZ/DAZ enabled.
+        f = (float)(v & mask) * ldexpf(1.0f, sh + 6);
+        f *= 0x1p-6f;
+    } else {
+        f = (float)(v & mask) * ldexpf(1.0f, sh);
+    }
     return (v & sbit) ? -f : f;
 }
 

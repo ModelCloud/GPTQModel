@@ -58,6 +58,17 @@
 
 namespace {
 
+// The true per-block scale is 2^(e - 126 - magnitude_bits).  For the six
+// smallest exponents that value is subnormal (bf8: e < 7), so a CPU running
+// with FTZ/DAZ enabled would flush it to zero even when the decoded weight
+// is normal -- e.g. bf8_b exponent 1 with magnitude 64 is 2^-126, but its
+// scale 2^-132 is subnormal.  Store the normal high factor 2^(e-120-mb)
+// instead and fold the remaining 2^-6 into the decode after the magnitude
+// multiply.  Both factors are normal, so table construction and the first
+// multiply are independent of the ambient FP mode; the final multiply can
+// still produce a genuinely subnormal weight, which the ftz argument owns.
+constexpr float kLowScale = 0x1p-6f;  // 2^-6
+
 struct ScaleTables {
     float bf8[256];
     float bf4[256];
@@ -68,9 +79,15 @@ struct ScaleTables {
         bf2[0] = 0.0f;
         for (int e = 1; e < 256; ++e) {
             // decode: mag * 2^(e - 126 - magnitude_bits)
-            bf8[e] = std::ldexp(1.0f, e - 133);
-            bf4[e] = std::ldexp(1.0f, e - 129);
-            bf2[e] = std::ldexp(1.0f, e - 127);
+            if (e < 7) {
+                bf8[e] = std::ldexp(1.0f, e - 127);
+                bf4[e] = std::ldexp(1.0f, e - 123);
+                bf2[e] = std::ldexp(1.0f, e - 121);
+            } else {
+                bf8[e] = std::ldexp(1.0f, e - 133);
+                bf4[e] = std::ldexp(1.0f, e - 129);
+                bf2[e] = std::ldexp(1.0f, e - 127);
+            }
         }
     }
 };
@@ -236,27 +253,28 @@ inline void decode_block_scalar(ttbfp_fmt fmt, uint8_t e, const uint8_t *d,
         return;
     }
     const float scale = scale_table(fmt)[e];
+    const float lo = (e < 7) ? kLowScale : 1.0f;
     const int mb = magnitude_bits(fmt);
     const int mask = (1 << mb) - 1;
     const int sbit = 1 << mb;
     if (fmt == TTBFP_BF8_B) {
         for (int i = 0; i < TTBFP_BLOCK; ++i) {
             uint8_t v = d[i];
-            float f = (float)(v & mask) * scale;
+            float f = (float)(v & mask) * scale * lo;
             out[i] = (v & sbit) ? -f : f;
         }
     } else if (fmt == TTBFP_BF4_B) {
         for (int i = 0; i < TTBFP_BLOCK; ++i) {
             uint8_t b = d[i >> 1];
             uint8_t v = (i & 1) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0F);
-            float f = (float)(v & mask) * scale;
+            float f = (float)(v & mask) * scale * lo;
             out[i] = (v & sbit) ? -f : f;
         }
     } else {
         for (int i = 0; i < TTBFP_BLOCK; ++i) {
             uint8_t b = d[i >> 2];
             uint8_t v = (uint8_t)((b >> ((i & 3) * 2)) & 0x03);
-            float f = (float)(v & mask) * scale;
+            float f = (float)(v & mask) * scale * lo;
             out[i] = (v & sbit) ? -f : f;
         }
     }
@@ -379,6 +397,11 @@ TTBFP_AVX2 void dequantize_row_avx2(ttbfp_fmt fmt, const uint8_t *exps,
         }
         v0 = _mm256_mul_ps(v0, s);
         v1 = _mm256_mul_ps(v1, s);
+        if (e < 7) {
+            __m256 lo = _mm256_set1_ps(kLowScale);
+            v0 = _mm256_mul_ps(v0, lo);
+            v1 = _mm256_mul_ps(v1, lo);
+        }
         if (ftz && e < 7) {
             v0 = flush_denorm(v0);
             v1 = flush_denorm(v1);
@@ -467,6 +490,7 @@ TTBFP_AVX512 void dequantize_row_avx512(ttbfp_fmt fmt, const uint8_t *exps,
                  : fmt == TTBFP_BF4_B ? bf4_decode16_512(p)
                                       : bf2_decode16_512(p);
         v = _mm512_mul_ps(v, _mm512_set1_ps(tab[e]));
+        if (e < 7) v = _mm512_mul_ps(v, _mm512_set1_ps(kLowScale));
         if (ftz && e < 7) v = flush_denorm_512(v);
         if (n == TTBFP_BLOCK) {
             _mm512_storeu_ps(o, v);
@@ -537,9 +561,15 @@ struct SmDec {
                 float m = (float)(v & mask);
                 out[i] = (v & sbit) ? -m : m;
             }
-        } else {
+        } else if (fmt == TTBFP_BF4_B) {
             for (int i = 0; i < TTBFP_BLOCK; ++i) {
                 int v = (i & 1) ? (d[i >> 1] >> 4) : (d[i >> 1] & 0x0F);
+                float m = (float)(v & mask);
+                out[i] = (v & sbit) ? -m : m;
+            }
+        } else {
+            for (int i = 0; i < TTBFP_BLOCK; ++i) {
+                int v = (d[i >> 2] >> (2 * (i & 3))) & 0x03;
                 float m = (float)(v & mask);
                 out[i] = (v & sbit) ? -m : m;
             }
@@ -609,6 +639,9 @@ void mm_panel_scalar(ttbfp_fmt fmt, const AT *A, int64_t lda,
                 Dec::raw_scalar(fmt, d0 + k * d_k + jj * d_j, b[jj]);
                 const float sc = tab[e];
                 for (int x = 0; x < TTBFP_BLOCK; ++x) b[jj][x] *= sc;
+                if (e < 7) {
+                    for (int x = 0; x < TTBFP_BLOCK; ++x) b[jj][x] *= kLowScale;
+                }
                 if (ftz && e < 7) {
                     for (int x = 0; x < TTBFP_BLOCK; x += 1) {
                         if (std::fabs(b[jj][x]) < FLT_MIN) b[jj][x] = 0.0f;
@@ -669,6 +702,11 @@ TTBFP_AVX2 void mm_panel_avx2(ttbfp_fmt fmt_, const AT *A, int64_t lda,
                 __m256 s = _mm256_set1_ps(tab[e]);
                 v0 = _mm256_mul_ps(v0, s);
                 v1 = _mm256_mul_ps(v1, s);
+                if (e < 7) {
+                    __m256 lo = _mm256_set1_ps(kLowScale);
+                    v0 = _mm256_mul_ps(v0, lo);
+                    v1 = _mm256_mul_ps(v1, lo);
+                }
                 if (ftz && e < 7) {
                     v0 = flush_denorm(v0);
                     v1 = flush_denorm(v1);
@@ -710,6 +748,7 @@ TTBFP_AVX512 inline void decode_blocks_avx512(ttbfp_fmt fmt, const float *tab,
         const uint8_t e = e0[k * e_k + jj * e_j];
         __m512 v = Dec::raw_avx512(fmt, d0 + k * d_k + jj * d_j);
         v = _mm512_mul_ps(v, _mm512_set1_ps(tab[e]));
+        if (e < 7) v = _mm512_mul_ps(v, _mm512_set1_ps(kLowScale));
         if (ftz && e < 7) v = flush_denorm_512(v);
         b[jj] = v;
     }
@@ -851,6 +890,49 @@ inline void mm_run(ttbfp_fmt fmt_, const AT *A, int64_t lda,
     }
 }
 
+template <class AT, class Loader, class Dec>
+inline void mm_run_rows(int mr, ttbfp_fmt fmt_, const AT *A, int64_t lda,
+                        const uint8_t *e0, const uint8_t *d0,
+                        int64_t e_k, int64_t d_k, int64_t e_j, int64_t d_j,
+                        int64_t K, int64_t j0, int jc,
+                        float *C, int64_t ldc, int ftz, int level) {
+#define TTBFP_RUN(MR, AP, CP)                                                \
+    mm_run<MR, AT, Loader, Dec>(fmt_, AP, lda, e0, d0, e_k, d_k, e_j, d_j,  \
+                                K, j0, jc, CP, ldc, ftz, level)
+    switch (mr) {
+        case 16: TTBFP_RUN(16, A, C); break;
+        case 15: case 14: case 13: case 12: case 11:
+        case 10: case 9: {
+            // 9..15 rows: an 8-row tile plus the remaining 1..7 rows, so
+            // the accumulator tile never exceeds the 16-zmm shapes.
+            TTBFP_RUN(8, A, C);
+            const AT *A2 = A + 8 * lda;
+            float *C2 = C + 8 * ldc;
+            switch (mr - 8) {
+                case 7: TTBFP_RUN(7, A2, C2); break;
+                case 6: TTBFP_RUN(6, A2, C2); break;
+                case 5: TTBFP_RUN(5, A2, C2); break;
+                case 4: TTBFP_RUN(4, A2, C2); break;
+                case 3: TTBFP_RUN(3, A2, C2); break;
+                case 2: TTBFP_RUN(2, A2, C2); break;
+                case 1: TTBFP_RUN(1, A2, C2); break;
+                default: break;
+            }
+            break;
+        }
+        case 8: TTBFP_RUN(8, A, C); break;
+        case 7: TTBFP_RUN(7, A, C); break;
+        case 6: TTBFP_RUN(6, A, C); break;
+        case 5: TTBFP_RUN(5, A, C); break;
+        case 4: TTBFP_RUN(4, A, C); break;
+        case 3: TTBFP_RUN(3, A, C); break;
+        case 2: TTBFP_RUN(2, A, C); break;
+        case 1: TTBFP_RUN(1, A, C); break;
+        default: break;
+    }
+#undef TTBFP_RUN
+}
+
 /* ---- driver ------------------------------------------------------- */
 
 template <class AT, class Loader, class Dec>
@@ -891,18 +973,8 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
                 const int jc = (int)std::min<int64_t>(jm, nfull - j0);
                 const AT *Ap = A + mt * mrt * lda;
                 float *Cp = C + mt * mrt * ldc + j0 * TTBFP_BLOCK;
-                switch (mr) {
-                    case 16: mm_run<16, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 8: mm_run<8, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 7: mm_run<7, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 6: mm_run<6, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 5: mm_run<5, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 4: mm_run<4, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 3: mm_run<3, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 2: mm_run<2, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    case 1: mm_run<1, AT, Loader, Dec>(fmt, Ap, lda, exps, data, e_k, d_k, e_j, d_j, K, j0, jc, Cp, ldc, ftz, level); break;
-                    default: break;
-                }
+                mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, exps, data, e_k, d_k,
+                            e_j, d_j, K, j0, jc, Cp, ldc, ftz, level);
             }
         }
     }
@@ -918,18 +990,8 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
             const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
             float tmp[16 * TTBFP_BLOCK];
             const AT *Ap = A + mt * mrt * lda;
-            switch (mr) {
-                case 16: mm_run<16, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 8: mm_run<8, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 7: mm_run<7, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 6: mm_run<6, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 5: mm_run<5, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 4: mm_run<4, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 3: mm_run<3, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 2: mm_run<2, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                case 1: mm_run<1, AT, Loader, Dec>(fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0, K, 0, 1, tmp, TTBFP_BLOCK, ftz, level); break;
-                default: break;
-            }
+            mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0,
+                        K, 0, 1, tmp, TTBFP_BLOCK, ftz, level);
             for (int r = 0; r < mr; ++r) {
                 std::memcpy(C + (mt * mrt + r) * ldc + j * TTBFP_BLOCK,
                             tmp + r * TTBFP_BLOCK, (size_t)n * sizeof(float));

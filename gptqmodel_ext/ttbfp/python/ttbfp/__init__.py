@@ -56,6 +56,55 @@ def _db(f: int) -> int:
     return 16 if f == 8 else (8 if f == 4 else 4)
 
 
+def _flat_packed(exps, data, fmt):
+    """Validate the row-major (flat) layout and return its dimensions."""
+    f = _fmt(fmt)
+    exps = np.ascontiguousarray(exps, dtype=np.uint8)
+    data = np.ascontiguousarray(data, dtype=np.uint8)
+    if exps.ndim != 2:
+        raise ValueError("exps must be a 2-D (rows, nblk) array")
+    if data.ndim != 2:
+        raise ValueError("data must be a 2-D (rows, nblk*db) array")
+    rows, nblk = exps.shape
+    want = (rows, nblk * _db(f))
+    if data.shape != want:
+        raise ValueError(f"data must have shape {want}, got {data.shape}")
+    return f, exps, data, rows, nblk
+
+
+def _block_major(exps_t, data_t, fmt, K, *, s8=False):
+    """Validate the block-major layout and return its dimensions."""
+    f = _fmt(fmt)
+    exps_t = np.ascontiguousarray(exps_t, dtype=np.uint8)
+    data_t = np.ascontiguousarray(data_t, dtype=np.uint8)
+    if exps_t.ndim != 2:
+        raise ValueError("exps_t must be a 2-D (nblk, K) array")
+    if exps_t.shape[1] != K:
+        raise ValueError(f"exps_t must be (nblk, {K}), got {exps_t.shape}")
+    nblk = exps_t.shape[0]
+    width = 16 if s8 else _db(f)
+    want = (nblk, K * width)
+    if data_t.ndim != 2 or data_t.shape != want:
+        raise ValueError(f"packed data must have shape {want}, got {data_t.shape}")
+    return f, exps_t, data_t, nblk
+
+
+def _cols(cols, nblk, *, flat):
+    """Resolve ``cols`` and reject counts that change a flat row stride."""
+    if cols is None:
+        return nblk * 16
+    cols = int(cols)
+    if cols <= 0 or cols > nblk * 16:
+        raise ValueError(f"cols must be in 1..{nblk * 16}, got {cols}")
+    if flat and blocks_per_row(cols) != nblk:
+        raise ValueError(
+            f"cols={cols} would change the stored row stride: the packed "
+            f"buffer has {nblk} blocks per row, but cols={cols} needs "
+            f"{blocks_per_row(cols)}. Pass cols > {(nblk - 1) * 16} or "
+            "repack with the smaller column count.")
+    return cols
+
+
 def _find_lib() -> str:
     env = os.environ.get("TTBFP_LIB")
     if env:
@@ -187,16 +236,8 @@ def pack(x, fmt=BF8_B):
 
 def unpack(exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
     """Decode packed BFP data to a row-major fp32 array."""
-    f = _fmt(fmt)
-    exps = np.ascontiguousarray(exps, dtype=np.uint8)
-    data = np.ascontiguousarray(data, dtype=np.uint8)
-    if exps.ndim != 2:
-        raise ValueError("exps must be (rows, nblk)")
-    rows, nblk = exps.shape
-    if cols is None:
-        cols = nblk * 16
-    if cols > nblk * 16:
-        raise ValueError("cols exceeds the packed block count")
+    f, exps, data, rows, nblk = _flat_packed(exps, data, fmt)
+    cols = _cols(cols, nblk, flat=True)
     out = np.empty((rows, cols), dtype=np.float32)
     _lib.ttbfp_dequantize(f, _ptr(exps), _ptr(data), rows, cols,
                           out.ctypes.data_as(_f32p), int(bool(ftz)))
@@ -209,19 +250,14 @@ def matmul(a, exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
     a: (M, K) float32; exps: (K, nblk); data: (K, nblk*db).
     Returns (M, N) float32, N = nblk*16 unless ``cols`` is given.
     """
-    f = _fmt(fmt)
     a = _f32(a)
-    exps = np.ascontiguousarray(exps, dtype=np.uint8)
-    data = np.ascontiguousarray(data, dtype=np.uint8)
     if a.ndim != 2:
         raise ValueError("a must be 2-D")
     M, K = a.shape
-    if exps.shape[0] != K:
-        raise ValueError(f"exps has {exps.shape[0]} rows, expected K={K}")
-    nblk = exps.shape[1]
-    N = nblk * 16 if cols is None else int(cols)
-    if N > nblk * 16:
-        raise ValueError("cols exceeds the packed block count")
+    f, exps, data, rows, nblk = _flat_packed(exps, data, fmt)
+    if rows != K:
+        raise ValueError(f"exps has {rows} rows, expected K={K}")
+    N = _cols(cols, nblk, flat=True)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul(f, a.ctypes.data_as(_f32p), K, _ptr(exps), _ptr(data),
                       M, K, N, out.ctypes.data_as(_f32p), N, int(bool(ftz)))
@@ -231,15 +267,14 @@ def matmul(a, exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
 def matmul_bf16(a_bf16, exps, data, fmt=BF8_B, cols: int | None = None,
                 ftz: bool = True):
     """Like matmul(), with A given as bf16 bit patterns (uint16)."""
-    f = _fmt(fmt)
     a = np.ascontiguousarray(a_bf16, dtype=np.uint16)
-    exps = np.ascontiguousarray(exps, dtype=np.uint8)
-    data = np.ascontiguousarray(data, dtype=np.uint8)
+    if a.ndim != 2:
+        raise ValueError("a_bf16 must be 2-D")
     M, K = a.shape
-    if exps.shape[0] != K:
-        raise ValueError(f"exps has {exps.shape[0]} rows, expected K={K}")
-    nblk = exps.shape[1]
-    N = nblk * 16 if cols is None else int(cols)
+    f, exps, data, rows, nblk = _flat_packed(exps, data, fmt)
+    if rows != K:
+        raise ValueError(f"exps has {rows} rows, expected K={K}")
+    N = _cols(cols, nblk, flat=True)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_bf16(f, a.ctypes.data_as(_u16p), K, _ptr(exps),
                            _ptr(data), M, K, N, out.ctypes.data_as(_f32p), N,
@@ -252,15 +287,8 @@ def transpose_packed(exps, data, fmt=BF8_B):
 
     exps (K, nblk) -> (nblk, K);  data (K, nblk*db) -> (nblk, K*db).
     """
-    f = _fmt(fmt)
-    exps = np.ascontiguousarray(exps, dtype=np.uint8)
-    data = np.ascontiguousarray(data, dtype=np.uint8)
-    if exps.ndim != 2:
-        raise ValueError("exps must be (K, nblk)")
-    K, nblk = exps.shape
+    f, exps, data, K, nblk = _flat_packed(exps, data, fmt)
     db = _db(f)
-    if data.shape != (K, nblk * db):
-        raise ValueError(f"data must be (K, {nblk * db})")
     exps_t = np.empty((nblk, K), dtype=np.uint8)
     data_t = np.empty((nblk, K * db), dtype=np.uint8)
     _lib.ttbfp_transpose_packed(f, _ptr(exps), _ptr(data), K, nblk * 16,
@@ -280,19 +308,12 @@ def matmul_prepacked(a, exps_t, data_t, fmt=BF8_B, cols: int | None = None,
 
     exps_t: (nblk, K) uint8;  data_t: (nblk, K*db) uint8.
     """
-    f = _fmt(fmt)
     a = _f32(a)
-    exps_t = np.ascontiguousarray(exps_t, dtype=np.uint8)
-    data_t = np.ascontiguousarray(data_t, dtype=np.uint8)
     if a.ndim != 2:
         raise ValueError("a must be 2-D")
     M, K = a.shape
-    if exps_t.ndim != 2 or exps_t.shape[1] != K:
-        raise ValueError(f"exps_t must be (nblk, {K})")
-    nblk = exps_t.shape[0]
-    N = nblk * 16 if cols is None else int(cols)
-    if N > nblk * 16:
-        raise ValueError("cols exceeds the packed block count")
+    f, exps_t, data_t, nblk = _block_major(exps_t, data_t, fmt, K)
+    N = _cols(cols, nblk, flat=False)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked(f, a.ctypes.data_as(_f32p), K, _ptr(exps_t),
                                 _ptr(data_t), M, K, N,
@@ -303,13 +324,12 @@ def matmul_prepacked(a, exps_t, data_t, fmt=BF8_B, cols: int | None = None,
 def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=BF8_B,
                           cols: int | None = None, ftz: bool = True):
     """Like matmul_prepacked(), with A as bf16 bit patterns (uint16)."""
-    f = _fmt(fmt)
     a = np.ascontiguousarray(a_bf16, dtype=np.uint16)
-    exps_t = np.ascontiguousarray(exps_t, dtype=np.uint8)
-    data_t = np.ascontiguousarray(data_t, dtype=np.uint8)
+    if a.ndim != 2:
+        raise ValueError("a_bf16 must be 2-D")
     M, K = a.shape
-    nblk = exps_t.shape[0]
-    N = nblk * 16 if cols is None else int(cols)
+    f, exps_t, data_t, nblk = _block_major(exps_t, data_t, fmt, K)
+    N = _cols(cols, nblk, flat=False)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_bf16(f, a.ctypes.data_as(_u16p), K,
                                      _ptr(exps_t), _ptr(data_t), M, K, N,
@@ -325,12 +345,7 @@ def convert_s8(exps, data, fmt=BF8_B):
     are unchanged: sign*magnitude is stored as a two's-complement int8, which
     the matmul kernel decodes in 3 instructions instead of 8-12.
     """
-    f = _fmt(fmt)
-    exps = np.ascontiguousarray(exps, dtype=np.uint8)
-    data = np.ascontiguousarray(data, dtype=np.uint8)
-    if exps.ndim != 2:
-        raise ValueError("exps must be (K, nblk)")
-    K, nblk = exps.shape
+    f, exps, data, K, nblk = _flat_packed(exps, data, fmt)
     exps_t = np.empty((nblk, K), dtype=np.uint8)
     s8 = np.empty((nblk, K * 16), dtype=np.uint8)
     _lib.ttbfp_convert_s8(f, _ptr(exps), _ptr(data), K, nblk * 16,
@@ -347,19 +362,12 @@ def prepack_s8(x, fmt=BF8_B):
 def matmul_prepacked_s8(a, exps_t, s8, fmt=BF8_B, cols: int | None = None,
                         ftz: bool = True):
     """C = A @ dequant(B) with B in the int8 kernel-native layout."""
-    f = _fmt(fmt)
     a = _f32(a)
-    exps_t = np.ascontiguousarray(exps_t, dtype=np.uint8)
-    s8 = np.ascontiguousarray(s8, dtype=np.uint8)
     if a.ndim != 2:
         raise ValueError("a must be 2-D")
     M, K = a.shape
-    if exps_t.ndim != 2 or exps_t.shape[1] != K:
-        raise ValueError(f"exps_t must be (nblk, {K})")
-    nblk = exps_t.shape[0]
-    N = nblk * 16 if cols is None else int(cols)
-    if N > nblk * 16:
-        raise ValueError("cols exceeds the packed block count")
+    f, exps_t, s8, nblk = _block_major(exps_t, s8, fmt, K, s8=True)
+    N = _cols(cols, nblk, flat=False)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_s8(f, a.ctypes.data_as(_f32p), K,
                                    _ptr(exps_t), _ptr(s8), M, K, N,
@@ -371,13 +379,12 @@ def matmul_prepacked_s8(a, exps_t, s8, fmt=BF8_B, cols: int | None = None,
 def matmul_prepacked_s8_bf16(a_bf16, exps_t, s8, fmt=BF8_B,
                              cols: int | None = None, ftz: bool = True):
     """Like matmul_prepacked_s8(), with A as bf16 bit patterns (uint16)."""
-    f = _fmt(fmt)
     a = np.ascontiguousarray(a_bf16, dtype=np.uint16)
-    exps_t = np.ascontiguousarray(exps_t, dtype=np.uint8)
-    s8 = np.ascontiguousarray(s8, dtype=np.uint8)
+    if a.ndim != 2:
+        raise ValueError("a_bf16 must be 2-D")
     M, K = a.shape
-    nblk = exps_t.shape[0]
-    N = nblk * 16 if cols is None else int(cols)
+    f, exps_t, s8, nblk = _block_major(exps_t, s8, fmt, K, s8=True)
+    N = _cols(cols, nblk, flat=False)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_s8_bf16(f, a.ctypes.data_as(_u16p), K,
                                         _ptr(exps_t), _ptr(s8), M, K, N,
@@ -402,6 +409,9 @@ def tile_unpack(blob, fmt=BF8_B, ftz: bool = True):
     """Unpack a TT L1 byte-layout tile back to a 32x32 fp32 tile."""
     f = _fmt(fmt)
     b = np.ascontiguousarray(blob, dtype=np.uint8)
+    want = tile_bytes(f)
+    if b.size != want:
+        raise ValueError(f"blob must contain {want} bytes, got {b.size}")
     out = np.empty((32, 32), dtype=np.float32)
     _lib.ttbfp_tile_unpack(f, _ptr(b), out.ctypes.data_as(_f32p), int(bool(ftz)))
     return out

@@ -327,3 +327,181 @@ def test_convert_s8_preserves_values(fmt):
     np.testing.assert_array_equal(bits(y0), bits(y1))
     # A single int8 lane per datum: 16 bytes per block for both formats.
     assert s8.shape == (nblk, 23 * 16)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the native-kernel review of PR #3808.
+# ---------------------------------------------------------------------------
+
+def _matmul_into(out, a, exps, data, fmt, cols, *, bf16=False, ftz=True):
+    """Call the C entry point with a caller-provided output buffer.
+
+    This lets a test prefill ``out`` with a sentinel, so a kernel that skips
+    a row tile leaves an unmistakable value instead of whatever ``np.empty``
+    happened to contain.
+    """
+    a = np.ascontiguousarray(a, dtype=np.uint16 if bf16 else np.float32)
+    exps = np.ascontiguousarray(exps, dtype=np.uint8)
+    data = np.ascontiguousarray(data, dtype=np.uint8)
+    M, K = a.shape
+    fn = ttbfp.lib.ttbfp_matmul_bf16 if bf16 else ttbfp.lib.ttbfp_matmul
+    ap = a.ctypes.data_as(ttbfp._u16p if bf16 else ttbfp._f32p)
+    fn(int(fmt), ap, K, exps.ctypes.data_as(ttbfp._u8p),
+       data.ctypes.data_as(ttbfp._u8p), M, K, int(cols),
+       out.ctypes.data_as(ttbfp._f32p), int(cols), int(bool(ftz)))
+
+
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
+@pytest.mark.parametrize("entry", ["f32", "bf16"])
+@pytest.mark.parametrize(
+    "N", [16, 17, 33], ids=["full", "partial", "two-full-plus-partial"])
+def test_matmul_all_row_remainders(fmt, entry, N, monkeypatch):
+    """Every M remainder must be written, in both column-block switches.
+
+    The sign-magnitude AVX-512 path selects a 16-row tile, so M = 16 + r for
+    r in 1..15 used to leave the r-row remainder untouched.
+    """
+    rng = np.random.default_rng(0xB3808 + fmt * 100 + N)
+    K = 8
+    w = (rng.standard_normal((K, N)) * 0.5).astype(np.float32)
+    e, d = ttbfp.pack(w, fmt)
+    for rem in range(1, 16):
+        M = 16 + rem
+        a = (rng.standard_normal((M, K)) * 0.5).astype(np.float32)
+        a_in = ((a.view(np.uint32) >> 16).astype(np.uint16)
+                if entry == "bf16" else a)
+        bf16 = entry == "bf16"
+
+        monkeypatch.setenv("TTBFP_MRT", "16")
+        got = np.full((M, N), np.float32(1e30), dtype=np.float32)
+        _matmul_into(got, a_in, e, d, fmt, N, bf16=bf16)
+
+        monkeypatch.setenv("TTBFP_MRT", "4")
+        want = np.full((M, N), np.float32(-1e30), dtype=np.float32)
+        _matmul_into(want, a_in, e, d, fmt, N, bf16=bf16)
+
+        np.testing.assert_array_equal(bits(got), bits(want))
+
+
+def test_scalar_bf2_decode_reads_two_bit_fields(tmp_path):
+    """The scalar fallback must decode bf2_b as four 2-bit fields per byte.
+
+    Block 0 is 0x55 in all four bytes (sixteen +1 datums).  A nibble decoder
+    reads eight bytes and pulls block 1's zero bytes into lanes 8..15, so the
+    first block decodes as eight ones followed by eight zeros.
+    """
+    e = np.full((1, 2), 127, dtype=np.uint8)
+    d = np.zeros((1, 8), dtype=np.uint8)
+    d[0, :4] = 0x55
+    a = np.ones((1, 1), dtype=np.float32)
+    np.savez(tmp_path / "case.npz", a=a, e=e, d=d)
+    script = """
+import numpy as np, sys, ttbfp
+z = np.load(sys.argv[1])
+c = ttbfp.matmul(z['a'], z['e'], z['d'], 2, cols=32)
+np.save(sys.argv[2], c)
+"""
+    out = tmp_path / "out.npy"
+    env = dict(os.environ)
+    env.update(PYTHONPATH=str(ROOT / "python"),
+               TTBFP_LIB=str(ROOT / "libttbfp.so"),
+               TTBFP_FORCE_SCALAR="1")
+    subprocess.run([sys.executable, "-c", script, str(tmp_path / "case.npz"),
+                    str(out)], check=True, env=env, cwd=str(ROOT))
+    c = np.load(out)
+    np.testing.assert_array_equal(c[0, :16], np.ones(16, dtype=np.float32))
+    np.testing.assert_array_equal(c[0, 16:], np.zeros(16, dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "fmt,value", [(ttbfp.BF8_B, 2.0 ** -126), (ttbfp.BF4_B, 2.0 ** -126)],
+    ids=["bf8_b", "bf4_b"])
+def test_normal_decode_survives_ambient_ftz(fmt, value, tmp_path):
+    """A normal decoded weight must not be flushed via a subnormal scale.
+
+    The scale table is initialized while FTZ is on, then FTZ is left on for
+    one matmul and turned off for another.  2^126 * 2^-126 must be exactly 1.
+    """
+    pytest.importorskip("torch")
+    np.savez(tmp_path / "case.npz",
+             x=np.full((1, 16), np.float32(value), dtype=np.float32))
+    script = """
+import numpy as np, sys, torch, ttbfp
+z = np.load(sys.argv[1])
+fmt = int(sys.argv[2])
+torch.set_flush_denormal(True)
+e, d = ttbfp.pack(z['x'], fmt)
+ttbfp.unpack(e, d, fmt, cols=16)          # initialize the static table
+a = np.array([[np.float32(2.0 ** 126)]], dtype=np.float32)
+c_on = ttbfp.matmul(a, e, d, fmt, cols=16)
+torch.set_flush_denormal(False)
+c_off = ttbfp.matmul(a, e, d, fmt, cols=16)
+np.savez(sys.argv[3], on=c_on, off=c_off)
+"""
+    out = tmp_path / "out.npz"
+    env = dict(os.environ)
+    env.update(PYTHONPATH=str(ROOT / "python"),
+               TTBFP_LIB=str(ROOT / "libttbfp.so"))
+    subprocess.run([sys.executable, "-c", script, str(tmp_path / "case.npz"),
+                    str(fmt), str(out)], check=True, env=env, cwd=str(ROOT))
+    z = np.load(out)
+    np.testing.assert_array_equal(z["on"], np.ones((1, 16), dtype=np.float32))
+    np.testing.assert_array_equal(z["off"], np.ones((1, 16), dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "fmt,db", [(ttbfp.BF8_B, 16), (ttbfp.BF4_B, 8), (ttbfp.BF2_B, 4)])
+def test_rejects_malformed_packed_buffers(fmt, db):
+    """Short or mis-shaped packed buffers must raise, not reach ctypes."""
+    rng = np.random.default_rng(404)
+    w = rng.standard_normal((5, 32)).astype(np.float32)
+    e, d = ttbfp.pack(w, fmt)
+    assert d.shape == (5, 2 * db)
+    a = np.ones((2, 5), dtype=np.float32)
+    a_bf = np.ones((2, 5), dtype=np.uint16)
+
+    with pytest.raises(ValueError):
+        ttbfp.unpack(e, d[:, :-1], fmt)
+    with pytest.raises(ValueError):
+        ttbfp.unpack(e[0], d, fmt)
+    with pytest.raises(ValueError):
+        ttbfp.matmul(a, e, d[:, :-1], fmt)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_bf16(a_bf, e, d[:, :-1], fmt)
+
+    et, dt = ttbfp.transpose_packed(e, d, fmt)
+    assert dt.shape == (2, 5 * db)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked(a, et, dt[:, :-1], fmt)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked_bf16(a_bf, et, dt[:, :-1], fmt)
+
+    est, s8 = ttbfp.prepack_s8(w, fmt)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked_s8(a, est, s8[:, :-1], fmt)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked_s8_bf16(a_bf, est, s8[:, :-1], fmt)
+
+    blob = ttbfp.tile_pack(np.zeros((32, 32), dtype=np.float32), fmt)
+    with pytest.raises(ValueError):
+        ttbfp.tile_unpack(blob[:-1], fmt)
+
+
+def test_flat_cols_must_preserve_stored_stride():
+    """Cropping whole blocks changes the flat row stride; reject it."""
+    w = np.array([[1.0] * 16 + [11.0] * 16,
+                  [2.0] * 16 + [12.0] * 16,
+                  [3.0] * 16 + [13.0] * 16], dtype=np.float32)
+    e, d = ttbfp.pack(w, ttbfp.BF8_B)
+    with pytest.raises(ValueError):
+        ttbfp.unpack(e, d, ttbfp.BF8_B, cols=16)
+    y = ttbfp.unpack(e, d, ttbfp.BF8_B, cols=17)
+    np.testing.assert_allclose(y[:, 0], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(y[:, 16], [11.0, 12.0, 13.0])
+
+    a = np.eye(3, dtype=np.float32)
+    with pytest.raises(ValueError):
+        ttbfp.matmul(a, e, d, ttbfp.BF8_B, cols=16)
+    c = ttbfp.matmul(a, e, d, ttbfp.BF8_B, cols=17)
+    np.testing.assert_allclose(c[:, 0], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(c[:, 16], [11.0, 12.0, 13.0])
