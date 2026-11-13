@@ -77,20 +77,43 @@ def pack_awq_columns(codes: torch.Tensor, bits: int, order=None) -> torch.Tensor
     return packed
 
 
-def _unpack_columnwise(qtensor: torch.Tensor, bits: int, count: int = None) -> torch.Tensor:
-    """Unpack continuous words, including codes that cross word boundaries."""
+def _unpack_columnwise(
+    qtensor: torch.Tensor,
+    bits: int,
+    count: int = None,
+    dtype: torch.dtype = None,
+    shifts: torch.Tensor = None,
+) -> torch.Tensor:
+    """Unpack continuous words, including codes that cross word boundaries.
+
+    ``dtype`` selects the integer width of the returned codes and defaults to
+    ``torch.int64``, which the packing paths keep for their widened bit-stream
+    arithmetic.  ``dequantize_gemm`` requests ``torch.int32``: a code is at most
+    eight bits wide, so the wider default only doubled the traffic of the
+    largest transient allocation in the AWQ forward.
+
+    ``shifts`` overrides the four-bit extraction offsets, in output-column
+    order. Passing the AWQ reverse order as the offsets emits the codes already
+    in natural column order, which removes the separate column gather.
+    """
     if bits not in range(2, 9):
         raise ValueError(f"AWQ unpacking requires 2 through 8 bits, got {bits}")
     if bits == 4:
+        if shifts is None:
+            shifts = torch.arange(0, 32, bits, device=qtensor.device)
         if qtensor.device.type == "npu":
-            shifts = torch.arange(0, 32, bits, dtype=torch.int64, device=qtensor.device)
+            shifts = shifts.to(torch.int64)
             divisors = torch.pow(torch.full_like(shifts, 2), shifts)
             unpacked = torch.floor_divide(qtensor[:, :, None].to(torch.int64), divisors[None, None, :])
         else:
-            shifts = torch.arange(0, 32, bits, device=qtensor.device)
+            if dtype is not None:
+                shifts = shifts.to(dtype)
             unpacked = torch.bitwise_right_shift(qtensor[:, :, None], shifts[None, None, :])
-        unpacked = unpacked.view(qtensor.shape[0], -1) & 15
-        return unpacked[..., :count] if count is not None else unpacked
+        # Masking in place avoids a second tile-sized allocation.
+        unpacked = unpacked.view(qtensor.shape[0], -1)
+        unpacked.bitwise_and_(15)
+        unpacked = unpacked[..., :count] if count is not None else unpacked
+        return unpacked if dtype is None else unpacked.to(dtype)
     count = count or (qtensor.shape[-1] * 32 // bits)
     blocks = math.ceil(count / 32)
     words = torch.zeros((*qtensor.shape[:-1], blocks * bits), dtype=torch.int64, device=qtensor.device)
@@ -105,7 +128,8 @@ def _unpack_columnwise(qtensor: torch.Tensor, bits: int, count: int = None) -> t
         if shift + bits > 32:
             value |= words[..., word + 1] << (32 - shift)
         codes[..., index] = value & mask
-    return codes.flatten(-2)[..., :count]
+    codes = codes.flatten(-2)[..., :count]
+    return codes if dtype is None else codes.to(dtype)
 
 
 def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int, count: int = None):
@@ -177,19 +201,107 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     return qweight, qzeros
 
 
+# Upper bound on one tile of INT32 codes inside `dequantize_gemm`. The tile is
+# what keeps the transient footprint of a wide layer proportional to the
+# reconstructed weight instead of a multiple of it; 8 MiB keeps the extra
+# allocations far below the matmul operand while leaving enough rows per tile
+# that the launch overhead stays negligible.
+_AWQ_DEQUANT_TILE_BYTES = 8 * 1024 * 1024
+
+
 def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
-    # Unpack the qweight and qzeros tensors
-    iweight, izeros = unpack_awq(qweight, qzeros, bits, scales.shape[-1])
-    # Reverse the order of the iweight and izeros tensors
-    iweight, izeros = reverse_awq_order(iweight, izeros, bits)
+    """Reconstruct the dense AWQ weight ``[in_features, out_features]``.
 
-    # overflow checks
-    iweight = torch.bitwise_and(iweight, (2**bits) - 1)
-    izeros = torch.bitwise_and(izeros, (2**bits) - 1)
+    The reconstruction is tiled over input rows, and each group broadcasts its
+    single scale and zero-point row instead of expanding both to
+    ``[in_features, out_features]`` with ``repeat_interleave``. That keeps the
+    per-call scratch bounded by one tile: the previous implementation allocated
+    several full-size INT64/INT32 copies per forward, which is why one 4096x4096
+    four-bit layer needed 448 MiB of transient memory for a 32 MiB weight.
 
-    # fp16 weights
-    scales = scales.repeat_interleave(group_size, dim=0)
-    izeros = izeros.repeat_interleave(group_size, dim=0)
-    iweight = (iweight - izeros) * scales
+    The returned tensor is the matmul operand for the current call only. Nothing
+    is cached, so no dequantized weight outlives the operation that consumes it.
+    """
+    if qzeros is None:
+        raise ValueError("dequantize_gemm requires packed AWQ zero points")
 
-    return iweight
+    in_features = qweight.shape[0]
+    out_features = scales.shape[-1]
+    device = qweight.device
+    # `group_size <= 0` is the per-channel layout: one group spans every row.
+    group = in_features if group_size is None or int(group_size) <= 0 else int(group_size)
+    num_groups = scales.shape[0]
+    if num_groups == 0:
+        raise ValueError("dequantize_gemm requires at least one scale group")
+
+    # Folding the AWQ reverse order into the extraction offsets returns both the
+    # codes and the zero points in natural column order, so neither needs the
+    # full-size column gather that `reverse_awq_order` performs.
+    shifts = None
+    if bits == 4:
+        shifts = torch.tensor(
+            [lane * bits for lane in AWQ_REVERSE_ORDER], dtype=torch.int64, device=device
+        )
+
+    # Zero points hold one row per group, so they stay small when unpacked once.
+    izeros = _unpack_columnwise(qzeros, bits, out_features, dtype=torch.int32, shifts=shifts)
+
+    weight = torch.empty((in_features, out_features), dtype=scales.dtype, device=device)
+    # Align every tile to a group boundary so one broadcast scale/zero slice
+    # serves the whole tile. Both slices are views, so no expansion is written.
+    rows_per_tile = max(1, _AWQ_DEQUANT_TILE_BYTES // (out_features * 4))
+    rows_per_tile = max(1, rows_per_tile // group) * group
+    group_covered_rows = num_groups * group
+    # `out=` is rejected while an input tracks gradients; the explicit
+    # expression keeps a trainable scale usable.
+    fused_write = not scales.requires_grad
+
+    for start in range(0, in_features, rows_per_tile):
+        stop = min(start + rows_per_tile, in_features)
+        # `_unpack_columnwise` already masks every code to `maxq`.
+        codes = _unpack_columnwise(
+            qweight[start:stop], bits, out_features, dtype=torch.int32, shifts=shifts
+        )
+
+        if (stop - start) % group == 0 and stop <= group_covered_rows:
+            tiles = (stop - start) // group
+            first_group = start // group
+            # `reshape` also accepts the sliced view that a packed word count
+            # above `out_features` produces, where `view` would refuse.
+            block = codes.reshape(tiles, group, out_features)
+            block.sub_(izeros[first_group:first_group + tiles].unsqueeze(1))
+            target = weight[start:stop].reshape(tiles, group, out_features)
+            if fused_write:
+                torch.mul(
+                    block, scales[first_group:first_group + tiles].unsqueeze(1), out=target
+                )
+            else:
+                target.copy_(
+                    block * scales[first_group:first_group + tiles].unsqueeze(1)
+                )
+            continue
+
+        # A tail that does not fill a whole group, or rows past the last group,
+        # is rare and small: broadcast one group row at a time.
+        first_group = min(start // group, num_groups - 1)
+        last_group = min((stop - 1) // group, num_groups - 1)
+        for group_index in range(first_group, last_group + 1):
+            group_start = group_index * group
+            # The last group also covers a tail of rows that does not fill it.
+            group_stop = (
+                in_features
+                if group_index == num_groups - 1
+                else min(group_start + group, in_features)
+            )
+            lo = max(start, group_start)
+            hi = min(stop, group_stop)
+            if lo >= hi:
+                continue
+            block = codes[lo - start:hi - start]
+            block.sub_(izeros[group_index])
+            if fused_write:
+                torch.mul(block, scales[group_index], out=weight[lo:hi])
+            else:
+                weight[lo:hi] = block * scales[group_index]
+
+    return weight

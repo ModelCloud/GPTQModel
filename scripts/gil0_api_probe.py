@@ -231,11 +231,42 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("torch.get_autocast_dtype is not thread-local across nested contexts")
         return True
 
+    p2p_guard_verdict = {}
+
+    def p2p_allocator_guard() -> bool:
+        """Check CUDA/ROCm allocator guards from concurrent workers.
+
+        Every cross-device copy consults this metadata-only guard, so it must be
+        safe on worker threads and must return a stable verdict. The probe never
+        issues a raw peer copy -- that is exactly the call the guard suppresses.
+        """
+        from gptqmodel.utils import p2p
+
+        with p2p_guard_verdict_lock:
+            if "value" not in p2p_guard_verdict:
+                p2p_guard_verdict["value"] = (
+                    p2p._raw_peer_copy_unsafe(),
+                    p2p._rocm_peer_link_unusable(),
+                    p2p._pytorch_owns_peer_enablement(),
+                    p2p._rocm_nested_peer_disabled(),
+                )
+            expected = p2p_guard_verdict["value"]
+        actual = (
+            p2p._raw_peer_copy_unsafe(),
+            p2p._rocm_peer_link_unusable(),
+            p2p._pytorch_owns_peer_enablement(),
+            p2p._rocm_nested_peer_disabled(),
+        )
+        if actual != expected:
+            raise AssertionError("the P2P allocator guard verdict changed across threads")
+        return True
+
     def set_device_isolation(index: int = 0) -> bool:
         device = index % max(_gpu_count(), 1)
         torch.cuda.set_device(device)
         return int(torch.cuda.current_device()) == device
 
+    p2p_guard_verdict_lock = threading.Lock()
     nf12_lock = threading.Lock()
     nf12_thread = threading.local()
     nf12_next_device = [0]
@@ -561,6 +592,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.get_device_capability": lambda: torch.cuda.get_device_capability(0),
         "torch.cuda.get_device_properties": lambda: torch.cuda.get_device_properties(0).total_memory,
         "torch.cuda.current_device": torch.cuda.current_device,
+        "gptqmodel.p2p.allocator_guard": p2p_allocator_guard,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12.gate": nf12_gate,
