@@ -3011,6 +3011,139 @@ def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
     assert torch.equal(a, b), float((a - b).abs().max())
 
 
+def test_shipped_modeling_file_uses_the_source_architecture(tmp_path):
+    """The generated entry point must subclass the checkpoint's own class.
+
+    It used to import ``LlamaForCausalLM`` unconditionally, so an OPT
+    checkpoint exported and reloaded through the native loader, but the
+    advertised ``AutoModelForCausalLM.from_pretrained`` path raised
+    ``AttributeError: 'OPTConfig' object has no attribute
+    'num_key_value_heads'`` before loading any packed weight.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(5)
+    from transformers import OPTConfig, OPTForCausalLM
+
+    model = OPTForCausalLM(
+        OPTConfig(
+            vocab_size=64,
+            hidden_size=32,
+            ffn_dim=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            word_embed_proj_dim=32,
+            max_position_embeddings=64,
+        )
+    ).eval()
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear) and ".layers." in name:
+                module.weight.copy_(
+                    bq.quantize_blockfloat(module.weight.detach().float(), 4)[0]
+                )
+        embedding = model.get_input_embeddings()
+        embedding.weight.copy_(
+            bq.quantize_blockfloat(embedding.weight.detach().float(), 8)[0]
+        )
+
+    out = str(tmp_path / "opt")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+
+    with open(os.path.join(out, bq.MODELING_FILE)) as handle:
+        source = handle.read()
+    assert "from transformers.models.opt.modeling_opt import OPTForCausalLM" in source
+    assert "LlamaForCausalLM" not in source
+
+    from transformers import AutoModelForCausalLM
+
+    remote = AutoModelForCausalLM.from_pretrained(
+        out, dtype=torch.float32, trust_remote_code=True
+    )
+    assert type(remote).__mro__[1].__name__ == "OPTForCausalLM"
+
+    native, _, _ = bq.build_blockfloat_model(out, dtype=torch.float32)
+    ids = torch.randint(0, 64, (1, 5))
+    with torch.no_grad():
+        a = remote(ids).logits
+        b = native(ids).logits
+    assert torch.equal(a, b), float((a - b).abs().max())
+
+
+def test_modeling_base_fails_closed_for_an_unknown_architecture():
+    """An unresolvable architecture must fail at save time, not ship a bad file."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    wrapper = torch.nn.Module()
+    wrapper.config = type("Config", (), {"model_type": "not_a_real_model_type"})()
+    with pytest.raises(ValueError, match="no known Transformers causal-LM class"):
+        bq._modeling_base(wrapper)
+
+
+def test_blockfloat_bias_keeps_source_precision(tmp_path):
+    """Dense biases are not quantized, so packing must not narrow them.
+
+    The module used to register an fp16 bias and ``pack`` cast the source bias
+    to fp16, which turned valid fp32/bf16 values such as 65536 into infinity
+    and changed the projection output even when fp32 was requested.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+
+    values = torch.tensor([65536.0, 2.0**-30, 0.12345678])
+    for dtype in (torch.float32, torch.bfloat16):
+        source = torch.nn.Linear(16, 3, bias=True, dtype=dtype)
+        with torch.no_grad():
+            source.weight.zero_()
+            source.bias.copy_(values.to(dtype))
+        packed = TTBlockfloatLinear(
+            bits=4,
+            in_features=16,
+            out_features=3,
+            bias=True,
+            dtype=dtype,
+            backend=BACKEND.TT_BLOCKFLOAT,
+        ).pack(source)
+        assert packed.bias.dtype == dtype
+        assert torch.equal(packed.bias, source.bias)
+        with torch.no_grad():
+            result = packed(torch.zeros(1, 16, dtype=dtype))
+        assert torch.equal(result[0], source.bias)
+
+    # The same precision must survive a real checkpoint round trip.
+    model = _tiny_llama({"attention_bias": True, "mlp_bias": True})
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            weight = getattr(module, "weight", None)
+            if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+                bits = 8 if name.endswith("embed_tokens") else 4
+                weight.copy_(
+                    bq.quantize_blockfloat(weight.detach().float(), bits)[0]
+                )
+        model.model.layers[0].self_attn.q_proj.bias[:3] = values
+
+    out = str(tmp_path / "bias")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    loaded, _, _ = bq.build_blockfloat_model(out, dtype=torch.float32)
+    bias = loaded.model.layers[0].self_attn.q_proj.bias
+    assert bias.dtype == torch.float32
+    assert torch.equal(bias[:3], values)
+    with torch.no_grad():
+        before = model.model.layers[0].self_attn.q_proj(torch.zeros(1, 32))
+        after = loaded.model.layers[0].self_attn.q_proj(torch.zeros(1, 32))
+    assert torch.equal(before, after)
+    assert torch.isfinite(after).all()
+
+
 def test_native_checkpoint_resave_is_bit_identical(tmp_path):
     """checkpoint -> floats -> checkpoint must reproduce the same codes.
 

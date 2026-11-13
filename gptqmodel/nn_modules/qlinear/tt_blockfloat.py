@@ -292,7 +292,11 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         self.pack_dtype = pack_dtype
         self._init_storage(out_features, in_features, bits, block)
         if bias:
-            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+            # Bias is not quantized, so keep the precision of the model it came
+            # from. Narrowing to float16 here would overflow large finite
+            # values and round ordinary ones even for a float32 checkpoint.
+            bias_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float16
+            self.register_buffer("bias", torch.zeros(out_features, dtype=bias_dtype))
         else:
             self.bias = None
 
@@ -313,7 +317,9 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
                 quantize_blockfloat(weight, self.bits, block=self.block)[0]
             )
         if getattr(linear, "bias", None) is not None:
-            self.bias = linear.bias.detach().to(torch.float16).contiguous()
+            # Preserve the source dtype exactly: this buffer is dense state,
+            # not a quantized payload, so there is nothing to gain by narrowing.
+            self.bias = linear.bias.detach().to(linear.bias.dtype).contiguous()
         return self
 
     def load_codes_from(self, grid_weight: torch.Tensor) -> None:
@@ -559,6 +565,9 @@ def swap_blockfloat_modules(
                 backend=BACKEND.TT_BLOCKFLOAT,
                 adapter=None,
                 name=prefix,
+                # Follow the precision the model was built at; the source bias
+                # is dense state and must not be narrowed on the way in.
+                dtype=module.weight.dtype,
                 block=block,
             )
         else:

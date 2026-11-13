@@ -106,6 +106,61 @@ when the module is moved, a state dict is loaded, the checkpoint format changes,
 or packed tensor versions change. The `_tt_layout` is rebuilt for the new card
 after placement.
 
+## Block-float checkpoint export and reload
+
+`save_blockfloat_model()` writes a self-contained HF directory: packed
+`codes`/`exponents`/`code_shape` tensors, the dense remainder, and a
+`modeling_tt_blockfloat.py` that `config.json`'s `auto_map` points at. The
+modeling file subclasses the checkpoint's own causal-LM class; a fixed Llama
+base class only works for Llama. The class comes from the live model, with the
+declared `model_type` as the fallback for wrappers and subclasses.
+
+```mermaid
+flowchart TD
+    A["save_blockfloat_model(model)"] --> B{"type(model).__module__<br/>starts with transformers.?"}
+    B -- yes --> C["base = type(model).__module__, type(model).__name__"]
+    B -- no --> D["MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[model.config.model_type]"]
+    D -- missing --> E["ValueError: no known causal-LM class"]:::fail
+    C --> F["render modeling_tt_blockfloat.py"]
+    D --> F
+    F --> G["config.json auto_map -><br/>TTBlockfloatForCausalLM"]
+    G --> H["AutoModelForCausalLM.from_pretrained"]
+    H --> I["TTBlockfloatForCausalLM(config)"]
+    I --> J["swap_blockfloat_modules()"]
+    J --> K["load packed state"]
+
+    classDef fail fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+```
+
+Biases are dense state, not part of the block-float grid. They are registered
+and packed at the source dtype, and `swap_blockfloat_modules()` passes the
+model's precision into each replacement, so an fp32 or bf16 bias keeps every
+bit. The forward casts the bias to the activation dtype only at the kernel
+boundary.
+
+```mermaid
+flowchart LR
+    A["dense model cast to requested dtype"] --> B["swap_blockfloat_modules"]
+    B --> C["TTBlockfloatLinear(dtype=module.weight.dtype)"]
+    C --> D["pack(): bias = source bias dtype"]
+    D --> E["load_state_dict: bias copied exactly"]
+    E --> F["forward: bias.to(x.dtype)"]
+    F --> G["kernel or F.linear"]
+
+    classDef dense fill:#dcfce7,stroke:#15803d,color:#14532d;
+    class C,D,E dense;
+```
+
+| Old mechanism | New mechanism | Evidence |
+| --- | --- | --- |
+| `_MODELING_SOURCE` imported `LlamaForCausalLM` unconditionally | `_modeling_base()` derives the import from the model or `model_type` | `gptqmodel/utils/tt_blockfloat_quant.py` |
+| `TTBlockfloatLinear.__init__` registered an fp16 bias | the buffer uses the declared dtype | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py` |
+| `pack()` cast the bias to fp16 | `pack()` preserves the source dtype | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py` |
+| `swap_blockfloat_modules()` created linears without a dtype | passes `module.weight.dtype` | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py` |
+
+A checkpoint whose architecture cannot be resolved fails at save time instead
+of writing an entry point that only loads Llama.
+
 ## Native TTNN execution path
 
 `TTNNLinear` removes StableHLO and PJRT from the inference path. It opens a
