@@ -2555,20 +2555,7 @@ def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | No
         model.tie_weights()
 
 
-# Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
-def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_converter) -> Optional[str]:
-    checkpoint = os.fspath(checkpoint)
-    if not os.path.isfile(checkpoint) or not checkpoint.endswith(".safetensors"):
-        return None
-
-    with open(checkpoint, "rb") as source:
-        header_size_bytes = source.read(8)
-        if len(header_size_bytes) != 8:
-            return None
-        header_size = struct.unpack("<Q", header_size_bytes)[0]
-        header = json.loads(source.read(header_size))
-        data_offset = 8 + header_size
-
+def _convert_safetensors_header_keys(header: dict, key_converter) -> Tuple[dict, bool]:
     converted_header = {}
     changed = False
     for name, tensor_info in header.items():
@@ -2580,19 +2567,127 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
             raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
         converted_header[converted_name] = tensor_info
         changed |= converted_name != name
+    return converted_header, changed
 
+
+def _write_safetensors_with_converted_header(source_path: str, target_path: str, key_converter) -> bool:
+    """Copy a safetensors file, rewriting its header keys. Returns whether any key changed."""
+    with open(source_path, "rb") as source:
+        header_size_bytes = source.read(8)
+        if len(header_size_bytes) != 8:
+            return False
+        header_size = struct.unpack("<Q", header_size_bytes)[0]
+        header = json.loads(source.read(header_size))
+        data_offset = 8 + header_size
+
+    converted_header, changed = _convert_safetensors_header_keys(header, key_converter)
     if not changed:
-        return None
+        return False
 
     encoded_header = json.dumps(converted_header, separators=(",", ":")).encode("utf-8")
     encoded_header += b" " * ((-len(encoded_header)) % 8)
-    descriptor, converted_path = tempfile.mkstemp(prefix="gptqmodel-key-remap-", suffix=".safetensors")
+    with open(target_path, "wb") as target, open(source_path, "rb") as source:
+        target.write(struct.pack("<Q", len(encoded_header)))
+        target.write(encoded_header)
+        source.seek(data_offset)
+        shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+    return True
+
+
+def _remap_safetensors_index(checkpoint: str, key_converter) -> Optional[str]:
+    """Rewrite a sharded safetensors index and its shard headers into a temporary directory."""
+    with open(checkpoint, encoding="utf-8") as handle:
+        index = json.load(handle)
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+
+    checkpoint_dir = os.path.dirname(checkpoint)
+    shard_names = sorted(set(weight_map.values()))
+    shard_paths = {name: os.path.join(checkpoint_dir, name) for name in shard_names}
+    if not all(
+        os.path.isfile(path) and path.endswith(".safetensors")
+        for path in shard_paths.values()
+    ):
+        # A non-safetensors shard cannot be rewritten in place; leave the
+        # checkpoint untouched so the caller keeps the previous behaviour.
+        return None
+
+    converted_weight_map = {}
+    changed = False
+    for name, shard in weight_map.items():
+        converted_name = key_converter(name)
+        if converted_name in converted_weight_map:
+            raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
+        converted_weight_map[converted_name] = shard
+        changed |= converted_name != name
+    if not changed:
+        return None
+
+    remap_dir = tempfile.mkdtemp(prefix="gptqmodel-key-remap-")
     try:
-        with os.fdopen(descriptor, "wb") as target, open(checkpoint, "rb") as source:
-            target.write(struct.pack("<Q", len(encoded_header)))
-            target.write(encoded_header)
-            source.seek(data_offset)
-            shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+        target_names = {}
+        for shard_name in shard_names:
+            # Keep relative subdirectories, but never let a malformed index
+            # escape the temporary directory.
+            normalized = os.path.normpath(shard_name)
+            if os.path.isabs(normalized) or normalized.startswith(".."):
+                normalized = os.path.basename(normalized)
+            target_names[shard_name] = normalized
+            target_path = os.path.join(remap_dir, normalized)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            if not _write_safetensors_with_converted_header(
+                shard_paths[shard_name], target_path, key_converter
+            ):
+                shutil.copyfile(shard_paths[shard_name], target_path)
+
+        converted_index = dict(index)
+        converted_index["weight_map"] = {
+            name: target_names[shard] for name, shard in converted_weight_map.items()
+        }
+        converted_path = os.path.join(remap_dir, os.path.basename(checkpoint))
+        with open(converted_path, "w", encoding="utf-8") as handle:
+            json.dump(converted_index, handle)
+        return converted_path
+    except BaseException:
+        shutil.rmtree(remap_dir, ignore_errors=True)
+        raise
+
+
+def _cleanup_remapped_checkpoint(checkpoint: Optional[str]) -> None:
+    if not checkpoint:
+        return
+    checkpoint = os.fspath(checkpoint)
+    parent = os.path.dirname(checkpoint)
+    if (
+        os.path.basename(checkpoint).endswith(".index.json")
+        and os.path.basename(parent).startswith("gptqmodel-key-remap-")
+    ):
+        shutil.rmtree(parent, ignore_errors=True)
+        return
+    try:
+        os.unlink(checkpoint)
+    except OSError:
+        # Best-effort cleanup: do not mask the original exception if temp file removal fails.
+        pass
+
+
+# Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
+def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_converter) -> Optional[str]:
+    checkpoint = os.fspath(checkpoint)
+    if not os.path.isfile(checkpoint):
+        return None
+    if checkpoint.endswith(".index.json"):
+        return _remap_safetensors_index(checkpoint, key_converter)
+    if not checkpoint.endswith(".safetensors"):
+        return None
+
+    descriptor, converted_path = tempfile.mkstemp(prefix="gptqmodel-key-remap-", suffix=".safetensors")
+    os.close(descriptor)
+    try:
+        if not _write_safetensors_with_converted_header(checkpoint, converted_path, key_converter):
+            os.unlink(converted_path)
+            return None
     except BaseException:
         try:
             os.unlink(converted_path)
@@ -2794,11 +2889,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             )
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
-        if converted_checkpoint is not None:
-            try:
-                os.unlink(converted_checkpoint)
-            except OSError:
-                pass
+        _cleanup_remapped_checkpoint(converted_checkpoint)
 
 
 # 32MB read/write i/o buffer

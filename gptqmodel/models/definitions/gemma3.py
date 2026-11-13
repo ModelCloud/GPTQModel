@@ -107,11 +107,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             operations=[],
         ),
         SimpleNamespace(
-            source_patterns=[r"^model\.language_model\.(model\..+)$"],
-            target_patterns=[r"^language_model\.(model\..+)$"],
-            operations=[],
-        ),
-        SimpleNamespace(
             source_patterns=[r"model\.language_model"],
             target_patterns=[r"^language_model.model"],
             operations=[],

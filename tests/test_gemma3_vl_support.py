@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import os
 from types import SimpleNamespace
 
 import torch
@@ -13,7 +15,13 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions import gemma3 as gemma3_def
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
 from gptqmodel.models.writer import _convert_checkpoint_state_dict_keys
-from gptqmodel.utils.model import MODALITY, TensorSource, _remap_safetensors_checkpoint_keys
+from gptqmodel.utils.model import (
+    MODALITY,
+    TensorSource,
+    _cleanup_remapped_checkpoint,
+    _remap_safetensors_checkpoint_keys,
+    load_checkpoint_in_model_then_tie_weights,
+)
 
 
 class _FakeProcessor:
@@ -155,7 +163,10 @@ def test_gemma3_checkpoint_keys_are_saved_in_huggingface_layout():
     assert convert("model.language_model.layers.0.self_attn.q_proj.qweight") == (
         "language_model.model.layers.0.self_attn.q_proj.qweight"
     )
-    assert convert("model.language_model.model.norm.weight") == "language_model.model.norm.weight"
+    assert convert("model.language_model.norm.weight") == "language_model.model.norm.weight"
+    assert Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load(
+        "language_model.model.norm.weight"
+    ) == "model.language_model.norm.weight"
     assert convert("model.vision_tower.encoder.layers.0.self_attn.q_proj.weight") == (
         "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"
     )
@@ -198,9 +209,141 @@ def test_gemma3_checkpoint_load_remaps_huggingface_names_for_transformers5(tmp_p
             assert list(checkpoint_file.keys()) == ["model.vision_tower.encoder.weight"]
             assert torch.equal(checkpoint_file.get_tensor("model.vision_tower.encoder.weight"), torch.ones((2, 2)))
     finally:
-        if converted_path:
-            import os
-            os.unlink(converted_path)
+        _cleanup_remapped_checkpoint(converted_path)
+
+
+def test_gemma3_checkpoint_load_remaps_sharded_huggingface_names(tmp_path):
+    shard = tmp_path / "part.safetensors"
+    index = tmp_path / "model.safetensors.index.json"
+    save_file({"vision_tower.vision_model.encoder.weight": torch.ones((2, 2))}, str(shard))
+    index.write_text(
+        json.dumps({"weight_map": {"vision_tower.vision_model.encoder.weight": shard.name}}),
+        encoding="utf-8",
+    )
+
+    converted_path = _remap_safetensors_checkpoint_keys(
+        index,
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load,
+    )
+    try:
+        assert converted_path is not None
+        converted_dir = os.path.dirname(converted_path)
+        with open(converted_path, encoding="utf-8") as handle:
+            weight_map = json.load(handle)["weight_map"]
+        assert list(weight_map) == ["model.vision_tower.encoder.weight"]
+        with safe_open(
+            os.path.join(converted_dir, weight_map["model.vision_tower.encoder.weight"]),
+            framework="pt",
+            device="cpu",
+        ) as checkpoint_file:
+            assert list(checkpoint_file.keys()) == ["model.vision_tower.encoder.weight"]
+            assert torch.equal(
+                checkpoint_file.get_tensor("model.vision_tower.encoder.weight"),
+                torch.ones((2, 2)),
+            )
+    finally:
+        _cleanup_remapped_checkpoint(converted_path)
+
+
+def test_gemma3_sharded_checkpoint_load_restores_vision_weights(tmp_path):
+    class Fixture(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.vision_tower = torch.nn.Module()
+            self.model.vision_tower.encoder = torch.nn.Linear(2, 2, bias=False)
+            self.model.vision_tower.encoder.weight.data.zero_()
+
+        def tie_weights(self, **kwargs):
+            pass
+
+    shard = tmp_path / "part.safetensors"
+    index = tmp_path / "model.safetensors.index.json"
+    save_key = Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save(
+        "model.vision_tower.encoder.weight"
+    )
+    save_file({save_key: torch.ones((2, 2))}, str(shard))
+    index.write_text(json.dumps({"weight_map": {save_key: shard.name}}), encoding="utf-8")
+
+    for checkpoint in (shard, index):
+        model = Fixture()
+        load_checkpoint_in_model_then_tie_weights(
+            model,
+            checkpoint=str(checkpoint),
+            device_map={"": "cpu"},
+            key_converter=Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load,
+        )
+        assert torch.equal(model.model.vision_tower.encoder.weight, torch.ones((2, 2)))
+
+
+def test_gemma3_tiny_checkpoint_roundtrip_restores_language_and_vision(tmp_path):
+    from transformers import Gemma3Config, Gemma3ForConditionalGeneration
+
+    config = Gemma3Config(
+        text_config={
+            "vocab_size": 16,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "max_position_embeddings": 16,
+        },
+        vision_config={
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "image_size": 4,
+            "patch_size": 2,
+        },
+        mm_tokens_per_image=4,
+    )
+    source = Gemma3ForConditionalGeneration(config)
+    for parameter in source.parameters():
+        parameter.data.fill_(1)
+
+    state = {
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save(name): tensor.clone()
+        for name, tensor in source.state_dict().items()
+    }
+
+    single_file = tmp_path / "single"
+    single_file.mkdir()
+    save_file(state, str(single_file / "model.safetensors"))
+
+    sharded = tmp_path / "sharded"
+    sharded.mkdir()
+    keys = sorted(state)
+    midpoint = len(keys) // 2
+    shards = {
+        "model-00001-of-00002.safetensors": keys[:midpoint],
+        "model-00002-of-00002.safetensors": keys[midpoint:],
+    }
+    weight_map = {}
+    for filename, shard_keys in shards.items():
+        save_file({key: state[key] for key in shard_keys}, str(sharded / filename))
+        weight_map.update(dict.fromkeys(shard_keys, filename))
+    (sharded / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}), encoding="utf-8"
+    )
+
+    for checkpoint in (
+        single_file / "model.safetensors",
+        sharded / "model.safetensors.index.json",
+    ):
+        target = Gemma3ForConditionalGeneration(config)
+        for parameter in target.parameters():
+            parameter.data.fill_(0)
+        load_checkpoint_in_model_then_tie_weights(
+            target,
+            checkpoint=str(checkpoint),
+            device_map={"": "cpu"},
+            key_converter=Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load,
+        )
+        assert target.model.language_model.norm.weight.sum().item() == 8.0
+        assert target.model.vision_tower.encoder.layers[0].layer_norm1.weight.sum().item() == 8.0
 
 
 def test_gemma3_save_config_excludes_unquantized_multimodal_modules():
