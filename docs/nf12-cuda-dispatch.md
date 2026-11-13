@@ -37,9 +37,9 @@ flowchart TD
 ```
 
 The specialized families use no workspace; workspace sizing tests the same
-heuristics as dispatch. The asynchronous heuristic additionally checks the
-device's shared-memory capacity and uses stages and CTA clusters only for
-supported shapes. A shape outside a heuristic's band continues to the existing
+heuristics as dispatch. The asynchronous launcher additionally checks the
+device's shared-memory capacity. Direct small-M uses clusters only for selected
+shapes. A shape outside a heuristic's band continues to the existing
 families; a selected kernel launch failure is returned, not silently retried.
 SM103 short-K prefill (`K <= 128`, `512 <= N <= 8192`, `M >= 64`) can use
 external decode/GEMM. Row-major decode uses two warps on SM103 and preserves
