@@ -99,6 +99,24 @@ class _BlockfloatStorage(nn.Module):
             "exponents", torch.zeros(exponents_shape, dtype=torch.int8)
         )
 
+    def hip_dispatch(self, tensor: torch.Tensor) -> bool:
+        """Whether the HIP kernels can serve ``tensor`` for this storage.
+
+        The kernels bind one exponent per 16 values, so storage with a wider
+        ``block`` must stay on the Torch path even when the device and dtype
+        are supported. Call sites that bind an activation flatten it to 2-D
+        themselves.
+        """
+
+        from ...utils import tt_blockfloat_hip
+
+        return (
+            tensor.is_cuda
+            and self.block == BLOCKFLOAT_BLOCK
+            and tt_blockfloat_hip.available(tensor.device)
+            and tt_blockfloat_hip.supports_bits(self.bits)
+        )
+
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Rebuild the exact grid weights as ``[out_features, in_features]``."""
 
@@ -106,11 +124,7 @@ class _BlockfloatStorage(nn.Module):
         from ...utils.tt_blockfloat_quant import _unpack_codes, recompose_blockfloat
 
         shape = tuple(int(v) for v in self.code_shape)
-        if (
-            self.codes.is_cuda
-            and tt_blockfloat_hip.available(self.codes.device)
-            and tt_blockfloat_hip.supports_bits(self.bits)
-        ):
+        if self.hip_dispatch(self.codes):
             # The HIP kernel expands the packed stream directly, so the host
             # never materialises the unpacked uint8 code matrix.
             return tt_blockfloat_hip.dequantize(
@@ -242,11 +256,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         from ...utils.tt_blockfloat_quant import quantize_blockfloat
 
         weight = linear.weight.detach().to(torch.float32)
-        if (
-            weight.is_cuda
-            and tt_blockfloat_hip.available(weight.device)
-            and tt_blockfloat_hip.supports_bits(self.bits)
-        ):
+        if self.hip_dispatch(weight):
             # Quantise on the GPU: the exponent search and packing stay on the
             # device instead of round-tripping a dense fp32 copy through torch.
             codes, exponents = tt_blockfloat_hip.quantize(weight, self.bits)
@@ -278,16 +288,22 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
 
         from ...utils import tt_blockfloat_hip
 
-        if (
-            x.is_cuda
-            and tt_blockfloat_hip.available(x.device)
-            and tt_blockfloat_hip.supports_bits(self.bits)
-        ):
+        if self.hip_dispatch(x):
             # Fused unpack + GEMM: the packed weight is read once and expanded
             # only into shared memory, so no dense weight is created here.
+            # The binding takes a 2-D activation, so flatten the leading
+            # dimensions and restore them afterwards; transformers pass
+            # [batch, sequence, hidden] and F.linear accepted that.
             out = tt_blockfloat_hip.linear(
-                x, self.codes, self.exponents, self.bits, bias
+                x.reshape(-1, x.shape[-1]),
+                self.codes,
+                self.exponents,
+                self.bits,
+                bias,
             )
+            # Restore the caller's leading dimensions, including the 1-D case
+            # where there are none and F.linear returns [out_features].
+            out = out.reshape(*x.shape[:-1], out.shape[-1])
         else:
             weight = self.dequantize(dtype=x.dtype)
             out = F.linear(x, weight, bias)
@@ -353,11 +369,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         from ...utils import tt_blockfloat_hip
 
-        if (
-            input_ids.is_cuda
-            and tt_blockfloat_hip.available(input_ids.device)
-            and tt_blockfloat_hip.supports_bits(self.bits)
-        ):
+        if self.hip_dispatch(input_ids):
             # Dequantise only the gathered rows; the table is never expanded.
             # The output precision follows the module, as the Torch path does.
             return tt_blockfloat_hip.embedding(
@@ -398,18 +410,17 @@ class TTBlockfloatTiedHead(nn.Module):
         from ...utils import tt_blockfloat_hip
 
         embedding = self.embedding
-        if (
-            hidden_states.is_cuda
-            and tt_blockfloat_hip.available(hidden_states.device)
-            and tt_blockfloat_hip.supports_bits(self.bits)
-        ):
-            return tt_blockfloat_hip.linear(
-                hidden_states,
+        # The width, block size and device support all belong to the embedding:
+        # this class only holds a reference to it and has no ``bits`` of its own.
+        if embedding.hip_dispatch(hidden_states):
+            out = tt_blockfloat_hip.linear(
+                hidden_states.reshape(-1, hidden_states.shape[-1]),
                 embedding.codes,
                 embedding.exponents,
                 embedding.bits,
                 None,
             )
+            return out.reshape(*hidden_states.shape[:-1], out.shape[-1])
         weight = embedding.dequantize(dtype=hidden_states.dtype)
         return F.linear(hidden_states, weight)
 

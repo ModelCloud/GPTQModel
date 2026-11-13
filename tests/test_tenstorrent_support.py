@@ -170,6 +170,113 @@ def test_cpu_dequant_matches_independent_formula():
     assert layout.bias.dtype == torch.bfloat16
 
 
+# ---------------------------------------------------------------------------
+# HIP dispatch routing (CPU, with only the backend availability mocked)
+# ---------------------------------------------------------------------------
+
+
+def _hip_routing(monkeypatch, *, available=True):
+    """Make the HIP kernels look reachable so the routing itself is exercised.
+
+    ``is_cuda`` is a property on the tensor type, so patching it is the only way
+    to reach the dispatch branch on a CPU-only host. The kernels themselves are
+    never executed here: every entry point the forward would call is replaced.
+    """
+
+    from gptqmodel.utils import tt_blockfloat_hip
+
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(tt_blockfloat_hip, "available", lambda device=None: available)
+    return tt_blockfloat_hip
+
+
+def _blockfloat_linear(bits=4, in_features=16, out_features=3):
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+
+    return TTBlockfloatLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        backend=BACKEND.TT_BLOCKFLOAT,
+        name="proj",
+    )
+
+
+@pytest.mark.parametrize(
+    "shape, expected",
+    [((16,), (1, 16)), ((2, 16), (2, 16)), ((1, 2, 16), (2, 16)), ((1, 2, 3, 16), (6, 16))],
+)
+def test_hip_linear_flattens_leading_dimensions(monkeypatch, shape, expected):
+    """The binding takes a 2-D activation; F.linear accepted any leading dims."""
+
+    hip = _hip_routing(monkeypatch)
+    module = _blockfloat_linear()
+    seen = {}
+
+    def fake_linear(x, codes, exponents, bits, bias):
+        seen["shape"] = tuple(x.shape)
+        return torch.zeros(x.shape[0], 3)
+
+    monkeypatch.setattr(hip, "linear", fake_linear)
+
+    out = module(torch.zeros(*shape))
+
+    assert seen["shape"] == expected
+    assert out.shape == shape[:-1] + (3,)
+
+
+def test_tied_head_uses_the_embedding_width_and_flattens(monkeypatch):
+    """TTBlockfloatTiedHead holds no ``bits`` of its own; the embedding owns it."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    hip = _hip_routing(monkeypatch)
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    head = TTBlockfloatTiedHead(embedding, name="head")
+    assert not hasattr(head, "bits")
+
+    seen = {}
+
+    def fake_linear(x, codes, exponents, bits, bias):
+        seen["shape"] = tuple(x.shape)
+        seen["bits"] = bits
+        return torch.zeros(x.shape[0], 3)
+
+    monkeypatch.setattr(hip, "linear", fake_linear)
+
+    out = head(torch.zeros(1, 2, 16))
+
+    assert seen == {"shape": (2, 16), "bits": 4}
+    assert out.shape == (1, 2, 3)
+
+
+def test_embedding_with_a_wider_block_stays_on_the_torch_path(monkeypatch):
+    """The kernels bind one exponent per 16 values, so block=32 cannot dispatch."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatEmbedding
+
+    hip = _hip_routing(monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("HIP embedding must not be used for block != 16")
+
+    monkeypatch.setattr(hip, "embedding", refuse)
+    monkeypatch.setattr(hip, "dequantize", refuse)
+
+    embedding = TTBlockfloatEmbedding(3, 32, bits=4, block=32, name="embed")
+    assert embedding.block == 32
+    assert not embedding.hip_dispatch(torch.zeros(4, 32))
+
+    ids = torch.tensor([[0, 2]], dtype=torch.int64)
+    got = embedding(ids)
+    assert got.shape == (1, 2, 32)
+    assert torch.equal(got, embedding.dequantize()[ids])
+
+
 def test_bfloat2_b_grid_is_three_levels_and_packs_four_per_byte():
     """bfloat2_b is a sign bit plus one magnitude bit, so a block holds
     ``{-1, 0, +1} x 2**exponent`` and four codes share a byte."""
