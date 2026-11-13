@@ -737,6 +737,22 @@ integer types (the vendor spellings; everywhere else this repository says
 byte, exact pack/unpack) so its cost can be measured, but the HIP kernels do
 not implement it and a `bits == 2` module takes the torch path.
 
+## Emulating bf8/bf4 on CUDA
+
+A `bf4_b` / `bf8_b` checkpoint is portable storage, not a device binding, so it
+can be validated and benchmarked without a Tenstorrent part. The CUDA kernels in
+`gptqmodel_ext/tt_blockfloat_cuda` reproduce the storage exactly — same codes,
+same `int8` exponent per 16 values, same round-to-nearest-even grid — so a
+checkpoint produces the same numbers there as it will on Tensix. They are used
+automatically when a block-float module is on a CUDA device of sm_80 or newer;
+the torch path remains the fallback everywhere else, and a failed extension build
+logs once and falls back rather than failing a forward pass.
+
+That path exists to exercise the dtype, not to serve CUDA inference: the
+Tenstorrent backends above are what this repository supports on the cards. See
+`gptqmodel_ext/tt_blockfloat_cuda/README.md` for the measured numbers and the two
+GEMM paths.
+
 ## Scope and follow-up
 
 This change implements the following:
