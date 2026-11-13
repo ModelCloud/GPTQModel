@@ -205,6 +205,20 @@ def is_xla_available() -> bool:
         return False
 
 
+def xla_runtime_claimed() -> bool:
+    """Whether this process has already initialized XLA and taken its devices.
+
+    Importing ``torch_xla`` is inert, so a ``sys.modules`` check alone cannot
+    distinguish "installed" from "in use". Only the flag set after
+    ``addressable_device_count()`` answered means the runtime is live, which is
+    what a generic barrier may synchronize. Anything else would discover and
+    claim another runtime from a job that never selected it.
+    """
+
+    module = sys.modules.get("torch_xla")
+    return bool(module is not None and getattr(module, "_gptqmodel_device_claimed", False))
+
+
 # Availability is deliberately not probed here.  Use ``is_xla_available()``
 # from an explicit device-resolution path; see ``require_xla_runtime``.
 HAS_XLA = _xla_package_installed()
@@ -384,7 +398,12 @@ def torch_sync(device: torch.device = None):
                 for idx in range(dev_count):
                     torch.npu.synchronize(idx)
 
-        if is_xla_available():
+        # Only synchronize XLA if this process already initialized it. Probing
+        # availability here would import the runtime and request addressable
+        # devices, so an ordinary CUDA/CPU barrier would claim the Tenstorrent
+        # chips (or fail on an unrelated XLA error) from a job that never
+        # selected that backend.
+        if xla_runtime_claimed():
             synchronized_any = True
             require_xla_runtime().sync(wait=True)
 
@@ -631,10 +650,13 @@ def auto_select_torch_device(index: int = 0):
 def auto_select_torch_device_unprobed(index: int = 0):
     """Choose an indexable device without initializing an optional runtime.
 
-    ``torch_xla`` cannot be probed implicitly: its PJRT plugin opens hardware
-    during import. The returned XLA family device is valid for constructing and
-    forwarding to a later explicit XLA operation; callers that need the device
-    count use :func:`is_xla_available` and :func:`torch_devices` at that point.
+    ``torch_xla`` is deliberately absent: asking whether it is usable calls
+    ``addressable_device_count()``, which initializes the PJRT plugin and claims
+    every Tenstorrent chip for the rest of the process. Package presence is not
+    evidence that a device exists either -- an installed XLA runtime with zero
+    devices would otherwise turn a CPU job into ``xla:0``. Callers that want XLA
+    resolve it explicitly through :func:`is_xla_available` and
+    :func:`xla_device_count`, which are allowed to pay that cost.
     """
     if HAS_CUDA:
         # Clamp against the visible count: a caller asking for index 1 on a
@@ -652,8 +674,6 @@ def auto_select_torch_device_unprobed(index: int = 0):
         count = torch.npu.device_count()
         if count > 0:
             return torch.device(f"npu:{index if index < count else 0}")
-    if HAS_XLA:
-        return torch.device(f"xla:{index}")
     if HAS_MPS:
         return torch.device("mps")
     return CPU

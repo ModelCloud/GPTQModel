@@ -1706,6 +1706,80 @@ def test_auto_select_device_clamps_to_the_visible_count(monkeypatch):
     assert ttmod.auto_select_torch_device_unprobed(1) == torch.device("cuda:0")
 
 
+def test_unprobed_device_selection_never_picks_xla(monkeypatch):
+    """An installed XLA runtime with no devices must not redirect a CPU job.
+
+    Package presence is not evidence that a device exists, and asking costs a
+    PJRT initialization that claims the Tenstorrent chips for the process.
+    """
+
+    import gptqmodel.utils.torch as ttmod
+
+    monkeypatch.setattr(ttmod, "HAS_CUDA", False)
+    monkeypatch.setattr(ttmod, "HAS_XPU", False)
+    monkeypatch.setattr(ttmod, "HAS_NPU", False)
+    monkeypatch.setattr(ttmod, "HAS_MPS", False)
+    monkeypatch.setattr(ttmod, "HAS_XLA", True)
+
+    assert ttmod.auto_select_torch_device_unprobed(0) == ttmod.CPU
+    assert ttmod.auto_select_torch_device_unprobed(1) == ttmod.CPU
+
+
+def test_torch_sync_does_not_probe_unclaimed_xla(monkeypatch):
+    """A generic barrier must not discover and claim another runtime."""
+
+    import gptqmodel.utils.torch as ttmod
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("torch_sync touched XLA for a job that never selected it")
+
+    for flag in ("HAS_CUDA", "HAS_XPU", "HAS_NPU", "HAS_MPS"):
+        monkeypatch.setattr(ttmod, flag, False)
+    monkeypatch.setattr(ttmod, "is_xla_available", forbidden)
+    monkeypatch.setattr(ttmod, "require_xla_runtime", forbidden)
+    monkeypatch.setattr(ttmod, "xla_runtime_claimed", lambda: False)
+
+    ttmod.torch_sync()
+
+
+def test_torch_sync_synchronizes_claimed_xla(monkeypatch):
+    """Once XLA owns the devices, the barrier does include it."""
+
+    import gptqmodel.utils.torch as ttmod
+
+    synced = {"count": 0}
+
+    class Runtime:
+        @staticmethod
+        def sync(wait=False):
+            synced["count"] += 1
+
+    for flag in ("HAS_CUDA", "HAS_XPU", "HAS_NPU", "HAS_MPS"):
+        monkeypatch.setattr(ttmod, flag, False)
+    monkeypatch.setattr(ttmod, "require_xla_runtime", lambda: Runtime)
+    monkeypatch.setattr(ttmod, "xla_runtime_claimed", lambda: True)
+
+    ttmod.torch_sync()
+    assert synced["count"] == 1
+
+
+def test_qqq_portable_kernel_accepts_pre_ampere(monkeypatch):
+    """The FP32 fallback must not inherit the native kernel's SM80 floor."""
+
+    from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("portable kernel consulted compute capability")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", forbidden)
+    QQQTorchLinear.validate_device(torch.device("cuda:0"))
+
+    # The native kernel keeps its restriction.
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
+    with pytest.raises(NotImplementedError, match="Marlin"):
+        QQQLinear.validate_device(torch.device("cuda:0"))
+
+
 def test_blockfloat_beats_uniform_int4_for_heavy_tails():
     """Block-float should win where a per-group int4 scale clips an outlier."""
 

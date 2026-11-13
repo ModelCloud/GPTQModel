@@ -568,18 +568,14 @@ class QQQTorchLinear(QQQLinear):
 
     @classmethod
     def validate_device(cls, device: DEVICE | torch.device):
-        # The portable path has no CUDA-only Marlin requirement; it must not
-        # inherit the native QQQ kernel's ROCm rejection.
-        if IS_ROCM:
-            return
-        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
-            targets = (
-                (device,)
-                if isinstance(device, torch.device)
-                else tuple(torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count()))
-            )
-            if not targets or any(torch.cuda.get_device_capability(target)[0] < 8 for target in targets):
-                raise NotImplementedError("QQQ portable kernel only supports compute capability >= 8.0 on NVIDIA.")
+        # This kernel computes with a plain FP32 matmul, so it needs neither the
+        # Marlin compute-capability floor nor the CUDA-only requirement the
+        # native QQQ kernel enforces -- and that kernel is this class's MRO
+        # parent. Skip it and apply only the generic device-family validation,
+        # which is what the portable path had before the family checks landed.
+        # Without this, a pre-Ampere NVIDIA card that could run the fallback is
+        # rejected at selection time.
+        super(QQQLinear, cls).validate_device(device)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
