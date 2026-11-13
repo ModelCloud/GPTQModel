@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from gptqmodel.looper.checkpoint_modules import (
-    packed_module_spec,
+    packed_module_config,
     restore_packed_module,
 )
 from gptqmodel.looper.continuation import ContinuationCodec
@@ -22,11 +22,11 @@ from gptqmodel.quantization.config import (
 
 
 def assert_schema_roundtrip(module, config):
-    spec = ContinuationCodec.loads(
-        ContinuationCodec.dumps(packed_module_spec(module, config))
+    module_config = ContinuationCodec.loads(
+        ContinuationCodec.dumps(packed_module_config(module, config))
     )
     restored = restore_packed_module(
-        spec, name="proj", config=config, kernel=type(module), lm_head_name="lm_head"
+        module_config, name="proj", config=config, kernel=type(module), lm_head_name="lm_head"
     )
     assert type(restored) is type(module)
     assert {
@@ -81,17 +81,17 @@ def test_dynamic_pack_settings_roundtrip_per_module():
         format=config.format,
         register_buffers=True,
     )
-    spec = packed_module_spec(module, config)
+    module_config = packed_module_config(module, config)
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=config,
         kernel=TorchLinear,
         lm_head_name="lm_head",
     )
 
-    assert "dynamic" not in spec
-    assert spec["pack_dtype"] == "int16"
+    assert "dynamic" not in module_config
+    assert module_config["pack_dtype"] == "int16"
     assert restored.bits == 8
     assert restored.pack_dtype is torch.int16
 
@@ -111,9 +111,9 @@ def test_checkpoint_restores_dynamic_kernel_different_from_global_kernel():
         format=FORMAT.GEMM,
         register_buffers=True,
     )
-    spec = packed_module_spec(module, config)
+    module_config = packed_module_config(module, config)
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=config,
         kernel=AwqGEMMLinear,
@@ -143,16 +143,16 @@ def test_checkpoint_persists_effective_dynamic_awq_format():
         register_buffers=True,
     )
 
-    spec = packed_module_spec(module, config, module_name="proj")
+    module_config = packed_module_config(module, config, module_name="proj")
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=config,
         kernel=AwqGEMVLinear,
         lm_head_name="lm_head",
     )
 
-    assert spec["format"] == FORMAT.GEMV.value
+    assert module_config["format"] == FORMAT.GEMV.value
     assert type(restored) is AwqGEMVLinear
 
 
@@ -170,9 +170,9 @@ def test_bitblas_compute_dtype_schema_without_optional_compiler(dtype):
         QUANT_TYPE="awq_bitblas",
         quant_config=SimpleNamespace(torch_dtype=dtype),
     )
-    spec = packed_module_spec(source, config)
+    module_config = packed_module_config(source, config)
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=config,
         kernel=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -229,9 +229,9 @@ def test_checkpoint_persists_effective_dynamic_fp8_settings():
         weight_scale_semantics=config.weight_scale_semantics,
         register_buffers=True,
     )
-    spec = packed_module_spec(module, config, module_name="proj")
+    module_config = packed_module_config(module, config, module_name="proj")
 
-    assert spec["options"] == {
+    assert module_config["options"] == {
         "format": "float8_e5m2",
         "weight_scale_method": "block",
         "weight_block_size": [32, 32],
@@ -239,7 +239,7 @@ def test_checkpoint_persists_effective_dynamic_fp8_settings():
     }
 
     restored = restore_packed_module(
-        spec, name="proj", config=config, kernel=TorchFP8Linear, lm_head_name="lm_head"
+        module_config, name="proj", config=config, kernel=TorchFP8Linear, lm_head_name="lm_head"
     )
     assert restored.fp8_format == "float8_e5m2"
     assert restored.weight_scale_method == "block"
@@ -377,13 +377,13 @@ def test_checkpoint_persists_effective_dynamic_bitsandbytes_settings():
         compress_statistics=config.compress_statistics,
     )
     module.pack_original(torch.nn.Linear(128, 128, bias=False), None, None)
-    spec = packed_module_spec(module, config, module_name="proj")
+    module_config = packed_module_config(module, config, module_name="proj")
 
-    assert spec["options"]["block_size"] == 32
-    assert spec["options"]["compress_statistics"] == module.bnb_compress_statistics
+    assert module_config["options"]["block_size"] == 32
+    assert module_config["options"]["compress_statistics"] == module.bnb_compress_statistics
 
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=config,
         kernel=BitsAndBytesLinear,

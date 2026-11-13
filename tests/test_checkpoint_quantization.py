@@ -735,7 +735,7 @@ def test_checkpoint_capture_accepts_dynamic_awq_kernel(tmp_path):
     state, artifacts = adapter.capture()
 
     assert set(artifacts) == {"proj"}
-    assert state["specs"]["proj"]["kernel"].endswith(".AwqTorchLinear")
+    assert state["modules"]["proj"]["kernel"].endswith(".AwqTorchLinear")
 
 
 def test_checkpoint_roundtrip_restores_runtime_dynamic_exclusions(tmp_path):

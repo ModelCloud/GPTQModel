@@ -3,7 +3,7 @@
 """One normalized constructor contract shared by packing and checkpoint restore.
 
 Packing resolves a module's effective settings once into a
-``ModuleConstructorSpec``. Checkpoint serialization derives the same object
+``ModuleConstructorConfig``. Checkpoint serialization derives the same object
 from the packed module and restore consumes it, so the two paths cannot drift
 into separate field inventories.
 """
@@ -24,7 +24,7 @@ from .config import (
     _normalize_fp8_scale_semantics,
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
-    _normalize_gguf_config_spec,
+    _normalize_gguf_config,
     _normalize_pack_dtype,
     _normalize_quant_bits,
     quant_bits_width,
@@ -36,7 +36,7 @@ _PACK_DTYPES = frozenset({torch.int8, torch.int16, torch.int32, torch.int64})
 
 
 @dataclass(frozen=True)
-class ModuleConstructorSpec:
+class ModuleConstructorConfig:
     """Validated, immutable constructor settings for one packed module.
 
     ``format`` is the ``FORMAT`` layout used for packing. Method-specific
@@ -56,29 +56,29 @@ class ModuleConstructorSpec:
 
     def __post_init__(self) -> None:
         if self.bits is None:
-            raise ValueError("module constructor spec requires bits")
+            raise ValueError("module constructor config requires bits")
         if quant_bits_width(self.bits) <= 0:
-            raise ValueError(f"module constructor spec has invalid bits: {self.bits!r}")
+            raise ValueError(f"module constructor config has invalid bits: {self.bits!r}")
         if self.group_size is not None and (
             not isinstance(self.group_size, int) or self.group_size == 0
         ):
             raise ValueError(
-                f"module constructor spec has invalid group_size: {self.group_size!r}"
+                f"module constructor config has invalid group_size: {self.group_size!r}"
             )
         if not isinstance(self.desc_act, bool):
-            raise ValueError("module constructor spec requires a boolean desc_act")
+            raise ValueError("module constructor config requires a boolean desc_act")
         if not isinstance(self.sym, bool):
-            raise ValueError("module constructor spec requires a boolean sym")
+            raise ValueError("module constructor config requires a boolean sym")
         if self.pack_dtype not in _PACK_DTYPES:
             raise ValueError(
-                f"module constructor spec has invalid pack_dtype: {self.pack_dtype!r}"
+                f"module constructor config has invalid pack_dtype: {self.pack_dtype!r}"
             )
         if not isinstance(self.format, FORMAT):
             raise ValueError(
-                f"module constructor spec has invalid format: {self.format!r}"
+                f"module constructor config has invalid format: {self.format!r}"
             )
         if any(not isinstance(key, str) for key, _ in self.options):
-            raise ValueError("module constructor spec option keys must be strings")
+            raise ValueError("module constructor config option keys must be strings")
 
     def options_dict(self) -> Dict[str, Any]:
         return dict(self.options)
@@ -99,7 +99,7 @@ class ModuleConstructorSpec:
         return kwargs
 
 
-def resolve_module_constructor_spec(
+def resolve_module_constructor_config(
     *,
     bits,
     group_size: Optional[int],
@@ -109,8 +109,8 @@ def resolve_module_constructor_spec(
     format: FORMAT,
     init_kwargs: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
-) -> Optional[ModuleConstructorSpec]:
-    """Apply one module's winning dynamic rule and return its constructor spec.
+) -> Optional[ModuleConstructorConfig]:
+    """Apply one module's winning dynamic rule and return its constructor config.
 
     ``overrides`` is the already-resolved rule payload (``None`` when no rule
     matched, ``False`` when the module is excluded). The function is the single
@@ -189,13 +189,13 @@ def resolve_module_constructor_spec(
             # Resolve width and subtype independently, matching the config used
             # to quantize this module. Width-only overrides inherit the base
             # subtype; format-only overrides inherit only its width.
-            base_width, base_format, _ = _normalize_gguf_config_spec(bits, None)
-            _, _, tmp_bits = _normalize_gguf_config_spec(
+            base_width, base_format, _ = _normalize_gguf_config(bits, None)
+            _, _, tmp_bits = _normalize_gguf_config(
                 overrides.get("bits", base_width),
                 overrides.get(FORMAT_FIELD_CODE, base_format),
             )
 
-    return ModuleConstructorSpec(
+    return ModuleConstructorConfig(
         bits=tmp_bits,
         group_size=tmp_group_size,
         desc_act=bool(tmp_desc_act),
@@ -206,13 +206,13 @@ def resolve_module_constructor_spec(
     )
 
 
-def module_constructor_spec(
+def module_constructor_config(
     module,
     config,
     *,
     module_name: Optional[str] = None,
-) -> ModuleConstructorSpec:
-    """Derive the spec from an already-packed module's resolved runtime state."""
+) -> ModuleConstructorConfig:
+    """Derive the config from an already-packed module's resolved runtime state."""
 
     format_value = getattr(module, "format", None)
     if format_value is None and module_name is not None:
@@ -260,7 +260,7 @@ def module_constructor_spec(
     if quant_type == "qqq":
         kind = "qqq"
 
-    return ModuleConstructorSpec(
+    return ModuleConstructorConfig(
         bits=getattr(module, "bits", config.runtime_bits),
         group_size=getattr(module, "group_size", config.group_size),
         desc_act=getattr(module, "desc_act", config.desc_act),

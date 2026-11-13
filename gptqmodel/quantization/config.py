@@ -749,7 +749,7 @@ def _gguf_bits_from_components(bits: int, public_format: str) -> GGUFBits:
     return bits_spec
 
 
-def _normalize_gguf_config_spec(
+def _normalize_gguf_config(
     bits: Union[int, str, GGUFBits],
     format_value: Optional[Union[str, FORMAT, GGUFBits]],
 ) -> Tuple[int, str, GGUFBits]:
@@ -3707,7 +3707,7 @@ def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
         legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
     if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
         normalized[BITS_FIELD_CODE] = legacy_gguf_bits
-    normalized[BITS_FIELD_CODE], normalized[FORMAT_FIELD_CODE], _ = _normalize_gguf_config_spec(
+    normalized[BITS_FIELD_CODE], normalized[FORMAT_FIELD_CODE], _ = _normalize_gguf_config(
         normalized.get(BITS_FIELD_CODE, 4),
         normalized.get(FORMAT_FIELD_CODE),
     )
@@ -6276,7 +6276,7 @@ class GGUFConfig(PreProcessorConfig):
         return False
 
     def _resolve_checkpoint_format(self) -> FORMAT:
-        self.bits, self.format, self._gguf_bits = _normalize_gguf_config_spec(self.bits, self.format)
+        self.bits, self.format, self._gguf_bits = _normalize_gguf_config(self.bits, self.format)
         return FORMAT.GGUF
 
     def _normalize_bits_field(
@@ -6309,7 +6309,7 @@ class GGUFConfig(PreProcessorConfig):
         if bits_override_present or format_override_present:
             raw_bits = layer_dict.get("bits", self.bits)
             raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
-            normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config_spec(raw_bits, raw_format)
+            normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config(raw_bits, raw_format)
 
             layer_dict["bits"] = normalized_bits
 
@@ -6404,7 +6404,7 @@ def clone_weight_only_config_for_module(
         if isinstance(qcfg_clone, GGUFConfig):
             dynamic_bits = resolved_cfg.get("bits", qcfg_clone.bits)
             dynamic_format = resolved_cfg.get(FORMAT_FIELD_CODE, qcfg_clone.format)
-            qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config_spec(
+            qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config(
                 dynamic_bits,
                 dynamic_format,
             )

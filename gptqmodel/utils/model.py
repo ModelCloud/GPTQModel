@@ -61,7 +61,7 @@ from ..quantization.config import (
     quant_bits_width,
     resolve_quant_format,
 )
-from ..quantization.module_spec import resolve_module_constructor_spec
+from ..quantization.module_config import resolve_module_constructor_config
 from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
 from .ctx import ctx
@@ -685,9 +685,9 @@ def create_quant_module(
         overrides = None
 
     # One owner resolves the module's effective constructor settings. Packing
-    # and checkpoint restore both consume this spec instead of reinterpreting
+    # and checkpoint restore both consume this config instead of reinterpreting
     # dynamic overrides independently.
-    module_spec = resolve_module_constructor_spec(
+    module_config = resolve_module_constructor_config(
         bits=_normalize_quant_bits(bits, format_value=format),
         group_size=group_size,
         desc_act=desc_act,
@@ -697,15 +697,15 @@ def create_quant_module(
         init_kwargs=init_kwargs,
         overrides=overrides,
     )
-    if module_spec is None:
+    if module_config is None:
         # negative module match, skip this module
         return
-    tmp_bits = module_spec.bits
-    tmp_group_size = module_spec.group_size
-    tmp_desc_act = module_spec.desc_act
-    tmp_sym = module_spec.sym
-    tmp_pack_dtype = module_spec.pack_dtype
-    tmp_init_kwargs = module_spec.options_dict()
+    tmp_bits = module_config.bits
+    tmp_group_size = module_config.group_size
+    tmp_desc_act = module_config.desc_act
+    tmp_sym = module_config.sym
+    tmp_pack_dtype = module_config.pack_dtype
+    tmp_init_kwargs = module_config.options_dict()
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits

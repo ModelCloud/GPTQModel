@@ -230,7 +230,7 @@ def test_resolved_module_config_is_ordered_and_immutable():
 
 def test_one_module_snapshot_drives_clone_and_pack_settings():
     from gptqmodel.looper.checkpoint_modules import (
-        packed_module_spec,
+        packed_module_config,
         restore_packed_module,
     )
 
@@ -268,9 +268,9 @@ def test_one_module_snapshot_drives_clone_and_pack_settings():
     assert model.proj.bits == 3
     assert model.proj.group_size == 64
 
-    spec = packed_module_spec(model.proj, clone, module_name="proj")
+    module_config = packed_module_config(model.proj, clone, module_name="proj")
     restored = restore_packed_module(
-        spec,
+        module_config,
         name="proj",
         config=clone,
         kernel=TorchLinear,
@@ -336,10 +336,10 @@ def test_module_snapshot_cannot_leak_to_another_pack_name():
         )
 
 
-def test_packing_and_checkpoint_share_one_constructor_spec():
-    from gptqmodel.quantization.module_spec import (
-        module_constructor_spec,
-        resolve_module_constructor_spec,
+def test_packing_and_checkpoint_share_one_constructor_config():
+    from gptqmodel.quantization.module_config import (
+        module_constructor_config,
+        resolve_module_constructor_config,
     )
 
     config = QuantizeConfig(
@@ -360,7 +360,7 @@ def test_packing_and_checkpoint_share_one_constructor_spec():
     )
     resolved_cfg = config.resolve_module_config("proj")
 
-    packed = resolve_module_constructor_spec(
+    packed = resolve_module_constructor_config(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -393,18 +393,18 @@ def test_packing_and_checkpoint_share_one_constructor_spec():
         resolved_module_config=resolved_cfg,
     )
 
-    # Checkpoint derives its spec from the packed module, not a second field
-    # inventory, and must agree with the spec packing used.
-    checkpoint = module_constructor_spec(model.proj, config, module_name="proj")
+    # Checkpoint derives its config from the packed module, not a second field
+    # inventory, and must agree with the config packing used.
+    checkpoint = module_constructor_config(model.proj, config, module_name="proj")
     assert (checkpoint.bits, checkpoint.group_size) == (packed.bits, packed.group_size)
     assert checkpoint.sym is packed.sym
     assert checkpoint.pack_dtype is packed.pack_dtype
     assert checkpoint.format is packed.format
 
-    # An excluded module resolves to no spec at all.
+    # An excluded module resolves to no config at all.
     excluded = QuantizeConfig(dynamic={r"-:^proj$": {}})
     excluded_cfg = excluded.resolve_module_config("proj")
-    assert resolve_module_constructor_spec(
+    assert resolve_module_constructor_config(
         bits=4,
         group_size=128,
         desc_act=False,

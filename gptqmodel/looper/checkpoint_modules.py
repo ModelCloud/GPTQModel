@@ -9,7 +9,7 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import resolve_quant_format, serialize_quant_bits
-from ..quantization.module_spec import ModuleConstructorSpec, module_constructor_spec
+from ..quantization.module_config import ModuleConstructorConfig, module_constructor_config
 from ..utils.importer import get_auto_backend_kernel_mapping
 from .checkpoint_store import CheckpointError
 
@@ -65,7 +65,7 @@ def _resolve_checkpoint_kernel(checkpoint_kernel, default_kernel, config, format
     )
 
 
-def packed_module_spec(module, config, *, module_name=None):
+def packed_module_config(module, config, *, module_name=None):
     dimensions = {
         "in_features": module.in_features,
         "out_features": module.out_features,
@@ -83,8 +83,8 @@ def packed_module_spec(module, config, *, module_name=None):
                 for key, value in module.state_dict().items()
             },
         }
-    constructor = module_constructor_spec(module, config, module_name=module_name)
-    spec = {
+    constructor = module_constructor_config(module, config, module_name=module_name)
+    module_config = {
         **dimensions,
         "bits": serialize_quant_bits(constructor.bits),
         "group_size": constructor.group_size,
@@ -95,53 +95,53 @@ def packed_module_spec(module, config, *, module_name=None):
         "format": _serialize_value(constructor.format),
     }
     if constructor.kind is not None:
-        spec["kind"] = constructor.kind
+        module_config["kind"] = constructor.kind
     if constructor.options:
-        spec["options"] = _serialize_value(constructor.options_dict())
+        module_config["options"] = _serialize_value(constructor.options_dict())
     if is_packed_module(module):
-        spec["kernel"] = _kernel_path(type(module))
+        module_config["kernel"] = _kernel_path(type(module))
     if getattr(module, "QUANT_TYPE", None) == "bitsandbytes":
-        spec["compute_dtype"] = str(module.compute_dtype) if module.compute_dtype is not None else None
+        module_config["compute_dtype"] = str(module.compute_dtype) if module.compute_dtype is not None else None
         if module.is_4bit:
             # Packed QuantState JSON length depends on values, not dimensions.
-            spec["quant_state_shape"] = list(module.weight_quant_state.shape)
+            module_config["quant_state_shape"] = list(module.weight_quant_state.shape)
     if getattr(module, "QUANT_TYPE", None) in {"gptq_bitblas", "awq_bitblas"}:
-        spec["compute_dtype"] = str(module.quant_config.torch_dtype)
+        module_config["compute_dtype"] = str(module.quant_config.torch_dtype)
     if constructor.kind == "qqq":
-        spec["group_scales"] = "s_group" in module.state_dict()
-    return spec
+        module_config["group_scales"] = "s_group" in module.state_dict()
+    return module_config
 
 
-def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
+def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
     with torch.device("meta"):
-        if spec.get("kind") == "exl3":
+        if module_config.get("kind") == "exl3":
             dtype = {
                 "torch.float16": torch.float16,
                 "torch.bfloat16": torch.bfloat16,
                 "torch.float32": torch.float32,
-            }.get(spec["out_dtype"])
+            }.get(module_config["out_dtype"])
             if dtype is None:
                 raise CheckpointError("invalid EXL3 output dtype")
             return ExllamaV3Linear(
-                in_features=spec["in_features"],
-                out_features=spec["out_features"],
+                in_features=module_config["in_features"],
+                out_features=module_config["out_features"],
                 name=name,
                 out_dtype=dtype,
                 tensor_storage={
                     "stored_tensors": {
-                        f"{name}.{key}": value for key, value in spec["buffers"].items()
+                        f"{name}.{key}": value for key, value in module_config["buffers"].items()
                     }
                 },
             )
-        spec = dict(spec)
-        kind = spec.pop("kind", None)
-        group_scales = spec.pop("group_scales", True)
-        checkpoint_kernel = spec.pop("kernel", None)
-        checkpoint_pack_dtype = spec.pop("pack_dtype", None)
-        checkpoint_format = spec.pop("format", None)
-        has_compute_dtype = "compute_dtype" in spec
-        dtype_name = spec.pop("compute_dtype", None)
-        quant_state_shape = spec.pop("quant_state_shape", None)
+        module_config = dict(module_config)
+        kind = module_config.pop("kind", None)
+        group_scales = module_config.pop("group_scales", True)
+        checkpoint_kernel = module_config.pop("kernel", None)
+        checkpoint_pack_dtype = module_config.pop("pack_dtype", None)
+        checkpoint_format = module_config.pop("format", None)
+        has_compute_dtype = "compute_dtype" in module_config
+        dtype_name = module_config.pop("compute_dtype", None)
+        quant_state_shape = module_config.pop("quant_state_shape", None)
         if kind == "paro":
             kernel = ParoLinear
         module_format = resolve_quant_format(
@@ -154,18 +154,18 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             config,
             module_format,
         )
-        # The checkpoint's own constructor spec is authoritative. Global method
-        # defaults only fill fields the spec does not carry.
-        constructor = ModuleConstructorSpec(
-            bits=spec.pop("bits"),
-            group_size=spec.pop("group_size"),
-            desc_act=spec.pop("desc_act"),
-            sym=spec.pop("sym"),
+        # The checkpoint's own constructor config is authoritative. Global method
+        # defaults only fill fields the config does not carry.
+        constructor = ModuleConstructorConfig(
+            bits=module_config.pop("bits"),
+            group_size=module_config.pop("group_size"),
+            desc_act=module_config.pop("desc_act"),
+            sym=module_config.pop("sym"),
             pack_dtype=_deserialize_pack_dtype(
                 checkpoint_pack_dtype, config.pack_dtype
             ),
             format=module_format,
-            options=tuple(dict(spec.pop("options", {})).items()),
+            options=tuple(dict(module_config.pop("options", {})).items()),
             kind=kind,
         )
         kwargs = dict(config.quant_linear_init_kwargs())
@@ -186,7 +186,7 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
             if dtype is None:
                 raise CheckpointError("invalid packed compute dtype")
             kwargs["dtype"] = dtype
-        module = kernel(**spec, **kwargs)
+        module = kernel(**module_config, **kwargs)
         if quant_state_shape is not None:
             if (
                 len(quant_state_shape) != 1
