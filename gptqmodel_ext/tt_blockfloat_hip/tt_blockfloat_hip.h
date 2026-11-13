@@ -4,7 +4,7 @@
 // Host-visible contract for the Tenstorrent block-float HIP emulation kernels.
 //
 // The storage layout is the one GPT-QModel already writes for
-// ``bfloat8_b`` / ``bfloat4_b``:
+// ``bf8_b`` / ``bf4_b`` (``ttnn`` spells them ``bfloat8_b`` / ``bfloat4_b``):
 //
 //   codes      packed uint8, two nibbles per byte for bf4 (low nibble first),
 //              one byte per value for bf8.  Code range is [0, 2*(2*levels-1)].

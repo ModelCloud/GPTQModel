@@ -51,6 +51,7 @@ float also has one implicit leading mantissa bit unless the value is subnormal.
 | `mxfp8` | 8 + 8 | 1 | 4 | 3 | ±448 × scale | weights | emulated |
 | **`bf4_b`** | 4 + 0.5 | 1 | shared | 2 | ±1.75·2ᵉ | **yes — TT block float** | no (unpacked to BF16) |
 | **`bf8_b`** | 8 + 0.5 | 1 | shared | 6 | ±1.98·2ᵉ | **yes — TT block float** | no (unpacked to BF16) |
+| `bf2_b` | 2 + 0.5 | 1 | shared | 0 | ±1·2ᵉ | no — measurement only (§8.6) | no (unpacked to BF16) |
 | `nf12` | 12 | 1 | 8 | 3 | bf16 range | lossless bf16 encoding | no |
 
 ## 3. IEEE binary floats
@@ -244,6 +245,23 @@ easily mistaken for OCP FP8 E4M3, which it is not; hence the short form here.
 documentation, but the `ttnn` build on this host does not expose it, so it is
 not defined here.
 
+### 8.6 `bf2_b`, the degenerate member
+
+Two bits are one sign and one magnitude, so `bf2_b` has no stored mantissa at
+all: `levels = 1`, `offset = 1`, and a block holds only `{-1, 0, +1} · 2^e`.
+Three distinct values per 16-value block is not a weight format, and this
+repository does not offer it as a quantization target.
+
+It is still defined, because the silicon can hold it: the Blackhole LLK has
+`DataFormat::Bfp2_b`, and Block FP2 appears among the Blackhole matrix-engine
+input formats. `gptqmodel/utils/tt_blockfloat_quant.py` therefore accepts
+`bits=2` — `stored_mantissa_bits(2) == 0`, four codes per byte, exact pack and
+unpack — so the cost of the grid can be measured.
+
+`ttnn` exposes no `bfloat2_b` attribute, so there is no vendor spelling and no
+checkpoint can contain it. The HIP emulation kernels do not implement it, and a
+`bits == 2` module takes the torch path.
+
 ## 9. `nf12`
 
 A lossless 12-bit encoding of `bf16`: sign, the full 8-bit exponent, and the top
@@ -288,7 +306,7 @@ asserts exactness must therefore say which realization it ran.
 | NVFP4 scale selection and E2M1 rounding | `gptqmodel/quantization/activation_floatx.py` |
 | GGUF MXFP4 packing | `gptqmodel/nn_modules/qlinear/gguf.py` |
 | FP8 / NVFP8 / MX checkpoint dequantization | `gptqmodel/utils/model_dequant.py` |
-| `bf4_b` / `bf8_b` grid, codes, exponents | `gptqmodel/utils/tt_blockfloat_quant.py` |
+| `bf2_b` / `bf4_b` / `bf8_b` grid, codes, exponents | `gptqmodel/utils/tt_blockfloat_quant.py` |
 | `bf4_b` / `bf8_b` modules and packing | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py` |
 | `nf12` codec | `gptqmodel/quantization/nf12_ad.py` |
 

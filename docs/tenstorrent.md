@@ -664,7 +664,7 @@ outside this change.
 
 `gptqmodel_ext/tt_blockfloat_hip` executes the same packed `codes` and int8
 `exponents` a Tenstorrent device consumes on AMD GPUs. It exists to test and
-emulate `bfloat8_b` / `bfloat4_b` without Tenstorrent hardware; it does not
+emulate `bf8_b` / `bf4_b` without Tenstorrent hardware; it does not
 replace the device kernels.
 
 The HIP kernels unpack bf4 nibbles / bf8 bytes in registers and fuse the
@@ -711,7 +711,8 @@ Blackhole matrix-engine input formats), so the p300c silicon can hold it.  It
 is not a usable weight format and is not reachable through `ttnn`: two bits are
 one sign and one magnitude, so a block holds only `{-1, 0, +1} x 2**exponent`,
 and `ttnn` exposes only `bfloat16`, `bfloat8_b`, `bfloat4_b`, `float32` and the
-integer types.  The grid is therefore defined in
+integer types (the vendor spellings; everywhere else this repository says
+`bf8_b` and `bf4_b`).  The grid is therefore defined in
 `gptqmodel.utils.tt_blockfloat_quant` (`quantize_bfloat2_b`, four codes per
 byte, exact pack/unpack) so its cost can be measured, but the HIP kernels do
 not implement it and a `bits == 2` module takes the torch path.

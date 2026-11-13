@@ -1,6 +1,6 @@
 # Tenstorrent bf8/bf4 emulation on ROCm
 
-HIP kernels that execute GPT-QModel's Tenstorrent `bfloat8_b` / `bfloat4_b`
+HIP kernels that execute GPT-QModel's Tenstorrent `bf8_b` / `bf4_b`
 checkpoints on AMD GPUs. They exist so the formats can be tested and emulated
 on hardware that is not a Tenstorrent device.
 
@@ -12,11 +12,13 @@ values. Nothing is re-quantised, converted to int4, or expanded on the host.
 
 | format | code bits | stored mantissa | levels | value |
 | --- | --- | --- | --- | --- |
-| `bfloat8_b` | 8 | 6 | 64 | `(code - 127) / 64 * 2**exponent` |
-| `bfloat4_b` | 4 | 2 | 4 | `(code - 7) / 4 * 2**exponent` |
+| `bf8_b` | 8 | 6 | 64 | `(code - 127) / 64 * 2**exponent` |
+| `bf4_b` | 4 | 2 | 4 | `(code - 7) / 4 * 2**exponent` |
 
 `codes` are packed at their natural density: one byte per value for bf8, two
-nibbles per byte for bf4 with the lower column in the low nibble. The exponent
+nibbles per byte for bf4 with the lower column in the low nibble.  `ttnn` spells
+these `bfloat8_b` and `bfloat4_b`; that vendor spelling is used only at the
+`getattr(ttnn, ...)` call site, and `hw/dtypes.md` is the bit-level reference. The exponent
 is shared by a 16-value block, matching `gptqmodel.utils.tt_blockfloat_quant`.
 
 The dequantised values are exact float32 grid points, and every bf8/bf4 value

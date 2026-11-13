@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""HIP emulation of Tenstorrent ``bfloat8_b`` / ``bfloat4_b`` execution.
+"""HIP emulation of Tenstorrent ``bf8_b`` / ``bf4_b`` execution.
 
 Tenstorrent stores these formats as 16-value blocks that share one exponent and
 expands them inside the Tensix unpack stage, so a weight never exists as a dense
@@ -27,8 +27,8 @@ Nothing is shipped precompiled: the extension is built from the sources in
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
 
 import torch
 
@@ -85,7 +85,7 @@ def _sources() -> list[str]:
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
 
 
-def _rocm_root() -> Optional[Path]:
+def _rocm_root() -> Path | None:
     """Locate a ROCm root with the development layout hipcc needs."""
 
     from torch.utils import cpp_extension
@@ -146,7 +146,7 @@ _EXTENSION = TorchOpsJitExtension(
 _SELFTESTED = False
 
 
-def _device_supported(device: Optional[torch.device]) -> bool:
+def _device_supported(device: torch.device | None) -> bool:
     if not torch.cuda.is_available() or torch.version.hip is None:
         return False
     if device is not None and torch.device(device).type != "cuda":
@@ -154,7 +154,7 @@ def _device_supported(device: Optional[torch.device]) -> bool:
     return True
 
 
-def tt_blockfloat_hip_supported(device: Optional[torch.device] = None) -> bool:
+def tt_blockfloat_hip_supported(device: torch.device | None = None) -> bool:
     """Whether this host/device can run the block-float HIP kernels.
 
     The kernels are portable HIP (no RDNA4-only builtins), so any ROCm GPU is
@@ -183,7 +183,7 @@ def prewarm_tt_blockfloat_hip_extension() -> bool:
     return True
 
 
-def available(device: Optional[torch.device] = None) -> bool:
+def available(device: torch.device | None = None) -> bool:
     """Whether the extension can run on ``device`` (builds it on first use)."""
 
     return tt_blockfloat_hip_supported(device) and _EXTENSION.load()
@@ -238,14 +238,14 @@ def dequantize(
     return torch.ops.tt_blockfloat_hip.dequant(codes, exponents, int(bits), rows, cols, _dtype_code(dtype))
 
 
-def quantize(weight: torch.Tensor, bits: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def quantize(weight: torch.Tensor, bits: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantise a float32 ``[rows, cols]`` matrix onto the block-float grid."""
 
     _require_loaded()
     return torch.ops.tt_blockfloat_hip.quantize(weight.to(torch.float32), int(bits))
 
 
-def decompose(weight: torch.Tensor, bits: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def decompose(weight: torch.Tensor, bits: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Split an already-on-grid matrix into packed codes and exponents."""
 
     _require_loaded()
@@ -257,7 +257,7 @@ def linear(
     codes: torch.Tensor,
     exponents: torch.Tensor,
     bits: int,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``x @ dequant(codes).T + bias`` without materialising the weight."""
 

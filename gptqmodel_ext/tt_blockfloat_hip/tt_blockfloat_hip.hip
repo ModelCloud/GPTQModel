@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// Tenstorrent bfloat8_b / bfloat4_b execution on AMD ROCm GPUs.
+// Tenstorrent bf8_b / bf4_b execution on AMD ROCm GPUs.
 //
 // Tenstorrent stores these formats as blocks of 16 values that share one
 // exponent; the Tensix unpack stage expands the packed codes in the data path,
@@ -134,7 +134,7 @@ void ttbf_store8(T* p, const float* v) {
 
 template <int BITS>
 struct Grid {
-    static_assert(BITS == 4 || BITS == 8, "only bfloat4_b / bfloat8_b exist");
+    static_assert(BITS == 4 || BITS == 8, "only bf4_b / bf8_b exist");
     // Stored mantissa bits: 2 for bf4, 6 for bf8.  One implicit leading bit.
     static constexpr int kMantBits = BITS - 2;
     static constexpr int kLevels = 1 << kMantBits;
