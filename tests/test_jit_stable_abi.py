@@ -27,6 +27,7 @@ from gptqmodel.utils import (
     paroquant,
     qqq,
     rco_cpp,
+    swordfish,
     tt_blockfloat_cuda,
     vptq_cuda,
 )
@@ -118,6 +119,10 @@ def test_vptq_cuda_uses_stable_abi():
     _assert_stable(vptq_cuda._VPTQ_TORCH_OPS_EXTENSION)
 
 
+def test_swordfish_uses_stable_abi():
+    _assert_stable(swordfish._SWORDFISH_TORCH_OPS_EXTENSION)
+
+
 def test_rco_dp_uses_stable_abi():
     _assert_stable(rco_cpp._RCO_DP_EXTENSION)
 
@@ -162,3 +167,29 @@ def test_every_jit_loader_declares_the_stable_abi():
                 missing.append(relative)
                 break
     assert not missing, f"JIT loaders missing torch_stable_abi_target: {missing}"
+
+
+def test_nf12_torch_build_targets_the_stable_abi():
+    """The vendored nf12 CMake build pins the same 2.10 stable-ABI floor."""
+
+    source = Path(__file__).resolve().parents[1] / "gptqmodel_ext" / "nf12"
+    cmake = (source / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert "TORCH_TARGET_VERSION=0x020A000000000000" in cmake
+    assert "USE_CUDA" in cmake
+
+    ops = (source / "csrc" / "torch" / "ops.cpp").read_text(encoding="utf-8")
+    assert "#include <torch/csrc/stable/library.h>" in ops
+    assert "STABLE_TORCH_LIBRARY" in ops
+
+
+def test_nf12_jit_cache_key_ignores_torch_version(monkeypatch):
+    """A stable-ABI nf12 artifact must survive a torch upgrade."""
+
+    from gptqmodel_nf12 import _jit
+
+    source = _jit._source_root()
+    monkeypatch.setattr(_jit.torch, "__version__", "2.10.0+cu128")
+    fingerprint = _jit._cache_key(source, [80])
+    monkeypatch.setattr(_jit.torch, "__version__", "2.15.0.dev20260928+cu130")
+
+    assert _jit._cache_key(source, [80]) == fingerprint
