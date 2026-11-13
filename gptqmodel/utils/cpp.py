@@ -122,6 +122,14 @@ def torch_stable_abi_target_define(major: int, minor: int) -> str:
     return f"-DTORCH_TARGET_VERSION=0x{encoded_version:016X}"
 
 
+# Torch 2.10 is the oldest stable-ABI release that exposes every symbol the
+# GPT-QModel JIT kernels need (torch::stable::Tensor, mutable_data_ptr,
+# header-only array refs and the CUDA stream/device shims). A binary built
+# against this floor is forward-compatible with every newer torch release, so
+# one cached artifact replaces a per-torch-version rebuild.
+_TORCH_STABLE_ABI_TARGET = (2, 10)
+
+
 def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
     """Drop NVCC scheduling knobs that cannot change generated device code."""
 
@@ -1200,6 +1208,12 @@ class TorchOpsJitExtension:
     def _resolved_extra_cflags(self) -> list[str]:
         flags = self._with_stable_abi_target(self._resolve_sequence(self.extra_cflags))
         if self.requires_cuda:
+            # The stable compatibility header keys its CUDA shims off USE_CUDA;
+            # only stable-ABI extensions need the define.
+            if self.torch_stable_abi_target is not None and not any(
+                flag == "-DUSE_CUDA" for flag in flags
+            ):
+                flags.append("-DUSE_CUDA")
             flags.extend(rocm_supplemental_include_cflags())
         return flags
 
@@ -1409,6 +1423,9 @@ class TorchOpsJitExtension:
                         and not (
                             include_name.startswith("torch/csrc/stable/")
                             or include_name.startswith("torch/headeronly/")
+                            # AOTInductor's C shims are the stable C surface
+                            # used by torch::stable for stream/device access.
+                            or include_name.startswith("torch/csrc/inductor/aoti_torch/")
                         )
                     )
                 )
@@ -2061,6 +2078,7 @@ def _pack_block_extension() -> TorchOpsJitExtension:
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
             python_abi_dependent=False,
+            torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
         )
     return _PACK_BLOCK_TORCH_OPS_EXTENSION
 
@@ -2083,6 +2101,7 @@ def _floatx_cpu_extension() -> TorchOpsJitExtension:
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
             python_abi_dependent=False,
+            torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
         )
     return _FLOATX_CPU_TORCH_OPS_EXTENSION
 

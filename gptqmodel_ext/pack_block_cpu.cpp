@@ -3,9 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-#include <ATen/Parallel.h>
-#include <torch/extension.h>
-#include <torch/library.h>
+#include "torch_stable_compat.h"
 
 #include <algorithm>
 #include <array>
@@ -36,12 +34,12 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
 
     TORCH_CHECK(word_bits == 32, "Only 32-bit packing supported");
 
-    at::Tensor weight_f = weight.contiguous().to(at::kFloat);
-    at::Tensor scales_f = scales.contiguous().to(at::kFloat);
-    at::Tensor zeros_i32 = zeros.contiguous().to(at::kInt);
-    at::Tensor g_idx_i32 = g_idx.contiguous().to(at::kInt);
+    at::Tensor weight_f = at::to(at::contiguous(weight), at::kFloat);
+    at::Tensor scales_f = at::to(at::contiguous(scales), at::kFloat);
+    at::Tensor zeros_i32 = at::to(at::contiguous(zeros), at::kInt);
+    at::Tensor g_idx_i32 = at::to(at::contiguous(g_idx), at::kInt);
 
-    at::Tensor scale_zeros = zeros_i32.to(at::kFloat) * scales_f;
+    at::Tensor scale_zeros = at::mul(at::to(zeros_i32, at::kFloat), scales_f);
 
     const int64_t out_features = weight_f.size(0);
     const int64_t in_features = weight_f.size(1);
@@ -82,7 +80,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     const float* scales_ptr = scales_f.const_data_ptr<float>();
     const float* scale_zeros_ptr = scale_zeros.const_data_ptr<float>();
     const int32_t* gidx_ptr = g_idx_i32.const_data_ptr<int32_t>();
-    int32_t* qweight_ptr = qweight.data_ptr<int32_t>();
+    int32_t* qweight_ptr = qweight.mutable_data_ptr<int32_t>();
 
     const int64_t out_stride = in_features;
     const int64_t scales_stride = out_features;
@@ -171,13 +169,13 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
         }
     });
 
-    at::Tensor zeros_i32_contig = zeros_i32.contiguous();
+    at::Tensor zeros_i32_contig = at::contiguous(zeros_i32);
     const int32_t* zeros_ptr = zeros_i32_contig.const_data_ptr<int32_t>();
     const int64_t zeros_stride = zeros_i32_contig.size(1);
 
     int64_t qzeros_cols = (out_features / word_bits) * bits;
     at::Tensor qzeros = at::zeros({groups, qzeros_cols}, q_options);
-    int32_t* qzeros_ptr = qzeros.data_ptr<int32_t>();
+    int32_t* qzeros_ptr = qzeros.mutable_data_ptr<int32_t>();
 
     if (bits == 2 || bits == 4 || bits == 8) {
         int pack_factor_local = pack_factor;
@@ -231,13 +229,12 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
 
 } // namespace gptqmodel
 
-TORCH_LIBRARY(gptqmodel, m) {
+STABLE_TORCH_LIBRARY(gptqmodel, m) {
     m.def(
         "pack_block_cpu(Tensor weight, Tensor scales, Tensor zeros, Tensor g_idx, int bits, int word_bits, int block_in, int threads) -> (Tensor, Tensor)"
     );
-    m.impl(
-        "pack_block_cpu",
-        c10::DispatchKey::CPU,
-        TORCH_FN(gptqmodel::pack_block_cpu)
-    );
+}
+
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel, CPU, m) {
+    m.impl("pack_block_cpu", TORCH_BOX(&gptqmodel::pack_block_cpu));
 }

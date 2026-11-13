@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Source-level checks for JIT kernels migrated to the torch stable ABI.
+
+The stable ABI ("AnyTorch") lets one compiled artifact run on every newer
+torch release. These tests assert that a migrated loader declares the ABI
+floor and that its source graph only includes stable torch headers, without
+requiring a GPU or a compiler.
+"""
+
+from __future__ import annotations
+
+from gptqmodel.utils import cpp
+
+
+def _assert_stable(loader) -> None:
+    assert loader.torch_stable_abi_target == cpp._TORCH_STABLE_ABI_TARGET
+    sources = loader._resolve_sequence(loader.sources)
+    include_paths = loader._resolved_extra_include_paths()
+    python_dependent, stable, non_stable_headers = loader._source_abi_details(
+        sources, include_paths
+    )
+    assert stable, non_stable_headers
+    assert not python_dependent
+    assert non_stable_headers == ()
+    if loader.requires_cuda:
+        assert "-DUSE_CUDA" in loader._resolved_extra_cflags()
+
+
+def test_stable_abi_floor_is_torch_2_10():
+    assert cpp._TORCH_STABLE_ABI_TARGET == (2, 10)
+    assert (
+        cpp.torch_stable_abi_target_define(*cpp._TORCH_STABLE_ABI_TARGET)
+        == "-DTORCH_TARGET_VERSION=0x020A000000000000"
+    )
+
+
+def test_pack_block_cpu_uses_stable_abi():
+    _assert_stable(cpp._pack_block_extension())
