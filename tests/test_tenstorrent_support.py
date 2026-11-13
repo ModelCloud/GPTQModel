@@ -1209,14 +1209,17 @@ def test_gptq_blockfloat_matches_a_canonical_reference():
     """Pin the solve against an independent, textbook GPTQ implementation.
 
     The grid is deliberately shared, so this isolates the error-feedback
-    update: any difference is in the inverse update, not in the quantizer.
+    update. The oracle takes the **upper Cholesky factor of the inverse**
+    (``H^-1 = U^T U``) and updates with rows of ``U``, which is the
+    remaining-variable inverse GPTQ specifies. Reusing ``H^-1`` directly is the
+    tempting shortcut and it is wrong: the correction is too small.
     """
 
     import importlib
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
-    def reference(weight, hessian, bits, damp=0.01, block=16):
+    def reference(weight, hessian, bits, damp=0.01, block=16, factor="upper"):
         w = weight.clone().float()
         h = hessian.clone().float()
         dead = torch.diag(h) == 0
@@ -1224,6 +1227,8 @@ def test_gptq_blockfloat_matches_a_canonical_reference():
         w[:, dead] = 0.0
         h += torch.eye(h.shape[0]) * damp * torch.mean(torch.diag(h))
         hinv = torch.linalg.inv(h)
+        if factor == "upper":
+            hinv = torch.linalg.cholesky(hinv, upper=True)
         exps = bq._block_exponents(weight, block)
         levels = float(1 << bq.stored_mantissa_bits(bits))
         out = torch.zeros_like(w)
@@ -1252,14 +1257,30 @@ def test_gptq_blockfloat_matches_a_canonical_reference():
                 f"{float((got - want).abs().max()):.6g}"
             )
 
-    # A value already on the grid produces zero error, so error feedback is
-    # identically zero and the answer must equal plain rounding. 1.25 is code 5
-    # of the 15-level ttbf4 grid, so a reference that returns 1.0 is using a
-    # coarser grid, not a better update.
-    weight = torch.tensor([[1.25, 1.25, 1.25]])
-    hessian = torch.tensor([[1.0, 0.9, 0.9], [0.9, 1.0, 0.9], [0.9, 0.9, 1.0]])
-    assert torch.equal(bq.quantize_blockfloat(weight, 4)[0], weight)
-    assert torch.equal(bq.gptq_solve_blockfloat(weight, hessian, bits=4), weight)
+    # The case that separates the two updates: 1.2 is off-grid, so column 0
+    # produces real error, and the remaining-variable inverse moves column 2
+    # from 1.25 down to 1.0. The plain inverse leaves it at 1.25.
+    weight = torch.tensor([[1.2, 1.2, 1.2] + [0.0] * 13])
+    hessian = torch.eye(16)
+    hessian[:3, :3] = torch.tensor(
+        [[1.0, 0.8, 0.7], [0.8, 1.0, 0.9], [0.7, 0.9, 1.0]]
+    )
+    solved = bq.gptq_solve_blockfloat(weight, hessian, bits=4)
+    assert solved[0, :3].tolist() == [1.25, 1.25, 1.0]
+
+    def damped_loss(candidate):
+        # The Hessian the solve is minimising, with the same damping it applies.
+        h = hessian.clone()
+        h += torch.eye(16) * 0.01 * torch.mean(torch.diag(h))
+        err = weight - candidate
+        return float((err @ h @ err.T).item())
+
+    naive = reference(weight, hessian, 4, factor="full")
+    assert naive[0, :3].tolist() == [1.25, 1.25, 1.25]
+    assert damped_loss(solved) < damped_loss(naive), (
+        "the remaining-variable update must beat the plain-inverse one on the "
+        "objective GPTQ minimises"
+    )
 
 
 def test_blockfloat_mantissa_widths():
@@ -1433,13 +1454,21 @@ def test_resave_of_a_loaded_checkpoint_keeps_its_packed_weights(tmp_path):
 
     first_dir = str(tmp_path / "first")
     second_dir = str(tmp_path / "second")
-    first = bq.save_blockfloat_model(model, first_dir, bits=4, embed_bits=8)
+    first = bq.save_blockfloat_model(
+        model, first_dir, bits=4, embed_bits=8, metadata={"source_model": "original/model"}
+    )
     loaded, restored = bq.load_blockfloat_model(first_dir)
 
     second = bq.save_blockfloat_model(loaded, second_dir, bits=4, embed_bits=8)
     assert second["layers"] == first["layers"] > 0
     assert second["payload_bytes"] == first["payload_bytes"]
     assert second["bits_per_layer"] == first["bits_per_layer"]
+
+    # A re-save must not erase where the checkpoint came from.
+    import json
+
+    config = json.loads((tmp_path / "second" / "config.json").read_text())
+    assert config["quantization_config"]["meta"]["source_model"] == "original/model"
 
     again, restored_again = bq.load_blockfloat_model(second_dir)
     assert set(restored_again) == set(restored)
@@ -1523,6 +1552,72 @@ def test_embed_bits_quantizes_the_embedding(tmp_path, monkeypatch):
     index = json.loads((out / "model.safetensors.index.json").read_text())
     assert "model.embed_tokens.codes" in index["weight_map"]
     assert "model.embed_tokens.weight" not in index["weight_map"]
+
+
+def test_public_export_keeps_the_save_contract(tmp_path):
+    """``save_quantized`` must honour generation settings, shard size and metadata.
+
+    The block-float branch exports packed state directly, so it has to reproduce
+    the rest of the publication contract instead of returning early past it:
+    generation settings, the requested shard limit, caller safetensors metadata
+    and the checkpoint's own provenance.
+    """
+
+    import importlib
+    import json
+    import os
+
+    from safetensors import safe_open
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    from gptqmodel import GPTQModel
+
+    torch.manual_seed(31)
+    model = _tiny_llama()
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            weight = getattr(module, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
+                continue
+            bits = 8 if name.endswith("embed_tokens") else 4
+            weight.copy_(bq.quantize_blockfloat(weight.detach(), bits)[0])
+
+    first = str(tmp_path / "first")
+    bq.save_blockfloat_model(
+        model, first, bits=4, embed_bits=8, metadata={"source_model": "original/model"}
+    )
+
+    loaded = GPTQModel.load(first)
+    loaded.model.generation_config.eos_token_id = [2, 3]
+    loaded.model.generation_config.max_new_tokens = 17
+
+    second = str(tmp_path / "second")
+    loaded.save_quantized(
+        second,
+        max_shard_size="1KB",
+        safetensors_metadata={"review": "preserve-me"},
+    )
+
+    # Generation settings survive the round trip.
+    from transformers import GenerationConfig
+
+    gen = GenerationConfig.from_pretrained(second)
+    assert list(gen.eos_token_id) == [2, 3]
+    assert gen.max_new_tokens == 17
+
+    # The requested shard limit is applied rather than the writer default.
+    shards = sorted(f for f in os.listdir(second) if f.endswith(".safetensors"))
+    assert len(shards) > 1, shards
+
+    # Caller metadata reaches the safetensors header, and ``format`` stays ours.
+    with safe_open(os.path.join(second, shards[0]), framework="pt") as handle:
+        header = handle.metadata()
+    assert header["review"] == "preserve-me"
+    assert header["format"] == "pt"
+
+    # Provenance from the source checkpoint is not erased by the re-export.
+    config = json.loads((tmp_path / "second" / "config.json").read_text())
+    assert config["quantization_config"]["meta"]["source_model"] == "original/model"
 
 
 def test_validate_restored_geometry_rejects_a_swapped_shape():

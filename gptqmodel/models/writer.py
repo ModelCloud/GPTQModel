@@ -125,6 +125,60 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
+    """Resolve a ``max_shard_size`` argument to bytes.
+
+    Module level so every export path -- including formats that publish their
+    own packed state -- honours the same shard limit.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    match = _MAX_SHARD_SIZE_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"Invalid max_shard_size value: {value}")
+    base = int(match.group(1))
+    suffix = match.group(2).upper()
+    multiplier = 1
+    if suffix.startswith("K"):
+        multiplier = 1024
+    elif suffix.startswith("M"):
+        multiplier = 1024 ** 2
+    elif suffix.startswith("G"):
+        multiplier = 1024 ** 3
+    elif suffix.startswith("T"):
+        multiplier = 1024 ** 4
+    elif suffix.startswith("P"):
+        multiplier = 1024 ** 5
+    return base * multiplier
+
+
+def _normalize_metadata(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Stringify caller-supplied safetensors header metadata."""
+
+    if meta is None:
+        return {}
+    if not isinstance(meta, dict):
+        raise TypeError("safetensors_metadata must be a dictionary.")
+    normalized: Dict[str, str] = {}
+    for key, value in meta.items():
+        try:
+            new_key = str(key)
+            new_value = str(value)
+        except Exception as exc:
+            raise TypeError(
+                f"safetensors_metadata: both keys and values must be strings and conversion failed for ({key}, {value}): {exc}"
+            )
+        if new_key in normalized:
+            log.warn(
+                f"Duplicate metadata key '{new_key}' after conversion to string; overwriting previous value."
+            )
+        normalized[new_key] = new_value
+    return normalized
+
+
 # Source-only config fields are preserved, but a live value always wins. These
 # keys are excluded because they are either stripped on purpose or are fully
 # regenerated for the export.
@@ -1592,19 +1646,40 @@ def ModelWriter(cls):
             # hold packed codes on the hardware grid, so the generic writer has
             # nothing to pack and would rebuild a dense model it cannot
             # represent. Export the packed state verbatim instead.
-            from ..utils.tt_blockfloat_quant import save_blockfloat_model
+            from ..utils.tt_blockfloat_quant import (
+                DEFAULT_MAX_SHARD_BYTES,
+                save_blockfloat_model,
+            )
 
             tokenizer = getattr(self, "tokenizer", None)
             tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
             if not hasattr(tokenizer, "save_pretrained"):
                 tokenizer = None
+            # Honour the same shard limit and header metadata the generic path
+            # uses. Ignoring them silently changed the published layout and
+            # dropped caller metadata.
+            shard_bytes = _parse_max_shard_size(max_shard_size)
+            header_metadata = _normalize_metadata(safetensors_metadata)
             info = save_blockfloat_model(
                 self.model,
                 save_dir,
                 bits=self.quantize_config.bits,
                 embed_bits=int(getattr(self.quantize_config, "embed_bits", 8) or 8),
                 tokenizer=tokenizer,
+                safetensors_metadata=header_metadata,
+                max_shard_bytes=(
+                    DEFAULT_MAX_SHARD_BYTES if shard_bytes is None else shard_bytes
+                ),
             )
+            # Generation settings are part of the save contract. This early
+            # return would otherwise drop ``generation_config.json`` and change
+            # stopping behaviour on reload.
+            generation_config = getattr(self.model, "generation_config", None)
+            can_generate = getattr(self.model, "can_generate", None)
+            if generation_config is not None and (
+                not callable(can_generate) or can_generate()
+            ):
+                generation_config.save_pretrained(save_dir)
             log.info(
                 f"Saved tt-blockfloat checkpoint to {save_dir}: "
                 f"{info['layers']} packed modules, {info['payload_bytes'] / (1 << 20):.2f} MiB "
@@ -1918,50 +1993,6 @@ def ModelWriter(cls):
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             log.warn("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
-
-        def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
-            if value is None:
-                return None
-            if isinstance(value, int):
-                return value
-            match = _MAX_SHARD_SIZE_RE.fullmatch(value)
-            if not match:
-                raise ValueError(f"Invalid max_shard_size value: {value}")
-            base = int(match.group(1))
-            suffix = match.group(2).upper()
-            multiplier = 1
-            if suffix.startswith("K"):
-                multiplier = 1024
-            elif suffix.startswith("M"):
-                multiplier = 1024 ** 2
-            elif suffix.startswith("G"):
-                multiplier = 1024 ** 3
-            elif suffix.startswith("T"):
-                multiplier = 1024 ** 4
-            elif suffix.startswith("P"):
-                multiplier = 1024 ** 5
-            return base * multiplier
-
-        def _normalize_metadata(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
-            if meta is None:
-                return {}
-            if not isinstance(meta, dict):
-                raise TypeError("safetensors_metadata must be a dictionary.")
-            normalized: Dict[str, str] = {}
-            for key, value in meta.items():
-                try:
-                    new_key = str(key)
-                    new_value = str(value)
-                except Exception as exc:
-                    raise TypeError(
-                        f"safetensors_metadata: both keys and values must be strings and conversion failed for ({key}, {value}): {exc}"
-                    )
-                if new_key in normalized:
-                    log.warn(
-                        f"Duplicate metadata key '{new_key}' after conversion to string; overwriting previous value."
-                    )
-                normalized[new_key] = new_value
-            return normalized
 
         max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
         metadata_dict = _normalize_metadata(safetensors_metadata)

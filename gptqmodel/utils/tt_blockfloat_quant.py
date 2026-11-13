@@ -324,13 +324,28 @@ def gptq_solve_blockfloat(
     mean = torch.mean(torch.diag(h))
     h += torch.eye(in_features, dtype=h.dtype) * (damp * mean)
 
-    # GPTQ needs the full inverse here. Taking ``triu`` of a lower-triangular
-    # Cholesky factor leaves only the diagonal, which silently disables error
-    # feedback (measured: the solve then matched plain rounding exactly).
+    # GPTQ updates a column with the *remaining-variable* inverse, which is the
+    # upper Cholesky factor U of H^-1 (H^-1 = U^T U), not H^-1 itself. Using the
+    # plain inverse makes every correction too small, because row i of H^-1 is
+    # not the conditional covariance left after columns 0..i are frozen.
+    #
+    # This is not the same as ``triu(cholesky(H))``: that is the lower factor of
+    # H, whose ``triu`` keeps only the diagonal and disables error feedback
+    # entirely. The factor has to be taken of the inverse, and it is upper.
     try:
         hinv = torch.linalg.inv(h)
     except Exception:  # pragma: no cover - singular Hessian
         hinv = torch.linalg.pinv(h)
+    try:
+        hinv = torch.linalg.cholesky(hinv, upper=True)
+    except Exception:
+        # Damping left the inverse non-positive-definite (a rank-deficient
+        # Hessian). Nudge the diagonal so the factor exists rather than falling
+        # back to the plain inverse, which is the update this function exists to
+        # avoid.
+        eye = torch.eye(in_features, dtype=hinv.dtype)
+        jitter = torch.finfo(hinv.dtype).eps * torch.diag(hinv).abs().mean()
+        hinv = torch.linalg.cholesky(hinv + eye * jitter.clamp_min(1e-12), upper=True)
 
     # The hardware fixes one exponent per 16-wide block of a row, so derive those
     # exponents from the *original* weights before the solve starts. Recomputing
@@ -982,13 +997,28 @@ SHARD_PATTERN = "model-{index:05d}-of-{total:05d}.safetensors"
 DEFAULT_MAX_SHARD_BYTES = 500 * 1024**2
 
 
-def _write_shards(tensors: dict, output_dir: str, max_shard_bytes: int) -> dict:
-    """Write HF-style shards plus the standard index. Returns the weight map."""
+def _write_shards(
+    tensors: dict,
+    output_dir: str,
+    max_shard_bytes: int,
+    safetensors_metadata: "Optional[dict]" = None,
+) -> dict:
+    """Write HF-style shards plus the standard index. Returns the weight map.
+
+    ``safetensors_metadata`` is the per-file header metadata callers pass to
+    ``save_quantized``. ``format`` stays authoritative, so a caller cannot
+    relabel the container, but every other key is preserved.
+    """
 
     import json
     import os
 
     from safetensors.torch import save_file
+
+    header_metadata = {"format": "pt"}
+    for key, value in dict(safetensors_metadata or {}).items():
+        if key != "format":
+            header_metadata[str(key)] = str(value)
 
     names = sorted(tensors)
     sizes = {name: tensors[name].numel() * tensors[name].element_size() for name in names}
@@ -1015,7 +1045,7 @@ def _write_shards(tensors: dict, output_dir: str, max_shard_bytes: int) -> dict:
         save_file(
             {key: value.contiguous() for key, value in shard.items()},
             os.path.join(output_dir, filename),
-            metadata={"format": "pt"},
+            metadata=header_metadata,
         )
         for key in shard:
             weight_map[key] = filename
@@ -1219,6 +1249,7 @@ def save_blockfloat_model(
     embed_bits: int = 8,
     tokenizer=None,
     metadata: "Optional[dict]" = None,
+    safetensors_metadata: "Optional[dict]" = None,
     max_shard_bytes: int = DEFAULT_MAX_SHARD_BYTES,
 ) -> dict:
     """Write a self-contained checkpoint in the standard HF layout.
@@ -1315,10 +1346,17 @@ def save_blockfloat_model(
     )
     stored_embed_bits = bits_per_layer[embed_prefix] if embed_prefix else embed_bits
 
-    written = _write_shards(tensors, output_dir, max_shard_bytes)
+    written = _write_shards(tensors, output_dir, max_shard_bytes, safetensors_metadata)
 
     config = model.config.to_dict()
     config["torch_dtype"] = "float16"
+    # A re-save must not erase where the checkpoint came from. Keep whatever the
+    # source recorded and layer explicit updates on top; the format fields below
+    # stay authoritative either way.
+    inherited_meta = {}
+    source_qcfg = getattr(model.config, "quantization_config", None)
+    if isinstance(source_qcfg, dict):
+        inherited_meta = dict(source_qcfg.get("meta") or {})
     quantization_config = {
         "quant_method": "tt-blockfloat",
         "checkpoint_format": "tt-blockfloat",
@@ -1333,7 +1371,7 @@ def save_blockfloat_model(
         "lm_head_tied_to_embedding": tied,
         "embed_bits": stored_embed_bits,
         "bits_per_layer": bits_per_layer,
-        "meta": dict(metadata or {}),
+        "meta": {**inherited_meta, **dict(metadata or {})},
     }
     if len(widths) > 1:
         quantization_config["mixed_bits"] = True
