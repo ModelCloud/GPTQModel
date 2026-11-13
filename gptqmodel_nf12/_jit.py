@@ -69,7 +69,10 @@ def _cache_key(source: Path, archs: list[int]) -> str:
     digest = hashlib.sha256()
     identity = {
         "archs": archs,
-        "torch": torch.__version__,
+        # nf12_torch is compiled against TORCH_TARGET_VERSION=2.10 (stable
+        # ABI), so the artifact is forward-compatible across torch releases.
+        # Do not key the cache on torch.__version__ or a torch upgrade would
+        # needlessly rebuild it.
         "torch_cuda": torch.version.cuda,
         "torch_path": str(Path(torch.__file__).resolve().parent),
         "python": sys.executable,
