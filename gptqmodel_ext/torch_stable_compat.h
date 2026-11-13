@@ -37,6 +37,7 @@
 
 #if defined(USE_CUDA) || defined(__CUDACC__)
 #include <torch/csrc/inductor/aoti_torch/generated/c_shim_cuda.h>
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #endif
 
@@ -156,6 +157,12 @@ class TensorOptions {
 };
 
 inline Device device_of(const Tensor& tensor) { return tensor.device(); }
+
+inline bool is_meta(const Device& device) {
+  return device.type() == DeviceType::Meta;
+}
+
+inline bool is_meta(const Tensor& tensor) { return is_meta(tensor.device()); }
 
 inline bool is_alias_of(const Tensor& lhs, const Tensor& rhs) {
   if (!lhs.defined() || !rhs.defined()) {
@@ -341,6 +348,12 @@ inline void record_stream(const Tensor&, cudaStream_t) {
   // The stable ABI does not expose Tensor::record_stream. Callers keep the
   // workspace alive for the duration of the op; this is a lifetime hint, not
   // a correctness requirement.
+}
+
+inline cublasHandle_t getCurrentCUDABlasHandle() {
+  void* handle = nullptr;
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_get_current_cuda_blas_handle(&handle));
+  return static_cast<cublasHandle_t>(handle);
 }
 
 inline const cudaDeviceProp* getDeviceProperties(int32_t device_index) {

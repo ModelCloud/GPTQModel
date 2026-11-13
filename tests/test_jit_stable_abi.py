@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from gptqmodel.utils import cpp
 from gptqmodel.utils import awq
+from gptqmodel.utils import exllamav2
 from gptqmodel.utils import hadamard
 from gptqmodel.utils import marlin
 from gptqmodel.utils import paroquant
@@ -71,3 +72,11 @@ def test_marlin_fp16_uses_stable_abi():
 
 def test_marlin_bf16_uses_stable_abi():
     _assert_stable(marlin._MARLIN_BF16_TORCH_OPS_EXTENSION)
+
+
+def test_exllamav2_gptq_uses_stable_abi():
+    _assert_stable(exllamav2._EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION)
+
+
+def test_exllamav2_awq_uses_stable_abi():
+    _assert_stable(exllamav2._EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION)
