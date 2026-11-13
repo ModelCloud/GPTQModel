@@ -13,12 +13,12 @@ mean every layer or quantization setting is compatible. In particular, expert
 paths remain excluded, and a model with an attention-only profile has no MoE
 expert fusion.
 
-The native numerical matrix covers **118 distinct parent/family pairs**, each
-with GPTQ and AWQ, FP16 and BF16: **472 cases** using symmetric INT4,
+The native numerical matrix covers **117 distinct parent/family pairs**, each
+with GPTQ and AWQ, FP16 and BF16: **468 cases** using symmetric INT4,
 `group_size=128`, `desc_act=False`, and Marlin on NVIDIA CUDA. All use separate
 native-forward baselines plus an independent integer-code weight oracle with
 `rtol=atol=2e-3`. Together with one registry contract and 102 real-model topology
-checks, the qualification suite has **575 passing cases** in the tested
+checks, the qualification suite has **571 passing cases** in the tested
 Transformers 5.22.2 / Torch 2.15.0+cu132 environment. The full-model generation,
 accuracy and performance results in the [fusion planner guide](fusion-planner.md)
 are measured on Llama 3.2 1B; they are not measurements for every architecture.
@@ -140,7 +140,7 @@ leaves. Multimodal profiles cover only the declared decoder text stack.
 | `hy_v3` | `HYV3QModel` | `qkv` | `HYV3Attention` |
 | `inkling_mm_model` | `InklingMMQModel` | `qkv` | `InklingAttention` |
 | `internvl` | `InternVLQModel` | `qkv`, `gate_up` | `Qwen2Attention`, `Qwen2MLP` |
-| `jamba` | `JambaQModel` | `qkv`, `gate_up` | `JambaAttention`, `JambaMLP` |
+| `jamba` | `JambaQModel` | `qkv` | `JambaAttention` |
 | `laguna` | `LagunaQModel` | `qkv` | `LagunaAttention` |
 | `lfm2` | `LFM2QModel` | `qkv`, `gate_up` | `Lfm2Attention`, `Lfm2MLP` |
 | `lfm2_moe` | `LFM2MoeQModel` | `qkv` | `Lfm2MoeAttention` |

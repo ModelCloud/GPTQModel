@@ -523,7 +523,7 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   this return value and pass it to storage/diagnostic helpers explicitly.
 - `tests/module_tree/test_fusable_models.py` pins admission for all 205 aliases,
   exercises 102 real native model definitions through the public module-plan API
-  and fusion planner, and checks 118 distinct native parent/family pairs in
+  and fusion planner, and checks 117 distinct native parent/family pairs in
   GPTQ/AWQ and FP16/BF16 against separate forwards and integer-weight oracles.
 - `tests/module_tree/test_fusable_merge.py` checks target-first construction,
   multiple sources, diamond deduplication, alias variants, explicit conflict

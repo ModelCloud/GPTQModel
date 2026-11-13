@@ -2599,10 +2599,6 @@
           "q",
           "k",
           "v"
-        ],
-        "gate_up": [
-          "gate",
-          "up"
         ]
       },
       "loader": "AutoModelForCausalLM",
@@ -2633,15 +2629,6 @@
             "self_attn.v_proj"
           ],
           "parent_type": "transformers.models.jamba.modeling_jamba.JambaAttention"
-        },
-        {
-          "parent": "feed_forward",
-          "family": "gate_up",
-          "paths": [
-            "feed_forward.gate_proj",
-            "feed_forward.up_proj"
-          ],
-          "parent_type": "transformers.models.jamba.modeling_jamba.JambaMLP"
         }
       ]
     },

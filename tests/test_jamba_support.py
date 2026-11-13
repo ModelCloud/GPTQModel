@@ -9,6 +9,7 @@ CPU: the registry wiring, the module tree shape, the attention-layer replay
 mask rebuild, and a tiny end-to-end GPTQ quantize/save/reload smoke run.
 """
 
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from transformers.masking_utils import create_causal_mask
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.jamba import JambaQModel
+from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
 
@@ -72,7 +74,9 @@ def _tiny_jamba_config() -> JambaConfig:
         attn_layer_period=2,
         expert_layer_period=2,
         expert_layer_offset=1,
-        num_experts=1,
+        # `JambaAttentionDecoderLayer` builds `JambaMLP` when the scheduled
+        # expert count is 1, so a sparse layer needs at least two experts.
+        num_experts=2,
         num_experts_per_tok=1,
         mamba_d_state=8,
         mamba_d_conv=4,
@@ -138,6 +142,8 @@ def test_jamba_definition_contract_and_module_tree():
     assert JambaQModel.layer_modules_strict is False
     assert JambaQModel.pre_lm_head_norm_module == "model.final_layernorm"
     assert JambaQModel.extract_layers_node() == ["model.layers"]
+    assert JambaQModel.dynamic_expert_index == "num_experts"
+    assert JambaQModel.moe_lifecycle_hooks is not None
 
     quantize_config = SimpleNamespace(dynamic=None)
     simple = JambaQModel.simple_layer_modules(_tiny_jamba_config(), quantize_config)
@@ -148,6 +154,13 @@ def test_jamba_definition_contract_and_module_tree():
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
         ["mamba.out_proj"],
+        [
+            "feed_forward.experts.0.gate_proj",
+            "feed_forward.experts.1.gate_proj",
+            "feed_forward.experts.0.up_proj",
+            "feed_forward.experts.1.up_proj",
+        ],
+        ["feed_forward.experts.0.down_proj", "feed_forward.experts.1.down_proj"],
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"],
     ]
@@ -155,9 +168,60 @@ def test_jamba_definition_contract_and_module_tree():
     full_names = {name for block in full for name in block}
     assert "input_layernorm:!" in full_names
     assert "pre_ff_layernorm:!" in full_names
+    assert "feed_forward.router:!" in full_names
+    assert "feed_forward.experts.0.gate_proj" in full_names
+    assert "feed_forward.experts.0.down_proj" in full_names
     # The mixer consumes `dt_proj.weight` and `x_proj` output directly, so the
     # definition intentionally leaves them dense.
     assert not any("dt_proj" in name or "x_proj" in name for name in full_names)
+
+
+def test_jamba_moe_hooks_replay_every_routed_expert(monkeypatch):
+    """The declared MoE hooks must forward every routed expert during calibration."""
+
+    _use_torch_reference_kernels(monkeypatch)
+
+    from defuser import convert_model
+
+    config = _tiny_jamba_config()
+    model = JambaForCausalLM(config).eval()
+    layer = model.model.layers[1]
+    convert_model(model, cleanup_original=False)
+
+    hooks = copy.copy(JambaQModel.moe_lifecycle_hooks)
+    hooks.module_plan = ModulePlan.from_tree(JambaQModel.module_tree)
+    moe_block = hooks.get_moe_block(layer, JambaQModel)
+    assert moe_block is not None
+    assert hooks.get_experts_module_name(moe_block) == "experts"
+
+    names = [
+        f"feed_forward.experts.{index}.{projection}"
+        for index in range(config.num_experts)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    ]
+    subset = {name: layer.get_submodule(name) for name in names}
+
+    class _Processor:
+        def record_moe_root_input_feature(self, *args, **kwargs):
+            return None
+
+    class _Looper:
+        def _set_processor_hooks_paused(self, *args, **kwargs):
+            return None
+
+    hidden = torch.randn(2, 3, config.hidden_size)
+    output = hooks.forward_to_all_experts(
+        moe_block,
+        hidden,
+        _Processor(),
+        subset,
+        names,
+        moe_block.forward,
+        JambaQModel,
+        _Looper(),
+    )
+    assert output.shape == hidden.shape
+    assert torch.isfinite(output).all()
 
 
 def test_jamba_replay_rebuilds_causal_mask_for_attention_layers():
@@ -277,6 +341,14 @@ def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
         "model.layers.1.self_attn.o_proj",
     ):
         assert isinstance(modules[name], TorchLinear), name
+
+    for expert_index in range(_tiny_jamba_config().num_experts):
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            name = f"model.layers.1.feed_forward.experts.{expert_index}.{projection}"
+            assert isinstance(modules[name], TorchLinear), name
+
+    # The top-k router is checkpoint-owned but intentionally stays unquantized.
+    assert not isinstance(modules["model.layers.1.feed_forward.router"], TorchLinear)
 
     # Mamba mixer modules that consume dense weights stay dense.
     assert isinstance(modules["model.layers.0.mamba.dt_proj"], torch.nn.Linear)
