@@ -1,3 +1,4 @@
+import os
 import random
 import sys
 from pathlib import Path
@@ -29,3 +30,29 @@ for path in (_REPO_ROOT, _TESTS_DIR, _MODELS_TESTS_DIR):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Run native-TTNN hardware tests before the Torch/XLA hardware tests.
+
+    TT-Metal allows one runtime owner per chip, and initializing the Torch/XLA
+    PJRT plugin is irreversible within a process: once it has claimed the
+    devices, a native ``ttnn.MeshDevice`` cannot be opened again.  Both suites
+    are individually valid and gated behind explicit environment flags, so the
+    only reliable way to run them together is to take the native path first.
+    This is an ordering contract, not a skip: whichever backend the user
+    enabled still runs.
+    """
+
+    if os.environ.get("GPTQMODEL_TEST_TTNN") != "1":
+        return
+
+    def _priority(item):
+        name = item.nodeid
+        if "ttnn" in name and "actual" in name:
+            return 0
+        if "ttxla" in name or "tt_xla" in name:
+            return 2
+        return 1
+
+    items.sort(key=_priority)

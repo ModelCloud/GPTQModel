@@ -2614,7 +2614,17 @@ class BaseQModel(nn.Module):
         return runtime_generate(self.model, **kwargs)
 
     def generate(self, inputs=None, **kwargs):
-        with torch.inference_mode():
+        # Torch/XLA represents a slice as an in-place view update during graph
+        # construction. Inference tensors cannot receive a version counter, so
+        # ``torch.inference_mode`` fails before model math on the TT PJRT path.
+        # no_grad keeps autograd disabled without changing tensor semantics.
+        model_device = getattr(self.model, "device", torch.device("cpu"))
+        generate_context = (
+            torch.no_grad()
+            if getattr(model_device, "type", None) == "xla"
+            else torch.inference_mode()
+        )
+        with generate_context:
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)
             if pad_token_id is None and self.tokenizer:
@@ -2998,6 +3008,32 @@ class BaseQModel(nn.Module):
 
     def after_model_load(self, model, load_quantized_model):
         return model
+
+    def release_device(self) -> bool:
+        """Release Tenstorrent devices held by this model's kernels.
+
+        Call this between model loads in a benchmark loop instead of relying on
+        garbage collection, which leaves the chips owned (and hot) until the
+        interpreter drops the last reference.
+
+        Closing the mesh alone does not make the cards idle: measured on a
+        p300c, AICLK stayed at 1350 MHz and ~50 W per board for more than 50 s
+        after ``close_device``. The mesh close path therefore also sends the
+        firmware ``AICLK_GO_LONG_IDLE`` message, which is what actually returns
+        the cards to 800 MHz and ~40 W, so the cooldown that follows is real
+        idle time.
+
+        Returns ``True`` when a Tenstorrent device was actually released, and
+        ``False`` for every other backend so the call is safe to make
+        unconditionally.
+        """
+
+        from ..utils.ttnn_runtime import close_mesh, current_mesh
+
+        if current_mesh() is None:
+            return False
+        close_mesh()
+        return True
 
     def pre_quantize_generate_hook_start(self):
         pass

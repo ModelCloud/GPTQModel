@@ -253,6 +253,20 @@ contract. Opt-in AllSpark W8A16 keeps its GPTQ/AWQ checkpoint tensors
 authoritative and its N32K16/WMMA kernel layout a derived cache; see
 [AllSpark checkpoint layout](docs/allspark-checkpoint-layout.md).
 
+Tenstorrent Blackhole cards use an explicit `DEVICE.XLA` family and a packed
+4-bit kernel. `XLALinear` runs through Torch/XLA and the TT PJRT plugin, and the
+opt-in `TTNNLinear` (`BACKEND.GPTQ_TTNN`) runs natively on TTNN with on-device
+nibble extraction, `g_idx` expansion, BF16 dequantization, `HiFi4` GEMM, and
+optional tensor parallelism across a `1xN` mesh via `FABRIC_1D` `all_gather`.
+The [Tenstorrent execution flow](docs/tenstorrent.md) documents both paths, the
+exact runtime pins, packed checkpoint conversion, measured numerical results,
+mesh networking behavior, supported failure contract, and the complete
+conversion policy for every registered GPTQ linear kernel. The
+[validated QuietBox inventory](hw/tenstorrent.md) records the four-card host,
+firmware, and hardware measurements. Tenstorrent runtime packages are installed
+from the pinned `requirements/tenstorrent-py312.txt` manifest because the PJRT
+plugin is not available from the default PyPI index.
+
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
 

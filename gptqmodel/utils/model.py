@@ -1721,6 +1721,12 @@ def auto_dtype(config: PretrainedConfig,
         log.info("Loader: Auto dtype (MPS or XPU): `torch.float16`")
         return torch.float16
 
+    if device == DEVICE.XLA:
+        # Tenstorrent PJRT currently rounds float16 transfers to bfloat16.
+        # Select the native representation instead of silently losing bits.
+        log.info("Loader: Auto dtype (XLA/Tenstorrent): `torch.bfloat16`")
+        return torch.bfloat16
+
     # TODO: need to verify this
     # Torch 2.8 fused kernel for CPU is optimized for bfloat16
     if device in [DEVICE.CPU]:

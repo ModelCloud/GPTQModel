@@ -123,6 +123,10 @@ class QQQLinear(GroupedQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
+    #: Whether the native Marlin kernel's device restrictions apply: SM80 or
+    #: newer on NVIDIA, and no ROCm. The portable FP32 kernel clears this.
+    MARLIN_DEVICE_RESTRICTIONS = True
+
     REQUIRES_FORMAT_V2 = False
 
     # for transformers/optimum tests compat
@@ -307,6 +311,14 @@ class QQQLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_device(cls, device: DEVICE | torch.device):
+        # The native kernel runs Marlin, so it needs SM80 and has no ROCm path.
+        # The portable subclass clears this flag: it computes with a plain FP32
+        # matmul, so neither restriction applies to it. Keeping the difference
+        # as data means one implementation and no `super()` call that skips a
+        # class in the MRO.
+        if not cls.MARLIN_DEVICE_RESTRICTIONS:
+            super().validate_device(device)
+            return
         # ROCm exposes the CUDA device namespace through torch, so the device
         # check alone would accept a cuda:N target.  Reject it explicitly here
         # instead of inferring CUDA capability from a HIP device.
@@ -557,7 +569,7 @@ class QQQTorchLinear(QQQLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -565,6 +577,12 @@ class QQQTorchLinear(QQQLinear):
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "qqq"
+
+    #: This kernel computes with a plain FP32 matmul, so it needs neither the
+    #: Marlin compute-capability floor nor the CUDA-only requirement. Without
+    #: this, a pre-Ampere NVIDIA card that could run the fallback is rejected at
+    #: selection time.
+    MARLIN_DEVICE_RESTRICTIONS = False
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)

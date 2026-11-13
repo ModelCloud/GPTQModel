@@ -1138,6 +1138,9 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             self._qzeros_format = 1
         elif self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
             self._qzeros_format = 2
+        # Derived packed layouts depend on both the loaded words and the
+        # checkpoint format. Invalidate only after the format has been restored.
+        self._clear_runtime_weight_cache()
 
 
 class PackableQuantLinear(GPTQQuantLinear):

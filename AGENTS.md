@@ -49,6 +49,24 @@ the persistent-storage validation requirements in
 `.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md` as well as its numerical
 requirements. Apply this rule when auditing existing inference kernels too.
 
+## Checkpoint serialization
+
+Converted and quantized checkpoints are written as **safetensors** by default,
+including their non-quantized tensors (embeddings, lm-head, norms, biases) and
+every payload uploaded to a model repository. Only an explicit user request may
+select another container, and that override is a named writer option — never a
+`GPTQMODEL_*` environment variable. Pickle is a legacy read-only format: keep
+readers tolerant of `.pt`/`.bin` checkpoints that already exist, never emit new
+ones, and never introduce a second container for a payload a sibling file
+already stores as safetensors.
+
+Transient within-run scratch (calibration replay buffers, captured hidden
+states, training intermediates) is not a checkpoint and is out of scope.
+
+Before writing or changing any checkpoint writer, converter, or export path,
+read and follow `$gptqmodel-checkpoint-serialization` in
+`.agents/skills/gptqmodel-checkpoint-serialization/SKILL.md`.
+
 ## Numerical oracle validation
 
 Fusion backend changes must preserve AUTO's native kernel selection. Add an

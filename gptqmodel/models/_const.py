@@ -13,7 +13,7 @@ from torch import device
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available
 
 
 def _optional_torch_device(spec: str, fallback: torch.device) -> torch.device:
@@ -53,6 +53,7 @@ class DEVICE(str, Enum):
     NPU = "npu"  # Ascend NPU: portable Torch kernels
     MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
     ROCM = "rocm"  # AMD GPU family; HIP's Torch runtime namespace is "cuda".
+    XLA = "xla"  # PyTorch/XLA runtime, including Tenstorrent PJRT devices.
 
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
@@ -71,7 +72,7 @@ class DEVICE(str, Enum):
     @property
     def index(self) -> int | None:
         """Default index used when materialising a torch.device from this enum."""
-        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA):
             return 0
         return None
 
@@ -130,6 +131,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
             return DEVICE.XPU
         elif HAS_NPU:
             return DEVICE.NPU
+        elif is_xla_available():
+            return DEVICE.XLA
         elif HAS_MPS:
             return DEVICE.MPS
         else:
@@ -165,6 +168,8 @@ def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
         return XPU_0
     elif HAS_NPU:
         return NPU_0
+    elif is_xla_available():
+        return DEVICE.XLA.to_torch_device()
     elif HAS_MPS:
         return MPS
     else:

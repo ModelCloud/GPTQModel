@@ -178,8 +178,16 @@ def test_qqq_marlin_kernel_declares_cuda_only():
     # compile, so QQQLinear must not advertise the ROCm family at all.
     assert qqq_module.QQQLinear.SUPPORTS_DEVICES == [DEVICE.CUDA]
     assert DEVICE.ROCM not in qqq_module.QQQLinear.SUPPORTS_DEVICES
-    # The portable kernel is the ROCm/CPU replacement and stays device-agnostic.
-    assert qqq_module.QQQTorchLinear.SUPPORTS_DEVICES == [DEVICE.ALL]
+    # The portable kernel is the ROCm/CPU replacement. Explicit families keep
+    # it available on every supported backend without admitting XLA by accident.
+    assert qqq_module.QQQTorchLinear.SUPPORTS_DEVICES == [
+        DEVICE.CPU,
+        DEVICE.CUDA,
+        DEVICE.ROCM,
+        DEVICE.XPU,
+        DEVICE.NPU,
+        DEVICE.MPS,
+    ]
 
 
 def test_qqq_linear_rejects_rocm_with_actionable_error(monkeypatch):

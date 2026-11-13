@@ -17,7 +17,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear, _device_family
 from ...quantization import FORMAT, METHOD
 from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
@@ -98,6 +98,11 @@ def _log_fallback_once(reason: str, message: str) -> None:
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    if values.device.type == "xla":
+        raise RuntimeError(
+            "Torch/XLA does not provide an exact GPTQ word unpack for this operation. "
+            "Use the Tenstorrent native unpack path."
+        )
     if values.device.type != "npu":
         return torch.bitwise_right_shift(values, shifts).to(dtype)
 
@@ -187,7 +192,7 @@ class TorchLinear(PackableQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -286,6 +291,18 @@ class TorchLinear(PackableQuantLinear):
             )
         return True, None
 
+    @classmethod
+    def validate_device(cls, device):
+        super().validate_device(device)
+        if _device_family(device) == DEVICE.XLA:
+            # TT's Torch-XLA lowering converts int32 shifts through f32. The
+            # portable wf-unpack path is therefore not numerically exact; use
+            # the dedicated Tenstorrent kernel instead of silently wrong codes.
+            raise NotImplementedError(
+                "TorchLinear's packed-word unpack is not exact on Torch/XLA; "
+                "a Tenstorrent-native GPTQ kernel is required."
+            )
+
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
@@ -340,6 +357,13 @@ class TorchLinear(PackableQuantLinear):
             # deployments; the eager Torch path is the portable NPU backend.
             self.optimized = True
             log.info.once("Optimize: `TorchLinear` torch.compile skipped on NPU.")
+            return
+
+        if device_type == "xla":
+            # TT-XLA already compiles StableHLO graphs through PJRT. Nesting
+            # torch.compile's inductor backend here is unsupported.
+            self.optimized = True
+            log.info.once("Optimize: `TorchLinear` torch.compile skipped on XLA.")
             return
 
         if not self._compile_enabled:
@@ -1022,7 +1046,7 @@ class TorchQuantEmbeddings(TorchLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
     SUPPORTS_ADAPTERS = []

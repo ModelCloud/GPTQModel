@@ -25,7 +25,7 @@ from gptqmodel.utils.backend import BACKEND
 # not inferring ROCm support from a name containing "Torch", "CUDA", or "Triton".
 ROCM_KERNELS = set("""
     AllSparkLinear AllSparkAwqLinear AwqGEMMTritonLinear AwqGEMVTritonLinear
-    ParoQuantTritonLinear GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
+    GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
     GGUFTorchLinear ParoLinear VPTQLinear NF12ADLinear
 """.split())
@@ -44,6 +44,8 @@ OTHER_KERNELS = set("""
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear
     ParoMlxQuantLinear QQQMlxQuantLinear GGUFMlxQuantLinear FP8MlxQuantLinear
     BitsAndBytesMlxQuantLinear
+    XLALinear
+    TTNNLinear
 """.split())
 KERNELS = sorted([*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings], key=lambda c: c.__name__)
 

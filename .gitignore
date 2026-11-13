@@ -248,3 +248,7 @@ gptqmodel_ext/exllamav2/hip/
 !gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh
 !gptqmodel_ext/nf12_hip/nf12_ad_validation.cuh
 !gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp
+
+# TT-Metal writes fabric, watcher and inspector dumps here relative to the
+# working directory. They describe the local mesh and are not sources.
+/generated/

@@ -131,6 +131,9 @@ class FORMAT(str, Enum):
     # Public name is `nf12`; the internal extension/loader symbols keep the
     # `nf12_ad` suffix so they cannot collide with the upstream `nf12` package.
     NF12_AD = "nf12"
+    # Tenstorrent native block-float: one shared exponent per 16-value block
+    # plus packed mantissa codes. Not a GPTQ layout, so it gets its own code.
+    TT_BLOCKFLOAT = "tt_blockfloat"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -154,6 +157,8 @@ class METHOD(str, Enum):
     VPTQ = "vptq"
     # Public name is `nf12`; see the FORMAT note above.
     NF12_AD = "nf12"
+    # Tenstorrent native block-float weights (`bf4_b` / `bf8_b`).
+    TT_BLOCKFLOAT = "tt-blockfloat"
 
 
 # Integer bit widths each method's packer and kernels can actually realize.
@@ -184,6 +189,10 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # NF12-AD is a lossless 12-bit encoding of BF16. The width is fixed by the
     # format, so 12 is the only valid request.
     METHOD.NF12_AD: (12,),
+    # TT block-float stores a fixed mantissa width per element: `bf4_b`
+    # keeps 2 mantissa bits, `bf8_b` keeps 6. Those are the only two
+    # widths the hardware has a storage format for.
+    METHOD.TT_BLOCKFLOAT: (4, 8),
 }
 
 
@@ -2291,6 +2300,9 @@ VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 NF12_AD_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.NF12_AD,
 )
+TT_BLOCKFLOAT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.TT_BLOCKFLOAT,
+)
 
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
@@ -2309,10 +2321,19 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
     FORMAT.NF12_AD: METHOD.NF12_AD,
+    FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
 
 # inference only methods should go here
-QUANTIZE_BLACK_LIST = {}
+QUANTIZE_BLACK_LIST = {
+    # Tenstorrent block-float is a checkpoint format, not a quantization pass.
+    # The grid solve runs in `scripts/tt_quantize_blockfloat.py`, which writes
+    # codes directly; there is no looper processor that can pack a dense model
+    # into it, so asking `quantize()` for it must fail with the documented
+    # message instead of producing a weight-only plan with no implementation
+    # behind it.
+    METHOD.TT_BLOCKFLOAT: "inference-only: use scripts/tt_quantize_blockfloat.py",
+}
 
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
@@ -3313,15 +3334,20 @@ def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
 
 
 def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torch.dtype:
+    # ``uint8`` is the natural container for the Tenstorrent block-float code
+    # buffers, so it has to survive a config round-trip even though the packed
+    # GPTQ layouts use signed widths. Kernels still validate their own
+    # supported set, so a method that cannot use it fails with a kernel message.
+    supported = (torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8)
     if pack_dtype is None:
         return torch.int32
     if isinstance(pack_dtype, str):
         pack_dtype = pack_dtype.lower()
-        if pack_dtype not in ["int64", "int32", "int16", "int8"]:
+        if pack_dtype not in ["int64", "int32", "int16", "int8", "uint8"]:
             raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
         return getattr(torch, pack_dtype)
     if isinstance(pack_dtype, torch.dtype):
-        if pack_dtype not in [torch.int64, torch.int32, torch.int16, torch.int8]:
+        if pack_dtype not in supported:
             raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
         return pack_dtype
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
@@ -3859,6 +3885,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.NF12_AD:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.NF12_AD}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.NF12_AD
+    elif target_cls is TTBlockfloatConfig:
+        expected_method = METHOD.TT_BLOCKFLOAT
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.TT_BLOCKFLOAT:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.TT_BLOCKFLOAT}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.TT_BLOCKFLOAT
     else:
         expected_method = METHOD.GPTQ
 
@@ -5844,6 +5883,88 @@ class NF12ADConfig(PreProcessorConfig):
 
 
 @dataclass
+class TTBlockfloatConfig(PreProcessorConfig):
+    """Configuration for Tenstorrent native block-float weights.
+
+    The Tenstorrent accelerator stores weights as blocks of 16 values that
+    share one exponent, with a fixed number of mantissa bits per value:
+    ``bf4_b`` keeps 2 and ``bf8_b`` keeps 6. A checkpoint in this
+    format is already in the layout the hardware unpacks, so inference reads
+    the stored codes directly instead of unpacking an INT4 GPTQ layout.
+
+    ``bits`` applies to the decoder linears. ``embed_bits`` covers the tied
+    input embedding / output head, which uses the wider 8-bit format because a
+    vocabulary-sized matrix tolerates far less relative error than a decoder
+    projection.
+
+    This is an **inference-only** format. The grid solve that produces it runs
+    in ``scripts/tt_quantize_blockfloat.py`` and writes codes directly, so there
+    is no looper processor that can pack a dense model into it; the method is
+    listed in ``QUANTIZE_BLACK_LIST`` and ``quantize()`` refuses it. What this
+    config exists for is describing a checkpoint to the loader.
+    """
+
+    bits: int = field(default=4, metadata={"choices": [4, 8]})
+    method: METHOD = field(default=METHOD.TT_BLOCKFLOAT)
+    format: FORMAT = field(default=FORMAT.TT_BLOCKFLOAT)
+    # One shared exponent covers this many consecutive input features. The
+    # hardware format fixes the value at 16; a checkpoint that disagrees
+    # cannot be fed to a device kernel.
+    block: int = field(default=16, metadata={"choices": [16]})
+    group_size: int = field(default=16)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    # Width of the tied embedding / output head payload.
+    embed_bits: int = field(default=8, metadata={"choices": [4, 8]})
+
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        return FORMAT.TT_BLOCKFLOAT
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.TT_BLOCKFLOAT,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return TT_BLOCKFLOAT_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {"block": self.block}
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["block"] = self.block
+        out["embed_bits"] = self.embed_bits
+        # A block-float block always carries one shared exponent, so symmetry
+        # is a property of the format rather than a user choice.
+        out["sym"] = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.method != METHOD.TT_BLOCKFLOAT:
+            raise ValueError("TTBlockfloatConfig: `method` must be `tt-blockfloat`.")
+        if int(self.block) != 16:
+            raise ValueError(
+                f"TTBlockfloatConfig: `block` must be 16, got {self.block}; the "
+                "hardware stores one exponent per 16 values."
+            )
+        if int(self.embed_bits) not in (4, 8):
+            raise ValueError(
+                f"TTBlockfloatConfig: `embed_bits` must be 4 or 8, got {self.embed_bits}."
+            )
+        self.format = FORMAT.TT_BLOCKFLOAT
+        self.group_size = 16
+        self.desc_act = False
+        self.sym = True
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        # Describes the storage family (weights only, no activation
+        # quantization), not an admission to run a packing chain: the method is
+        # blacklisted from quantization, so no run plan is ever built for it.
+        return True
+
+
+@dataclass
 class BitsAndBytesConfig(PreProcessorConfig):
     bits: int = field(default=4, metadata={"choices": [4, 8]})
     method: METHOD = field(default=METHOD.BITSANDBYTES)
@@ -6543,6 +6664,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return VPTQConfig
     if method == METHOD.NF12_AD or format_value == FORMAT.NF12_AD:
         return NF12ADConfig
+    if method == METHOD.TT_BLOCKFLOAT or format_value == FORMAT.TT_BLOCKFLOAT:
+        return TTBlockfloatConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQConfig
     if method == METHOD.AWQ:
@@ -6566,6 +6689,7 @@ def _known_quantize_config_field_names() -> set[str]:
         QQQConfig,
         VPTQConfig,
         NF12ADConfig,
+        TTBlockfloatConfig,
         FP8Config,
         BitsAndBytesConfig,
         EXL3Config,

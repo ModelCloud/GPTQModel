@@ -26,7 +26,7 @@ from ..utils.logger import setup_logger
 from . import BACKEND
 from .backend import normalize_backend
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
+from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available, xla_device_count
 
 
 ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
@@ -328,13 +328,19 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
     target = targets[0]
     if isinstance(target, DEVICE):
         family = target
-    elif isinstance(target, torch.device) and target.index is None and target.type in {"cuda", "xpu", "npu"}:
+    elif isinstance(target, torch.device) and target.index is None and target.type in {"cuda", "xpu", "npu", "xla"}:
         family = _device_family(target)
     else:
         return target
 
-    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA):
         return family
+
+    if family == DEVICE.XLA:
+        count = xla_device_count()
+        devices = tuple(torch.device(f"xla:{index}") for index in range(count))
+        _validate_selector_device_families(devices)
+        return devices[0] if len(devices) == 1 else devices
 
     runtime_type = "cuda" if family == DEVICE.ROCM else family.type
     runtime = getattr(torch, runtime_type, None)
@@ -1121,6 +1127,12 @@ def auto_select_device(
         # Backend-specific kernels should default to a compatible device class.
         if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
+        if backend == BACKEND.GPTQ_TTNN:
+            # The native TTNN backend opens its own mesh. Probing XLA
+            # availability here would initialize the PJRT plugin and claim every
+            # Tenstorrent chip before TT-Metal can take ownership, so select the
+            # family without touching the runtime.
+            return DEVICE.XLA
         if HAS_CUDA:
             # HIP reuses torch's ``cuda`` namespace, so the default accelerator
             # on a ROCm host is the AMD family, not NVIDIA CUDA.  Keep the
@@ -1131,6 +1143,8 @@ def auto_select_device(
             device = DEVICE.XPU
         elif HAS_NPU:
             device = DEVICE.NPU
+        elif is_xla_available():
+            device = DEVICE.XLA
         elif HAS_MPS:
             device = DEVICE.MPS
         else:

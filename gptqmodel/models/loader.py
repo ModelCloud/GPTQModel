@@ -108,6 +108,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
+from ..utils.torch import xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -417,8 +418,17 @@ def _explicit_layerwise_devices(device) -> Optional[List[str]]:
     return [str(target) for target in requested] if requested is not None else None
 
 
-def _layerwise_device_count(device) -> int:
-    """Return the visible device count for layer-wise checkpoint placement."""
+def _layerwise_device_count(device, backend: Optional[BACKEND] = None) -> int:
+    """Return the visible device count for layer-wise checkpoint placement.
+
+    The XLA family needs an explicit opt-out for the native TTNN backend.
+    ``xla_device_count()`` initializes the PJRT plugin, and with
+    ``pjrt-plugin-tt`` that opens and claims every Tenstorrent chip. The native
+    TTNN backend owns those chips through TT-Metal instead, and TT-Metal allows
+    exactly one owner per chip, so probing PJRT here poisoned the very next
+    ``ttnn.open_device`` in ``post_init`` with a TT_FATAL ownership assert.
+    Reading the PCIe device count names the same chips without opening one.
+    """
     explicit = _explicit_layerwise_devices(device)
     if explicit is not None:
         return len(explicit)
@@ -430,11 +440,25 @@ def _layerwise_device_count(device) -> int:
         return torch.xpu.device_count()
     if family == DEVICE.NPU:
         return torch.npu.device_count()
+    if family == DEVICE.XLA:
+        if _native_ttnn_backend(backend):
+            from ..utils.ttnn_runtime import ttnn_device_count
+
+            return ttnn_device_count()
+        return xla_device_count()
     return 1
 
 
-def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
-    """Render layer-wise placement targets using the selected accelerator."""
+def _layerwise_device_strings(
+    device, num_gpus: int, backend: Optional[BACKEND] = None
+) -> list[str]:
+    """Render layer-wise placement targets using the selected accelerator.
+
+    Like :func:`_layerwise_device_count`, this must not initialize PJRT for the
+    native TTNN backend: ``xla_device_count()`` opens and claims every chip, and
+    the checkpoint would then be dispatched onto ``xla:N`` through a runtime
+    that cannot coexist with the TT-Metal mesh ``post_init`` opens.
+    """
     explicit = _explicit_layerwise_devices(device)
     if explicit is not None:
         return explicit[:num_gpus]
@@ -452,7 +476,22 @@ def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
         if HAS_NPU:
             return [f"npu:{index}" for index in range(num_gpus)]
         raise RuntimeError("NPU is not available")
+    if family == DEVICE.XLA:
+        if _native_ttnn_backend(backend):
+            from ..utils.ttnn_runtime import ttnn_device_count
+
+            if ttnn_device_count() >= num_gpus:
+                return [f"xla:{index}" for index in range(num_gpus)]
+            raise RuntimeError("no Tenstorrent devices are visible to TTNN")
+        if xla_device_count() >= num_gpus:
+            return [f"xla:{index}" for index in range(num_gpus)]
+        raise RuntimeError("XLA is not available")
     return ["cpu"] * num_gpus
+
+
+def _native_ttnn_backend(backend: BACKEND) -> bool:
+    """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
+    return backend in (BACKEND.GPTQ_TTNN,)
 
 
 def _resolve_default_layerwise_device(device, backend: BACKEND):
@@ -462,6 +501,12 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         return tuple(requested)
     normalized = normalize_device_device_map(device, None)
     selected = auto_select_device(normalized, backend)
+    if _native_ttnn_backend(backend):
+        # ``expand_selector_device_family`` asks PJRT for an addressable device
+        # count, which initializes the Tenstorrent PJRT plugin and claims every
+        # chip. The native TTNN backend opens its own mesh and never consumes an
+        # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
+        return selected
     return expand_selector_device_family(selected)
 
 
@@ -471,7 +516,7 @@ def _external_runtime_device_kwargs(
 ) -> Dict[str, Union[str, int]]:
     device_family = selector_device_family(device) or DEVICE.CPU
     runtime_kwargs: Dict[str, Union[str, int]] = {"device": device_family.type}
-    if not requested_device_map or device_family not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU}:
+    if not requested_device_map or device_family not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA}:
         return runtime_kwargs
 
     targets = (
@@ -845,6 +890,56 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
             exc,
         )
         return loader.from_pretrained(model_local_path, **retry_kwargs)
+
+
+def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remote_code=False):
+    """Build a native block-float model and wrap it as a ``BaseQModel``.
+
+    The checkpoint stores decoder weights as packed mantissa codes plus one
+    exponent per block of 16 values, on the grid the Tenstorrent hardware
+    unpacks natively. There is no GPTQ packing to bind, so the decoder linears
+    become ``TTBlockfloatLinear`` modules that keep that storage, and the
+    embedding, norms and head come from the checkpoint's own payloads.
+    """
+
+    from .tt_blockfloat_loader import (
+        build_tt_blockfloat_model,
+        quantize_config_from_checkpoint,
+    )
+
+    if not isinstance(dtype, torch.dtype):
+        dtype = torch.float32
+
+    model, restored, info = build_tt_blockfloat_model(model_local_path, dtype=dtype)
+
+    model_config = model.config.to_dict()
+    seq_len = find_config_seq_len(
+        model_config,
+        ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"],
+    )
+    model.seqlen = seq_len if seq_len is not None else 4096
+
+    qcfg = quantize_config_from_checkpoint(model_local_path)
+    quantization_config = info.get("quantization_config") or {}
+    widths = quantization_config.get("bits_per_layer")
+    width_label = (
+        "/".join(str(w) for w in sorted(set(widths.values()))) + "-bit"
+        if isinstance(widths, dict) and widths
+        else f"{info['bits']}-bit"
+    )
+    log.info(
+        f"Loader: tt-blockfloat checkpoint: {len(restored)} quantized modules "
+        f"({width_label} codes, block {quantization_config.get('block', 16)}, "
+        f"{quantization_config.get('embed_bits', '?')}-bit embedding)"
+    )
+    return model_cls(
+        model=model,
+        quantized=True,
+        quantize_config=qcfg,
+        load_quantized_model=True,
+        trust_remote_code=trust_remote_code,
+        model_local_path=model_local_path,
+    )
 
 
 def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
@@ -1504,6 +1599,15 @@ def ModelLoader(cls):
 
         warn_unsupported_rocm()
 
+        # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
+        # this one before any device is claimed. The native TTNN backend also
+        # gates its own mesh open; the two gates share one rate limit, so a load
+        # never pays the cooldown twice.
+        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+            from ..utils.tt_thermal import before_device_open
+
+            before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")
+
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
@@ -1528,6 +1632,9 @@ def ModelLoader(cls):
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+        # Kept for the block-float route, which builds on CPU and must not
+        # silently ignore a placement request the caller made.
+        requested_device = device
 
         if requested_device_map is None:
             explicit_device = None
@@ -1561,6 +1668,36 @@ def ModelLoader(cls):
             )
 
         check_versions(cls, cls.require_pkgs)
+
+        # A native block-float checkpoint carries none of the GPTQ keys this
+        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
+        # codes plus one exponent per block of 16 values. Route it before any
+        # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # guards above still apply -- this path builds the model through
+        # transformers like any other, so the same version and
+        # trust_remote_code rules hold.
+        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
+
+        if is_tt_blockfloat_checkpoint(model_local_path):
+            if requested_device_map is not None or (
+                requested_device is not None
+                and str(requested_device).split(":")[0].lower() != "cpu"
+            ):
+                # The block-float kernel is the portable correctness reference,
+                # not the device path. Accepting a placement request here and
+                # ignoring it would report a device the model is not on.
+                raise NotImplementedError(
+                    "tt-blockfloat checkpoints load on CPU; the block-float "
+                    "kernel is a correctness reference and device placement is "
+                    "the caller's dispatch step. Omit device/device_map, or pass "
+                    "device='cpu'."
+                )
+            return _load_tt_blockfloat_model(
+                cls,
+                model_local_path=model_local_path,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs_without_internal.pop("cache_dir", None)
@@ -2088,7 +2225,7 @@ def ModelLoader(cls):
             """
 
             if num_gpus is None:
-                num_gpus = _layerwise_device_count(device)
+                num_gpus = _layerwise_device_count(device, backend)
             if num_gpus < 1:
                 family = selector_device_family(device) or DEVICE.CPU
                 raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
@@ -2097,7 +2234,7 @@ def ModelLoader(cls):
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
 
-            device_strs = _layerwise_device_strings(device, num_gpus)
+            device_strs = _layerwise_device_strings(device, num_gpus, backend)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -2240,9 +2377,21 @@ def ModelLoader(cls):
 
         log.info(f"Loader: device = {device}")
         if explicit_device_map is None:
-            layers, _ = get_layers_with_prefixes(model, extract_layers_node)
-            num_gpus = _layerwise_device_count(device)
-            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+            if _native_ttnn_backend(backend):
+                # The native TTNN kernel owns the chips through TT-Metal and
+                # uploads a layer's packed weights on demand in its forward, so
+                # its parameters stay on the host. A layer-wise ``xla:N`` map
+                # would instead dispatch the checkpoint through PJRT, which
+                # opens and claims every chip and therefore collides with the
+                # mesh ``post_init`` opens (TT-Metal allows one owner per chip).
+                # The collision surfaces as a TT_FATAL reading a stale device,
+                # so keep the whole model on CPU for this backend.
+                device_map = {"": "cpu"}
+                log.info("Loader: native TTNN backend keeps packed weights on CPU until forward upload.")
+            else:
+                layers, _ = get_layers_with_prefixes(model, extract_layers_node)
+                num_gpus = _layerwise_device_count(device, backend)
+                device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")

@@ -36,6 +36,7 @@ HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
 HAS_NPU = False
+HAS_XLA = False
 
 CPU = torch.device("cpu")
 META = torch.device("meta")
@@ -144,6 +145,85 @@ try:
     HAS_NPU = _ascend_runtime_env_ready() and torch.npu.is_available()
 except Exception:
     HAS_NPU = False
+
+
+def _xla_package_installed() -> bool:
+    """Return whether the optional Torch/XLA package can be imported.
+
+    This probe must remain lazy: importing ``torch_xla`` initializes its PJRT
+    runtime and, with ``pjrt-plugin-tt``, opens every Tenstorrent device.  A
+    plain ``import gptqmodel`` on an accelerator host must not claim hardware
+    or contend with another process using those devices.
+    """
+    return importlib.util.find_spec("torch_xla") is not None
+
+
+def require_xla_runtime():
+    """Import and return ``torch_xla`` for an explicit XLA request.
+
+    Callers use this only after selecting or constructing an ``xla`` device.
+    The returned module is the authoritative owner of the PJRT runtime.
+    """
+    try:
+        module = importlib.import_module("torch_xla")
+    except Exception as exc:
+        raise RuntimeError(
+            "PyTorch/XLA was requested, but `torch_xla` could not be initialized. "
+            "Install the pinned Tenstorrent environment from "
+            "`requirements/tenstorrent-py312.txt` and check the active PJRT plugin."
+        ) from exc
+    return module
+
+
+def xla_device_count() -> int:
+    """Return the addressable XLA device count, recording that PJRT now owns them.
+
+    ``addressable_device_count()`` is the call that actually initializes the
+    PJRT plugin, and with ``pjrt-plugin-tt`` that opens every Tenstorrent chip.
+    TT-Metal allows a single owner per chip, so the whole process becomes
+    unable to use the native TTNN path from this point on. The flag recorded
+    here is the only reliable signal of that state -- importing ``torch_xla``
+    alone is inert, so a bare ``sys.modules`` check cannot tell the two apart.
+    """
+
+    runtime = require_xla_runtime()
+    count = int(runtime.runtime.addressable_device_count())
+    # Mark the claim only after the runtime answered, so a failed probe does not
+    # leave a lingering "claimed" flag that blocks a later native TTNN attempt.
+    try:
+        runtime._gptqmodel_device_claimed = True
+    except Exception:  # pragma: no cover - module objects always accept attributes
+        pass
+    return count
+
+
+def is_xla_available() -> bool:
+    """Probe XLA availability without initializing hardware at import time."""
+    if not _xla_package_installed():
+        return False
+    try:
+        return xla_device_count() > 0
+    except Exception:
+        return False
+
+
+def xla_runtime_claimed() -> bool:
+    """Whether this process has already initialized XLA and taken its devices.
+
+    Importing ``torch_xla`` is inert, so a ``sys.modules`` check alone cannot
+    distinguish "installed" from "in use". Only the flag set after
+    ``addressable_device_count()`` answered means the runtime is live, which is
+    what a generic barrier may synchronize. Anything else would discover and
+    claim another runtime from a job that never selected it.
+    """
+
+    module = sys.modules.get("torch_xla")
+    return bool(module is not None and getattr(module, "_gptqmodel_device_claimed", False))
+
+
+# Availability is deliberately not probed here.  Use ``is_xla_available()``
+# from an explicit device-resolution path; see ``require_xla_runtime``.
+HAS_XLA = _xla_package_installed()
 
 
 mlx = None
@@ -450,6 +530,9 @@ def torch_new_stream():
     if HAS_NPU:
         STREAM = torch.npu.Stream()
         return STREAM
+    if is_xla_available():
+        # Torch/XLA supplies its own lazy execution and synchronization model.
+        return None
     return None
 
 def torch_new_stream_ctx():
@@ -459,6 +542,8 @@ def torch_new_stream_ctx():
         return torch.xpu.stream(torch_new_stream())
     if HAS_NPU:
         return torch.npu.stream(torch_new_stream())
+    if is_xla_available():
+        return contextlib.nullcontext()
     return contextlib.nullcontext()
 
 def torch_sync(device: torch.device = None):
@@ -497,6 +582,15 @@ def torch_sync(device: torch.device = None):
                 for idx in range(dev_count):
                     torch.npu.synchronize(idx)
 
+        # Only synchronize XLA if this process already initialized it. Probing
+        # availability here would import the runtime and request addressable
+        # devices, so an ordinary CUDA/CPU barrier would claim the Tenstorrent
+        # chips (or fail on an unrelated XLA error) from a job that never
+        # selected that backend.
+        if xla_runtime_claimed():
+            synchronized_any = True
+            require_xla_runtime().sync(wait=True)
+
         if not synchronized_any:
             torch.cpu.synchronize()
         return
@@ -509,6 +603,8 @@ def torch_sync(device: torch.device = None):
         torch.mps.synchronize()
     elif device.type == "npu":
         torch.npu.synchronize(device=device)
+    elif device.type == "xla":
+        require_xla_runtime().sync(wait=True)
     elif device.type == "cpu":
         torch.cpu.synchronize()
 
@@ -526,6 +622,8 @@ def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[t
             return torch.device("xpu", device)
         if HAS_NPU and torch.npu.device_count() > device:
             return torch.device("npu", device)
+        if is_xla_available() and xla_device_count() > device:
+            return torch.device("xla", device)
         raise ValueError(f"Unable to map integer `{device}` to a known accelerator device.")
     raise TypeError(f"Unsupported device specifier type: {type(device)}")
 
@@ -541,6 +639,8 @@ def resolve_empty_cache_callable(device_type: str) -> Optional[Callable[[], None
             candidate = torch.mps.empty_cache
         elif device_type == "npu" and HAS_NPU:
             candidate = torch.npu.empty_cache
+        elif device_type == "xla" and is_xla_available():
+            candidate = getattr(require_xla_runtime(), "empty_cache", None)
         else:
             candidate = None
     except Exception:
@@ -718,12 +818,49 @@ def auto_select_torch_device(index: int = 0):
         if index > 0 and torch.npu.device_count() <= index:
             index = 0
         device = torch.device(f"npu:{index}")
+    elif is_xla_available():
+        count = xla_device_count()
+        if index >= count:
+            index = 0
+        device = torch.device(f"xla:{index}")
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
     else:
         device = CPU # cpu has no index
 
     return device
+
+
+def auto_select_torch_device_unprobed(index: int = 0):
+    """Choose an indexable device without initializing an optional runtime.
+
+    ``torch_xla`` is deliberately absent: asking whether it is usable calls
+    ``addressable_device_count()``, which initializes the PJRT plugin and claims
+    every Tenstorrent chip for the rest of the process. Package presence is not
+    evidence that a device exists either -- an installed XLA runtime with zero
+    devices would otherwise turn a CPU job into ``xla:0``. Callers that want XLA
+    resolve it explicitly through :func:`is_xla_available` and
+    :func:`xla_device_count`, which are allowed to pay that cost.
+    """
+    if HAS_CUDA:
+        # Clamp against the visible count: a caller asking for index 1 on a
+        # single-GPU host would otherwise get ``cuda:1``, which fails later with
+        # "invalid device ordinal" instead of falling back to the device that
+        # exists. CUDA is safe to probe here; XLA is not.
+        count = torch.cuda.device_count()
+        if count > 0:
+            return torch.device(f"cuda:{index if index < count else 0}")
+    if HAS_XPU:
+        count = torch.xpu.device_count()
+        if count > 0:
+            return torch.device(f"xpu:{index if index < count else 0}")
+    if HAS_NPU:
+        count = torch.npu.device_count()
+        if count > 0:
+            return torch.device(f"npu:{index if index < count else 0}")
+    if HAS_MPS:
+        return torch.device("mps")
+    return CPU
 
 # some device types can have multiple gpus cuda/rocm + xpu
 def torch_devices() -> List[torch.device]:
@@ -733,6 +870,9 @@ def torch_devices() -> List[torch.device]:
         return [torch.device(f"xpu:{i}") for i in range(torch.xpu.device_count())]
     elif HAS_NPU:
         return [torch.device(f"npu:{i}") for i in range(torch.npu.device_count())]
+    elif is_xla_available():
+        count = xla_device_count()
+        return [torch.device(f"xla:{i}") for i in range(count)]
     elif HAS_MPS:
         return [torch.device("mps")]
     else:
@@ -774,7 +914,15 @@ def last_npu_device_by_pci_bus_order() -> Optional[torch.device]:
         return None
     return devices[-1]
 
-ALL_DEVICES = torch_devices()
+def all_torch_devices() -> List[torch.device]:
+    """Discover the active accelerator set only when a caller requests it.
+
+    ``torch_devices()`` is an explicit runtime probe. In particular, instantiating
+    ``torch_xla`` opens every Tenstorrent device owned by the PJRT plugin. A
+    plain ``import gptqmodel`` therefore must not cache the result in
+    ``ALL_DEVICES``.
+    """
+    return torch_devices()
 
 
 class _LazyAcceleratorStreams:
@@ -825,11 +973,11 @@ class _LazyAcceleratorStreamRef:
         return self._streams[self._index]
 
 
-ALL_STREAMS = _LazyAcceleratorStreams(ALL_DEVICES)
+ALL_STREAMS = _LazyAcceleratorStreams([auto_select_torch_device_unprobed(index=0)])
 
-DEVICE_0 = auto_select_torch_device(index=0)
+DEVICE_0 = auto_select_torch_device_unprobed(index=0)
 # device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
+DEVICE_1 = auto_select_torch_device_unprobed(index=1)
 
 DEVICE_0_STREAM = _LazyAcceleratorStreamRef(ALL_STREAMS, 0)
 
@@ -842,11 +990,12 @@ NEXT_DEVICE_INDEX = 0
 # def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> torch.device:
 #     global NEXT_DEVICE_INDEX
 #
-#     if len(ALL_DEVICES) <= 1:
-#         return ALL_DEVICES[0]
+#     devices = all_torch_devices()
+#     if len(devices) <= 1:
+#         return devices[0]
 #
-#     device = ALL_DEVICES[NEXT_DEVICE_INDEX]
-#     if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
+#     device = devices[NEXT_DEVICE_INDEX]
+#     if NEXT_DEVICE_INDEX < len(devices) - 1:
 #         NEXT_DEVICE_INDEX += 1
 #     else:
 #         if balance_strategy == BalanceStrategy.MEMORY:
