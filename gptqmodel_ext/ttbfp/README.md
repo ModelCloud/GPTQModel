@@ -1,8 +1,8 @@
-# ttbfp — Tenstorrent block-float emulation on CPU
+# ttbfp — Tenstorrent block floats executed on CPU
 
-`ttbfp` is a small C++/AVX2 + NumPy library that reproduces Tenstorrent's
-**block-float** tensor formats on ordinary CPUs, so models and kernels that use
-them can be tested on non-Tenstorrent hardware.
+`ttbfp` is a small C++/AVX2 + NumPy library that implements Tenstorrent's
+**block-float** tensor formats directly on ordinary CPUs, so models and kernels
+that use them can run on non-Tenstorrent hardware.
 
 This directory is vendored in GPT-QModel as `gptqmodel_ext/ttbfp/`.  It is a
 standalone library: `setup.py` does not build it and it is not imported by the
@@ -508,7 +508,7 @@ uses `time.process_time`, which is stable.  Two OpenMP settings matter:
 * The CPU library is the tested implementation.  The optional CUDA kernels in
   `src/ttbfp_cuda.cu` are compile-checked but have not been run on a GPU here.
   (There is no "CUDA kernel that runs on CPU" — this library is the CPU
-  emulation of the TT kernels.)
+  implementation of the TT kernels.)
 
 ---
 

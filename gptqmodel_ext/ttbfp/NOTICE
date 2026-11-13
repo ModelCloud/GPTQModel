@@ -1,4 +1,4 @@
-ttbfp - CPU emulation of Tenstorrent block-float formats
+ttbfp - CPU implementation of Tenstorrent block-float formats
 =========================================================
 
 The quantizer/dequantizer in `src/ttbfp_cpu.cpp` and

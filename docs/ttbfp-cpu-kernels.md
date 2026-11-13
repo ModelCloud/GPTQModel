@@ -1,4 +1,4 @@
-# Tenstorrent block-float emulation on CPU (`ttbfp`)
+# Tenstorrent block floats on CPU (`ttbfp`)
 
 `gptqmodel_ext/ttbfp/` is a standalone C++/NumPy library that reproduces
 Tenstorrent's block-float tensor formats on ordinary CPUs, so models and

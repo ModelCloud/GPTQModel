@@ -1,6 +1,6 @@
 ---
 name: ttbfp-perf
-description: Measure, profile, or optimize the ttbfp CPU kernels (Tenstorrent ttbf8/ttbf4 emulation) under gptqmodel_ext/ttbfp/ - running the suite, reporting throughput, A/B comparing builds, or editing gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp. Use when a task concerns ttbfp performance, thread or tile tuning, or a reported slowdown. Not for questions about the TT block-float bit layout or dtype naming; those are answered in gptqmodel_ext/ttbfp/README.md.
+description: Measure, profile, or optimize the ttbfp CPU kernels (Tenstorrent ttbf8/ttbf4/ttbf2 block floats) under gptqmodel_ext/ttbfp/ - running the suite, reporting throughput, A/B comparing builds, or editing gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp. Use when a task concerns ttbfp performance, thread or tile tuning, or a reported slowdown. Not for questions about the TT block-float bit layout or dtype naming; those are answered in gptqmodel_ext/ttbfp/README.md.
 ---
 
 # ttbfp performance work

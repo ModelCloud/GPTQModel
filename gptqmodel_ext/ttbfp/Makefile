@@ -1,4 +1,4 @@
-# ttbfp - CPU emulation kernels for Tenstorrent BFP8_b / BFP4_b
+# ttbfp - CPU kernels for Tenstorrent BFP8_b / BFP4_b / BFP2_b
 CXX      ?= g++
 NVCC     ?= nvcc
 PYTHON   ?= python3

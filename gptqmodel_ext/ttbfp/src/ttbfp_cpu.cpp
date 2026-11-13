@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp - CPU kernels for Tenstorrent BFP8_b / BFP4_b emulation.
+ * ttbfp - CPU kernels for Tenstorrent BFP8_b / BFP4_b / BFP2_b.
  *
  * Reference semantics:
  *   tt_metal/tt-llk/tests/python_tests/helpers/pack.py

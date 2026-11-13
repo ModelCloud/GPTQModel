@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp_cuda - CUDA kernels for Tenstorrent ttbf8 / ttbf4 / ttbf2 emulation.
+ * ttbfp_cuda - CUDA kernels for Tenstorrent ttbf8 / ttbf4 / ttbf2.
  *
  * Numerics match src/ttbfp_cpu.cpp and the tt-llk reference packers:
  *   ttbf8 = Bfp8_b (E8M6), ttbf4 = Bfp4_b (E8M2), ttbf2 = Bfp2_b (E8M0)

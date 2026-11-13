@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp - Tenstorrent block-float (ttbf8 / ttbf4) emulation kernels.
+ * ttbfp - CPU kernels for Tenstorrent block floats (ttbf8 / ttbf4 / ttbf2).
  *
  * Bit-exact port of the packing/unpacking semantics used by tt-metal's
  * tt-llk reference helpers:
