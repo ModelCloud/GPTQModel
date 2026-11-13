@@ -34,7 +34,7 @@ struct SmallMConfig {
                // independent CTAs whose FP32 partials a second kernel sums (workspace)
   int slice;   // super-atoms of x per double-buffered shared-memory slice, a multiple of
                // small_m_step(small_m_stages(...)) * kp; 0 = whole CTA K range
-  int kp = 1;  // K parts per CTA (small_m_core.cuh), below SM90 only: warps / kp row blocks per CTA
+  int kp = 1;  // K parts per CTA on SM8x and SM103: warps / kp row blocks per CTA
 };
 
 // Shared-memory ring stages available on `dev`, or 0 for register-ring-only devices.

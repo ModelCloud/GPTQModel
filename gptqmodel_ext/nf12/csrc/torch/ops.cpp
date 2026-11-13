@@ -224,14 +224,15 @@ Tensor decode(const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
 }
 
 Tensor linear(const Tensor& x, const Tensor& packed, const Tensor& escapes, int64_t exp_base,
-              const std::optional<Tensor>& bias) {
+              const std::optional<Tensor>& bias, bool static_weights) {
   const int32_t device = packed.get_device_index();
   const torch::stable::accelerator::DeviceGuard guard(device);
   const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
   return run_linear(x, w.n, w.k, bias, device, "linear", &w,
                     [&](const void* xp, int64_t m, int64_t ldx, const void* bp, void* yp, int64_t ldy, void* ws,
                         size_t ws_bytes, cudaStream_t stream) {
-                      return nf12_linear(xp, m, ldx, &w, bp, yp, ldy, ws, ws_bytes, stream);
+                      const auto fn = static_weights ? nf12_linear_static_weights : nf12_linear;
+                      return fn(xp, m, ldx, &w, bp, yp, ldy, ws, ws_bytes, stream);
                     });
 }
 
@@ -711,7 +712,8 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> encode_moe(const Tensor& w_in) {
 STABLE_TORCH_LIBRARY(nf12, m) {
   m.def("encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)");
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
-  m.def("linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
+  m.def("linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None, "
+        "*, bool static_weights=False) -> Tensor");
   m.def("linear_staged_b1(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
   m.def("pack_bf16t(Tensor w) -> Tensor");
   m.def("linear_bf16t(Tensor x, Tensor w_bf16t, Tensor? bias=None) -> Tensor");

@@ -135,17 +135,16 @@ __device__ __forceinline__ void tile_raster(int tile, int n_tiles, int m_tiles, 
 // produces the A fragment of atom j (k columns 16j..16j+15) for all four j.
 // Both sources yield the same registers for the same weights, so WeightTraits
 // kernels produce matching outputs.
-template <WeightSource S>
+template <WeightSource S, bool CoherentWeights = false>
 struct WeightTraits;
 
-template <>
-struct WeightTraits<WeightSource::kNF12> {
+template <bool CoherentWeights>
+struct WeightTraits<WeightSource::kNF12, CoherentWeights> {
   static constexpr int kLoads = 3;
   static constexpr int kSuperAtomBytes = nf12::kSuperAtomBytes;
 
   // plane 0 = metas of atoms 0..3; plane 1 = (L0, L1) of atoms 0, 1;
-  // plane 2 = (L0, L1) of atoms 2, 3. Must be called by the full warp: the
-  // escape test is one warp vote per super-atom rather than one per group.
+  // plane 2 = (L0, L1) of atoms 2, 3. Requires full-warp participation.
   __device__ __forceinline__ static void fragments(const uint4 (&p)[kLoads], uint32_t base_x4,
                                                    const uint4* __restrict__ escapes, uint32_t (&a)[4][4]) {
     const Group g0{p[0].x, p[1].x, p[1].y};
@@ -157,19 +156,23 @@ struct WeightTraits<WeightSource::kNF12> {
     decode_bulk(g2, base_x4, a[2]);
     decode_bulk(g3, base_x4, a[3]);
     const bool esc = (p[0].x == 0u) | (p[0].y == 0u) | (p[0].z == 0u) | (p[0].w == 0u);
-    if (__any_sync(0xffffffffu, esc)) {
-      if (esc) {
-        decode_group_any_lane(g0, base_x4, escapes, a[0]);
-        decode_group_any_lane(g1, base_x4, escapes, a[1]);
-        decode_group_any_lane(g2, base_x4, escapes, a[2]);
-        decode_group_any_lane(g3, base_x4, escapes, a[3]);
-      }
+#if __CUDA_ARCH__ == 1030
+    // SM103 avoids the vote and its reconvergence overhead.
+    const bool any_esc = esc;
+#else
+    const bool any_esc = __any_sync(0xffffffffu, esc);
+#endif
+    if (any_esc && esc) {
+      decode_group_any_lane<CoherentWeights>(g0, base_x4, escapes, a[0]);
+      decode_group_any_lane<CoherentWeights>(g1, base_x4, escapes, a[1]);
+      decode_group_any_lane<CoherentWeights>(g2, base_x4, escapes, a[2]);
+      decode_group_any_lane<CoherentWeights>(g3, base_x4, escapes, a[3]);
     }
   }
 };
 
-template <>
-struct WeightTraits<WeightSource::kBF16T> {
+template <bool CoherentWeights>
+struct WeightTraits<WeightSource::kBF16T, CoherentWeights> {
   static constexpr int kLoads = 4;
   static constexpr int kSuperAtomBytes = kSuperAtomBytesBf16t;
 

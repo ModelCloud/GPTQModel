@@ -51,6 +51,8 @@ struct LinearArgs {
   size_t workspace_bytes;
   cudaStream_t stream;
   const DeviceInfo* dev;
+  // Only immutable NF12 packed weights and escapes may precede the PDL wait.
+  bool weights_ready = false;
 };
 
 size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);

@@ -38,18 +38,18 @@ constexpr int kSuperAtomVecsBf16t = kSuperAtomBytesBf16t / 16;
 constexpr int kPlaneVecs = kPlaneBytes / 16;
 
 // Interleave warps along K so their row-major accesses form contiguous segments.
-template <int kPerWarp>
+template <int kPerWarp, int kWarps = kWarpsPerBlock>
 __device__ __forceinline__ int64_t warp_super_atom(int i) {
-  return (int64_t(blockIdx.x) * kPerWarp + i) * kWarpsPerBlock + (threadIdx.x >> 5);
+  return (int64_t(blockIdx.x) * kPerWarp + i) * kWarps + (threadIdx.x >> 5);
 }
 
-template <int kPerWarp>
+template <int kPerWarp, int kWarps = kWarpsPerBlock>
 int64_t grid_blocks(int64_t num_sa) {
-  const int64_t per_block = int64_t(kPerWarp) * kWarpsPerBlock;
+  const int64_t per_block = int64_t(kPerWarp) * kWarps;
   return (num_sa + per_block - 1) / per_block;
 }
 
-template <int kPerWarp>
+template <int kPerWarp, int kWarps = kWarpsPerBlock>
 __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
                                             uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
                                             __nv_bfloat16* __restrict__ out, int64_t ldo) {
@@ -57,7 +57,7 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, co
   uint4 planes[kPerWarp][3];
 #pragma unroll
   for (int i = 0; i < kPerWarp; ++i) {
-    const int64_t sa = warp_super_atom<kPerWarp>(i);
+    const int64_t sa = warp_super_atom<kPerWarp, kWarps>(i);
     if (sa < num_sa) {
       const uint4* src = packed + sa * kSuperAtomVecs + lane;
 #pragma unroll
@@ -66,7 +66,7 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, co
   }
 #pragma unroll
   for (int i = 0; i < kPerWarp; ++i) {
-    const int64_t sa = warp_super_atom<kPerWarp>(i);
+    const int64_t sa = warp_super_atom<kPerWarp, kWarps>(i);
     if (sa >= num_sa) break;
     const uint4& m = planes[i][0];
     const uint4& l01 = planes[i][1];
@@ -87,20 +87,20 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, co
   }
 }
 
-template <int kPerWarp>
-__global__ void __launch_bounds__(kThreadsPerBlock)
+template <int kPerWarp, int kWarps = kWarpsPerBlock>
+__global__ void __launch_bounds__(kWarps * 32)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes, uint32_t base_x4,
                   int64_t num_sa, int64_t k_blocks, __nv_bfloat16* __restrict__ out, int64_t ldo) {
-  decode_rows<kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
+  decode_rows<kPerWarp, kWarps>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
 }
 
-template <int kPerWarp>
+template <int kPerWarp, int kWarps = kWarpsPerBlock>
 cudaError_t launch_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                           int64_t num_sa, int64_t k_blocks, __nv_bfloat16* out, int64_t ldo,
                           cudaStream_t stream) {
-  const int64_t blocks = grid_blocks<kPerWarp>(num_sa);
+  const int64_t blocks = grid_blocks<kPerWarp, kWarps>(num_sa);
   if (blocks > codec::kMaxGridX) return cudaErrorInvalidValue;
-  decode_kernel<kPerWarp><<<dim3(static_cast<unsigned>(blocks)), kThreadsPerBlock, 0, stream>>>(
+  decode_kernel<kPerWarp, kWarps><<<dim3(static_cast<unsigned>(blocks)), kWarps * 32, 0, stream>>>(
       reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa, k_blocks, out, ldo);
   return cudaGetLastError();
 }
@@ -203,15 +203,16 @@ cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_bas
   if (exp_base > kMaxExpBase) return cudaErrorInvalidValue;
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
   if (num_sa == 0) return cudaSuccess;
-  // The compressor's 512x5120 SM80 prefill decode is latency-bound with two
-  // super-atoms per warp. A single super-atom measured faster on PG506-230.
-  if (n == 512 && k == 5120) {
-    int device = 0;
-    if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
-    if (device_info(device).sm_arch == 80)
-      return launch_decode<1>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
-  }
-  return launch_decode<2>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+  int device = 0;
+  if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
+  const int sm_arch = device_info(device).sm_arch;
+  if (sm_arch == 103)
+    return launch_decode<1, 2>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+  // Preserve the SM80 one-super-atom prefill route.
+  if (sm_arch == 80 && n == 512 && k == 5120)
+    return launch_decode<1>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+  return launch_decode<kDecodeSuperAtomsPerWarp>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols,
+                                                 out, ldo, stream);
 }
 
 cudaError_t moe_decode(const uint8_t* packed, const uint4* escapes, const int64_t* escape_offsets,

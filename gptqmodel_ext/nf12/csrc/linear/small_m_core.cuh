@@ -67,21 +67,25 @@ NF12_HD constexpr int small_m_partial_stride(int warps) { return 16 * warps + 4;
 
 #if defined(__CUDACC__)
 
-template <bool Retain>
+template <bool Retain, bool CoherentWeights = false>
 __device__ __forceinline__ uint4 small_m_weight_load(const void* p) {
+  if constexpr (CoherentWeights) {
+    return load_global_u4<true>(static_cast<const uint4*>(p));
+  } else {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 890
-  if constexpr (Retain) {
-    // Coherent L2 loads retain Ada weights after preceding cache pressure.
-    uint4 r;
-    asm volatile("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-                 : "l"(p));
-    return r;
-  }
-  return ldg_stream(p);
+    if constexpr (Retain) {
+      // Coherent L2 loads retain Ada weights after preceding cache pressure.
+      uint4 r;
+      asm volatile("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
+                   : "l"(p));
+      return r;
+    }
+    return ldg_stream(p);
 #else
-  return ldg_stream(p);
+    return ldg_stream(p);
 #endif
+  }
 }
 
 __device__ __forceinline__ uint4 ld_shared_v4(uint32_t addr) {
@@ -102,6 +106,8 @@ __device__ __forceinline__ uint4 ld_shared_v4(uint32_t addr) {
 //            in part order before the cluster reduction. For devices without
 //            clusters (SM8x), where it is the only way to split K. `slice`
 //            must be a multiple of KP * small_m_step(kStages).
+//   CoherentWeights  use coherent packed/escape loads for mutable PDL inputs.
+//   DirectGlobalStore  store writes only global memory, never shared scratch.
 //   smem     dynamic shared memory: x slots (2 * m * xstride, or one slot
 //            when slice covers cnt), later reused for the partials
 //            (KP * m * small_m_partial_stride(RW) floats).
@@ -120,11 +126,11 @@ __device__ __forceinline__ uint4 ld_shared_v4(uint32_t addr) {
 //            CTA's 16 * RW rows) of token tok, FP32 sums of all parts and
 //            ranks in order. Called once per (tok, rp) across the cluster.
 template <WeightSource S, int MT, int WARPS, int kStages, int KP = 1, bool Retain = false,
-          class XRow, class Prep, class Store>
+          bool CoherentWeights = false, bool DirectGlobalStore = false, class XRow, class Prep, class Store>
 __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, const uint8_t* wp, int cnt,
                                              uint32_t base_x4, const uint4* __restrict__ escapes, int m, int slice,
                                              int xstride, int kc, int rank, XRow xrow, Prep prep, Store store) {
-  using T = WeightTraits<S>;
+  using T = WeightTraits<S, CoherentWeights>;
   constexpr bool kBulk = kStages > 0;
   constexpr int kDepth = kSmallMDepth;
   constexpr int kAtoms = kSmallMBulkAtoms;
@@ -165,7 +171,8 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
       if (d < wcnt) {
 #pragma unroll
         for (int l = 0; l < T::kLoads; ++l)
-          ring[d][l] = small_m_weight_load<Retain>(wp + d * (KP * T::kSuperAtomBytes) + l * kPlaneBytes);
+          ring[d][l] = small_m_weight_load<Retain, CoherentWeights>(
+              wp + d * (KP * T::kSuperAtomBytes) + l * kPlaneBytes);
       }
     }
   }
@@ -272,7 +279,8 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
             if (j + d + kDepth < wcnt) {
               const uint8_t* src = wp + static_cast<size_t>(j + d + kDepth) * (KP * T::kSuperAtomBytes);
 #pragma unroll
-              for (int l = 0; l < T::kLoads; ++l) ring[d][l] = small_m_weight_load<Retain>(src + l * kPlaneBytes);
+              for (int l = 0; l < T::kLoads; ++l)
+                ring[d][l] = small_m_weight_load<Retain, CoherentWeights>(src + l * kPlaneBytes);
             }
             // Duplicated instead of calling mma_tiles to avoid extra registers
             // and reduced SM90 occupancy.
@@ -297,14 +305,37 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
     }
   }
 
-  // Partials -> shared [token][row] (x is dead). C fragment: c0, c1 = row g,
-  // tokens 2t, 2t+1; c2, c3 = row g + 8.
+  // Combine accumulator chains. C fragment: c0, c1 = row g, tokens 2t,
+  // 2t+1; c2, c3 = row g + 8.
 #pragma unroll
   for (int c = 1; c < kChains; ++c)
 #pragma unroll
     for (int nt = 0; nt < MT; ++nt)
 #pragma unroll
       for (int i = 0; i < 4; ++i) acc[0][nt][i] += acc[c][nt][i];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+  if constexpr (DirectGlobalStore && MT == 1 && KP == 1) {
+    if (kc == 1) {
+      float peer[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) peer[i] = __shfl_down_sync(0xffffffffu, acc[0][0][i], 4);
+      if ((lane & 4) == 0) {
+        const int tok = 2 * (lane & 3);
+        const int rp = rw * 8 + (lane >> 3);
+        if (tok < m) {
+          store(tok, rp, make_float2(acc[0][0][0], peer[0]));
+          store(tok, rp + 4, make_float2(acc[0][0][2], peer[2]));
+        }
+        if (tok + 1 < m) {
+          store(tok + 1, rp, make_float2(acc[0][0][1], peer[1]));
+          store(tok + 1, rp + 4, make_float2(acc[0][0][3], peer[3]));
+        }
+      }
+      return;
+    }
+  }
+#endif
+  // Retire x before reusing its shared-memory slots for partials.
   __syncthreads();
   constexpr int RS = small_m_partial_stride(RW);
   float* part = reinterpret_cast<float*>(smem);
@@ -326,6 +357,29 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
       }
     }
   }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+  if constexpr (DirectGlobalStore && MT == 1 && KP > 1) {
+    if (kc == 1) {
+      // Finalize paired outputs directly instead of writing the sum to part 0.
+      __syncthreads();
+      constexpr int pairs = RW * 8;
+      for (int e = threadIdx.x; e < m * pairs; e += WARPS * 32) {
+        const int tok = e / pairs;
+        const int rp = e - tok * pairs;
+        const int off = tok * RS + 2 * rp;
+        float2 sum = *reinterpret_cast<const float2*>(part + off);
+#pragma unroll
+        for (int p = 1; p < KP; ++p) {
+          const float2 value = *reinterpret_cast<const float2*>(part + p * m * RS + off);
+          sum.x += value.x;
+          sum.y += value.y;
+        }
+        store(tok, rp, sum);
+      }
+      return;
+    }
+  }
+#endif
   if constexpr (KP > 1) {
     // Sum the parts into part 0, in part order.
     __syncthreads();
