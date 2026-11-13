@@ -2153,6 +2153,7 @@ def _int4_qzero_group_scaled_cpu_extension() -> TorchOpsJitExtension:
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
             python_abi_dependent=False,
+            torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
         )
     return _INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION
 

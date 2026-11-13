@@ -3,9 +3,11 @@
 // Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
 // Modified for GPT-QModel by ModelCloud.ai.
 
+#pragma once
+
 // AVX512 implementation - compile with -mavx512f -mavx512bf16
 #include <algorithm>
-#include <ATen/Parallel.h>
+#include "../torch_stable_compat.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>

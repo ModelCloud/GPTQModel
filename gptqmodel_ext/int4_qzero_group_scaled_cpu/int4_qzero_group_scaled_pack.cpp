@@ -3,7 +3,7 @@
 
 #include "int4_qzero_group_scaled_pack.hpp"
 
-#include <ATen/Parallel.h>
+#include <algorithm>
 
 
 namespace int4_qzero_group_scaled_cpu
@@ -53,26 +53,33 @@ namespace int4_qzero_group_scaled_cpu
             TORCH_CHECK(ret_idx.dim() == 1, "ret_idx must be 1D");
             TORCH_CHECK(ret_idx.numel() == in_features, "ret_idx size must match in_features");
             TORCH_CHECK(ret_idx.is_contiguous(), "ret_idx must be contiguous");
+            const int32_t* ret_idx_check = ret_idx.const_data_ptr<int32_t>();
+            int32_t min_idx = 0;
+            int32_t max_idx = 0;
+            for (int64_t i = 0; i < ret_idx.numel(); ++i)
+            {
+                min_idx = std::min(min_idx, ret_idx_check[i]);
+                max_idx = std::max(max_idx, ret_idx_check[i]);
+            }
             TORCH_CHECK(
-                ret_idx.min().item<int32_t>() >= 0 &&
-                    ret_idx.max().item<int32_t>() < in_features,
+                min_idx >= 0 && max_idx < in_features,
                 "ret_idx values must be in [0, in_features)");
         }
 
         const int64_t groups = out_features / 32;
         const int64_t k_half = in_features / 2;
-        auto packed = torch::empty(
+        auto packed = at::empty(
             {out_features, k_half},
-            qweight.options().dtype(at::kByte));
-        auto zero_codes = torch::empty(
+            at::options(qweight).dtype(at::kByte));
+        auto zero_codes = at::empty(
             {qzeros.size(0), out_features},
-            qzeros.options().dtype(at::kByte));
+            at::options(qzeros).dtype(at::kByte));
 
-        const int32_t *qweight_ptr = qweight.data_ptr<int32_t>();
-        const int32_t *qzeros_ptr = qzeros.data_ptr<int32_t>();
-        const int32_t *ret_idx_ptr = reorder ? ret_idx.data_ptr<int32_t>() : nullptr;
-        uint8_t *packed_ptr = packed.data_ptr<uint8_t>();
-        uint8_t *zeros_ptr = zero_codes.data_ptr<uint8_t>();
+        const int32_t *qweight_ptr = qweight.const_data_ptr<int32_t>();
+        const int32_t *qzeros_ptr = qzeros.const_data_ptr<int32_t>();
+        const int32_t *ret_idx_ptr = reorder ? ret_idx.const_data_ptr<int32_t>() : nullptr;
+        uint8_t *packed_ptr = packed.mutable_data_ptr<uint8_t>();
+        uint8_t *zeros_ptr = zero_codes.mutable_data_ptr<uint8_t>();
 
         if (!reorder)
         {
@@ -193,17 +200,17 @@ namespace int4_qzero_group_scaled_cpu
         const int64_t groups = out_features / 32;
         const int64_t k_half = in_features / 2;
         const int64_t words_per_row = out_features / 8;
-        auto packed = torch::empty(
+        auto packed = at::empty(
             {out_features, k_half},
-            qweight.options().dtype(at::kByte));
-        auto zero_codes = torch::empty(
+            at::options(qweight).dtype(at::kByte));
+        auto zero_codes = at::empty(
             {qzeros.size(0), out_features},
-            qzeros.options().dtype(at::kByte));
+            at::options(qzeros).dtype(at::kByte));
 
-        const int32_t *qweight_ptr = qweight.data_ptr<int32_t>();
-        const int32_t *qzeros_ptr = qzeros.data_ptr<int32_t>();
-        uint8_t *packed_ptr = packed.data_ptr<uint8_t>();
-        uint8_t *zeros_ptr = zero_codes.data_ptr<uint8_t>();
+        const int32_t *qweight_ptr = qweight.const_data_ptr<int32_t>();
+        const int32_t *qzeros_ptr = qzeros.const_data_ptr<int32_t>();
+        uint8_t *packed_ptr = packed.mutable_data_ptr<uint8_t>();
+        uint8_t *zeros_ptr = zero_codes.mutable_data_ptr<uint8_t>();
 
         at::parallel_for(0, in_features, 1, [&](int64_t begin, int64_t end)
         {

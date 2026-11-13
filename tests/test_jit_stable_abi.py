@@ -115,3 +115,7 @@ def test_vptq_cuda_uses_stable_abi():
 
 def test_rco_dp_uses_stable_abi():
     _assert_stable(rco_cpp._RCO_DP_EXTENSION)
+
+
+def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
+    _assert_stable(cpp._int4_qzero_group_scaled_cpu_extension())
