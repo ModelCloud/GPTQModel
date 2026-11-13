@@ -461,7 +461,14 @@ def test_explicit_device_discovery_returns_all_xla_cards(monkeypatch):
     assert torch_utils.auto_select_torch_device(index=9) == torch.device("xla:0")
 
 
-def test_ttxla_persistent_layout_and_invalidation(monkeypatch):
+@pytest.fixture
+def cpu_xla_layout(monkeypatch):
+    """Allow CPU layout tests to construct XLALinear without claiming PJRT."""
+
+    monkeypatch.setattr(XLALinear, "validate_once", classmethod(lambda cls: (True, None)))
+
+
+def test_ttxla_persistent_layout_and_invalidation(cpu_xla_layout):
     fixture = _fixture(qzero_format=2)
     module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
@@ -486,7 +493,7 @@ def test_ttxla_persistent_layout_and_invalidation(monkeypatch):
     assert module._tt_layout is None
 
 
-def test_tt_layout_tracks_device_moves_and_weight_updates():
+def test_tt_layout_tracks_device_moves_and_weight_updates(cpu_xla_layout):
     fixture = _fixture(qzero_format=2)
     module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
@@ -509,7 +516,7 @@ def test_tt_layout_tracks_device_moves_and_weight_updates():
     assert module._build_tt_layout() is not rebuilt
 
 
-def test_ttxla_forward_rejects_cpu_activation_fail_closed():
+def test_ttxla_forward_rejects_cpu_activation_fail_closed(cpu_xla_layout):
     fixture = _fixture(qzero_format=2)
     module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
@@ -606,7 +613,7 @@ def test_actual_ttxla_forward_on_all_four_cards():
         torch_xla.sync(wait=True)
 
 
-def test_forward_never_retains_expanded_weights(monkeypatch):
+def test_forward_never_retains_expanded_weights(cpu_xla_layout):
     fixture = _fixture(qzero_format=2)
     module = XLALinear(
         bits=4, group_size=128, sym=True, desc_act=False,
@@ -1834,7 +1841,7 @@ def test_public_export_keeps_the_save_contract(tmp_path):
         model, first, bits=4, embed_bits=8, metadata={"source_model": "original/model"}
     )
 
-    loaded = GPTQModel.load(first)
+    loaded = GPTQModel.load(first, device="cpu")
     loaded.model.generation_config.eos_token_id = [2, 3]
     loaded.model.generation_config.max_new_tokens = 17
 
@@ -2559,7 +2566,7 @@ def test_blockfloat_pinned_fp32_norms_survive_an_fp32_override(tmp_path):
     # Explicit fp32 override: the pinned norm must be promoted, not skipped.
     forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
     assert forced.model.norm.weight.dtype is torch.float32
-    assert float(forced.model.norm.weight[0]) == 1.0010000467300415
+    assert float(forced.model.norm.weight[0].detach()) == 1.0010000467300415
 
 
 def test_blockfloat_embedding_follows_module_casts():
@@ -2784,7 +2791,7 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
     from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
     from gptqmodel.quantization import METHOD
 
-    loaded = GPTQModel.load(out)
+    loaded = GPTQModel.load(out, device="cpu")
     assert loaded.quantized is True
     assert loaded.quantize_config.method == METHOD.TT_BLOCKFLOAT
 
@@ -2995,7 +3002,7 @@ def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
 
     from gptqmodel import GPTQModel
 
-    ours = GPTQModel.load(out).model
+    ours = GPTQModel.load(out, device="cpu").model
 
     ids = torch.randint(0, 64, (1, 6))
     with torch.no_grad():

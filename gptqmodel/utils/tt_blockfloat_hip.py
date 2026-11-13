@@ -85,25 +85,6 @@ def _sources() -> list[str]:
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
 
 
-def _rocm_root() -> Path | None:
-    """Locate a ROCm root with the development layout hipcc needs."""
-
-    from torch.utils import cpp_extension
-
-    for candidate in (
-        os.environ.get("ROCM_PATH"),
-        os.environ.get("ROCM_HOME"),
-        getattr(cpp_extension, "ROCM_HOME", None),
-        "/opt/rocm",
-    ):
-        if not candidate:
-            continue
-        root = Path(candidate)
-        if (root / "lib" / "libamdhip64.so").exists():
-            return root
-    return None
-
-
 def _cuda_cflags() -> list[str]:
     flags = default_jit_cuda_cflags(
         enable_bf16=True,
@@ -116,15 +97,7 @@ def _cuda_cflags() -> list[str]:
         "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
     ]
-    rocm_root = _rocm_root()
-    if rocm_root is not None:
-        flags.append(f"--rocm-path={rocm_root}")
     return flags
-
-
-def _ldflags() -> list[str]:
-    rocm_root = _rocm_root()
-    return [f"-L{rocm_root / 'lib'}"] if rocm_root is not None else []
 
 
 _EXTENSION = TorchOpsJitExtension(
@@ -136,7 +109,6 @@ _EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("tt_blockfloat_hip"),
     display_name="Tenstorrent bf8/bf4 (HIP)",
     extra_cuda_cflags=_cuda_cflags,
-    extra_ldflags=_ldflags,
     force_rebuild_env="GPTQMODEL_TT_BLOCKFLOAT_HIP_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,

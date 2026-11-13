@@ -67,20 +67,22 @@ flowchart TD
     C -- yes --> E["_resolved_extra_cflags()"]
     C -- yes --> F["_resolved_extra_cuda_cflags()"]
     C -- yes --> G["_resolved_extra_ldflags()"]
+    F --> V["tt_blockfloat_hip._cuda_cflags()"]
+    V --> W["HIP bf16 flags only; no SDK override"]
     E --> H["rocm_supplemental_include_cflags()"]
     F --> I["rocm_supplemental_device_lib_flags()"]
     G --> J["rocm_supplemental_ldflags()"]
     H --> K["_rocm_toolkit_root()"]
     J --> K
-    K --> L["first root with include/thrust/complex.h and lib/libamdhip64.so"]
-    I --> M["ROCM_HOME bitcode, then _rocm_development_roots()"]
+    K --> R{"complete root found?"}
+    R -- yes --> L["first root with include/thrust/complex.h and lib/libamdhip64.so"]
+    R -- no --> T["header-only -I if available; no -L"]
+    I --> M["ROCM_HOME bitcode, then _rocm_toolkit_root()"]
     L --> N["-I root/include"]
     L --> O["-L root/lib"]
     M --> P["first root with lib/llvm/amdgcn/bitcode/hip.bc"]
     P --> Q["--rocm-device-lib-path=root/bitcode"]
-    K --> R{"match?"}
     M --> S{"match?"}
-    R -- no --> T["header-only fallback or no -L; the compiler or linker reports the failure"]
     S -- no --> U["no flag; clang++ reports cannot find ROCm device library"]
     style T fill:#ffe0e0,stroke:#b00020
     style U fill:#ffe0e0,stroke:#b00020
@@ -89,24 +91,33 @@ flowchart TD
 The include and link flags are taken from the same `_rocm_toolkit_root()` so a
 legacy `/opt/rocm/lib` cannot be paired with a newer `core-*` include tree. A
 header-only tree is used only when no root provides both artifacts.
+In that case `rocm_supplemental_ldflags()` emits no `-L`; linking against a
+library-only root from another SDK would violate the paired-root contract.
+The block-float HIP loader also relies on these shared flags. Its local
+`_cuda_cflags()` adds only kernel-specific BF16 flags, so it cannot put a
+legacy `--rocm-path` or `-L` ahead of the selected SDK.
 
 The device bitcode is resolved separately because the TheRock `hipcc` binary
 does not turn `ROCM_PATH`/`HIP_PATH` into `--rocm-path`; it passes the
 environment through untouched and clang++ falls back to its compiled-in
 install root. `ROCM_HOME` is preferred for this flag because its bitcode is
-guaranteed to match the runtime torch loaded, and a full SDK is only a
-fallback.
+guaranteed to match the runtime torch loaded. The selected complete toolkit is
+the only fallback; an unrelated bitcode-only SDK is ignored.
 
 ## Before and after
 
-Pre-fix pointers refer to `276605140`.
+The first four pre-fix pointers refer to `276605140` (before #3816). The
+remaining pre-fix pointers refer to its merged head `35987dfb7`.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Include fallback | `detected_rocm_include_paths()` at `cpp.py:641` probed `_rocm_sdk_devel`, env roots, `/opt/rocm`, `/usr`; `/opt/rocm/core-*` was never considered | `detected_rocm_include_paths()` at `cpp.py:745` takes `_rocm_toolkit_root()`, the first development root with both `thrust/complex.h` and `libamdhip64.so` |
-| Library fallback | `_rocm_sdk_devel_lib_paths()` at `cpp.py:719` only looked next to `ROCM_HOME`; an expanded pip devel wheel was required | `_rocm_library_roots()` at `cpp.py:815` accepts a versioned `/opt/rocm/core-*` tree; `rocm_supplemental_ldflags()` at `cpp.py:841` links the same `_rocm_toolkit_root()` chosen for the headers |
-| Device bitcode | No flag existed; `default_jit_cuda_cflags()` at `cpp.py:933` returned HIP flags only | `rocm_supplemental_device_lib_flags()` at `cpp.py:859` emits `--rocm-device-lib-path=<bitcode>` and `_resolved_extra_cuda_cflags()` at `cpp.py:1221` appends it for `requires_cuda` extensions |
+| Library fallback | `_rocm_sdk_devel_lib_paths()` at `cpp.py:719` only looked next to `ROCM_HOME`; an expanded pip devel wheel was required | `_rocm_library_roots()` at `cpp.py:815` accepts a versioned `/opt/rocm/core-*` tree; `rocm_supplemental_ldflags()` at `cpp.py:825` links the same `_rocm_toolkit_root()` chosen for the headers |
+| Device bitcode | No flag existed; `default_jit_cuda_cflags()` at `cpp.py:933` returned HIP flags only | `rocm_supplemental_device_lib_flags()` at `cpp.py:843` emits `--rocm-device-lib-path=<bitcode>` and `_resolved_extra_cuda_cflags()` at `cpp.py:1206` appends it for `requires_cuda` extensions |
 | Version selection | First matching env/install root won | `_rocm_core_roots()` at `cpp.py:641` prefers the `core-<major>.<minor>` named by `torch.version.rocm`, then the newest version |
+| Split-root fallback | `_rocm_sdk_devel_lib_paths()` at `cpp.py:825` chose a library-only root if no complete root existed, while `detected_rocm_include_paths()` chose a header-only root | `rocm_supplemental_ldflags()` at `cpp.py:825` emits no `-L` without `_rocm_toolkit_root()`; the compiler or linker reports the incomplete SDK |
+| Block-float HIP override | `tt_blockfloat_hip.py:88-127` chose a separate root by `libamdhip64.so` alone and prepended `--rocm-path` / `-L` | `tt_blockfloat_hip._cuda_cflags()` adds only BF16 flags; `TorchOpsJitExtension` supplies the shared include, library and bitcode flags |
+| Bitcode fallback | `rocm_supplemental_device_lib_flags()` at `cpp.py:859` scanned every development root after `ROCM_HOME`, even if a legacy bitcode-only root preceded the selected complete SDK | It now tries `ROCM_HOME` and then `_rocm_toolkit_root()`; if neither has bitcode, no device-library flag is added |
 
 ## Contracts
 

@@ -1,6 +1,6 @@
 # Quantization lifecycle contracts
 
-A quantization run now uses three explicit contracts:
+A quantization run now uses four explicit contracts:
 
 1. `QuantizationRunPlan` records the method, format, backends, batch size, and ordered processor chain.
 2. `ProcessorLifecycleConfig` declares replay behavior, calibration policies, and checkpoint support on each processor.
@@ -25,7 +25,7 @@ The redesign follows two rules:
 | `ResolvedModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
 | `ModuleConstructorConfig` | `create_quant_module`, checkpoint capture, checkpoint restore | Packing and restore must agree on bits, group size, symmetry, packing dtype, format, kernel, and method-specific options. |
 
-The three contracts do not introduce a generic quantization algorithm, a processor registry for every method, or a shared math interface. Those details remain local because they change for reasons unrelated to the common lifecycle.
+The four contracts do not introduce a generic quantization algorithm, a processor registry for every method, or a shared math interface. Those details remain local because they change for reasons unrelated to the common lifecycle.
 
 ## New flow
 
@@ -199,6 +199,40 @@ assert constructor_config.bits == 3
 `packed_module_config()` derives the same object from the packed module, and `restore_packed_module()` consumes it. The checkpoint therefore persists the selected kernel plus the validated constructor settings instead of maintaining a second field inventory. Method-specific values (FP8 subtype and scales, BitsAndBytes block settings, Paro rotation options) live in the config's `options`.
 
 Checkpointed quantization records the resolved packing fields and winning rule for each completed packed module. The adapter restores each module with its own `bits`, `group_size`, `sym`, `desc_act`, `pack_dtype`, and format instead of reusing global settings. Dynamic exclusions remain dense source modules, and trailing excluded layers are omitted from the checkpoint execution plan.
+
+### QQQ permutation tables during checkpoint restore
+
+`restore_packed_module()` constructs packed modules inside
+`torch.device("meta")` so their checkpoint buffers allocate no data before
+loading. QQQ also needs fixed permutation tables for packing and unpacking.
+`QQQLinear._get_perms()` now inverts the Python permutation first, then builds
+those small, device-independent tables explicitly on CPU. They remain real
+while packed buffers are meta, and inference moves them to the packed weight's
+device when needed.
+
+```mermaid
+flowchart TD
+    A["restore_packed_module()"] --> B["torch.device(meta)"]
+    B --> C["QQQLinear.__init__()"]
+    C --> D["packed checkpoint buffers on meta"]
+    C --> E["QQQLinear._get_perms()"]
+    E --> F["Python perm list"]
+    F --> G["_invert_permutation(perm)<br/>CPU tensor"]
+    F --> H["torch.tensor(perm, device=cpu)"]
+    D --> I["to_empty(device=target)<br/>load_state_dict()"]
+    G --> J["QQQTorchLinear._unpack_weight_codes()"]
+    H --> J
+    I --> X{"load_state_dict succeeds?"}
+    X -- yes --> J
+    X -- no --> Y["missing or mismatched checkpoint tensor raises"]
+    J --> K["copy permutation to B.device<br/>unpack and infer"]
+    style Y fill:#ffd6d6,stroke:#b42318,color:#7a271a
+```
+
+| QQQ restore step | Before (`35987dfb7`) | Current |
+| --- | --- | --- |
+| Invert permutation | `qqq.py:260` called `perm.tolist()` after `torch.tensor(perm)` inherited the meta device | `qqq.py:264` inverts the Python list before tensor construction |
+| Preserve static metadata | `_invert_permutation()` and `torch.tensor(perm)` inherited the meta device | `qqq.py:66,265` place fixed permutation tables on CPU, so later `.to(B.device)` has data to copy |
 
 ## Execution plan authority
 

@@ -481,6 +481,28 @@ def test_rocm_device_lib_flag_is_absent_without_bitcode(monkeypatch, tmp_path):
     assert cpp_module.rocm_supplemental_device_lib_flags() == []
 
 
+def test_rocm_bitcode_does_not_come_from_an_unrelated_legacy_root(monkeypatch, tmp_path):
+    """A legacy bitcode-only root cannot override the selected complete SDK."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    legacy_bitcode = opt_rocm / "lib" / "llvm" / "amdgcn" / "bitcode"
+    legacy_bitcode.mkdir(parents=True)
+    (legacy_bitcode / "hip.bc").touch()
+    core = opt_rocm / "core-10.1"
+    _make_rocm_sdk_root(core)
+    monkeypatch.setenv("ROCM_PATH", str(opt_rocm))
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    selected_bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    assert cpp_module.rocm_supplemental_device_lib_flags() == [
+        f"--rocm-device-lib-path={selected_bitcode}"
+    ]
+    (selected_bitcode / "hip.bc").unlink()
+    assert cpp_module.rocm_supplemental_device_lib_flags() == []
+
+
 def test_complete_env_root_is_honored_for_include_and_link(monkeypatch, tmp_path):
     """An explicit complete ROCM_PATH/HIP_PATH pair wins over another core version."""
 
@@ -546,6 +568,46 @@ def test_legacy_env_root_does_not_mix_include_and_library(monkeypatch, tmp_path)
 
     assert cpp_module.detected_rocm_include_paths() == [str(core / "include")]
     assert cpp_module.rocm_supplemental_ldflags() == [f"-L{core / 'lib'}"]
+
+
+def test_split_rocm_roots_do_not_mix_include_and_library(monkeypatch, tmp_path):
+    """A header-only SDK cannot be linked against a different library-only SDK."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    header_only = opt_rocm / "core-10.1" / "include" / "thrust"
+    header_only.mkdir(parents=True)
+    (header_only / "complex.h").touch()
+    (opt_rocm / "lib").mkdir()
+    (opt_rocm / "lib" / "libamdhip64.so").touch()
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    assert cpp_module.detected_rocm_include_paths() == [str(header_only.parent)]
+    assert cpp_module.rocm_supplemental_ldflags() == []
+
+
+def test_blockfloat_hip_jit_does_not_override_shared_rocm_root(monkeypatch, tmp_path):
+    """The HIP extension must not put a legacy root ahead of the shared SDK flags."""
+
+    from gptqmodel.utils import tt_blockfloat_hip
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    (opt_rocm / "lib").mkdir()
+    (opt_rocm / "lib" / "libamdhip64.so").touch()
+    core = opt_rocm / "core-10.1"
+    _make_rocm_sdk_root(core)
+    monkeypatch.setenv("ROCM_PATH", str(opt_rocm))
+    monkeypatch.setenv("HIP_PATH", str(opt_rocm))
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    cuda_flags = tt_blockfloat_hip._EXTENSION._resolved_extra_cuda_cflags()
+    link_flags = tt_blockfloat_hip._EXTENSION._resolved_extra_ldflags()
+    assert not any(flag.startswith("--rocm-path=") for flag in cuda_flags)
+    assert f"--rocm-device-lib-path={core / 'lib' / 'llvm' / 'amdgcn' / 'bitcode'}" in cuda_flags
+    assert link_flags == [f"-L{core / 'lib'}"]
 
 
 def test_detected_cuda_wheel_include_paths_discovers_merged_and_split_layouts(monkeypatch, tmp_path):
