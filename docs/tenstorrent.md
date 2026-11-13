@@ -696,6 +696,26 @@ there -- at 32 tokens a 32x32 warp block halves LDS traffic but leaves four
 warps on the card and measured slower -- so that ceiling needs a split-K
 workspace, which is not implemented.
 
+Large-M prefill is at a hardware plateau rather than a tuning miss.  A workgroup
+may request 64 KB of LDS and a CU has 128 KB, so a 128x128 block at K = 64
+(36864 B) gets three CTAs per CU and no more; 128 VGPRs per thread at those
+1536 threads is the matching register limit.  Warp blocks that cut LDS traffic
+(64x32) drop the warp count from 48 to 24 and measure slower, and a depth-2
+register prefetch that would hide the staging latency needs a second set of
+staging registers and falls to two CTAs per CU.  Both were measured on the
+R9700: 207-208 us and 262 us against 185 us.
+
+`bfloat2_b` is the third block-float width the Tensix packer understands
+(`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the
+Blackhole matrix-engine input formats), so the p300c silicon can hold it.  It
+is not a usable weight format and is not reachable through `ttnn`: two bits are
+one sign and one magnitude, so a block holds only `{-1, 0, +1} x 2**exponent`,
+and `ttnn` exposes only `bfloat16`, `bfloat8_b`, `bfloat4_b`, `float32` and the
+integer types.  The grid is therefore defined in
+`gptqmodel.utils.tt_blockfloat_quant` (`quantize_bfloat2_b`, four codes per
+byte, exact pack/unpack) so its cost can be measured, but the HIP kernels do
+not implement it and a `bits == 2` module takes the torch path.
+
 ## Scope and follow-up
 
 This change implements the following:

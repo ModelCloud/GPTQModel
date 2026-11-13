@@ -191,6 +191,29 @@ uncoalesced once the shared tile's row-major layout is gone.  Four accumulator
 banks instead of two were also measured and are not better (40.1 us against
 39.4 us at `m = 32`).
 
+At large `m` the kernel sits on two hard limits rather than a tuning miss: the
+64 KB of shared memory a workgroup may request, and 128 VGPRs per thread at the
+three CTAs per CU that the LDS footprint allows.  A 128x128 block at `K = 64`
+uses 36864 B, so a fourth CTA would need 147456 B against the 131072 B a CU
+has.  Everything that trades warps for fewer LDS bytes loses, and everything
+that trades registers for overlap loses:
+
+| variant | m=512 | why it is not in the kernel |
+| --- | --- | --- |
+| 32x32 warp block (baseline) | 185 us | 512 B of fragments per WMMA, 48 warps/CU |
+| 64x32 or 32x64 warp block | 207-208 us | 384 B per WMMA, but only 24 warps/CU |
+| 64x128 CTA block | 262 us | 4 CTAs/CU, but 8 warps each |
+| 128x256 CTA block | 193 us | 2 CTAs/CU |
+| depth-2 register prefetch | 262 us | the second tile of staging registers pushes VGPRs past 128/thread and drops the kernel to 2 CTAs/CU |
+| swap the grid axes | 184 us | neutral; the working set is above L2 either way |
+
+Measured separately with the staging or the matrix-core block compiled out,
+staging costs 15 us and the matrix core 92 us, but together they cost 184 us:
+with a single shared buffer the store at the bottom of each step waits on a
+load issued only one step earlier, and HBM latency is longer than one tile of
+MMA.  Removing that wait needs either a second shared buffer (which does not
+fit) or a second set of staging registers (which does not fit either).
+
 Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
 
 | version | m=32 | m=512 |
@@ -207,6 +230,12 @@ Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
   runtime still has to permute codes into 32x32 face order; that is a device
   layout concern and is not part of the dtype emulation.
 * `in_features` must be a multiple of 16 (the hardware block size).
+* `bfloat2_b` is **not** implemented by these kernels.  The grid is defined in
+  `gptqmodel.utils.tt_blockfloat_quant` (a sign bit and one magnitude bit, so
+  `{-1, 0, +1} x 2**exponent` per 16-value block), but `ttnn` does not expose
+  `bfloat2_b` as a data type, so no checkpoint can contain it and there is no
+  oracle to validate a kernel against.  A module with `bits == 2` takes the
+  torch path.
 * Accumulation is fp32. On `gfx1200`/`gfx1201`, bf16 activations use the
   `v_wmma_f32_16x16x16_bf16` matrix-core path; bf8/bf4 values are exact in
   bf16, so this changes only the accumulation order. fp16 and fp32 activations
