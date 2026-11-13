@@ -37,7 +37,13 @@ from .gar import (
 )
 from .gsq_scalar import gsq_enabled_for, refine_gptq_scalar
 from .npu_linalg import npu_inverse_cholesky_factor
-from .quantizer import HF_OPTIMUM, Quantizer, _neutralize_dead_columns, _replace_zero_scale
+from .quantizer import (
+    HF_OPTIMUM,
+    Quantizer,
+    _floor_scale_for_storage,
+    _neutralize_dead_columns,
+    _replace_zero_scale,
+)
 
 
 log = setup_logger()
@@ -1474,8 +1480,8 @@ class GPTQ:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
                     mid = (w_max + w_min) / 2.0
-                    scale = _replace_zero_scale(
-                        torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                    scale = _floor_scale_for_storage(
+                        _replace_zero_scale(torch.clamp((w_max - w_min) / maxq, min=1e-8))
                     )
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - mid) / scale + zero_mid)
@@ -1487,7 +1493,7 @@ class GPTQ:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _replace_zero_scale((2 * max_dev) / maxq)
+                    scale = _floor_scale_for_storage(_replace_zero_scale((2 * max_dev) / maxq))
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - mean) / scale + zero_mid)
                     q = torch.clamp(q, 0, maxq)
@@ -1498,7 +1504,7 @@ class GPTQ:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _replace_zero_scale((2 * max_dev) / maxq)
+                    scale = _floor_scale_for_storage(_replace_zero_scale((2 * max_dev) / maxq))
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - median) / scale + zero_mid)
                     q = torch.clamp(q, 0, maxq)
@@ -1511,8 +1517,8 @@ class GPTQ:
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    scale = _replace_zero_scale(
-                        torch.clamp((hi - lo) / maxq, min=1e-8)
+                    scale = _floor_scale_for_storage(
+                        _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8))
                     )
                     zero = torch.round(-lo / scale)
                     zero = torch.clamp(zero, 0, maxq)

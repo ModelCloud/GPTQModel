@@ -16,6 +16,23 @@ log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
 
+# GPTQ/AWQ checkpoints store group scales as FP16. A positive scale below the
+# smallest FP16 subnormal would be lost when the checkpoint is written, so the
+# quantizer floors near-dead groups at that value before computing codes. The
+# affected weights are below one code step, so the absolute error stays below
+# the FP16 scale resolution.
+SCALE_STORAGE_FLOOR = 2.0**-24
+
+
+def _floor_scale_for_storage(scale: torch.Tensor) -> torch.Tensor:
+    """Lift positive scales that would underflow the FP16 checkpoint layout."""
+
+    return torch.where(
+        (scale > 0) & (scale < SCALE_STORAGE_FLOOR),
+        torch.full_like(scale, SCALE_STORAGE_FLOOR),
+        scale,
+    )
+
 
 def _replace_zero_scale(
     scale: torch.Tensor,
@@ -329,9 +346,15 @@ class Quantizer(nn.Module):
         else:
             if self.requires_groupwise_processing():
                 self.scale = xmax / self.maxq
+                # Only weight scales are persisted in the FP16 checkpoint
+                # layout; activation scales keep their natural magnitude.
+                if weight:
+                    self.scale = _floor_scale_for_storage(self.scale)
                 self.zero = torch.zeros_like(self.scale)
             else:
                 self.scale = (xmax - xmin) / self.maxq
+                if weight:
+                    self.scale = _floor_scale_for_storage(self.scale)
                 if self.qcfg.sym:
                     # ``maxq`` is odd here, so the host-side half is exact.
                     self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)

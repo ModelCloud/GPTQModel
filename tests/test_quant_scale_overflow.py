@@ -8,6 +8,8 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import _scales_for_storage
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.quantizer import SCALE_STORAGE_FLOOR, Quantizer
 
 
 def test_representable_scales_are_cast_to_fp16():
@@ -15,6 +17,35 @@ def test_representable_scales_are_cast_to_fp16():
     out = _scales_for_storage(scales, name="layer")
     assert out.dtype == torch.float16
     assert torch.allclose(out.float(), scales, rtol=1e-3), out
+
+
+def test_quantizer_floors_near_dead_group_scales_for_fp16_storage():
+    """A near-dead group must not produce a scale lost by FP16 packing.
+
+    OLMo Hybrid ships full-attention ``q_proj`` groups whose largest weight is
+    below one FP16 scale step. The quantizer must lift the scale so the packed
+    checkpoint keeps the group instead of failing at pack time.
+    """
+
+    quantizer = Quantizer(QuantizeConfig(bits=4, group_size=128, sym=True))
+    quantizer.configure(perchannel=True)
+
+    near_dead = torch.full((4, 128), 1e-7, dtype=torch.float32)
+    quantizer.find_params(near_dead, weight=True)
+    assert quantizer.scale.min().item() >= SCALE_STORAGE_FLOOR
+    stored = _scales_for_storage(quantizer.scale, name="near_dead")
+    assert stored.min().item() >= SCALE_STORAGE_FLOOR
+
+    # Ordinary groups keep the exact symmetric scale.
+    normal = torch.linspace(-0.2, 0.2, 128, dtype=torch.float32).unsqueeze(0)
+    quantizer.find_params(normal, weight=True)
+    expected = (normal.amax(dim=1, keepdim=True) - normal.amin(dim=1, keepdim=True)) / 15.0
+    assert torch.equal(quantizer.scale, expected)
+
+    # Exact-zero groups keep the finite sentinel path and remain representable.
+    quantizer.find_params(torch.zeros((1, 128), dtype=torch.float32), weight=True)
+    assert torch.isfinite(quantizer.scale).all()
+    _scales_for_storage(quantizer.scale, name="zero_group")
 
 
 def test_largest_representable_scale_is_accepted():

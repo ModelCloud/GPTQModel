@@ -192,6 +192,7 @@ from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.olmo2 import Olmo2QModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
+from .definitions.olmo_hybrid import OlmoHybridQModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
 from .definitions.openvla import OpenVLAQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
@@ -398,6 +399,7 @@ MODEL_MAP = {
     "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)
     "olmo2": Olmo2QModel,
     "olmo3": Olmo3QModel,
+    "olmo_hybrid": OlmoHybridQModel,
     "helium": LlamaQModel, # 100% llama clone (HeliumModel == LlamaModel module layout)
     "olmoe": OlmoeQModel,
     "openvla": OpenVLAQModel,
