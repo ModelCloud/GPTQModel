@@ -8,6 +8,11 @@ organization. NumPy is the first target because the engine stack
 (`torch`, `transformers`) installs it anyway, so a direct pin buys nothing while
 forcing every downstream consumer to keep it.
 
+NumPy is no longer a base dependency: it was removed from `requirements.txt`
+and is declared only by the `gguf`, `bitblas`, and `mlx` extras. The core
+quantization path never imports it, and the GGUF modules are loaded lazily so
+`gptqmodel.models.loader` / `gptqmodel.utils.hf` do not pull them in.
+
 The byte-extraction and packing paths are fully NumPy-free. The one remaining
 optional integration is the checkpoint RNG snapshot, which can only exist when
 the process already loaded NumPy. No module imports NumPy to provide a fast
@@ -153,8 +158,8 @@ The remaining NumPy surface is concentrated and intentional for now:
 
 | Surface | Why it still needs NumPy |
 | --- | --- |
-| `utils/internal_gguf.py`, `qlinear/gguf.py`, `qlinear/gguf_cpp.py` | GGUF/ggml reader (`np.memmap`, dtype views) and the quantize/dequantize codecs |
-| `qlinear/mlx*.py`, `quantization/mlx_*.py`, `utils/mlx*.py`, `quantization/rco_mlx.py` | NumPy is the `mx.array` ↔ `torch.Tensor` bridge |
-| `qlinear/bitblas.py` | `general_compress` is a BitBLAS API that takes a NumPy array |
+| `utils/internal_gguf.py`, `qlinear/gguf.py`, `qlinear/gguf_cpp.py` | GGUF/ggml reader (`np.memmap`, dtype views) and codecs; provided by the `gguf` extra |
+| `qlinear/mlx*.py`, `quantization/mlx_*.py`, `utils/mlx*.py`, `quantization/rco_mlx.py` | NumPy is the `mx.array` ↔ `torch.Tensor` bridge; provided by the `mlx` extra |
+| `qlinear/bitblas.py` | `general_compress` takes a NumPy array; provided by the `bitblas` extra |
 
 `gptqmodel_nf12/experimental_rowmajor.py` is experimental and tracked separately.

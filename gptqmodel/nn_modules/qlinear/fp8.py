@@ -33,7 +33,6 @@ from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
 from ._numerics import autocast_active, matmul_fp32_reduce
-from .gguf import _apply_optional_smoother
 
 
 log = setup_logger()
@@ -360,6 +359,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         smooth=None,
     ):
         del scales, zeros, g_idx
+
+        from .gguf import _apply_optional_smoother
 
         weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
         if smooth is not None:

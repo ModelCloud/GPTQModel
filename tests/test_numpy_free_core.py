@@ -57,6 +57,59 @@ def _catches_module_not_found(handler: ast.ExceptHandler) -> bool:
     return any(isinstance(item, ast.Name) and item.id == "ModuleNotFoundError" for item in names)
 
 
+def test_base_requirements_do_not_declare_numpy() -> None:
+    requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    declared = [
+        line.split(";")[0].strip().lower()
+        for line in requirements.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any(name.startswith("numpy") for name in declared), declared
+
+
+def test_numpy_is_declared_by_the_optional_extras() -> None:
+    tomllib = pytest.importorskip("tomllib")
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    for extra in ("gguf", "bitblas", "mlx"):
+        assert any(dep.lower().startswith("numpy") for dep in extras[extra]), extra
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "gptqmodel/utils/hf.py",
+        "gptqmodel/models/loader.py",
+        "gptqmodel/looper/paroquant_processor.py",
+        "gptqmodel/nn_modules/qlinear/fp8.py",
+    ),
+)
+def test_optional_numpy_modules_are_not_imported_eagerly(relative_path: str) -> None:
+    """The core must not import the NumPy-backed GGUF/MLX modules at module scope."""
+    optional_modules = (
+        "qlinear.gguf",
+        "internal_gguf",
+        "qlinear.mlx",
+        "mlx_paroquant",
+        "mlx_packing",
+        "mlx_bitsandbytes",
+        "rco_mlx",
+    )
+    tree = ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+    offenders = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if any(name in node.module for name in optional_modules):
+                offenders.append((node.lineno, node.module))
+        elif isinstance(node, ast.Import):
+            offenders.extend(
+                (node.lineno, alias.name)
+                for alias in node.names
+                if any(name in alias.name for name in optional_modules)
+            )
+    assert not offenders, f"{relative_path} imports an optional NumPy module eagerly: {offenders}"
+
+
 @pytest.mark.parametrize("relative_path", NUMPY_FREE_MODULES)
 def test_module_scope_has_no_numpy_import(relative_path: str) -> None:
     path = REPO_ROOT / relative_path

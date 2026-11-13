@@ -61,10 +61,6 @@ from ..models.writer import (
 from ..nn_modules.hooked_linear import HookedLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
-from ..quantization.mlx_paroquant_optimize import (
-    optimize_paroquant_linear_mlx_to_torch,
-    paroquant_mlx_optimization_available,
-)
 from ..quantization.paroquant.optimization import (
     _activate_stage_params,
     _backward_scalar_loss,
@@ -474,6 +470,12 @@ class ParoQuantProcessor(LoopProcessor):
         inputs: torch.Tensor,
     ) -> tuple[float, float]:
         """Optimize one module and stash its packed runtime tensors in `module.state`."""
+        # MLX is optional and imports NumPy; keep it out of the core import path.
+        from ..quantization.mlx_paroquant_optimize import (
+            optimize_paroquant_linear_mlx_to_torch,
+            paroquant_mlx_optimization_available,
+        )
+
         bits, group_size, sym = self._module_quant_params(
             module.full_name, resolved_cfg=get_resolved_module_config(module),
         )
