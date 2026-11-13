@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 __all__ = [
-    "TTBF8", "TTBF4", "BFP8", "BFP4", "pack", "unpack", "matmul", "matmul_bf16",
+    "TTBF8", "TTBF4", "TTBF2", "BFP8", "BFP4", "BFP2", "pack", "unpack", "matmul", "matmul_bf16",
     "pack_transposed", "transpose_packed", "matmul_prepacked",
     "matmul_prepacked_bf16", "convert_s8", "prepack_s8",
     "matmul_prepacked_s8", "matmul_prepacked_s8_bf16",
@@ -25,14 +25,17 @@ __all__ = [
 
 TTBF8 = 8
 TTBF4 = 4
+TTBF2 = 2
 # Deprecated TT-internal spellings, kept as aliases.
 BFP8 = TTBF8
 BFP4 = TTBF4
+BFP2 = TTBF2
 
-_FMT = {8: 8, 4: 4,
-        "ttbf8": 8, "ttbf4": 4,
+_FMT = {8: 8, 4: 4, 2: 2,
+        "ttbf8": 8, "ttbf4": 4, "ttbf2": 2,
         "bfp8_b": 8, "bfp8": 8, "BFP8_B": 8,
-        "bfp4_b": 4, "bfp4": 4, "BFP4_B": 4}
+        "bfp4_b": 4, "bfp4": 4, "BFP4_B": 4,
+        "bfp2_b": 2, "bfp2": 2, "BFP2_B": 2}
 
 
 def _fmt(fmt) -> int:
@@ -40,6 +43,11 @@ def _fmt(fmt) -> int:
         return _FMT[fmt]
     except KeyError:
         raise ValueError(f"unknown bfp format {fmt!r}") from None
+
+
+def _db(f: int) -> int:
+    """Datum bytes per 16-element block (16 / 8 / 4 for ttbf8 / ttbf4 / ttbf2)."""
+    return 16 if f == 8 else (8 if f == 4 else 4)
 
 
 def _find_lib() -> str:
@@ -164,7 +172,7 @@ def pack(x, fmt=TTBF8):
     rows, cols = x.shape
     nblk = blocks_per_row(cols)
     exps = np.zeros((rows, nblk), dtype=np.uint8)
-    db = 16 if f == 8 else 8
+    db = _db(f)
     data = np.zeros((rows, nblk * db), dtype=np.uint8)
     _lib.ttbfp_quantize(f, x.ctypes.data_as(_f32p), rows, cols,
                         _ptr(exps), _ptr(data))
@@ -244,7 +252,7 @@ def transpose_packed(exps, data, fmt=TTBF8):
     if exps.ndim != 2:
         raise ValueError("exps must be (K, nblk)")
     K, nblk = exps.shape
-    db = 16 if f == 8 else 8
+    db = _db(f)
     if data.shape != (K, nblk * db):
         raise ValueError(f"data must be (K, {nblk * db})")
     exps_t = np.empty((nblk, K), dtype=np.uint8)

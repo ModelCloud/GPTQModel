@@ -50,7 +50,7 @@ SHAPES = [(1, 16), (2, 1), (1, 15), (3, 16), (5, 17), (7, 31), (4, 32),
           (9, 48), (32, 32), (33, 80), (6, 33)]
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4])
+@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_pack_matches_reference(fmt, shape, seed):
@@ -64,7 +64,7 @@ def test_pack_matches_reference(fmt, shape, seed):
     np.testing.assert_array_equal(d_c, d_ref)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4])
+@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("ftz", [True, False])
 def test_unpack_matches_reference(fmt, shape, ftz):
@@ -76,7 +76,7 @@ def test_unpack_matches_reference(fmt, shape, ftz):
     np.testing.assert_array_equal(bits(y_c), bits(y_ref))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4])
+@pytest.mark.parametrize("fmt", [ttbfp.BFP8, ttbfp.BFP4, ttbfp.BFP2])
 def test_pack_is_stable_on_zeros(fmt):
     x = np.zeros((4, 64), dtype=np.float32)
     e, d = ttbfp.pack(x, fmt)
@@ -85,13 +85,14 @@ def test_pack_is_stable_on_zeros(fmt):
     assert np.all(ttbfp.unpack(e, d, fmt) == 0.0)
 
 
-@pytest.mark.parametrize("fmt", [8, 4])
+@pytest.mark.parametrize("fmt", [8, 4, 2])
 def test_sizes(fmt):
     rows, cols = 5, 33
     nblk = 3
     assert ttbfp.blocks_per_row(cols) == nblk
-    assert ttbfp.packed_bytes(fmt, rows, cols) == rows * nblk * (1 + (16 if fmt == 8 else 8))
-    assert ttbfp.tile_bytes(fmt) == (1088 if fmt == 8 else 576)
+    db = {8: 16, 4: 8, 2: 4}[fmt]
+    assert ttbfp.packed_bytes(fmt, rows, cols) == rows * nblk * (1 + db)
+    assert ttbfp.tile_bytes(fmt) == {8: 1088, 4: 576, 2: 320}[fmt]
 
 
 def _rand_matmul_case(rng, fmt, M, K, N):
@@ -189,7 +190,7 @@ def test_matmul_bf16_matches_f32_path():
 
 @pytest.mark.parametrize(
     "fmt,tile_bytes",
-    [(8, 1088), (4, 576)],
+    [(8, 1088), (4, 576), (2, 320)],
 )
 def test_tile_layout(fmt, tile_bytes):
     rng = np.random.default_rng(5)
@@ -205,7 +206,7 @@ def test_tile_layout(fmt, tile_bytes):
 
 @pytest.mark.parametrize(
     "fmt,tile_bytes",
-    [(8, 1088), (4, 576)],
+    [(8, 1088), (4, 576), (2, 320)],
 )
 def test_tile_face_order(fmt, tile_bytes):
     # Each face is a distinct constant; exponents are one per face row and
@@ -240,7 +241,7 @@ def tempfile_dir():
     return tempfile.mkdtemp(prefix="ttbfp-test-")
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4])
+@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
 @pytest.mark.parametrize("shape", [(4, 64, 48), (1, 32, 16), (7, 33, 80),
                                    (16, 96, 128), (5, 17, 31)])
 def test_prepacked_matches_rowmajor(fmt, shape):
@@ -256,7 +257,7 @@ def test_prepacked_matches_rowmajor(fmt, shape):
     np.testing.assert_array_equal(bits(c1), bits(c0))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4])
+@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
 def test_transpose_packed_roundtrip(fmt):
     rng = np.random.default_rng(11)
     w = rng.standard_normal((37, 53)).astype(np.float32)
@@ -264,7 +265,7 @@ def test_transpose_packed_roundtrip(fmt):
     et, dt = ttbfp.transpose_packed(e, d, fmt)
     # Rebuild the row-major layout by hand and compare.
     nblk = e.shape[1]
-    db = 16 if fmt == 8 else 8
+    db = {8: 16, 4: 8, 2: 4}[fmt]
     e2 = np.empty_like(e)
     d2 = np.empty_like(d)
     for j in range(nblk):
@@ -274,19 +275,19 @@ def test_transpose_packed_roundtrip(fmt):
     np.testing.assert_array_equal(d2, d)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4])
+@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
 def test_pack_transposed_matches_reference(fmt):
     rng = np.random.default_rng(12)
     w = rng.standard_normal((9, 40)).astype(np.float32)
     e, d = ttbfp.pack(w, fmt)
     et, dt = ttbfp.pack_transposed(w, fmt)
     np.testing.assert_array_equal(et, e.T.copy())
-    db = 16 if fmt == 8 else 8
+    db = {8: 16, 4: 8, 2: 4}[fmt]
     np.testing.assert_array_equal(
         dt, d.reshape(9, -1, db).transpose(1, 0, 2).reshape(-1, 9 * db))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4])
+@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
 @pytest.mark.parametrize("shape", [(1, 64, 64), (2, 33, 48), (4, 128, 256),
                                    (7, 17, 31), (16, 96, 80), (5, 1, 16),
                                    (33, 48, 32)])
@@ -306,7 +307,7 @@ def test_prepacked_s8_matches_rowmajor(fmt, shape):
     np.testing.assert_array_equal(bits(c2), bits(c0))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4])
+@pytest.mark.parametrize("fmt", [ttbfp.TTBF8, ttbfp.TTBF4, ttbfp.TTBF2])
 def test_convert_s8_preserves_values(fmt):
     """int8 datums must decode to exactly the same floats."""
     rng = np.random.default_rng(3)
@@ -316,7 +317,7 @@ def test_convert_s8_preserves_values(fmt):
     est, s8 = ttbfp.convert_s8(e, d, fmt)
     np.testing.assert_array_equal(est, et)
     # Decode both layouts to float and compare bit for bit.
-    db = 16 if fmt == 8 else 8
+    db = {8: 16, 4: 8, 2: 4}[fmt]
     nblk = e.shape[1]
     d2 = np.empty_like(d)
     for j in range(nblk):

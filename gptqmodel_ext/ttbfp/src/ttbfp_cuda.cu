@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 /*
- * ttbfp_cuda - CUDA kernels for Tenstorrent ttbf8 / ttbf4 emulation.
+ * ttbfp_cuda - CUDA kernels for Tenstorrent ttbf8 / ttbf4 / ttbf2 emulation.
  *
  * Numerics match src/ttbfp_cpu.cpp and the tt-llk reference packers:
- *   ttbf8 = Bfp8_b (E8M6), ttbf4 = Bfp4_b (E8M2)
+ *   ttbf8 = Bfp8_b (E8M6), ttbf4 = Bfp4_b (E8M2), ttbf2 = Bfp2_b (E8M0)
  *   16-element blocks, one shared 8-bit exponent (bias 127), sign-magnitude.
  *
  * Layouts are identical to the CPU API:
- *   exps[rows * nblk], data[rows * nblk * 16 or 8].
+ *   exps[rows * nblk], data[rows * nblk * 16, 8 or 4].
  *
  * This file is optional; it needs nvcc and a CUDA-capable GPU.  The CPU
  * implementation is the tested reference.
@@ -24,11 +24,11 @@
 namespace {
 
 __device__ __forceinline__ int magnitude_bits_dev(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 7 : 3;
+    return fmt == TTBFP_TTBF8 ? 7 : (fmt == TTBFP_TTBF4 ? 3 : 1);
 }
 
 __device__ __forceinline__ int datum_bytes_dev(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 16 : 8;
+    return fmt == TTBFP_TTBF8 ? 16 : (fmt == TTBFP_TTBF4 ? 8 : 4);
 }
 
 __device__ __forceinline__ float decode_datum(ttbfp_fmt fmt, const uint8_t *data,
@@ -42,9 +42,12 @@ __device__ __forceinline__ float decode_datum(ttbfp_fmt fmt, const uint8_t *data
     uint8_t v;
     if (fmt == TTBFP_TTBF8) {
         v = data[block_index * db + lane];
-    } else {
+    } else if (fmt == TTBFP_TTBF4) {
         uint8_t b = data[block_index * db + (lane >> 1)];
         v = (lane & 1) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0F);
+    } else {
+        uint8_t b = data[block_index * db + (lane >> 2)];
+        v = (uint8_t)((b >> ((lane & 3) * 2)) & 0x03);
     }
     float scale = ldexpf(1.0f, (int)e - (126 + mb));
     float f = (float)(v & mask) * scale;
@@ -90,12 +93,22 @@ __device__ __forceinline__ void quantize_block_dev(const float *x, int n, int mb
 
     if (mb == 7) {
         for (int i = 0; i < n; ++i) dat_out[i] = dat[i];
-    } else {
+    } else if (mb == 3) {
         int nbytes = (n + 1) / 2;
         for (int i = 0; i < nbytes; ++i) {
             uint8_t lo = dat[2 * i];
             uint8_t hi = (2 * i + 1 < n) ? dat[2 * i + 1] : 0;
             dat_out[i] = (uint8_t)(lo | (hi << 4));
+        }
+    } else {
+        int nbytes = (n + 3) / 4;
+        for (int i = 0; i < nbytes; ++i) {
+            uint8_t v = 0;
+            for (int k = 0; k < 4; ++k) {
+                int idx = 4 * i + k;
+                if (idx < n) v = (uint8_t)(v | (dat[idx] << (2 * k)));
+            }
+            dat_out[i] = v;
         }
     }
 }

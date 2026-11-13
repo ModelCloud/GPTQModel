@@ -12,20 +12,20 @@ Tenstorrent block floats are **not** an industry-standard format.  Block
 floating point is an old, generic idea, but the TT encoding differs from the
 standardized block-scaled formats (OCP MX and friends):
 
-| Property | TT `ttbf8` / `ttbf4` | OCP MXFP8 / MXFP4 |
+| Property | TT `ttbf8` / `ttbf4` / `ttbf2` | OCP MXFP8 / MXFP4 |
 |---|---|---|
 | Block size | 16 elements | 32 elements |
 | Shared exponent | 8 bits, bias 127 | 8 bits, bias 127 |
 | Datum encoding | sign-magnitude | sign-magnitude |
-| Element bits | 8 / 4 | 8 / 4 (E4M3/E2M1) |
+| Element bits | 8 / 4 / 2 | 8 / 4 (E4M3/E2M1) |
 | Exponent in datum | none (block shared) | none (block shared) |
 
-Because the names are Tenstorrent-specific, the public API uses `ttbf8` and
-`ttbf4`.  `BFP8`/`BFP4` remain deprecated aliases.  Do not rename them to
-`bf8`/`bf4`.
+Because the names are Tenstorrent-specific, the public API uses `ttbf8`,
+`ttbf4` and `ttbf2`.  `BFP8`/`BFP4`/`BFP2` remain deprecated aliases.  Do not
+rename them to `bf8`/`bf4`/`bf2`.
 
-The P300C (Blackhole) native formats covered here are `Bfp8_b` (BLOCKFP8) and
-`Bfp4_b` (BLOCKFP4); `README.md` section 2 in the extension documents the full
+The P300C (Blackhole) native formats covered here are `Bfp8_b` (BLOCKFP8),
+`Bfp4_b` (BLOCKFP4) and `Bfp2_b` (BLOCKFP2); `README.md` section 2 in the extension documents the full
 native-dtype table.
 
 ## Bit-exactness invariants
@@ -80,8 +80,9 @@ Single thread, `K = N = 4096`, process CPU time:
 
 | format | M=1 | M=4 | M=16 | M=64 |
 |---|---|---|---|---|
-| `ttbf8` int8 | 0.79 ms | 1.67 ms | 6.52 ms | 26.10 ms |
-| `ttbf4` int8 | 0.80 ms | 1.67 ms | 6.47 ms | 25.90 ms |
+| `ttbf8` int8 | 0.80 ms | 1.60 ms | 6.48 ms | 25.64 ms |
+| `ttbf4` int8 | 0.80 ms | 1.60 ms | 6.40 ms | 25.93 ms |
+| `ttbf2` int8 | 0.80 ms | 1.60 ms | 6.50 ms | 25.74 ms |
 
 The pure FMA path (no decode, no scale, no broadcast) runs a 16x4096x16 panel
 in ~0.0178 ms, i.e. ~118 GFLOP/s or ~18.2 ms for the whole M=64 problem.  The

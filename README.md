@@ -501,7 +501,7 @@ Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`
 ### Tenstorrent block-float emulation on CPU
 
 [`gptqmodel_ext/ttbfp/`](gptqmodel_ext/ttbfp/) is a standalone, bit-exact CPU
-emulation of Tenstorrent's `ttbf8` / `ttbf4` block-float formats, so models and
+emulation of Tenstorrent's `ttbf8` / `ttbf4` / `ttbf2` block-float formats, so models and
 kernels that use them can be tested without Tenstorrent hardware.  It ships a
 quantizer validated against the upstream `tt-llk` helpers, fused
 dequantize+GEMM microkernels for scalar / AVX2+FMA / AVX-512, block-major and

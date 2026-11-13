@@ -10,10 +10,11 @@ standalone library: `setup.py` does not build it and it is not imported by the
 
 It provides:
 
-* bit-exact **quantize / dequantize** for `ttbf8` and `ttbf4`;
+* bit-exact **quantize / dequantize** for `ttbf8`, `ttbf4` and `ttbf2`;
 * a fused **dequantize + GEMM** (`C = A @ dequant(B)`) that never materializes
   the weights in fp32;
-* exact **32×32 TT L1 tile** pack/unpack (1088 B for `ttbf8`, 576 B for `ttbf4`);
+* exact **32×32 TT L1 tile** pack/unpack (1088 B for `ttbf8`, 576 B for
+  `ttbf4`, 320 B for `ttbf2`);
 * portable scalar, x86 AVX2+FMA, and x86 AVX-512 paths selected at runtime;
 * OpenMP parallelism over independent output tiles / rows.
 * optional PyTorch CPU helpers (`ttbfp.torch_ops`);
@@ -21,12 +22,12 @@ It provides:
 
 The quantizer is validated bit-for-bit against the actual `tt-llk` reference
 helpers (`pack.py`, `unpack.py`, `bfp_format_utils.py`) over 200 random seeds ×
-4 value distributions × both formats, including NaNs/Infs.  See
+4 value distributions × all three formats, including NaNs/Infs.  See
 `tools/verify_against_tt.py`.
 
 ---
 
-## 1. Naming: why `ttbf8` / `ttbf4`
+## 1. Naming: why `ttbf8` / `ttbf4` / `ttbf2`
 
 Tenstorrent's block floats are **not** an industry-standard format.  Block
 floating point itself is an old, generic idea, but the specific TT encoding
@@ -86,7 +87,7 @@ Vector                VTF19, VFP32
 Expanded, with the standard/non-standard classification:
 
 > This table is about the **hardware**.  The library in this repository
-> implements `ttbf8` and `ttbf4`; the other rows are context for naming and
+> implements `ttbf8`, `ttbf4` and `ttbf2`; the other rows are context for naming and
 > for deciding what is safe to call "standard".
 
 | portable name | TT name(s) | native P300C Tensix? | industry standard? | notes |
@@ -422,6 +423,20 @@ With 8 threads and `bench/ab_compare.py`, the int8 layout against the original
 row-major release gives 4.5x / 2.2x / 2.2x / 2.4x for ttbf8 at M = 1 / 4 /
 16 / 64, and 3.5x / 2.1x / 2.2x / 2.2x for ttbf4.  All variants are bitwise
 equal.
+
+`ttbf2` (`Bfp2_b`) was added after the original release, so it has no "before"
+column.  Same host, same shape:
+
+| format | M | block-major | int8 |
+|---|---|---|---|
+| ttbf2 | 1 | 2.33 ms | **0.80 ms** |
+| ttbf2 | 4 | 3.70 ms | **1.60 ms** |
+| ttbf2 | 16 | 8.08 ms | **6.50 ms** |
+| ttbf2 | 64 | 30.89 ms | **25.74 ms** |
+
+The int8 layout stores 16 bytes per block for every format, so its cost is the
+same for all three; the sign-magnitude layout shrinks with the datum and its
+decode grows.
 
 ### Where the time goes
 

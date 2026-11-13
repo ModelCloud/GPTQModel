@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""NumPy reference for Tenstorrent BFP8_b / BFP4_b.
+"""NumPy reference for Tenstorrent BFP8_b / BFP4_b / BFP2_b.
 
 This is a direct port of tt-metal's tt-llk helpers:
 
@@ -25,6 +25,8 @@ def _fmt_bits(fmt: int) -> int:
         return 7
     if fmt == 4:
         return 3
+    if fmt == 2:
+        return 1
     raise ValueError(f"unsupported bfp format: {fmt}")
 
 
@@ -85,9 +87,15 @@ def pack(x: np.ndarray, fmt: int = 8):
     rows, nblk, _ = q.shape
     if fmt == 8:
         data = q.reshape(rows, nblk * BLOCK)
-    else:
+    elif fmt == 4:
         data = (q[:, :, 0::2] | (q[:, :, 1::2] << 4)).astype(np.uint8)
         data = data.reshape(rows, nblk * 8)
+    else:
+        data = (q[:, :, 0::4]
+                | (q[:, :, 1::4] << 2)
+                | (q[:, :, 2::4] << 4)
+                | (q[:, :, 3::4] << 6)).astype(np.uint8)
+        data = data.reshape(rows, nblk * 4)
     return exps, data
 
 
@@ -101,11 +109,16 @@ def dequantize(exps: np.ndarray, data: np.ndarray, fmt: int = 8,
         cols = nblk * BLOCK
     if fmt == 8:
         d = np.asarray(data, dtype=np.uint8).reshape(rows, nblk, BLOCK)
-    else:
+    elif fmt == 4:
         b = np.asarray(data, dtype=np.uint8).reshape(rows, nblk, 8)
         d = np.empty((rows, nblk, BLOCK), dtype=np.uint8)
         d[:, :, 0::2] = b & 0x0F
         d[:, :, 1::2] = b >> 4
+    else:
+        b = np.asarray(data, dtype=np.uint8).reshape(rows, nblk, 4)
+        d = np.empty((rows, nblk, BLOCK), dtype=np.uint8)
+        for k in range(4):
+            d[:, :, k::4] = (b >> (2 * k)) & 0x03
 
     mag = (d & ((1 << mb) - 1)).astype(np.float32)
     neg = ((d >> mb) & 1).astype(bool)
@@ -155,8 +168,8 @@ def untilize(faces: np.ndarray) -> np.ndarray:
 def tile_pack(tile: np.ndarray, fmt: int = 8) -> np.ndarray:
     """Pack a 32x32 tile into the exact TT L1 byte layout.
 
-    Returns 64 exponent bytes followed by 1024 (BFP8) or 512 (BFP4) datum
-    bytes, i.e. 1088 or 576 bytes.
+    Returns 64 exponent bytes followed by 1024 (BFP8), 512 (BFP4) or 256
+    (BFP2) datum bytes, i.e. 1088, 576 or 320 bytes.
     """
     exps, data = pack(tilize(tile).reshape(64, 16), fmt)
     return np.concatenate([exps.reshape(-1), data.reshape(-1)])
@@ -165,6 +178,7 @@ def tile_pack(tile: np.ndarray, fmt: int = 8) -> np.ndarray:
 def tile_unpack(blob: np.ndarray, fmt: int = 8, ftz: bool = True) -> np.ndarray:
     blob = np.asarray(blob, dtype=np.uint8)
     exps = blob[:64].reshape(64, 1)
-    data = blob[64:].reshape(64, 16 if fmt == 8 else 8)
+    db = 16 if fmt == 8 else (8 if fmt == 4 else 4)
+    data = blob[64:].reshape(64, db)
     faces = dequantize(exps, data, fmt, cols=16, ftz=ftz).reshape(-1)
     return untilize(faces)

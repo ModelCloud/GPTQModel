@@ -61,13 +61,16 @@ namespace {
 struct ScaleTables {
     float bf8[256];
     float bf4[256];
+    float bf2[256];
     ScaleTables() {
         bf8[0] = 0.0f;
         bf4[0] = 0.0f;
+        bf2[0] = 0.0f;
         for (int e = 1; e < 256; ++e) {
             // decode: mag * 2^(e - 126 - magnitude_bits)
             bf8[e] = std::ldexp(1.0f, e - 133);
             bf4[e] = std::ldexp(1.0f, e - 129);
+            bf2[e] = std::ldexp(1.0f, e - 127);
         }
     }
 };
@@ -75,6 +78,13 @@ struct ScaleTables {
 inline const ScaleTables &scales() {
     static const ScaleTables t;
     return t;
+}
+
+// Per-format block scale: mag * 2^(e - 126 - magnitude_bits).
+inline const float *scale_table(ttbfp_fmt fmt) {
+    return fmt == TTBFP_TTBF8 ? scales().bf8
+         : fmt == TTBFP_TTBF4 ? scales().bf4
+                              : scales().bf2;
 }
 
 inline int have_avx2_fma() {
@@ -118,11 +128,11 @@ inline int have_avx512() {
 }
 
 inline int datum_bytes(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 16 : 8;
+    return fmt == TTBFP_TTBF8 ? 16 : (fmt == TTBFP_TTBF4 ? 8 : 4);
 }
 
 inline int magnitude_bits(ttbfp_fmt fmt) {
-    return fmt == TTBFP_TTBF8 ? 7 : 3;
+    return fmt == TTBFP_TTBF8 ? 7 : (fmt == TTBFP_TTBF4 ? 3 : 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -171,12 +181,22 @@ inline void quantize_block(const float *x, int n, int mb,
     }
     if (mb == 7) {
         std::memcpy(dat_out, dat, (size_t)n);
-    } else {
+    } else if (mb == 3) {
         const int nbytes = (n + 1) / 2;
         for (int i = 0; i < nbytes; ++i) {
             uint8_t lo = dat[2 * i];
             uint8_t hi = (2 * i + 1 < n) ? dat[2 * i + 1] : 0;
             dat_out[i] = (uint8_t)(lo | (hi << 4));
+        }
+    } else {  // mb == 1: four 2-bit datums per byte, lowest datum first
+        const int nbytes = (n + 3) / 4;
+        for (int i = 0; i < nbytes; ++i) {
+            uint8_t v = 0;
+            for (int k = 0; k < 4; ++k) {
+                const int idx = 4 * i + k;
+                if (idx < n) v = (uint8_t)(v | (dat[idx] << (2 * k)));
+            }
+            dat_out[i] = v;
         }
     }
 }
@@ -215,7 +235,7 @@ inline void decode_block_scalar(ttbfp_fmt fmt, uint8_t e, const uint8_t *d,
         for (int i = 0; i < TTBFP_BLOCK; ++i) out[i] = 0.0f;
         return;
     }
-    const float scale = fmt == TTBFP_TTBF8 ? scales().bf8[e] : scales().bf4[e];
+    const float scale = scale_table(fmt)[e];
     const int mb = magnitude_bits(fmt);
     const int mask = (1 << mb) - 1;
     const int sbit = 1 << mb;
@@ -225,10 +245,17 @@ inline void decode_block_scalar(ttbfp_fmt fmt, uint8_t e, const uint8_t *d,
             float f = (float)(v & mask) * scale;
             out[i] = (v & sbit) ? -f : f;
         }
-    } else {
+    } else if (fmt == TTBFP_TTBF4) {
         for (int i = 0; i < TTBFP_BLOCK; ++i) {
             uint8_t b = d[i >> 1];
             uint8_t v = (i & 1) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0F);
+            float f = (float)(v & mask) * scale;
+            out[i] = (v & sbit) ? -f : f;
+        }
+    } else {
+        for (int i = 0; i < TTBFP_BLOCK; ++i) {
+            uint8_t b = d[i >> 2];
+            uint8_t v = (uint8_t)((b >> ((i & 3) * 2)) & 0x03);
             float f = (float)(v & mask) * scale;
             out[i] = (v & sbit) ? -f : f;
         }
@@ -292,6 +319,33 @@ TTBFP_AVX2 inline void bf4_decode16(const uint8_t *p, __m256 *lo, __m256 *hi) {
     *hi = bf4_sign_mag(v1);
 }
 
+// 16 two-bit datums in 4 bytes -> two 8-lane vectors.  Each byte holds four
+// datums, lowest datum in bits[1:0]; the byte order matches tt-llk's
+// pack_bfp2_b.
+TTBFP_AVX2 inline void bf2_decode16(const uint8_t *p, __m256 *lo, __m256 *hi) {
+    uint32_t w;
+    std::memcpy(&w, p, sizeof(w));
+    __m128i b = _mm_cvtsi32_si128((int)w);
+    __m128i m2 = _mm_set1_epi8(0x03);
+    __m128i s0 = _mm_and_si128(b, m2);
+    __m128i s1 = _mm_and_si128(_mm_srli_epi16(b, 2), m2);
+    __m128i s2 = _mm_and_si128(_mm_srli_epi16(b, 4), m2);
+    __m128i s3 = _mm_and_si128(_mm_srli_epi16(b, 6), m2);
+    __m128i a01 = _mm_unpacklo_epi8(s0, s1);
+    __m128i a23 = _mm_unpacklo_epi8(s2, s3);
+    __m128i inter = _mm_unpacklo_epi16(a01, a23);  // 16 datums, even first
+    __m256i v0 = _mm256_cvtepu8_epi32(inter);
+    __m256i v1 = _mm256_cvtepu8_epi32(_mm_srli_si128(inter, 8));
+    __m256i one = _mm256_set1_epi32(1);
+    __m256i two = _mm256_set1_epi32(2);
+    __m256i mag0 = _mm256_and_si256(v0, one);
+    __m256i sgn0 = _mm256_slli_epi32(_mm256_and_si256(v0, two), 30);
+    __m256i mag1 = _mm256_and_si256(v1, one);
+    __m256i sgn1 = _mm256_slli_epi32(_mm256_and_si256(v1, two), 30);
+    *lo = _mm256_xor_ps(_mm256_cvtepi32_ps(mag0), _mm256_castsi256_ps(sgn0));
+    *hi = _mm256_xor_ps(_mm256_cvtepi32_ps(mag1), _mm256_castsi256_ps(sgn1));
+}
+
 TTBFP_AVX2 inline __m256 flush_denorm(__m256 v) {
     __m256 sign = _mm256_set1_ps(-0.0f);
     __m256 a = _mm256_andnot_ps(sign, v);
@@ -304,7 +358,7 @@ TTBFP_AVX2 void dequantize_row_avx2(ttbfp_fmt fmt, const uint8_t *exps,
                                     float *dst, int ftz) {
     const int db = datum_bytes(fmt);
     const int64_t nblk = (int64_t)ttbfp_blocks_per_row(cols);
-    const float *tab = fmt == TTBFP_TTBF8 ? scales().bf8 : scales().bf4;
+    const float *tab = scale_table(fmt);
     for (int64_t j = 0; j < nblk; ++j) {
         uint8_t e = exps[j];
         if (e == 0) {
@@ -318,8 +372,10 @@ TTBFP_AVX2 void dequantize_row_avx2(ttbfp_fmt fmt, const uint8_t *exps,
         if (fmt == TTBFP_TTBF8) {
             v0 = bf8_decode8(p);
             v1 = bf8_decode8(p + 8);
-        } else {
+        } else if (fmt == TTBFP_TTBF4) {
             bf4_decode16(p, &v0, &v1);
+        } else {
+            bf2_decode16(p, &v0, &v1);
         }
         v0 = _mm256_mul_ps(v0, s);
         v1 = _mm256_mul_ps(v1, s);
@@ -367,6 +423,25 @@ TTBFP_AVX512 inline __m512 bf4_decode16_512(const uint8_t *p) {
     return _mm512_xor_ps(_mm512_cvtepi32_ps(mag), _mm512_castsi512_ps(sgn));
 }
 
+TTBFP_AVX512 inline __m512 bf2_decode16_512(const uint8_t *p) {
+    uint32_t w;
+    std::memcpy(&w, p, sizeof(w));
+    __m128i b = _mm_cvtsi32_si128((int)w);
+    __m128i m2 = _mm_set1_epi8(0x03);
+    __m128i s0 = _mm_and_si128(b, m2);
+    __m128i s1 = _mm_and_si128(_mm_srli_epi16(b, 2), m2);
+    __m128i s2 = _mm_and_si128(_mm_srli_epi16(b, 4), m2);
+    __m128i s3 = _mm_and_si128(_mm_srli_epi16(b, 6), m2);
+    __m128i a01 = _mm_unpacklo_epi8(s0, s1);
+    __m128i a23 = _mm_unpacklo_epi8(s2, s3);
+    __m128i inter = _mm_unpacklo_epi16(a01, a23);  // 16 datums, even first
+    __m512i v = _mm512_cvtepu8_epi32(inter);
+    __m512i mag = _mm512_and_si512(v, _mm512_set1_epi32(1));
+    __m512i sgn = _mm512_slli_epi32(
+        _mm512_and_si512(v, _mm512_set1_epi32(2)), 30);
+    return _mm512_xor_ps(_mm512_cvtepi32_ps(mag), _mm512_castsi512_ps(sgn));
+}
+
 TTBFP_AVX512 inline __m512 flush_denorm_512(__m512 v) {
     __m512 a = _mm512_andnot_ps(_mm512_set1_ps(-0.0f), v);
     __mmask16 keep = _mm512_cmp_ps_mask(a, _mm512_set1_ps(FLT_MIN), _CMP_GE_OQ);
@@ -378,7 +453,7 @@ TTBFP_AVX512 void dequantize_row_avx512(ttbfp_fmt fmt, const uint8_t *exps,
                                         float *dst, int ftz) {
     const int db = datum_bytes(fmt);
     const int64_t nblk = (int64_t)ttbfp_blocks_per_row(cols);
-    const float *tab = fmt == TTBFP_TTBF8 ? scales().bf8 : scales().bf4;
+    const float *tab = scale_table(fmt);
     for (int64_t j = 0; j < nblk; ++j) {
         uint8_t e = exps[j];
         int n = (int)std::min<int64_t>(TTBFP_BLOCK, cols - j * TTBFP_BLOCK);
@@ -389,7 +464,8 @@ TTBFP_AVX512 void dequantize_row_avx512(ttbfp_fmt fmt, const uint8_t *exps,
         }
         const uint8_t *p = data + j * db;
         __m512 v = fmt == TTBFP_TTBF8 ? bf8_decode16_512(p)
-                                      : bf4_decode16_512(p);
+                 : fmt == TTBFP_TTBF4 ? bf4_decode16_512(p)
+                                      : bf2_decode16_512(p);
         v = _mm512_mul_ps(v, _mm512_set1_ps(tab[e]));
         if (ftz && e < 7) v = flush_denorm_512(v);
         if (n == TTBFP_BLOCK) {
@@ -475,12 +551,16 @@ struct SmDec {
         if (fmt == TTBFP_TTBF8) {
             *lo = bf8_decode8(p);
             *hi = bf8_decode8(p + 8);
-        } else {
+        } else if (fmt == TTBFP_TTBF4) {
             bf4_decode16(p, lo, hi);
+        } else {
+            bf2_decode16(p, lo, hi);
         }
     }
     TTBFP_AVX512 static inline __m512 raw_avx512(ttbfp_fmt fmt, const uint8_t *p) {
-        return fmt == TTBFP_TTBF8 ? bf8_decode16_512(p) : bf4_decode16_512(p);
+        return fmt == TTBFP_TTBF8 ? bf8_decode16_512(p)
+             : fmt == TTBFP_TTBF4 ? bf4_decode16_512(p)
+                                  : bf2_decode16_512(p);
     }
 #endif
 };
@@ -514,7 +594,7 @@ void mm_panel_scalar(ttbfp_fmt fmt, const AT *A, int64_t lda,
     float acc[MR][J][TTBFP_BLOCK];
     std::memset(acc, 0, sizeof(acc));
     alignas(64) float ap[MR][kAPanel];
-    const float *tab = fmt == TTBFP_TTBF8 ? scales().bf8 : scales().bf4;
+    const float *tab = scale_table(fmt);
 
     for (int64_t k0 = 0; k0 < K; k0 += kAPanel) {
         const int kb = (int)std::min<int64_t>(kAPanel, K - k0);
@@ -572,7 +652,7 @@ TTBFP_AVX2 void mm_panel_avx2(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         }
     }
     alignas(64) float ap[MR][kAPanel];
-    const float *tab = fmt == TTBFP_TTBF8 ? scales().bf8 : scales().bf4;
+    const float *tab = scale_table(fmt);
 
     for (int64_t k0 = 0; k0 < K; k0 += kAPanel) {
         const int kb = (int)std::min<int64_t>(kAPanel, K - k0);
@@ -660,7 +740,7 @@ TTBFP_AVX512 void mm_panel_avx512(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         for (int jj = 0; jj < J; ++jj) acc[r][jj] = _mm512_setzero_ps();
     }
     alignas(64) float ap[MR][kAPanel];
-    const float *tab = fmt == TTBFP_TTBF8 ? scales().bf8 : scales().bf4;
+    const float *tab = scale_table(fmt);
 
     for (int64_t k0 = 0; k0 < K; k0 += kAPanel) {
         const int kb = (int)std::min<int64_t>(kAPanel, K - k0);
@@ -885,7 +965,8 @@ size_t ttbfp_packed_bytes(ttbfp_fmt fmtm, int64_t rows, int64_t cols) {
 }
 
 size_t ttbfp_tile_bytes(ttbfp_fmt fmtm) {
-    return 64 + (fmtm == TTBFP_TTBF8 ? 1024u : 512u);
+    // 64 exponents + 64 blocks of 16 datums at (magnitude_bits + 1) bits.
+    return 64 + 128u * (size_t)(magnitude_bits(fmtm) + 1);
 }
 
 void ttbfp_quantize(ttbfp_fmt fmt,
@@ -1053,7 +1134,6 @@ void ttbfp_convert_s8(ttbfp_fmt fmt,
     const int mb = magnitude_bits(fmt);
     const int mask = (1 << mb) - 1;
     const int sbit = 1 << mb;
-    const bool bf8 = (fmt == TTBFP_TTBF8);
 #pragma omp parallel for schedule(static) if (nblk > 1)
     for (int64_t j = 0; j < nblk; ++j) {
         uint8_t *et = exps_t + j * K;
@@ -1063,9 +1143,12 @@ void ttbfp_convert_s8(ttbfp_fmt fmt,
             const uint8_t *src = data + (k * nblk + j) * db;
             uint8_t *dst = st + k * TTBFP_BLOCK;
             for (int i = 0; i < TTBFP_BLOCK; ++i) {
-                const int v = bf8 ? src[i]
-                                  : ((i & 1) ? (src[i >> 1] >> 4)
-                                             : (src[i >> 1] & 0x0F));
+                const int v = fmt == TTBFP_TTBF8
+                    ? src[i]
+                    : fmt == TTBFP_TTBF4
+                        ? ((i & 1) ? (src[i >> 1] >> 4)
+                                   : (src[i >> 1] & 0x0F))
+                        : ((src[i >> 2] >> ((i & 3) * 2)) & 0x03);
                 const int mag = v & mask;
                 dst[i] = (uint8_t)(int8_t)((v & sbit) ? -mag : mag);
             }

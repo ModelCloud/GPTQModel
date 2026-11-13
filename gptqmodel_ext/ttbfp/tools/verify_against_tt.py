@@ -64,6 +64,9 @@ def upstream_pack(values: np.ndarray, mb: int):
     dat = dat.flatten().to(torch.uint8).numpy()
     if mb == 3:
         dat = (dat[0::2] | (dat[1::2] << 4)).astype(np.uint8)
+    elif mb == 1:
+        dat = (dat[0::4] | (dat[1::4] << 2) | (dat[2::4] << 4)
+               | (dat[3::4] << 6)).astype(np.uint8)
     return shared.flatten().to(torch.uint8).numpy(), dat
 
 
@@ -93,8 +96,8 @@ def main():
         for mode in range(4):
             tile = make_tile(rng, mode)
             faces = ref.tilize(tile)
-            for mb in (7, 3):
-                fmt = 8 if mb == 7 else 4
+            for mb in (7, 3, 1):
+                fmt = 8 if mb == 7 else (4 if mb == 3 else 2)
                 ue, ud = upstream_pack(faces, mb)
                 ce, cd = ttbfp.pack(faces.reshape(64, 16), fmt)
                 ok = np.array_equal(ue, ce.reshape(-1)) and np.array_equal(ud, cd.reshape(-1))
@@ -110,7 +113,7 @@ def main():
                     print(f"TILE FAIL seed={seed} mode={mode} mb={mb}")
                     if failures > 5:
                         return 1
-    print(f"checked 200 seeds x 4 distributions x 2 formats: "
+    print(f"checked 200 seeds x 4 distributions x 3 formats: "
           f"{'OK' if failures == 0 else str(failures) + ' failures'}")
     return 0 if failures == 0 else 1
 

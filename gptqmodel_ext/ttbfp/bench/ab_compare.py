@@ -69,7 +69,7 @@ def cpu_ms(fn, reps, warmup=3):
 def pack(lib, w, fmt):
     k, n = w.shape
     nblk = (n + 15) // 16
-    db = 16 if fmt == 8 else 8
+    db = {8: 16, 4: 8, 2: 4}[fmt]
     e = np.zeros((k, nblk), np.uint8)
     d = np.zeros((k, nblk * db), np.uint8)
     lib.ttbfp_quantize(fmt, w.ctypes.data, k, n, e.ctypes.data, d.ctypes.data)
@@ -106,7 +106,7 @@ def main(argv=None):
         have_pre = hasattr(new, "ttbfp_matmul_prepacked")
         if have_pre:
             nblk = e.shape[1]
-            db = 16 if fmt == 8 else 8
+            db = {8: 16, 4: 8, 2: 4}[fmt]
             et = np.empty((nblk, k), np.uint8)
             dt = np.empty((nblk, k * db), np.uint8)
             new.ttbfp_transpose_packed(fmt, e.ctypes.data, d.ctypes.data, k, n,

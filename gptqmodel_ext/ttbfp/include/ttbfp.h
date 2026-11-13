@@ -82,6 +82,7 @@ extern "C" {
  *
  *   TTBFP_TTBF8  == TT Bfp8_b == BLOCKFP8  (E8M6: 8-bit shared exponent)
  *   TTBFP_TTBF4  == TT Bfp4_b == BLOCKFP4  (E8M2: 8-bit shared exponent)
+ *   TTBFP_TTBF2  == TT Bfp2_b == BLOCKFP2  (E8M0: 8-bit shared exponent)
  *
  * The TT-internal spellings are kept as deprecated aliases.
  * The 5-bit-exponent FP16-family variants (TT Bfp8/Bfp4/Bfp2, a.k.a.
@@ -90,8 +91,10 @@ extern "C" {
 typedef enum {
     TTBFP_TTBF8 = 8,
     TTBFP_TTBF4 = 4,
+    TTBFP_TTBF2 = 2,
     TTBFP_BFP8_B = 8, /* deprecated alias */
-    TTBFP_BFP4_B = 4  /* deprecated alias */
+    TTBFP_BFP4_B = 4, /* deprecated alias */
+    TTBFP_BFP2_B = 2  /* deprecated alias */
 } ttbfp_fmt;
 
 /* ---- size helpers ---------------------------------------------------- */
@@ -102,7 +105,7 @@ size_t ttbfp_exps_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 size_t ttbfp_data_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 size_t ttbfp_packed_bytes(ttbfp_fmt fmt, int64_t rows, int64_t cols);
 
-/* Bytes per 32x32 tile: 1088 (ttbf8) or 576 (ttbf4). */
+/* Bytes per 32x32 tile: 1088 (ttbf8), 576 (ttbf4) or 320 (ttbf2). */
 size_t ttbfp_tile_bytes(ttbfp_fmt fmt);
 
 /* ---- pack / unpack --------------------------------------------------- */
