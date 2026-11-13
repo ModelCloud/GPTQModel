@@ -146,16 +146,98 @@ def _resolve_timeout(
     return timeout
 
 
+def _clamp_timeout(
+    timeout: Union[float, Tuple[float, float]], remaining: float
+) -> Union[float, Tuple[float, float]]:
+    """Never let requests wait longer than the remaining wall-clock budget."""
+
+    if isinstance(timeout, tuple):
+        return (min(timeout[0], remaining), min(timeout[1], remaining))
+    return min(timeout, remaining)
+
+
+def _get_response(
+    url: str,
+    *,
+    timeout: Union[float, Tuple[float, float]],
+    deadline: float,
+    total_timeout: float,
+) -> requests.Response:
+    """Issue the request without letting headers or redirects escape the budget.
+
+    requests applies the timeout to individual socket reads, so a server that
+    trickles response headers (or a chain of individually fast redirects) can
+    keep requests.get busy long after total_timeout has elapsed.  Run the
+    blocking call on a helper thread and stop waiting at the deadline.
+    """
+
+    outcome: dict[str, object] = {}
+    finished = threading.Event()
+    cancelled = threading.Event()
+
+    def _run() -> None:
+        try:
+            response = requests.get(url, stream=True, timeout=timeout)
+        except BaseException as exc:  # re-raised on the calling thread
+            outcome["error"] = exc
+        else:
+            if cancelled.is_set():
+                # The caller already gave up; release the socket immediately
+                # instead of leaving the abandoned request open.
+                response.close()
+            else:
+                outcome["response"] = response
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=_run, name="gptqmodel-image-fetch", daemon=True)
+    worker.start()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not finished.wait(remaining):
+        cancelled.set()
+        response = outcome.get("response")
+        if isinstance(response, requests.Response):
+            _abort_response(response)
+        raise _FetchFailure(
+            f"request exceeded the {total_timeout} second total time limit",
+            retryable=False,
+        )
+    error = outcome.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    response = outcome.get("response")
+    if not isinstance(response, requests.Response):
+        raise _FetchFailure("request finished without a response", retryable=False)
+    return response
+
+
 def _download_image_bytes(
     url: str,
     *,
     timeout: Union[float, Tuple[float, float]],
     max_bytes: int,
+    deadline: float,
     total_timeout: float,
 ) -> bytes:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _FetchFailure(
+            f"download exceeded the {total_timeout} second total time limit",
+            retryable=False,
+        )
     try:
-        response = requests.get(url, stream=True, timeout=timeout)
+        response = _get_response(
+            url,
+            timeout=_clamp_timeout(timeout, remaining),
+            deadline=deadline,
+            total_timeout=total_timeout,
+        )
     except requests.Timeout as exc:
+        if time.monotonic() > deadline:
+            raise _FetchFailure(
+                f"download exceeded the {total_timeout} second total time limit",
+                retryable=False,
+            ) from exc
         # A stall on one attempt usually means the origin is unreachable; do
         # not multiply the wall-clock cost by retrying it.
         raise _FetchFailure(f"timed out after {timeout} seconds ({exc})", retryable=False) from exc
@@ -165,6 +247,11 @@ def _download_image_bytes(
         raise _FetchFailure(f"request failed ({exc})", retryable=True) from exc
 
     with response:
+        if time.monotonic() > deadline:
+            raise _FetchFailure(
+                f"download exceeded the {total_timeout} second total time limit",
+                retryable=False,
+            )
         status = response.status_code
         if status >= 400:
             raise _FetchFailure(
@@ -186,11 +273,12 @@ def _download_image_bytes(
 
         buffer = BytesIO()
         received = 0
-        deadline = time.monotonic() + total_timeout
         # A per-read timeout alone lets a server keep a download alive forever
         # by trickling a byte at a time.  A watchdog closes the socket when the
         # whole download exceeds the wall-clock budget.
-        watchdog = threading.Timer(total_timeout, _abort_response, args=(response,))
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()), _abort_response, args=(response,)
+        )
         watchdog.daemon = True
         watchdog.start()
         try:
@@ -209,7 +297,17 @@ def _download_image_bytes(
                         retryable=False,
                     )
                 buffer.write(chunk)
+            if time.monotonic() >= deadline:
+                raise _FetchFailure(
+                    f"download exceeded the {total_timeout} second total time limit",
+                    retryable=False,
+                )
         except requests.Timeout as exc:
+            if time.monotonic() >= deadline:
+                raise _FetchFailure(
+                    f"download exceeded the {total_timeout} second total time limit",
+                    retryable=False,
+                ) from exc
             raise _FetchFailure(f"timed out while reading the response ({exc})", retryable=False) from exc
         except requests.RequestException as exc:
             if time.monotonic() >= deadline:
@@ -288,7 +386,11 @@ def load_image_from_url(
             break
         try:
             data = _download_image_bytes(
-                url, timeout=timeout, max_bytes=max_bytes, total_timeout=remaining
+                url,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                deadline=deadline,
+                total_timeout=total_timeout,
             )
         except _FetchFailure as failure:
             last_failure = failure
@@ -299,6 +401,13 @@ def load_image_from_url(
                 break
             time.sleep(delay)
             continue
+
+        # The body may have finished just as the budget expired; do not start
+        # decoding an image the caller no longer has time to receive.
+        if time.monotonic() >= deadline:
+            raise ImageFetchError(
+                url, f"download exceeded the {total_timeout} second total time limit"
+            )
 
         try:
             image = Image.open(BytesIO(data))
@@ -323,6 +432,11 @@ def load_image_from_url(
         except Exception as exc:
             image.close()
             raise ImageFetchError(url, f"response is not a decodable image ({exc})") from exc
+        if time.monotonic() >= deadline:
+            image.close()
+            raise ImageFetchError(
+                url, f"image decoding exceeded the {total_timeout} second total time limit"
+            )
         return image
 
     assert last_failure is not None
