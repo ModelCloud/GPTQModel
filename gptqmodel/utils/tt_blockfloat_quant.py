@@ -95,8 +95,114 @@ def ttnn_blockfloat_attr(bits: int) -> str:
         ) from None
 
 
+def resolve_blockfloat_dtype(dtype, config=None) -> torch.dtype:
+    """Turn a caller's dtype request into a concrete ``torch.dtype``.
+
+    ``None`` and ``"auto"`` mean *the model's own precision*, which is what
+    ``from_pretrained`` does for every other quantized checkpoint: Llama-3.2-1B
+    declares ``bfloat16``, so it stays ``bfloat16``. This path used to hard-code
+    ``float32``, which doubled the resident size of the model and slowed the
+    calibration replay for no numerical gain:
+
+    * the Hessian is accumulated in ``float32`` regardless of the model dtype
+      (see :func:`collect_layer_hessians`), and
+    * every value the block-float grid can store is exactly representable in
+      ``bfloat16`` -- ``bf4_b`` keeps 3 significant bits and ``bf8_b`` keeps 7,
+      while ``bfloat16`` carries 8 -- so the solved weights survive bf16 storage
+      without rounding.
+
+    An explicit ``torch.dtype`` is honoured. A string name is accepted for CLI
+    use. Anything else (notably the "not provided" sentinel the loader's dtype
+    normaliser returns) falls back to the checkpoint's declared dtype.
+    """
+
+    if isinstance(dtype, torch.dtype):
+        return dtype
+
+    if isinstance(dtype, str):
+        name = dtype.strip().lower().replace("torch.", "")
+        if name != "auto":
+            resolved = getattr(torch, name, None)
+            if isinstance(resolved, torch.dtype):
+                return resolved
+            raise ValueError(
+                f"unknown dtype {dtype!r}; use 'auto', 'float32', 'bfloat16' or 'float16'"
+            )
+
+    declared = getattr(config, "torch_dtype", None) if config is not None else None
+    if isinstance(declared, torch.dtype):
+        return declared
+    if isinstance(declared, str):
+        resolved = getattr(torch, declared.replace("torch.", ""), None)
+        if isinstance(resolved, torch.dtype):
+            return resolved
+
+    return torch.float32
+
+
 #: Values per shared exponent.
 BLOCKFLOAT_BLOCK = 16
+
+
+#: Buffer names transformers deliberately keeps in float32 inside a bf16 model.
+#: ``from_pretrained`` never casts them -- they are built with an explicit
+#: ``.float()`` and are absent from the checkpoint -- so a blanket ``.to(dtype)``
+#: narrows them and changes the rotary frequencies.
+_FP32_PINNED_BUFFERS = ("inv_freq",)
+
+
+def _is_pinned_fp32(name: str, model) -> bool:
+    """Whether ``name`` must stay float32 even when the model is bf16."""
+
+    if name.endswith(_FP32_PINNED_BUFFERS):
+        return True
+    keep = getattr(model, "_keep_in_fp32_modules", None) or ()
+    return any(fragment in name for fragment in keep)
+
+
+def _cast_model_dtype(model, dtype: torch.dtype) -> None:
+    """Move a model to ``dtype`` the way ``from_pretrained`` does.
+
+    A blanket ``model.to(dtype)`` is not equivalent: it also narrows buffers
+    that Hugging Face intentionally keeps in float32 (Llama's rotary
+    ``inv_freq``), which changes the rotary frequencies and therefore the
+    logits. Casting per tensor lets those be handled explicitly.
+
+    Pinned tensors are converted *to* float32 rather than skipped: some models
+    declare ``_keep_in_fp32_modules`` (GPT-OSS lists its norms), and
+    ``_from_config`` initializes them in the checkpoint's dtype. Skipping them
+    would leave bf16 norms in an explicitly-fp32 load, and copying a float32
+    norm payload into a bf16 parameter rounds it (1.001 -> 1.0).
+    """
+
+    for name, parameter in model.named_parameters():
+        if not parameter.is_floating_point():
+            continue
+        target = torch.float32 if _is_pinned_fp32(name, model) else dtype
+        if parameter.dtype is not target:
+            parameter.data = parameter.data.to(target)
+    for name, buffer in model.named_buffers():
+        if not buffer.is_floating_point():
+            continue
+        target = torch.float32 if _is_pinned_fp32(name, model) else dtype
+        if buffer.dtype is not target:
+            buffer.data = buffer.data.to(target)
+
+
+def _sync_config_dtype(config, dtype: torch.dtype) -> None:
+    """Keep ``dtype`` and its deprecated ``torch_dtype`` mirror in agreement.
+
+    ``to_dict`` serialises both, and transformers prefers ``dtype`` when it
+    reads a checkpoint. Updating only one means an explicit load override is
+    silently reverted on the next load, and a re-save writes a config that
+    contradicts its own weights.
+    """
+
+    config.dtype = dtype
+    # Write the deprecated mirror directly: the property setter logs a warning
+    # on every call, and this runs on every load.
+    if "torch_dtype" in getattr(config, "__dict__", {}):
+        config.__dict__["torch_dtype"] = dtype
 
 
 def stored_mantissa_bits(total_bits: int) -> int:
@@ -1360,12 +1466,17 @@ def save_blockfloat_model(
 
     config = model.config.to_dict()
     # Declare the precision the dense remainder is actually stored at, so a
-    # plain ``from_pretrained`` does not round it on the way in.
+    # plain ``from_pretrained`` does not round it on the way in. Write both
+    # spellings: ``dtype`` is authoritative and ``torch_dtype`` is the
+    # deprecated mirror, and leaving either at the source model's value would
+    # contradict the weights on the next load.
     try:
         dense_dtype = next(model.parameters()).dtype
     except StopIteration:  # pragma: no cover - a fully quantized model
         dense_dtype = torch.float32
-    config["torch_dtype"] = str(dense_dtype).replace("torch.", "")
+    dense_dtype_name = str(dense_dtype).replace("torch.", "")
+    config["dtype"] = dense_dtype_name
+    config["torch_dtype"] = dense_dtype_name
     # A re-save must not erase where the checkpoint came from. Keep whatever the
     # source recorded and layer explicit updates on top; the format fields below
     # stay authoritative either way.
@@ -1534,12 +1645,15 @@ def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None
 
 
 def build_blockfloat_model(
-    checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
+    checkpoint_dir: str, *, dtype=None
 ) -> "tuple":
     """Build the torch model for a checkpoint directory.
 
     Returns ``(model, restored_layers, info)``. Shared by the library loader and
     the ``GPTQModel.load`` route so both read the checkpoint identically.
+
+    ``dtype`` defaults to the checkpoint's declared ``torch_dtype``, matching
+    ``from_pretrained``; pass ``torch.float32`` to force upcasting.
     """
 
     import transformers
@@ -1555,6 +1669,7 @@ def build_blockfloat_model(
         raise ValueError(f"{checkpoint_dir} has no tensors in its index")
 
     config = AutoConfig.from_pretrained(checkpoint_dir)
+    dtype = resolve_blockfloat_dtype(dtype, config)
     quantization_config = getattr(config, "quantization_config", None) or {}
     if not isinstance(quantization_config, dict):
         quantization_config = dict(quantization_config)
@@ -1572,7 +1687,12 @@ def build_blockfloat_model(
         raise ValueError(
             f"{checkpoint_dir} has unsupported model_type `{config.model_type}`"
         )
-    model = getattr(transformers, class_name)._from_config(config).to(dtype=dtype)
+    # Build through the dtype-aware constructor, then cast per tensor. A blanket
+    # ``.to(dtype)`` would also narrow Llama's float32 rotary ``inv_freq``, which
+    # ``from_pretrained`` deliberately leaves alone.
+    model = getattr(transformers, class_name)._from_config(config)
+    _cast_model_dtype(model, dtype)
+    _sync_config_dtype(model.config, dtype)
 
     restored = swap_blockfloat_modules(
         model,
@@ -1614,13 +1734,15 @@ def build_blockfloat_model(
 
 
 def load_blockfloat_model(
-    checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
+    checkpoint_dir: str, *, dtype=None
 ) -> "tuple":
     """Load a checkpoint written by :func:`save_blockfloat_model`.
 
     Reads the standard HF index, so nothing here depends on this project's file
     naming: any tensor named ``<prefix>.codes`` swaps that module for the
     block-float kernel, and everything else loads as an ordinary parameter.
+
+    ``dtype`` follows the same rule as :func:`build_blockfloat_model`.
     """
 
     model, restored, _info = build_blockfloat_model(checkpoint_dir, dtype=dtype)
@@ -1635,5 +1757,6 @@ __all__ += [
     "load_blockfloat_model",
     "load_hf_state_dict",
     "read_hf_weight_map",
+    "resolve_blockfloat_dtype",
     "save_blockfloat_model",
 ]

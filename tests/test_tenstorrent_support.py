@@ -2181,6 +2181,233 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
     assert torch.equal(after, expected), float((after - expected).abs().max())
 
 
+def test_blockfloat_grid_values_survive_bf16_storage():
+    """Every storable grid value is exact in bf16, which is why bf16 is safe.
+
+    ``bf4_b`` keeps 3 significant bits and ``bf8_b`` keeps 7; bf16 carries 8.
+    So copying a solved weight back into a bf16 parameter cannot move it off the
+    grid, and the loader may use the checkpoint's own precision instead of
+    upcasting everything to float32.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 128)
+    for bits in (4, 8):
+        quantized, _exponents = bq.quantize_blockfloat(weight, bits)
+        round_tripped = quantized.to(torch.bfloat16).to(torch.float32)
+        assert torch.equal(round_tripped, quantized), f"bf{bits} grid not exact in bf16"
+
+
+def test_resolve_blockfloat_dtype_defaults_to_the_checkpoint():
+    """``None``/``auto`` must mean the checkpoint's dtype, not float32."""
+
+    import importlib
+    from types import SimpleNamespace
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    bf16_config = SimpleNamespace(torch_dtype=torch.bfloat16)
+    string_config = SimpleNamespace(torch_dtype="bfloat16")
+
+    assert bq.resolve_blockfloat_dtype(None, bf16_config) is torch.bfloat16
+    assert bq.resolve_blockfloat_dtype("auto", bf16_config) is torch.bfloat16
+    assert bq.resolve_blockfloat_dtype(None, string_config) is torch.bfloat16
+    # An explicit request wins over the checkpoint.
+    assert bq.resolve_blockfloat_dtype(torch.float32, bf16_config) is torch.float32
+    assert bq.resolve_blockfloat_dtype("float16", bf16_config) is torch.float16
+    # The loader's "not provided" sentinel is not a dtype and must not win.
+    assert bq.resolve_blockfloat_dtype(object(), bf16_config) is torch.bfloat16
+    # No config and no request: float32 remains the safe fallback.
+    assert bq.resolve_blockfloat_dtype(None) is torch.float32
+    with pytest.raises(ValueError, match="unknown dtype"):
+        bq.resolve_blockfloat_dtype("float8", bf16_config)
+
+
+def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
+    """A bf16 checkpoint loads as bf16 by default and can be forced to fp32.
+
+    The source is built the way ``from_pretrained`` builds one -- bf16 weights
+    with a float32 rotary ``inv_freq`` -- so a blanket ``.to(bf16)`` in the
+    loader would narrow that buffer and change the rotary frequencies.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True, dtype=torch.bfloat16,
+    )
+    model = LlamaForCausalLM._from_config(config)
+    model.eval()
+    assert model.model.rotary_emb.inv_freq.dtype is torch.float32
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(
+                        bq.quantize_bf4(module.weight.detach().float()).to(torch.bfloat16)
+                    )
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0].to(torch.bfloat16)
+        )
+
+    out = str(tmp_path / "bf16")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    import json
+
+    with open(f"{out}/config.json") as handle:
+        saved = json.load(handle)
+    assert saved["dtype"] == "bfloat16"
+    assert saved["torch_dtype"] == "bfloat16"
+
+    auto, _ = bq.load_blockfloat_model(out)
+    assert next(auto.parameters()).dtype is torch.bfloat16
+    # The float32 rotary buffer must survive the load, as it does through
+    # from_pretrained; narrowing it shifts every rotary angle.
+    assert auto.model.rotary_emb.inv_freq.dtype is torch.float32
+
+    forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
+    assert next(forced.parameters()).dtype is torch.float32
+    # An explicit override must also update the authoritative config field,
+    # otherwise a re-save writes `dtype: bfloat16` next to `torch_dtype: float32`
+    # and transformers prefers the former on the next load.
+    assert forced.config.dtype is torch.float32
+
+    ids = torch.randint(0, 64, (1, 8))
+    with torch.no_grad():
+        reference = model(ids).logits.float()
+        reloaded = auto(ids).logits.float()
+    assert torch.equal(reloaded, reference), float((reloaded - reference).abs().max())
+
+    # Re-save the upcast model and confirm the artifact does not silently fall
+    # back to bf16 on the next load.
+    upcast_dir = str(tmp_path / "upcast")
+    bq.save_blockfloat_model(forced, upcast_dir, bits=4, embed_bits=8)
+    with open(f"{upcast_dir}/config.json") as handle:
+        upcast_config = json.load(handle)
+    assert upcast_config["dtype"] == "float32"
+    assert upcast_config["torch_dtype"] == "float32"
+
+    again, _ = bq.load_blockfloat_model(upcast_dir)
+    assert next(again.parameters()).dtype is torch.float32
+    norm = forced.model.norm.weight.detach()
+    assert torch.equal(again.model.norm.weight.detach(), norm)
+
+
+def test_blockfloat_pinned_fp32_norms_survive_an_fp32_override(tmp_path):
+    """Pinned parameters must be converted to fp32, not skipped.
+
+    GPT-OSS declares ``_keep_in_fp32_modules = ["post_attention_layernorm",
+    "input_layernorm", "norm"]``, so ``from_pretrained`` keeps its norms fp32
+    inside a bf16 model. The loader initialises them in the checkpoint dtype,
+    so an explicit fp32 load has to actively promote them -- skipping the cast
+    leaves a bf16 parameter, and the stored fp32 norm rounds on load
+    (1.001 -> 1.0).
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    from transformers import GptOssConfig, GptOssForCausalLM
+
+    torch.manual_seed(0)
+    config = GptOssConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        num_local_experts=2, head_dim=8, max_position_embeddings=64,
+        tie_word_embeddings=True, dtype=torch.bfloat16,
+    )
+    model = GptOssForCausalLM._from_config(config)
+    # The precondition: without an explicit promotion the norm starts bf16.
+    assert model.model.norm.weight.dtype is torch.bfloat16
+
+    pinned = tuple(GptOssForCausalLM._keep_in_fp32_modules)
+    with torch.no_grad():
+        # Emulate from_pretrained: pinned tensors are fp32, the rest bf16.
+        for name, parameter in model.named_parameters():
+            if any(fragment in name for fragment in pinned):
+                parameter.data = parameter.data.float()
+                parameter.fill_(1.001)
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(
+                        bq.quantize_bf4(module.weight.detach().float()).to(torch.bfloat16)
+                    )
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0].to(torch.bfloat16)
+        )
+
+    out = str(tmp_path / "gptoss")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    with open(f"{out}/config.json") as handle:
+        saved = json.load(handle)
+    assert saved["dtype"] == "bfloat16"
+
+    # Default load: the model is bf16, but the pinned norm stays fp32 exactly
+    # as it does through from_pretrained.
+    auto, _ = bq.load_blockfloat_model(out)
+    assert next(auto.parameters()).dtype is torch.bfloat16
+    assert auto.model.norm.weight.dtype is torch.float32
+
+    # Explicit fp32 override: the pinned norm must be promoted, not skipped.
+    forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
+    assert forced.model.norm.weight.dtype is torch.float32
+    assert float(forced.model.norm.weight[0]) == 1.0010000467300415
+
+
+def test_blockfloat_embedding_follows_module_casts():
+    """``.float()``/``.bfloat16()`` must move the table's output dtype too.
+
+    The table owns no float parameter, so a plain attribute would stay frozen
+    while the rest of the model was cast. A bf16 table feeding fp32 linears then
+    raises a dtype mismatch on the next forward.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    kern = importlib.import_module("gptqmodel.nn_modules.qlinear.tt_blockfloat")
+
+    torch.manual_seed(0)
+    weight = bq.quantize_blockfloat(torch.randn(16, 32), 8)[0]
+    codes, exponents = bq.decompose_blockfloat(weight, bits=8)
+
+    table = kern.TTBlockfloatEmbedding(
+        num_embeddings=16, embedding_dim=32, bits=8, dtype=torch.bfloat16
+    )
+    table.set_quantized_state(codes, exponents)
+
+    ids = torch.tensor([0, 3, 15])
+    assert table.output_dtype is torch.bfloat16
+    assert table(ids).dtype is torch.bfloat16
+
+    table.float()
+    assert table.output_dtype is torch.float32
+    assert table(ids).dtype is torch.float32
+
+    table.bfloat16()
+    assert table.output_dtype is torch.bfloat16
+    assert table(ids).dtype is torch.bfloat16
+
+    # The dtype anchor is a non-persistent buffer: it must not become a key in
+    # the checkpoint.
+    assert "_output_dtype_anchor" not in table.state_dict()
+
+
 def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
     """A decoder-only directory must fail loudly, not load random norms.
 
