@@ -52,6 +52,19 @@ def main(argv: list) -> int:
         ),
     )
     parser.add_argument("--nsamples", type=int, default=8)
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", "float32", "bfloat16", "float16"),
+        help=(
+            "precision to load the source model in. 'auto' (the default) uses "
+            "the checkpoint's declared torch_dtype, the same rule "
+            "from_pretrained and the CUDA/ROCm GPTQ path follow: a bf16 Llama "
+            "stays bf16. This does not weaken the solve -- the Hessian is "
+            "accumulated in float32 regardless, and every bf4_b/bf8_b grid "
+            "value is exactly representable in bf16."
+        ),
+    )
     calibration_source = parser.add_mutually_exclusive_group(required=True)
     calibration_source.add_argument(
         "--calibration",
@@ -102,16 +115,25 @@ def main(argv: list) -> int:
     os.environ.setdefault("USE_TORCH_XLA", "0")
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from gptqmodel.utils.tt_blockfloat_quant import (
         build_blockfloat_model,
         quantize_model_blockfloat,
+        resolve_blockfloat_dtype,
         save_blockfloat_model,
     )
 
+    # 'auto' follows the source checkpoint's declared precision, like
+    # from_pretrained and the CUDA/ROCm GPTQ path. Loading a bf16 model as
+    # float32 doubled its resident size and slowed the calibration replay
+    # without changing the solve: the Hessian is float32 either way.
+    dtype = resolve_blockfloat_dtype(
+        args.dtype, AutoConfig.from_pretrained(args.model)
+    )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype)
+    print(f"[Q] source dtype: {dtype}", flush=True)
 
     if args.calibration is not None:
         calibration = args.calibration
@@ -202,9 +224,10 @@ def main(argv: list) -> int:
 
     # Reload through the same reader a consumer uses: the checkpoint is a plain
     # HF directory, so this exercises the index and the module swap rather than a
-    # bespoke path.
+    # bespoke path. Reload at the saved precision so the bit-exact check compares
+    # like with like.
     reloaded_model, restored, _info = build_blockfloat_model(
-        args.out, dtype=torch.float32
+        args.out, dtype=dtype
     )
     with torch.no_grad():
         reloaded = reloaded_model(ids).logits[0, -1].float()

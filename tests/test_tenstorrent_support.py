@@ -2181,6 +2181,101 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
     assert torch.equal(after, expected), float((after - expected).abs().max())
 
 
+def test_blockfloat_grid_values_survive_bf16_storage():
+    """Every storable grid value is exact in bf16, which is why bf16 is safe.
+
+    ``bf4_b`` keeps 3 significant bits and ``bf8_b`` keeps 7; bf16 carries 8.
+    So copying a solved weight back into a bf16 parameter cannot move it off the
+    grid, and the loader may use the checkpoint's own precision instead of
+    upcasting everything to float32.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 128)
+    for bits in (4, 8):
+        quantized, _exponents = bq.quantize_blockfloat(weight, bits)
+        round_tripped = quantized.to(torch.bfloat16).to(torch.float32)
+        assert torch.equal(round_tripped, quantized), f"bf{bits} grid not exact in bf16"
+
+
+def test_resolve_blockfloat_dtype_defaults_to_the_checkpoint():
+    """``None``/``auto`` must mean the checkpoint's dtype, not float32."""
+
+    import importlib
+    from types import SimpleNamespace
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    bf16_config = SimpleNamespace(torch_dtype=torch.bfloat16)
+    string_config = SimpleNamespace(torch_dtype="bfloat16")
+
+    assert bq.resolve_blockfloat_dtype(None, bf16_config) is torch.bfloat16
+    assert bq.resolve_blockfloat_dtype("auto", bf16_config) is torch.bfloat16
+    assert bq.resolve_blockfloat_dtype(None, string_config) is torch.bfloat16
+    # An explicit request wins over the checkpoint.
+    assert bq.resolve_blockfloat_dtype(torch.float32, bf16_config) is torch.float32
+    assert bq.resolve_blockfloat_dtype("float16", bf16_config) is torch.float16
+    # The loader's "not provided" sentinel is not a dtype and must not win.
+    assert bq.resolve_blockfloat_dtype(object(), bf16_config) is torch.bfloat16
+    # No config and no request: float32 remains the safe fallback.
+    assert bq.resolve_blockfloat_dtype(None) is torch.float32
+    with pytest.raises(ValueError, match="unknown dtype"):
+        bq.resolve_blockfloat_dtype("float8", bf16_config)
+
+
+def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
+    """A bf16 checkpoint loads as bf16 by default and can be forced to fp32."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(0)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True, torch_dtype=torch.bfloat16,
+    )
+    model = LlamaForCausalLM(config).to(torch.bfloat16)
+    model.eval()
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(
+                        bq.quantize_bf4(module.weight.detach().float()).to(torch.bfloat16)
+                    )
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0].to(torch.bfloat16)
+        )
+
+    out = str(tmp_path / "bf16")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    import json
+
+    saved = json.load(open(f"{out}/config.json"))
+    assert saved["torch_dtype"] == "bfloat16"
+
+    auto, _ = bq.load_blockfloat_model(out)
+    assert next(auto.parameters()).dtype is torch.bfloat16
+
+    forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
+    assert next(forced.parameters()).dtype is torch.float32
+
+    ids = torch.randint(0, 64, (1, 8))
+    with torch.no_grad():
+        reference = model(ids).logits.float()
+        reloaded = auto(ids).logits.float()
+    assert torch.equal(reloaded, reference), float((reloaded - reference).abs().max())
+
+
 def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
     """A decoder-only directory must fail loudly, not load random norms.
 

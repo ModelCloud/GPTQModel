@@ -253,11 +253,18 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         bits: int = 8,
         block: int = BLOCKFLOAT_BLOCK,
         name: str = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.name = name or type(self).__name__
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
+        # The table owns no float parameter, so it cannot read the activation
+        # dtype off itself the way ``TTBlockfloatLinear`` does. Record the
+        # precision the surrounding model was built at and dequantize into it;
+        # the default used to be float32, which silently upcast every forward
+        # pass of a bf16 model.
+        self.output_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float32
         # ``_BlockfloatStorage`` reads ``out_features``/``in_features``; for a
         # table the rows are the outputs.
         self.out_features = num_embeddings
@@ -268,7 +275,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         self._init_storage(num_embeddings, embedding_dim, bits, block)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize()
+        weight = self.dequantize(dtype=self.output_dtype)
         return F.embedding(input_ids, weight)
 
 
@@ -339,6 +346,9 @@ def swap_blockfloat_modules(
                 bits=bits,
                 block=block,
                 name=prefix,
+                # Follow the precision the model was built at, so the table does
+                # not upcast the rest of the forward to float32.
+                dtype=module.weight.dtype,
             )
         elif isinstance(module, nn.Linear):
             replacement = TTBlockfloatLinear(

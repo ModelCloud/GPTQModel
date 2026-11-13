@@ -907,9 +907,10 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
         quantize_config_from_checkpoint,
     )
 
-    if not isinstance(dtype, torch.dtype):
-        dtype = torch.float32
-
+    # ``dtype`` is passed through as-is: ``None``/the normaliser's "not
+    # provided" sentinel means "the checkpoint's declared precision", which is
+    # what the GPTQ/AWQ routes get from ``from_pretrained``. Forcing float32
+    # here doubled the resident model for no numerical gain.
     model, restored, info = build_tt_blockfloat_model(model_local_path, dtype=dtype)
 
     model_config = model.config.to_dict()
