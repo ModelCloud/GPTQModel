@@ -9,9 +9,10 @@ import torch
 import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel import QuantizeEmbed, QuantizeEmbedConfig
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.extension import LoopExtensions, LoopPlan, LoopStep
 from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import ExecutionConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
@@ -22,6 +23,7 @@ from gptqmodel.looper.stage_layer import (
     _replay_layer_outputs,
     _should_drain_finalize_futures_synchronously,
     _should_empty_cache_after_sync_finalize,
+    _step_progress_index,
     run_layer_stage,
 )
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
@@ -693,7 +695,7 @@ def test_stage_subset_flush_goes_global_when_work_fans_out_across_devices():
 
 def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch):
     class DummyProcessor:
-        execution_config = ExecutionConfig(require_fwd=False)
+        forward = ForwardConfig(required=False)
         tasks = {}
 
         def set_fwd_time(self, *_):
@@ -760,10 +762,10 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
 
 def test_subset_pass_restored_capture_skips_forward(monkeypatch):
     class DummyProcessor:
-        execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
-        )
+        forward = ForwardConfig(
+                                           required=True,
+                                           replay_after_process=True,
+                                       )
         tasks = {}
 
         def restore_subset_capture_frontier(self, **kwargs):
@@ -890,10 +892,10 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
     )
 
     class DummyProcessor:
-        execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
-        )
+        forward = ForwardConfig(
+                                           required=True,
+                                           replay_after_process=True,
+                                       )
         tasks = {projection.name: object()}
 
         def begin_shared_input_capture(self, *args, **kwargs):
@@ -1051,10 +1053,10 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
             return ImmediateFuture(callback(*args))
 
     class DummyProcessor:
-        execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
-        )
+        forward = ForwardConfig(
+                                           required=True,
+                                           replay_after_process=True,
+                                       )
         tasks = {projection.name: object()}
 
         def restore_subset_capture_frontier(self, **_kwargs):
@@ -1525,11 +1527,11 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
     class DummyProcessor:
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
-            self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
-                fwd_all_modules_in_single_pass=False,
-            )
+            self.forward = ForwardConfig(
+                                                        required=True,
+                                                        replay_after_process=False,
+                                                        all_modules_in_single_pass=False,
+                                                    )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=[[tensor]],
                 layer_input_kwargs=[{}],
@@ -1744,11 +1746,11 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
     class DummyProcessor:
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
-            self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
-                fwd_all_modules_in_single_pass=False,
-            )
+            self.forward = ForwardConfig(
+                                                        required=True,
+                                                        replay_after_process=False,
+                                                        all_modules_in_single_pass=False,
+                                                    )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=[[tensor]],
                 layer_input_kwargs=[{}],
@@ -1894,6 +1896,343 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
     assert looper.named_module_layers == [0]
     assert pb.close_calls == 1
 
+    # The planner's resolved extent is authoritative. Without dynamic
+    # exclusions a recomputation would allow every layer, but the supplied
+    # extent still stops the stage after layer 0.
+    calls.clear()
+    looper.named_module_layers.clear()
+    looper.gptq_model.quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        offload_to_disk=False,
+    )
+    pb.close_calls = 0
+
+    run_layer_stage(
+        looper,
+        layers=[torch.nn.Linear(64, 64) for _ in range(3)],
+        layer_modules=[["foo"]],
+        planning_layer_modules=[["foo"]],
+        layer_names=["model.layers.0", "model.layers.1", "model.layers.2"],
+        fallback=True,
+        shared_kv_cache_dict={},
+        pb=pb,
+        layer_count=3,
+        region_timer=None,
+        finalize_progress_cls=FinalizeProgressInfo,
+        last_quantized_layer_index=0,
+        logger=DummyLogger(),
+    )
+
+    assert calls == [0]
+    assert looper.named_module_layers == [0]
+    assert pb.close_calls == 1
+
+
+def test_step_progress_index_maps_planned_step_kinds():
+    assert _step_progress_index(
+        LoopStep("input_embeddings", -1, "input_embeddings"),
+        layer_count=3,
+        layer_index_offset=1,
+    ) == 0
+    assert _step_progress_index(
+        LoopStep("layer", 2, "model.layers.2"),
+        layer_count=3,
+        layer_index_offset=1,
+    ) == 3
+    assert _step_progress_index(
+        LoopStep("output_embeddings", 3, "output_embeddings"),
+        layer_count=3,
+        layer_index_offset=1,
+    ) == 4
+    assert _step_progress_index(
+        LoopStep("lm_head", 3, "lm_head"),
+        layer_count=3,
+        layer_index_offset=0,
+    ) == 3
+
+
+def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
+    published = []
+    calls = []
+
+    class Recorder:
+        def on_boundary(self, boundary):
+            published.append(boundary.step)
+
+    def fake_run_subset_stage(looper, **kwargs):
+        calls.append(kwargs["layer_index"])
+        return SubsetStageResult(
+            processed_subset={},
+            layer_inputs=kwargs["layer_inputs"],
+            plan=kwargs["plan"],
+        )
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.find_modules", lambda *_, **__: {})
+
+    class DummyPB:
+        def __init__(self, iterable):
+            self._iterable = list(iterable)
+            self.current_iter_step = 0
+            self.close_calls = 0
+
+        def __len__(self):
+            return len(self._iterable)
+
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def next(self):
+            return self
+
+        def close(self):
+            self.close_calls += 1
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB(iterable)
+
+        def info(self, *_, **__):
+            return None
+
+        def debug(self, *_, **__):
+            return None
+
+        def warning(self, *_, **__):
+            return None
+
+        warn = warning
+
+        def error(self, *_, **__):
+            return None
+
+    class DummyProcessor:
+        def __init__(self):
+            tensor = torch.zeros(1, 1, 1)
+            self.forward = ForwardConfig(
+                required=True,
+                replay_after_process=False,
+                all_modules_in_single_pass=False,
+            )
+            self.inputs_cache = types.SimpleNamespace(
+                src_inputs=[[tensor]],
+                layer_inputs=[[tensor]],
+                layer_input_kwargs=[{}],
+                position_ids=[],
+                attention_masks=[],
+            )
+            self.calibration_dataset = []
+            self.log = []
+            self.tasks = {}
+
+        def collect_memory_info(self, *_):
+            return None
+
+        def pre_process_fwd_hook(self, *_):
+            return lambda *a, **k: None
+
+        def process(self, *_, **__):
+            return None
+
+        def clear_cache_data(self):
+            return None
+
+        def receive_layer_inputs(self, inputs):
+            self.inputs_cache.layer_inputs = inputs
+
+        def set_fwd_time(self, *_):
+            return None
+
+        def name(self):
+            return "dummy"
+
+        def submodule_finalize(self, *_, **__):
+            return None
+
+        def finalize(self, *_, **__):
+            return None
+
+        def log_plotly(self):
+            return None
+
+    input_embedding = torch.nn.Linear(64, 64)
+    output_embedding = torch.nn.Linear(64, 64)
+
+    class DummyGptqModel:
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.config = types.SimpleNamespace(model_type="llama")
+            self.quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=False,
+            )
+            self.lm_head = None
+
+        def pre_quantize(self, module):
+            return module
+
+        def should_quantize_layer(self, *_args):
+            return True
+
+        def post_quantize(self, module):
+            return module
+
+        def lm_head_pre_quantize_generate_hook(self, value):
+            return value
+
+        def get_input_embeddings(self):
+            return input_embedding
+
+        def get_output_embeddings(self):
+            return output_embedding
+
+        def get_input_embeddings_name(self):
+            return "model.embed_tokens"
+
+        def get_output_embeddings_name(self):
+            return "lm_head"
+
+    class DummyLooper:
+        def __init__(self):
+            self.gptq_model = DummyGptqModel()
+            self.processors = [DummyProcessor()]
+            self.input_embeddings_name = "model.embed_tokens"
+            self.output_embeddings_name = "lm_head"
+            self._quant_devices = [torch.device("cpu")]
+            self._module_device_map = {}
+            self._quant_device_lock = threading.Lock()
+            self._moe_subset_threshold = 16
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
+            self._layer_events = []
+            self.named_module_layers = []
+            self.extensions = LoopExtensions([Recorder()])
+
+        def _check_loop_stop(self):
+            return False
+
+        def _is_attention_module_name(self, _name):
+            return False
+
+        def _extract_moe_group_key(self, _name):
+            return None
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _emit_layer_complete(self, *, layer_idx, submodule_finalized, raise_in_place):
+            self._layer_events.append((layer_idx, submodule_finalized, raise_in_place))
+
+        def _request_loop_stop(self, exc):
+            self._stop_exc = exc
+
+        def _subset_event_dispatch(self, *kwargs):
+            pass
+
+        def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor,
+                                 fallback, layer_module=None) -> Dict[str, NamedModule]:
+            self.named_module_layers.append(layer_index)
+            return {
+                "self_attn.q_proj": NamedModule(
+                    module,
+                    name="self_attn.q_proj",
+                    full_name=full,
+                    layer_index=layer_index,
+                )
+            }
+
+    layers = [torch.nn.Linear(64, 64) for _ in range(2)]
+    layer_modules = [["foo"]]
+    layer_names = ["model.layers.0", "model.layers.1"]
+    logger = DummyLogger()
+
+    def run(pb, plan, *, cursor=0, embed_quant_mode=None):
+        calls.clear()
+        published.clear()
+        looper = DummyLooper()
+        processor = looper.processors[0]
+        processor.layer_count = 2
+        processor.pb = pb
+        run_layer_stage(
+            looper,
+            layers=layers,
+            layer_modules=layer_modules,
+            planning_layer_modules=layer_modules,
+            layer_names=layer_names,
+            fallback=True,
+            shared_kv_cache_dict={},
+            pb=pb,
+            layer_count=2,
+            region_timer=None,
+            finalize_progress_cls=FinalizeProgressInfo,
+            embed_quant_mode=embed_quant_mode,
+            embed_only=False,
+            plan=plan,
+            cursor=cursor,
+            logger=logger,
+        )
+        return pb
+
+    normal_plan = LoopPlan((
+        LoopStep("layer", 0, "model.layers.0"),
+        LoopStep("layer", 1, "model.layers.1"),
+    ))
+    pb = run(DummyPB(range(2)), normal_plan)
+    assert published == list(normal_plan.steps)
+    assert calls == [0, 1]
+    assert pb.close_calls == 1
+
+    # Resume from the extension cursor without re-running earlier steps.
+    pb = run(DummyPB(range(2)), normal_plan, cursor=1)
+    assert published == [normal_plan.steps[1]]
+    assert calls == [1]
+    assert pb.close_calls == 1
+
+    # A truncated plan is authoritative: trailing excluded layers never run.
+    excluded_plan = LoopPlan((LoopStep("layer", 0, "model.layers.0"),))
+    pb = run(DummyPB(range(3)), excluded_plan)
+    assert published == [excluded_plan.steps[0]]
+    assert calls == [0]
+    assert pb.close_calls == 1
+
+    # Embedding replay publishes the planner's embedding steps too.
+    embedding_plan = LoopPlan((
+        LoopStep("input_embeddings", -1, "input_embeddings"),
+        LoopStep("layer", 0, "model.layers.0"),
+        LoopStep("layer", 1, "model.layers.1"),
+        LoopStep("output_embeddings", 2, "output_embeddings"),
+    ))
+    pb = run(
+        DummyPB(range(4)),
+        embedding_plan,
+        embed_quant_mode=QuantizeEmbed.BOTH,
+    )
+    assert published == list(embedding_plan.steps)
+    assert len(calls) == 4
+    assert pb.close_calls == 1
+
 
 def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
     tensor = torch.zeros(1, 1, 1)
@@ -1992,11 +2331,11 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
 
     class DummyProcessor:
         def __init__(self):
-            self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=True,
-                fwd_all_modules_in_single_pass=False,
-            )
+            self.forward = ForwardConfig(
+                                                        required=True,
+                                                        replay_after_process=True,
+                                                        all_modules_in_single_pass=False,
+                                                    )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=[[tensor]],
                 layer_input_kwargs=[{}],
@@ -2682,12 +3021,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
 
     class DummyProcessor:
         def __init__(self, initial_inputs):
-            self.execution_config = ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=True,
-                fwd_all_modules_in_single_pass=False,
-                subset_forward_early_stop=True,
-            )
+            self.forward = ForwardConfig(
+                                                        required=True,
+                                                        replay_after_process=True,
+                                                        all_modules_in_single_pass=False,
+                                                        subset_early_stop=True,
+                                                    )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=initial_inputs,
                 layer_input_kwargs=[{}],

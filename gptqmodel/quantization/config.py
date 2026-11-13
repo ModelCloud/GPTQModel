@@ -749,7 +749,7 @@ def _gguf_bits_from_components(bits: int, public_format: str) -> GGUFBits:
     return bits_spec
 
 
-def _normalize_gguf_config_spec(
+def _normalize_gguf_config(
     bits: Union[int, str, GGUFBits],
     format_value: Optional[Union[str, FORMAT, GGUFBits]],
 ) -> Tuple[int, str, GGUFBits]:
@@ -2959,6 +2959,42 @@ def _get_module_include_patterns(patterns: Tuple[str, ...]) -> Tuple[Any, ...]:
     _MODULE_INCLUDE_PATTERN_CACHE[patterns] = result
     return result
 
+def _match_dynamic_rule(
+    dynamic: Dict[str, Dict[str, Any]],
+    module_name: str,
+) -> Tuple[Optional[str], Union[Dict[str, Any], bool, None]]:
+    """Return the first rule and its cached payload while the caller holds the dynamic lock."""
+    patterns = list(dynamic.keys())
+    exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
+    exact_entry = exact_lookup.get(module_name)
+    if all_exact:
+        if exact_entry is None:
+            return None, None
+        return patterns[exact_entry[0]], exact_entry[1]
+
+    best_index = exact_entry[0] if exact_entry is not None else None
+    for index, is_negative, compiled, overrides in regex_patterns:
+        if best_index is not None and index > best_index:
+            break
+        if compiled.match(module_name):
+            return patterns[index], False if is_negative else overrides
+    if exact_entry is not None:
+        return patterns[best_index], exact_entry[1]
+    return None, None
+
+
+def _cached_dynamic_rule(dynamic, module_name):
+    """Read or publish one ordered match under the dynamic configuration lock."""
+    cache_key = _dynamic_cache_key(dynamic)
+    override_cache = _dynamic_override_cache_for(dynamic)
+    lookup_key = (cache_key, module_name)
+    result = override_cache.get(lookup_key, _DYNAMIC_NO_MATCH)
+    if result is _DYNAMIC_NO_MATCH:
+        result = _match_dynamic_rule(dynamic, module_name)
+        override_cache[lookup_key] = result
+    return result
+
+
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
     module_name: str,
@@ -2977,35 +3013,7 @@ def _resolve_dynamic_override(
         return None
 
     with _dynamic_lock_for(dynamic):
-        cache_key = _dynamic_cache_key(dynamic)
-        override_cache = _dynamic_override_cache_for(dynamic)
-        lookup_key = (cache_key, module_name)
-        cached = override_cache.get(lookup_key, _DYNAMIC_NO_MATCH)
-        if cached is not _DYNAMIC_NO_MATCH:
-            return clone_result(cached)
-
-        exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
-        # Fast path: every pattern is an exact literal module name.
-        if all_exact:
-            exact_entry = exact_lookup.get(module_name)
-            matched = exact_entry[1] if exact_entry is not None else None
-            override_cache[lookup_key] = matched
-            return clone_result(matched)
-
-        # Mixed fallback: find the earliest matching pattern among exact
-        # literals (O(1) lookup) and ordered regex patterns.
-        exact_entry = exact_lookup.get(module_name)
-        best_index = exact_entry[0] if exact_entry is not None else None
-        matched = exact_entry[1] if exact_entry is not None else None
-
-        for index, is_negative, compiled, overrides in regex_patterns:
-            if best_index is not None and index > best_index:
-                break
-            if compiled.match(module_name):
-                matched = False if is_negative else copy.deepcopy(dict(overrides))
-                break
-
-        override_cache[lookup_key] = matched
+        _, matched = _cached_dynamic_rule(dynamic, module_name)
         return clone_result(matched)
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -3176,6 +3184,27 @@ def _validate_unique_preprocessors(preprocessors: List[BasePreProcessorConfig]) 
         codes_seen.add(preprocessor.code)
 
 
+def _select_dynamic_value(overrides: Mapping, key: Optional[str], default: Any, sub_key: Optional[str]) -> Any:
+    if key is None:
+        return overrides
+    if key in overrides:
+        value = overrides[key]
+    elif key in DYNAMIC_FIELD_SYNONYMS:
+        value = next(
+            (overrides[legacy_key] for legacy_key in DYNAMIC_FIELD_SYNONYMS[key] if legacy_key in overrides),
+            default,
+        )
+    else:
+        return default
+
+    if sub_key:
+        if isinstance(value, Mapping):
+            return value.get(sub_key, default)
+        log.info("QuantConfig: Dynamic `sub_key`: `%s` failed extraction from `sub_value`: `%s`", sub_key, value)
+        return default
+    return value
+
+
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
 
@@ -3188,27 +3217,7 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
     if overrides is None:
         return default
 
-    if key is None:
-        return overrides
-
-    if key in overrides:
-        sub_value = overrides[key]
-    elif key in DYNAMIC_FIELD_SYNONYMS:
-        sub_value = None
-        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
-            if legacy_key in overrides:
-                sub_value = overrides[legacy_key]
-                break
-    else:
-        return default
-
-    if sub_key:
-        if isinstance(sub_value, Dict):
-            return sub_value.get(sub_key, default)
-        log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
-        return default
-
-    return sub_value
+    return _select_dynamic_value(overrides, key, default, sub_key)
 
 
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
@@ -3221,23 +3230,51 @@ def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: st
     if not dynamic:
         return None
 
-    patterns = list(dynamic.keys())
-    exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
+    with _dynamic_lock_for(dynamic):
+        pattern, _ = _match_dynamic_rule(dynamic, module_name)
+        return pattern
 
-    if all_exact:
-        entry = exact_lookup.get(module_name)
-        return patterns[entry[0]] if entry is not None else None
 
-    exact_entry = exact_lookup.get(module_name)
-    best_index = exact_entry[0] if exact_entry is not None else None
-    for index, _is_negative, compiled, _overrides in regex_patterns:
-        if best_index is not None and index > best_index:
-            break
-        if compiled.match(module_name):
-            return patterns[index]
-    if best_index is not None:
-        return patterns[best_index]
-    return None
+@dataclass(frozen=True)
+class ResolvedModuleConfig:
+    """Read-only snapshot of the winning dynamic rule for one module.
+
+    Values are copied on access so nested method-specific settings cannot
+    mutate the original rule or another processor's snapshot.
+    """
+
+    module_name: str
+    source_pattern: Optional[str]
+    excluded: bool
+    _fields: Tuple[Tuple[str, Any], ...]
+
+    @property
+    def overrides(self) -> Dict[str, Any]:
+        return copy.deepcopy(dict(self._fields))
+
+    def get(self, key: Optional[str] = None, default: Any = None, sub_key: Optional[str] = None) -> Any:
+        """Read a resolved field with the same fallback rules as dynamic_get."""
+        if self.excluded:
+            return False
+        if self.source_pattern is None:
+            return default
+        fields = dict(self._fields)
+        return copy.deepcopy(_select_dynamic_value(fields, key, default, sub_key))
+
+
+def resolve_module_config_snapshot(config: "BaseQuantizeConfig", module_name: str) -> ResolvedModuleConfig:
+    """Match one rule once and retain its ordered provenance and value snapshot."""
+    dynamic = config.dynamic
+    if dynamic is None:
+        return ResolvedModuleConfig(module_name, None, False, ())
+    with _dynamic_lock_for(dynamic):
+        pattern, values = _cached_dynamic_rule(dynamic, module_name)
+        return ResolvedModuleConfig(
+            module_name=module_name,
+            source_pattern=pattern,
+            excluded=values is False,
+            _fields=tuple(copy.deepcopy(values).items()) if isinstance(values, dict) else (),
+        )
 
 
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
@@ -3422,6 +3459,24 @@ def _normalize_mse(
             return replace(base, norm=float(mse))
         return MSEConfig(norm=float(mse))
     raise ValueError("QuantizeConfig: `mse` must be a MSEConfig, dict, number, or None.")
+
+
+def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedModuleConfig) -> None:
+    """Apply the shared GPTQ/QQQ per-module fields to a cloned config."""
+    if resolved_cfg.excluded:
+        raise ValueError(f"Cannot apply excluded module config: {resolved_cfg.module_name}")
+    if resolved_cfg.source_pattern is None:
+        return
+    for field_name in ("bits", "sym", "group_size", "damp_percent", "static_groups"):
+        setattr(config, field_name, resolved_cfg.get(field_name, getattr(config, field_name)))
+    config.mse = _normalize_mse(resolved_cfg.get("mse", None), base=config.mse)
+    desc_act = resolved_cfg.get("desc_act", None)
+    if desc_act is not None:
+        config.desc_act = desc_act
+    act_group_aware = resolved_cfg.get("act_group_aware", None)
+    if act_group_aware is not None:
+        config.act_group_aware = act_group_aware
+    config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
 def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Optional[GPTAQConfig]:
@@ -3652,7 +3707,7 @@ def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
         legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
     if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
         normalized[BITS_FIELD_CODE] = legacy_gguf_bits
-    normalized[BITS_FIELD_CODE], normalized[FORMAT_FIELD_CODE], _ = _normalize_gguf_config_spec(
+    normalized[BITS_FIELD_CODE], normalized[FORMAT_FIELD_CODE], _ = _normalize_gguf_config(
         normalized.get(BITS_FIELD_CODE, 4),
         normalized.get(FORMAT_FIELD_CODE),
     )
@@ -4352,6 +4407,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         sub_key: str = None,
     ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
+
+    def resolve_module_config(self, module_name: str) -> ResolvedModuleConfig:
+        """Snapshot the resolved dynamic rule for one quantizable module."""
+        return resolve_module_config_snapshot(self, module_name)
 
     def meta_set_versionable(self, key: str, value: List[str]):
         self.meta_set(key, value)
@@ -6217,7 +6276,7 @@ class GGUFConfig(PreProcessorConfig):
         return False
 
     def _resolve_checkpoint_format(self) -> FORMAT:
-        self.bits, self.format, self._gguf_bits = _normalize_gguf_config_spec(self.bits, self.format)
+        self.bits, self.format, self._gguf_bits = _normalize_gguf_config(self.bits, self.format)
         return FORMAT.GGUF
 
     def _normalize_bits_field(
@@ -6250,7 +6309,7 @@ class GGUFConfig(PreProcessorConfig):
         if bits_override_present or format_override_present:
             raw_bits = layer_dict.get("bits", self.bits)
             raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
-            normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config_spec(raw_bits, raw_format)
+            normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config(raw_bits, raw_format)
 
             layer_dict["bits"] = normalized_bits
 
@@ -6325,104 +6384,74 @@ class GGUFConfig(PreProcessorConfig):
 def clone_weight_only_config_for_module(
     qcfg: Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
     module_full_name: str,
+    *,
+    resolved_cfg: Optional[ResolvedModuleConfig] = None,
 ) -> Optional[Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig]]:
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    resolved_cfg = resolved_cfg or qcfg.resolve_module_config(module_full_name)
+    if resolved_cfg.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        smooth_override = qcfg.dynamic_get(module_full_name, "smoother", None)
+        smooth_override = resolved_cfg.get("smoother", None)
         if smooth_override is None:
-            smooth_override = qcfg.dynamic_get(module_full_name, "smooth", None)
+            smooth_override = resolved_cfg.get("smooth", None)
         if smooth_override is not None:
             qcfg_clone.smoother = _normalize_smoother_config(smooth_override)
             qcfg_clone.smooth = qcfg_clone.resolve_smooth_method()
 
         if isinstance(qcfg_clone, GGUFConfig):
-            dynamic_bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-            dynamic_format = qcfg.dynamic_get(module_full_name, FORMAT_FIELD_CODE, qcfg_clone.format)
-            qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config_spec(
+            dynamic_bits = resolved_cfg.get("bits", qcfg_clone.bits)
+            dynamic_format = resolved_cfg.get(FORMAT_FIELD_CODE, qcfg_clone.format)
+            qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config(
                 dynamic_bits,
                 dynamic_format,
             )
         elif isinstance(qcfg_clone, FP8Config):
-            dynamic_format = qcfg.dynamic_get(module_full_name, FORMAT_FIELD_CODE, None)
+            dynamic_format = resolved_cfg.get(FORMAT_FIELD_CODE, None)
             if dynamic_format is None:
-                dynamic_format = qcfg.dynamic_get(module_full_name, "fmt", qcfg_clone.format)
-            dynamic_block_size = qcfg.dynamic_get(
-                module_full_name,
-                "weight_block_size",
-                qcfg_clone.weight_block_size,
-            )
+                dynamic_format = resolved_cfg.get("fmt", qcfg_clone.format)
+            dynamic_block_size = resolved_cfg.get("weight_block_size", qcfg_clone.weight_block_size)
             block_size = _normalize_fp8_weight_block_size(dynamic_block_size)
             qcfg_clone.format = _normalize_fp8_fmt(dynamic_format)
             qcfg_clone.weight_scale_method = _normalize_fp8_weight_scale_method(
-                qcfg.dynamic_get(
-                    module_full_name,
-                    "weight_scale_method",
-                    qcfg_clone.weight_scale_method,
-                ),
+                resolved_cfg.get("weight_scale_method", qcfg_clone.weight_scale_method),
                 weight_block_size=block_size,
             )
             qcfg_clone.weight_block_size = list(block_size) if block_size is not None else None
             qcfg_clone.weight_scale_semantics = _normalize_fp8_scale_semantics(
-                qcfg.dynamic_get(
-                    module_full_name,
-                    "weight_scale_semantics",
-                    qcfg_clone.weight_scale_semantics,
-                )
+                resolved_cfg.get("weight_scale_semantics", qcfg_clone.weight_scale_semantics)
             )
         elif isinstance(qcfg_clone, BitsAndBytesConfig):
             qcfg_clone.bits = _normalize_quant_bits(
-                qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
+                resolved_cfg.get("bits", qcfg_clone.bits),
                 format_value=FORMAT.BITSANDBYTES,
             )
             qcfg_clone.format = _normalize_bitsandbytes_format(
-                qcfg.dynamic_get(
-                    module_full_name,
-                    FORMAT_FIELD_CODE,
-                    qcfg.dynamic_get(
-                        module_full_name,
-                        "bnb_quant_type",
-                        qcfg_clone.format,
-                    ),
-                ),
+                resolved_cfg.get(FORMAT_FIELD_CODE, resolved_cfg.get("bnb_quant_type", qcfg_clone.format)),
                 bits=int(qcfg_clone.bits),
             )
             qcfg_clone.block_size = _normalize_bitsandbytes_block_size(
-                qcfg.dynamic_get(
-                    module_full_name,
-                    "block_size",
-                    qcfg.dynamic_get(
-                        module_full_name,
-                        "bnb_block_size",
-                        qcfg_clone.block_size,
-                    ),
-                )
+                resolved_cfg.get("block_size", resolved_cfg.get("bnb_block_size", qcfg_clone.block_size)),
             )
             qcfg_clone.compress_statistics = bool(
-                qcfg.dynamic_get(
-                    module_full_name,
+                resolved_cfg.get(
                     "compress_statistics",
-                    qcfg.dynamic_get(
-                        module_full_name,
-                        "bnb_compress_statistics",
-                        qcfg_clone.compress_statistics,
-                    ),
+                    resolved_cfg.get("bnb_compress_statistics", qcfg_clone.compress_statistics),
                 )
             )
         else:
             qcfg_clone.bits = _normalize_quant_bits(
-                qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
+                resolved_cfg.get("bits", qcfg_clone.bits),
                 format_value=resolve_quant_format(qcfg_clone.format, qcfg_clone.method),
             )
 
         if isinstance(qcfg_clone, RTNConfig):
-            qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
+            qcfg_clone.sym = resolved_cfg.get("sym", qcfg_clone.sym)
+            qcfg_clone.group_size = resolved_cfg.get("group_size", qcfg_clone.group_size)
 
-            desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
+            desc_act_override = resolved_cfg.get("desc_act", None)
             if desc_act_override is not None:
                 qcfg_clone.desc_act = desc_act_override
 

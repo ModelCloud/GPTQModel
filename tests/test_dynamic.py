@@ -19,7 +19,7 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.looper.gptq_processor import GPTQProcessor  # noqa: E402
-from gptqmodel.looper.loop_processor import LoopProcessor  # noqa: E402
+from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor  # noqa: E402
 from gptqmodel.looper.named_module import NamedModule  # noqa: E402
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -149,11 +149,10 @@ def _make_processor(qcfg: QuantizeConfig) -> GPTQProcessor:
     return GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=[{"input_ids": [0], "attention_mask": [1]}],
-        prepare_dataset_func=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(
+            dataset=[{"input_ids": [0], "attention_mask": [1]}],
+            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
+        ),
     )
 
 

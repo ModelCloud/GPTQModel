@@ -50,9 +50,11 @@ from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
+    find_last_quantized_layer_index,
     forward_batch_worker,
     move_module_to_device,
     normalize_device_like,
+    plan_layer_count,
     rehome_module_to_device,
     select_forward_devices,
 )
@@ -1865,10 +1867,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
-        # Capture-only layer groups are driven by processor execution config,
+        # Capture-only layer groups are driven by processor forward config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(getattr(proc, "execution_config", None), "enable_activation_capture", False)
+            getattr(getattr(proc, "forward", None), "activation_capture", False)
             for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(
@@ -1930,17 +1932,35 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # the looper. Non-checkpoint observers may omit on_start entirely.
         from ..utils.model import get_layer_name
 
+        last_quantized_layer_index = find_last_quantized_layer_index(
+            self.gptq_model.quantize_config,
+            layer_modules=layer_modules,
+            layer_names=layer_names,
+            layer_count=layer_count,
+        )
+        # `run_layer_stage()` only stops early at the last quantized layer when
+        # no embedding endpoint is requantized. With INPUT/OUTPUT/BOTH it still
+        # replays and publishes every trailing decoder layer, so the plan must
+        # cover them as well.
+        planned_layer_count = plan_layer_count(
+            layer_count,
+            last_quantized_layer_index,
+            replay_all_layers=self.embed_quant_mode is not None,
+        )
         steps = []
         if quant_input_embeddings:
             steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
-        steps.extend(LoopStep("layer", index, get_layer_name(layer_names, index))
-                     for index in range(layer_count))
+        steps.extend(
+            LoopStep("layer", index, get_layer_name(layer_names, index))
+            for index in range(planned_layer_count)
+        )
         if quant_output_embeddings:
             steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
         elif self.gptq_model.quantize_config.lm_head:
             steps.append(LoopStep("lm_head", layer_count, "lm_head"))
+        plan = LoopPlan(tuple(steps))
         self.start_step = self.extensions.start(LoopContext(
-            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
+            plan, self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
         ))
 
         if self.gptq_model.quantize_config.lm_head:
@@ -1968,6 +1988,8 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             start_layer_index=start_layer_index,
             embed_quant_mode=self.embed_quant_mode,
             embed_only=self.embed_only,
+            plan=plan,
+            cursor=self.start_step,
             logger=log,
         )
 

@@ -30,12 +30,9 @@ def test_dynamic_none_does_not_skip_module():
     assert clone.bits == qcfg.bits
 
 
-def test_explicit_false_still_skips_module(monkeypatch):
-    # EXL3Config rejects a literal ``False`` entry while normalizing, so drive the
-    # skip branch the way a non-EXL3 weight-only config would reach it.
+def test_negative_rule_still_skips_module():
     name = "model.layers.0.mlp.down_proj"
-    qcfg = _qcfg()
-    monkeypatch.setattr(qcfg, "dynamic_get", lambda *a, **k: False)
+    qcfg = _qcfg(dynamic={r"-:^model\.layers\.0\.mlp\.down_proj$": {}})
 
     assert clone_exllamav3_config_for_module(qcfg, name) is None
 

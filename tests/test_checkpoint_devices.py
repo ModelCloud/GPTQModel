@@ -222,14 +222,19 @@ def test_real_cuda_tensor_and_metadata_placement(count):
     ],
 )
 def test_real_multigpu_partial_hessian_recovery(tmp_path, monkeypatch, family, mode):
-    if torch.cuda.device_count() < 2:
+    visible_gpus = torch.cuda.device_count()
+    if visible_gpus < 2:
         pytest.skip("requires two physical CUDA devices for quantization/recovery")
     # Preserve visible physical identity if the caller already selected GPUs.
     # The subprocess uses the same visible set, never a CPU simulation.
     import os
 
     if "CUDA_VISIBLE_DEVICES" not in os.environ:
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        monkeypatch.setenv(
+            "CUDA_VISIBLE_DEVICES", ",".join(str(index) for index in range(visible_gpus))
+        )
     from test_checkpoint_quantization import test_subprocess_recovery
 
-    test_subprocess_recovery(tmp_path, family, mode, device="cuda:0", required_gpus=2)
+    test_subprocess_recovery(
+        tmp_path, family, mode, device="cuda:0", required_gpus=visible_gpus
+    )

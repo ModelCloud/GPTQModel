@@ -108,6 +108,7 @@ from ._const import (
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
 from .module_plan import ModulePlan
+from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
@@ -516,6 +517,7 @@ class BaseQModel(nn.Module):
         self.trust_remote_code = trust_remote_code
         self.model_local_path = model_local_path
         self.quantize_config = quantize_config
+        self.quantization_run_plan: Optional[QuantizationRunPlan] = None
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
         self._runtime_generate = None
         # Populated by `serve()`; `serve_shutdown()`/`serve_wait_until_ready()` read it.
@@ -1854,6 +1856,20 @@ class BaseQModel(nn.Module):
                     f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                 )
 
+        from ..adapter.adapter import Lora
+
+        run_plan = QuantizationRunPlan.build(
+            self.quantize_config,
+            format_code=format_code,
+            pack_backend=preferred_backend,
+            loop_backend=backend,
+            batch_size=batch_size,
+            needs_lora=isinstance(self.quantize_config.adapter, Lora),
+        )
+        if checkpoint is not None and not run_plan.checkpoint_supported:
+            raise NotImplementedError("checkpoint has no state adapter for this processor chain")
+        self.quantization_run_plan = run_plan
+
         # Warn before the (possibly long) quantization run: inference engines
         # (vLLM, SGLang) fuse these modules and resolve `dynamic` from the fused
         # module name only, so a checkpoint saved with a partial rule fails to
@@ -1864,8 +1880,9 @@ class BaseQModel(nn.Module):
         # quantize while rocBLAS covers the same math for a fraction of the
         # loading cost. The override spans only the quantization phase.
         with quant_blas_backend():
-            if self.quantize_config.uses_weight_only_lifecycle():
+            if run_plan.weight_only:
                 result = self._quantize_weight_only(
+                    run_plan=run_plan,
                     checkpoint=checkpoint,
                     calibration=calibration,
                     calibration_concat_size=calibration_concat_size,
@@ -1881,6 +1898,7 @@ class BaseQModel(nn.Module):
                         "Calibration dataset is required unless a weight-only quantize config is configured."
                     )
                 result = self._quantize_with_calibration(
+                    run_plan=run_plan,
                     calibration=calibration,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
@@ -2158,6 +2176,26 @@ class BaseQModel(nn.Module):
 
         return result
 
+    @staticmethod
+    def _build_calibration_config(
+        dataset,
+        prepare_dataset,
+        concat_size: Optional[int],
+        sort: Optional[str],
+        concat_separator: Optional[str],
+        batch_size: int,
+    ):
+        from ..looper.loop_processor import CalibrationConfig
+
+        return CalibrationConfig(
+            dataset=dataset,
+            prepare_dataset=prepare_dataset,
+            concat_size=concat_size,
+            sort=sort,
+            concat_separator=concat_separator,
+            batch_size=batch_size,
+        )
+
     def _quantize_with_calibration(
         self,
         *,
@@ -2171,150 +2209,90 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str],
         embed_quant_config: Optional[QuantizeEmbedConfig],
         checkpoint: Optional["CheckpointConfig"] = None,
+        run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..adapter.adapter import Lora
-        from ..looper.eora_processor import EoraProcessor
+        from ..looper.loop_processor import CalibrationConfig
         from ..looper.module_looper import ModuleLooper
-        from ..looper.module_preprocessor import ModulePreProcessor
 
-        needs_lora = isinstance(self.quantize_config.adapter, Lora)
+        if run_plan is None:
+            from ..adapter.adapter import Lora
+
+            run_plan = QuantizationRunPlan.build(
+                self.quantize_config,
+                format_code=resolve_quant_format(
+                    getattr(self.quantize_config, "format", FORMAT.GPTQ), self.quantize_config.method
+                ),
+                pack_backend=backend,
+                loop_backend=backend,
+                batch_size=batch_size,
+                needs_lora=isinstance(self.quantize_config.adapter, Lora),
+            )
+        if run_plan.weight_only:
+            raise ValueError("calibrated quantization requires a calibrated run plan")
+
         prepare_dataset_func = partial(
             self.prepare_dataset,
             calibration_data_min_length=calibration_data_min_length,
         )
-
+        calibration_config = self._build_calibration_config(
+            calibration,
+            prepare_dataset_func,
+            calibration_concat_size,
+            calibration_sort,
+            calibration_concat_separator,
+            run_plan.batch_size,
+        )
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
-            "calibration": calibration,
-            "prepare_dataset_func": prepare_dataset_func,
-            "calibration_concat_size": calibration_concat_size,
-            "calibration_sort": calibration_sort,
-            "calibration_concat_separator": calibration_concat_separator,
-            "batch_size": batch_size,
-            "calculate_w_wq_diff": needs_lora,
+            "calibration": calibration_config,
+            "calculate_w_wq_diff": ProcessorStep.EORA in run_plan.processors,
         }
 
-        preprocessors = []
-        if getattr(self.quantize_config, "preprocessors", None):
-            preprocessors.append(ModulePreProcessor(**args))
-
-        if self.quantize_config.method == METHOD.EXL3:
-            from ..looper.exllamav3_processor import EXL3Processor
-
-            if needs_lora:
-                raise NotImplementedError("EXL3 quantization does not support adapter/EoRA generation.")
-
-            if getattr(self.quantize_config, "gptaq", None) is not None:
-                raise NotImplementedError("EXL3 quantization does not support GPTAQ/native activation capture.")
-
-            if getattr(self.quantize_config, "foem", None) is not None:
-                raise NotImplementedError("EXL3 quantization does not support FOEM/native activation capture.")
-
-            exl3_args = {
-                "tokenizer": self.tokenizer,
-                "qcfg": self.quantize_config,
-                "calibration": calibration,
-                "prepare_dataset_func": prepare_dataset_func,
-                "calibration_concat_size": calibration_concat_size,
-                "calibration_sort": calibration_sort,
-                "calibration_concat_separator": calibration_concat_separator,
-                "batch_size": batch_size,
-                "lm_head_name": self.lm_head,
-            }
-            quantize_processor = preprocessors + [
-                EXL3Processor(**exl3_args),
-            ]
-        elif self.quantize_config.method == METHOD.FP8 and getattr(self.quantize_config, "gsq_calibration", False):
-            from ..looper.fp8_gsq_processor import FP8GSQProcessor
-
-            if needs_lora:
-                raise NotImplementedError("Calibrated FP8 GSQ does not support adapter generation")
-            fp8_args = dict(args)
-            fp8_args.pop("calculate_w_wq_diff", None)
-            quantize_processor = preprocessors + [FP8GSQProcessor(**fp8_args)]
-        elif self.quantize_config.method == METHOD.QQQ:
-            from ..looper.qqq_processor import QQQProcessor
-
-            qqq_args = dict(args)
-            qqq_args["backend"] = backend
-            quantize_processor = preprocessors + [
-                QQQProcessor(**qqq_args),
-            ]
-        elif self.quantize_config.method == METHOD.VPTQ:
-            from ..looper.vptq_processor import VPTQProcessor
-
-            quantize_processor = preprocessors + [
-                VPTQProcessor(**args),
-            ]
-        elif self.quantize_config.method == METHOD.AWQ:
-            from ..looper.awq_processor import AWQProcessor
-
-            os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
-
-            awq_args = dict(args)
-            awq_args["gptq_model"] = self
-            awq_args["model"] = self.model
-            awq_args["batch_size"] = batch_size
-
-            quantize_processor = preprocessors + [
-                AWQProcessor(**awq_args),
-            ]
-        elif self.quantize_config.method == METHOD.PARO:
-            from ..looper.paroquant_processor import ParoQuantProcessor
-
-            os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
-
-            paro_args = dict(args)
-            paro_args["gptq_model"] = self
-            paro_args["model"] = self.model
-            paro_args["batch_size"] = batch_size
-
-            quantize_processor = preprocessors + [
-                ParoQuantProcessor(**paro_args),
-            ]
-        else:
-            from ..looper.gptq_processor import GPTQProcessor
-
-            quantize_processor = preprocessors + [
-                GPTQProcessor(**args),
-            ]
-
-        if getattr(self.quantize_config, "gptaq", None) is not None:
-            from ..looper.native_processor import NativeProcessor
-
-            args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
-            args_clone = copy.deepcopy(args_to_copy)
-            args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
-
-            args_clone.pop("calculate_w_wq_diff", None)
-            quantize_processor.insert(0, NativeProcessor(**args_clone))
-
-        if getattr(self.quantize_config, "foem", None) is not None:
-            if self.quantize_config.foem.alpha > 0:
-                from ..looper.native_processor import NativeProcessor
-
-                args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
-                args_clone = copy.deepcopy(args_to_copy)
-                args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
-
-                args_clone.pop("calculate_w_wq_diff", None)
-                quantize_processor.insert(0, NativeProcessor(**args_clone))
-
-        processors = quantize_processor
-        if needs_lora:
-            processors.append(
-                EoraProcessor(
+        processors = []
+        for step in run_plan.processors:
+            factory = processor_class(step)
+            if step is ProcessorStep.NATIVE:
+                native_args = dict(args)
+                native_args.pop("calculate_w_wq_diff")
+                processors.append(factory(**native_args))
+            elif step is ProcessorStep.PREPROCESSOR:
+                processors.append(
+                    factory(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                        calibration=CalibrationConfig(),
+                    )
+                )
+            elif step is ProcessorStep.EORA:
+                eora_calibration = self._build_calibration_config(
+                    adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
+                    prepare_dataset_func,
+                    calibration_concat_size,
+                    calibration_sort,
+                    calibration_concat_separator,
+                    run_plan.batch_size,
+                )
+                processors.append(factory(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
-                    prepare_dataset_func=prepare_dataset_func,
-                    calibration_concat_size=calibration_concat_size,
-                    calibration_sort=calibration_sort,
-                    calibration_concat_separator=calibration_concat_separator,
-                    batch_size=batch_size,
-                )
-            )
+                    calibration=eora_calibration,
+                ))
+            elif step is ProcessorStep.EXL3:
+                exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
+            elif step is ProcessorStep.FP8_GSQ:
+                fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                processors.append(factory(**fp8_args))
+            elif step is ProcessorStep.QQQ:
+                processors.append(factory(**args, backend=run_plan.loop_backend))
+            elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
+                os.environ["AWQ_BATCH_SIZE"] = str(run_plan.batch_size)
+                processors.append(factory(
+                    **args, gptq_model=self, model=self.model,
+                ))
+            else:
+                processors.append(factory(**args))
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
@@ -2339,7 +2317,7 @@ class BaseQModel(nn.Module):
             )
             use_cache = getattr(self.model.config, "use_cache", False)
             try:
-                return module_looper.loop(backend=backend, fallback=self.quantize_config.fallback)
+                return module_looper.loop(backend=run_plan.loop_backend, fallback=self.quantize_config.fallback)
             finally:
                 module_looper.layer_module_coverage.report(type(self).__name__)
                 # Keep the run lease until every worker has stopped accessing
@@ -2362,32 +2340,30 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         calibration_concat_separator: Optional[str],
         embed_quant_config: Optional[QuantizeEmbedConfig],
+        run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
-
-        from ..adapter.adapter import Lora
         from ..looper.weight_only_looper import WeightOnlyLooper
-        from ..looper.weight_only_processor import WeightOnlyProcessor
+
+        if run_plan is None:
+            from ..adapter.adapter import Lora
+
+            run_plan = QuantizationRunPlan.build(
+                self.quantize_config,
+                format_code=resolve_quant_format(self.quantize_config.format, self.quantize_config.method),
+                pack_backend=backend,
+                loop_backend=backend,
+                batch_size=batch_size,
+                needs_lora=isinstance(self.quantize_config.adapter, Lora),
+            )
+        if run_plan.processors != (ProcessorStep.WEIGHT_ONLY,):
+            raise ValueError("weight-only quantization requires a weight-only run plan")
+
+        del calibration_concat_size, calibration_sort, calibration_concat_separator
 
         if calibration is not None:
             log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
 
-        if isinstance(self.quantize_config.adapter, Lora):
-            raise NotImplementedError(
-                "Weight-only quantization does not support adapter/EoRA generation."
-            )
-
-        if getattr(self.quantize_config, "gptaq", None) is not None:
-            raise NotImplementedError(
-                "Weight-only quantization does not support GPTAQ/native activation capture."
-            )
-
-        if getattr(self.quantize_config, "foem", None) is not None:
-            raise NotImplementedError(
-                "Weight-only quantization does not support FOEM/native activation capture."
-            )
-
-        processor = WeightOnlyProcessor(
+        processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
@@ -2406,7 +2382,7 @@ class BaseQModel(nn.Module):
                 extensions=(extension,) if extension else (),
             )
             try:
-                return module_looper.loop(backend=backend)
+                return module_looper.loop(backend=run_plan.loop_backend)
             finally:
                 module_looper.layer_module_coverage.report(type(self).__name__)
                 if checkpoint:
@@ -2451,18 +2427,20 @@ class BaseQModel(nn.Module):
         assert isinstance(self.quantize_config.adapter, Lora)
 
         # init processor with EoRA processor
+        calibration_config = self._build_calibration_config(
+            calibration_dataset,
+            self.prepare_dataset,
+            calibration_dataset_concat_size,
+            calibration_dataset_sort,
+            calibration_concat_separator,
+            batch_size,
+        )
         processors = []
         if getattr(self.quantize_config, "preprocessors", None):
             processors.append(
                 ModulePreProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration=calibration_dataset,
-                    prepare_dataset_func=self.prepare_dataset,
-                    calibration_concat_size=calibration_dataset_concat_size,
-                    calibration_sort=calibration_dataset_sort,
-                    calibration_concat_separator=calibration_concat_separator,
-                    batch_size=batch_size,
                 ),
             )
         processors.extend(
@@ -2473,12 +2451,7 @@ class BaseQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration=calibration_dataset,
-                    prepare_dataset_func=self.prepare_dataset,
-                    calibration_concat_size=calibration_dataset_concat_size,
-                    calibration_sort=calibration_dataset_sort,
-                    calibration_concat_separator=calibration_concat_separator,
-                    batch_size=batch_size,
+                    calibration=calibration_config,
                 ),
             ]
         )

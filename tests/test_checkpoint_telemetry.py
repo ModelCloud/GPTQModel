@@ -194,7 +194,7 @@ def test_scheduler_mismatch_is_fatal_before_module_restore():
         adapter.restore(
             {
                 "version": adapter.VERSION,
-                "specs": {},
+                "modules": {},
                 "processors": [],
                 "execution": {"next_device": 1, "module_devices": {"a": "cuda:1"}},
             },
@@ -224,7 +224,7 @@ def test_rng_mismatch_is_fatal_before_success(tmp_path, monkeypatch):
         expected_rng = torch.Generator().manual_seed(19464).get_state()
     state = {
         "version": adapter.VERSION,
-        "specs": {},
+        "modules": {},
         "processors": [],
         "dense": {},
         "execution": {},

@@ -19,6 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import generate_node_for_awq_scaling
 from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
@@ -117,18 +118,12 @@ class _TestAWQProcessor(AWQProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            batch_size=1,
+            calibration=CalibrationConfig(),
             gptq_model=types.SimpleNamespace(
                 rotary_embedding=None,
             ),
             model=None,
-            require_fwd=True,
             calculate_w_wq_diff=False,
-            calibration_concat_separator=None,
         )
 
     def _module_forward(self, x: torch.Tensor, module: torch.nn.Module, module_kwargs):
@@ -1164,16 +1159,10 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=16),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
-        calibration_concat_separator=None,
     )
     processor._quant_batch_size = 1
 
@@ -1242,16 +1231,10 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=AWQConfig(format=FORMAT.GEMM, group_size=16, scale_search_chunked_activations=False),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
-        calibration_concat_separator=None,
     )
     processor._quant_batch_size = 1
 

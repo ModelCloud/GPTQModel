@@ -54,6 +54,37 @@ def test_find_last_quantized_layer_index_uses_dynamic_exclusions():
     ) == 0
 
 
+def test_plan_layer_count_truncates_trailing_excluded_layers():
+    assert looper_helpers.plan_layer_count(4, 1) == 2
+
+
+def test_plan_layer_count_keeps_every_layer_without_exclusions():
+    assert looper_helpers.plan_layer_count(4, None) == 4
+
+
+def test_plan_layer_count_covers_replayed_layers_for_embedding_modes():
+    # `run_layer_stage()` replays and publishes every trailing decoder layer
+    # when an embedding endpoint is requantized, so the plan must not truncate.
+    assert looper_helpers.plan_layer_count(4, 1, replay_all_layers=True) == 4
+
+
+def test_plan_accepts_replayed_boundary_after_last_quantized_layer():
+    from gptqmodel.looper.extension import LoopPlan, LoopStep
+
+    # Two-layer model where layer 1 is fully excluded, plus an output embedding
+    # step. Layer 1 is still replayed and published, so `plan.after()` must
+    # resolve it instead of raising `ValueError: tuple.index(x): x not in tuple`.
+    steps = tuple(
+        LoopStep("layer", index, f"model.layers.{index}")
+        for index in range(
+            looper_helpers.plan_layer_count(2, 0, replay_all_layers=True)
+        )
+    ) + (LoopStep("output_embeddings", 2, "output_embeddings"),)
+    plan = LoopPlan(steps)
+
+    assert plan.after(LoopStep("layer", 1, "model.layers.1")) == 2
+
+
 class _RequiresAttentionMask(torch.nn.Module):
     def __init__(self):
         super().__init__()

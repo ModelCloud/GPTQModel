@@ -117,6 +117,7 @@ __all__ = [
     "move_nested_to_device",
     "clone_module_for_devices",
     "find_last_quantized_layer_index",
+    "plan_layer_count",
     "forward_batch_worker",
 ]
 
@@ -208,6 +209,25 @@ def find_last_quantized_layer_index(
             last_quantized_layer_index = candidate_layer_index
 
     return last_quantized_layer_index
+
+
+def plan_layer_count(
+    layer_count: int,
+    last_quantized_layer_index: Optional[int],
+    *,
+    replay_all_layers: bool = False,
+) -> int:
+    """Return how many decoder layers the execution plan must cover.
+
+    Trailing layers whose tracked modules are all dynamically excluded are
+    skipped, so they need no plan entry. Modes that replay the whole decoder
+    stack (for example input/output embedding requantization) still publish a
+    boundary for every layer, so the plan has to include them.
+    """
+
+    if last_quantized_layer_index is None or replay_all_layers:
+        return layer_count
+    return max(0, last_quantized_layer_index + 1)
 
 
 @contextmanager

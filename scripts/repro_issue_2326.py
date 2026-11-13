@@ -17,6 +17,7 @@ import types
 from contextlib import nullcontext
 from pathlib import Path
 
+
 os.environ.setdefault("GPTQMODEL_DEVICE_TELEMETRY", "1")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 
 from gptqmodel.looper.forward_executor import ForwardExecutor
-from gptqmodel.looper.loop_processor import ExecutionConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan
@@ -255,9 +256,9 @@ def main() -> int:
     plan = build_subset_plan(
         _PlanLooper(devices),
         processor=types.SimpleNamespace(
-            execution_config=ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=True,
+            forward=ForwardConfig(
+                required=True,
+                replay_after_process=True,
             )
         ),
         subset=subset,

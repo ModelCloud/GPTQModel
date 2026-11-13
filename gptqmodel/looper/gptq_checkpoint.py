@@ -22,28 +22,21 @@ from safetensors import safe_open
 from safetensors.torch import save
 
 from ..adapter.adapter import Lora
-from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import METHOD
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
-from .awq_processor import AWQProcessor
 from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_modules import (
     is_packed_module,
-    packed_module_spec,
+    packed_module_config,
     restore_packed_module,
 )
 from .checkpoint_store import CheckpointError
 from .continuation import ContinuationCodec
-from .eora_processor import EoraProcessor
-from .gptq_processor import GPTQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
-from .weight_only_processor import WeightOnlyProcessor
+from .loop_processor import CheckpointSupport, checkpoint_chain_supported
 
 
-_CHECKPOINT_IDENTITY_VERSION = 2
+_CHECKPOINT_IDENTITY_VERSION = 3
 _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "offload_to_disk_path",
     "_offload_temp_dir",
@@ -51,7 +44,7 @@ _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
 }
 
 
-def _checkpoint_identity_value(value):
+def _checkpoint_identity_value(value, *, preserve_mapping_order=False):
     """Convert a quantization setting into a deterministic JSON value.
 
     QuantizeConfig.to_dict() is an export format and intentionally omits
@@ -84,6 +77,11 @@ def _checkpoint_identity_value(value):
             "sha256": hashlib.sha256(raw).hexdigest(),
         }
     if isinstance(value, Mapping):
+        if preserve_mapping_order:
+            return [
+                [str(key), _checkpoint_identity_value(item)]
+                for key, item in value.items()
+            ]
         return {
             str(key): _checkpoint_identity_value(item)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
@@ -97,7 +95,10 @@ def _checkpoint_identity_value(value):
         return {
             "type": f"{type(value).__module__}.{type(value).__qualname__}",
             "fields": {
-                field.name: _checkpoint_identity_value(getattr(value, field.name))
+                field.name: _checkpoint_identity_value(
+                    getattr(value, field.name),
+                    preserve_mapping_order=field.name == "dynamic",
+                )
                 for field in fields(value)
             },
         }
@@ -136,12 +137,75 @@ def _checkpoint_quantization_identity(config):
         if field.name in _IDENTITY_EXCLUDED_CONFIG_FIELDS:
             continue
         value = getattr(config, field.name)
+        if field.name == "dynamic" and isinstance(value, Mapping):
+            runtime_exclusions = getattr(
+                config,
+                "_runtime_dynamic_exclusions",
+                (),
+            )
+            if runtime_exclusions:
+                value = {
+                    key: item
+                    for key, item in value.items()
+                    if key not in runtime_exclusions
+                }
+            if not value:
+                value = None
         if field.name == "meta" and isinstance(value, Mapping):
             value = dict(value)
             value.pop("offload_to_disk_path", None)
             value.pop("telemetry", None)
-        identity[field.name] = _checkpoint_identity_value(value)
+        identity[field.name] = _checkpoint_identity_value(
+            value,
+            preserve_mapping_order=field.name == "dynamic",
+        )
     return identity
+
+
+def _checkpoint_runtime_dynamic_rules(config):
+    """Capture runtime calibration exclusions separately from checkpoint identity."""
+    dynamic = getattr(config, "dynamic", None) or {}
+    exclusions = getattr(config, "_runtime_dynamic_exclusions", ()) or ()
+    if isinstance(exclusions, str):
+        raise CheckpointError("invalid runtime dynamic exclusions")
+    rules = {}
+    for pattern in exclusions:
+        if (
+            not isinstance(pattern, str)
+            or pattern not in dynamic
+            or not isinstance(dynamic[pattern], Mapping)
+        ):
+            raise CheckpointError("runtime dynamic exclusion is missing its rule")
+        rules[pattern] = dict(dynamic[pattern])
+    return rules
+
+
+def _validate_checkpoint_runtime_dynamic_rules(rules):
+    if rules is None:
+        return {}
+    if not isinstance(rules, Mapping):
+        raise CheckpointError("invalid checkpoint runtime dynamic exclusions")
+    validated = {}
+    for pattern, rule in rules.items():
+        if not isinstance(pattern, str) or not isinstance(rule, Mapping):
+            raise CheckpointError("invalid checkpoint runtime dynamic exclusion")
+        validated[pattern] = dict(rule)
+    return validated
+
+
+def _restore_checkpoint_runtime_dynamic_rules(config, rules):
+    """Merge runtime calibration exclusions back into the resumable config."""
+    validated = _validate_checkpoint_runtime_dynamic_rules(rules)
+    if not validated:
+        return
+    dynamic = dict(config.dynamic or {})
+    dynamic.update(validated)
+    config.dynamic = dynamic
+    runtime_exclusions = set(
+        getattr(config, "_runtime_dynamic_exclusions", ()) or ()
+    )
+    runtime_exclusions.update(validated)
+    config._runtime_dynamic_exclusions = runtime_exclusions
 
 
 @contextmanager
@@ -198,13 +262,12 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or (adapter is not None and type(adapter) is not Lora)
         or config.lm_head
         or embed_quant_config is not None
-        or config.dynamic
         or getattr(config, "rotation", None)
         or (config.adapter is not None and type(config.adapter) is not Lora)
     ):
         raise NotImplementedError(
-            "checkpoint requires sequential quantization without dynamic exclusions, "
-            "GPTAQ/FOEM, or embedding/lm_head quantization"
+            "checkpoint requires sequential quantization without GPTAQ/FOEM "
+            "or embedding/lm_head quantization"
         )
     model_type = model.model.config.model_type
     if model_type not in CHECKPOINT_MODEL_TYPES:
@@ -239,30 +302,18 @@ def _source_identity(model):
 
 
 class QuantizationCheckpointAdapter:
-    VERSION = 3
+    VERSION = 6
 
     def bind(self, context):
         self.execution = context.execution
         if self.execution is None:
             raise CheckpointError("checkpoint requires execution placement state")
         self.model = context.model
-        processor_types = tuple(type(processor) for processor in context.processors)
-        supported_processors = {
-            (GPTQProcessor,),
-            (GPTQProcessor, EoraProcessor),
-            (AWQProcessor,),
-            (AWQProcessor, EoraProcessor),
-            (WeightOnlyProcessor,),
-            (QQQProcessor,),
-            (QQQProcessor, EoraProcessor),
-            (ParoQuantProcessor,),
-            (ParoQuantProcessor, EoraProcessor),
-        }
-        if self.model.quantize_config.method == METHOD.EXL3:
-            from .exllamav3_processor import EXL3Processor
-
-            supported_processors.add((EXL3Processor,))
-        if processor_types not in supported_processors:
+        roles = tuple(
+            getattr(getattr(processor, "lifecycle", None), "checkpointing", CheckpointSupport.UNSUPPORTED)
+            for processor in context.processors
+        )
+        if not checkpoint_chain_supported(roles):
             raise NotImplementedError(
                 "checkpoint has no state adapter for this processor chain"
             )
@@ -272,6 +323,7 @@ class QuantizationCheckpointAdapter:
         self.offload = Path(self.model.quantize_config.offload_to_disk_path)
         self._artifacts = {}
         config = _checkpoint_quantization_identity(self.model.quantize_config)
+        self._quantization_identity = config
         return {
             "adapter_version": self.VERSION,
             "device_topology": checkpoint_device_topology(
@@ -294,22 +346,10 @@ class QuantizationCheckpointAdapter:
 
     def capture(self):
         artifacts = {}
-        specs = {}
+        module_configs = {}
         for name, module in self.model.model.named_modules():
             if not is_packed_module(module):
                 continue
-            expected_kernel = (
-                ParoLinear
-                if self.model.quantize_config.method == METHOD.PARO
-                else self.model.qlinear_kernel
-            )
-            if (
-                isinstance(module, BaseQuantLinear)
-                and type(module) is not expected_kernel
-            ):
-                raise NotImplementedError(
-                    f"unsupported checkpoint quantized module: {type(module).__name__}"
-                )
             bundle = self._artifacts.get(
                 name, self.offload / name / "module.safetensors"
             )
@@ -322,7 +362,20 @@ class QuantizationCheckpointAdapter:
                         for key, value in module.state_dict().items()
                     }
                 )
-            specs[name] = packed_module_spec(module, self.model.quantize_config)
+            module_configs[name] = packed_module_config(
+                module,
+                self.model.quantize_config,
+                module_name=name,
+            )
+        quantization_identity = getattr(self, "_quantization_identity", None)
+        if (
+            quantization_identity is not None
+            and _checkpoint_quantization_identity(self.model.quantize_config)
+            != quantization_identity
+        ):
+            raise CheckpointError(
+                "quantization configuration changed during checkpoint capture"
+            )
         np_state = np.random.get_state()
         processor_states = [
             processor.continuation_state_dict() for processor in self.processors
@@ -334,7 +387,7 @@ class QuantizationCheckpointAdapter:
         dense_aliases = {}
         tensor_owners = {}
         for name, module in self.model.model.named_modules():
-            if any(name == packed or name.startswith(packed + ".") for packed in specs):
+            if any(name == packed or name.startswith(packed + ".") for packed in module_configs):
                 continue
             values = {
                 key: value
@@ -358,7 +411,10 @@ class QuantizationCheckpointAdapter:
                 "processors": processor_states,
                 "dense": dense,
                 "dense_aliases": dense_aliases,
-                "specs": specs,
+                "modules": module_configs,
+                "runtime_dynamic_exclusions": _checkpoint_runtime_dynamic_rules(
+                    self.model.quantize_config
+                ),
                 "execution": self.execution.execution_state_dict(),
                 "rng": torch.random.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all()
@@ -382,11 +438,14 @@ class QuantizationCheckpointAdapter:
         self._artifacts = artifacts
 
     def restore(self, state, artifacts):
-        if state["version"] != self.VERSION or set(state["specs"]) != set(artifacts):
+        if state["version"] != self.VERSION or set(state["modules"]) != set(artifacts):
             raise CheckpointError("incompatible quantization continuation schema")
         if len(state["processors"]) != len(self.processors):
             raise CheckpointError("checkpoint processor count differs")
         config = self.model.quantize_config
+        runtime_dynamic_exclusions = _validate_checkpoint_runtime_dynamic_rules(
+            state.get("runtime_dynamic_exclusions", {})
+        )
         self.execution.load_execution_state_dict(state["execution"])
         actual_execution = self.execution.execution_state_dict()
         matched = actual_execution == state["execution"]
@@ -447,7 +506,7 @@ class QuantizationCheckpointAdapter:
                     )
                 )
         # Validate every module and bundle before replacing anything in the model.
-        for name, spec in state["specs"].items():
+        for name, module_config in state["modules"].items():
             if any(
                 not part or not part.replace("_", "").isalnum()
                 for part in name.split(".")
@@ -455,12 +514,12 @@ class QuantizationCheckpointAdapter:
                 raise CheckpointError("invalid checkpoint module name")
             original = self.model.model.get_submodule(name)
             if (
-                getattr(original, "in_features", None) != spec["in_features"]
-                or getattr(original, "out_features", None) != spec["out_features"]
+                getattr(original, "in_features", None) != module_config["in_features"]
+                or getattr(original, "out_features", None) != module_config["out_features"]
             ):
                 raise CheckpointError(f"checkpoint module dimensions differ: {name}")
             module = restore_packed_module(
-                spec,
+                module_config,
                 name=name,
                 config=config,
                 kernel=self.model.qlinear_kernel,
@@ -474,7 +533,7 @@ class QuantizationCheckpointAdapter:
                     for key, value in expected.items()
                 ):
                     raise CheckpointError(f"checkpoint tensor schema differs: {name}")
-                if spec.get("kind") == "exl3":
+                if module_config.get("kind") == "exl3":
                     # EXL3's writer reads scalar codebook metadata from its
                     # buffers. Its normal boundary state is materialized CPU,
                     # unlike the disk-offloaded BaseQuantLinear lifecycle.
@@ -519,6 +578,9 @@ class QuantizationCheckpointAdapter:
             setattr(
                 self.model.model.get_submodule(name), key, getattr(owner, owner_key)
             )
+        _restore_checkpoint_runtime_dynamic_rules(
+            config, runtime_dynamic_exclusions
+        )
         for processor, processor_state in zip(self.processors, state["processors"]):
             processor.load_continuation_state_dict(processor_state)
         self.shared_state.clear()
@@ -561,7 +623,7 @@ class QuantizationCheckpointAdapter:
                 }
             ),
             packed_storage="disk"
-            if all(spec.get("kind") != "exl3" for spec in state["specs"].values())
+            if all(module_config.get("kind") != "exl3" for module_config in state["modules"].values())
             else "mixed",
             cuda_rng_indices=list(range(len(state["cuda_rng"]))),
         )

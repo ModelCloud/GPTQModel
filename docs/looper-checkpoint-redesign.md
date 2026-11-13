@@ -27,8 +27,13 @@ FP8, GGUF and bitsandbytes processor paths for Llama and Qwen3 MoE, with
 and ParoQuant, the methods that support EoRA generation without checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
-kernels or deprecated export formats. Other model families, dynamic exclusions,
-rotation, embedding/lm_head quantization and GPTAQ/FOEM remain unsupported.
+kernels or deprecated export formats. Other model families, rotation,
+embedding/lm_head quantization and GPTAQ/FOEM remain unsupported.
+Per-module dynamic overrides and exclusions are supported: packed module
+schemas retain the effective packing settings, and the execution plan ends at
+the last layer containing quantized work. The checkpoint identity includes the
+ordered dynamic rules, so changing them rejects resume before any state is
+restored.
 Checkpointed quantization runs on the main thread so it can temporarily install
 and restore SIGINT/SIGTERM handlers. Normal quantization is unchanged.
 
@@ -141,7 +146,7 @@ Continuation tensors and device-valued metadata retain explicit device indices;
 CPU tensors stay on CPU and active CUDA tensors return to their recorded GPUs.
 Completed packed modules intentionally remain offloaded/meta until saving,
 except EXL3, whose ordinary completed state uses CPU buffers read by its writer.
-The composed adapter schema is version 3; topology and tensor codec schemas
+The composed adapter schema is version 4; topology and tensor codec schemas
 remain version 2. Older adapter checkpoints are rejected rather than guessed
 or migrated.
 

@@ -13,7 +13,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
+    CalibrationTypes,
+    CheckpointSupport,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -46,7 +57,8 @@ from ..quantization.config import (
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
-    _normalize_mse,
+    ResolvedModuleConfig,
+    apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
 )
@@ -122,36 +134,24 @@ def clone_gptq_config_for_module(
     module_full_name: str,
     *,
     fallback=None,
+    resolved_cfg: Optional[ResolvedModuleConfig] = None,
 ) -> Optional[QuantizeConfig]:
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
-    # entire module is skipped
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    resolved_cfg = resolved_cfg or qcfg.resolve_module_config(module_full_name)
+    if resolved_cfg.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
-    # dynamic overrides
-    if qcfg.dynamic is not None:
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.mse = _normalize_mse(
-            qcfg.dynamic_get(module_full_name, "mse", None), base=qcfg_clone.mse,
-        )
+    apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
-        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
-        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
-        if desc_act_override is not None:
-            qcfg_clone.desc_act = desc_act_override
-        act_group_aware_override = qcfg.dynamic_get(module_full_name, "act_group_aware", None)
-        if act_group_aware_override is not None:
-            qcfg_clone.act_group_aware = act_group_aware_override
-        qcfg_clone.damp_percent = qcfg.dynamic_get(module_full_name, "damp_percent", qcfg_clone.damp_percent)
-        qcfg_clone.static_groups = qcfg.dynamic_get(module_full_name, "static_groups", qcfg_clone.static_groups)
-        fallback_override = qcfg.dynamic_get(module_full_name, "fallback", None)
+    # Method-specific dynamic fields stay with GPTQ.
+    if qcfg.dynamic is not None:
+        fallback_override = resolved_cfg.get("fallback", None)
         if fallback_override is not None:
             qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
-        hessian_override = qcfg.dynamic_get(module_full_name, "hessian", None)
+        hessian_override = resolved_cfg.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
                 qcfg_clone.hessian = HessianConfig(**hessian_override)
@@ -159,9 +159,9 @@ def clone_gptq_config_for_module(
                 qcfg_clone.hessian = hessian_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
-        gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
-        foem_override = qcfg.dynamic_get(module_full_name, "foem", None)
-        qcfg_clone.gsq = normalize_gsq_config(qcfg.dynamic_get(module_full_name, "gsq", qcfg_clone.gsq))
+        gptaq_override = resolved_cfg.get("gptaq", None)
+        foem_override = resolved_cfg.get("foem", None)
+        qcfg_clone.gsq = normalize_gsq_config(resolved_cfg.get("gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
@@ -177,7 +177,6 @@ def clone_gptq_config_for_module(
             else:
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
 
-        qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
         qcfg_clone.validate_gsq()
 
     qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
@@ -186,18 +185,23 @@ def clone_gptq_config_for_module(
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
-        require_fwd: bool = True,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes GPTQ processing and optional weight-delta tracking."""
 
@@ -205,16 +209,7 @@ class GPTQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=True,
-                subset_forward_early_stop=True,
-            ),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -360,13 +355,16 @@ class GPTQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
 
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
             module.full_name,
             fallback=fallback,
+            resolved_cfg=resolved_cfg,
         )
         if qcfg_clone is None:
             return
+        bind_resolved_module_config(module, resolved_cfg)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
@@ -859,18 +857,21 @@ class GPTQProcessor(LoopProcessor):
 
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
-        with (self.lock):
-            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
-            if self.calculate_w_wq_diff:
-                module.weight.data = module.state.pop("wq").to(CPU)
+        # Finalization is already isolated per module. Do not hold the
+        # processor-wide lock while accessing NamedModule wrappers: they take
+        # the parent module lock, while create_quant_module/pack_module take
+        # these locks in the opposite order. EoRA enables this path through
+        # calculate_w_wq_diff, so the mixed order can deadlock multi-GPU runs.
+        if self.calculate_w_wq_diff:
+            module.weight.data = module.state.pop("wq").to(CPU)
 
-            module.state.pop("w", None) #
-            module.state.pop("w_wq_diff", None)
+        module.state.pop("w", None)  #
+        module.state.pop("w_wq_diff", None)
 
-            # need to clone to due to steamed pinned memory and access on diff thread
-            q_zeros = module.state.pop("q_zeros").clone()
-            q_scales = module.state.pop("q_scales").clone()
-            q_g_idx = module.state.pop("q_g_idx").clone()
+        # need to clone to due to steamed pinned memory and access on diff thread
+        q_zeros = module.state.pop("q_zeros").clone()
+        q_scales = module.state.pop("q_scales").clone()
+        q_g_idx = module.state.pop("q_g_idx").clone()
 
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
@@ -905,6 +906,7 @@ class GPTQProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
+                    resolved_module_config=get_resolved_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record(
@@ -949,8 +951,7 @@ class GPTQProcessor(LoopProcessor):
             )
 
         # TODO: store module quant results in module, not global processor result
-        with self.lock:
-            self.result_pop(module.full_name)
+        self.result_pop(module.full_name)
 
         del q_scales, q_zeros, q_g_idx
         module.unregister_parameter("weight")

@@ -13,7 +13,12 @@ import torch
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.loop_processor import LoopProcessor, _ThreadSafeDict, _ThreadSafeInputCache
+from gptqmodel.looper.loop_processor import (
+    CalibrationConfig,
+    LoopProcessor,
+    _ThreadSafeDict,
+    _ThreadSafeInputCache,
+)
 from gptqmodel.looper.stage_subset import _collect_worker_results
 
 
@@ -73,10 +78,18 @@ def test_loop_processor_rejects_empty_calibration_before_prepare(monkeypatch, tm
         LoopProcessor(
             tokenizer=None,
             qcfg=MagicMock(),
-            calibration=[],
-            prepare_dataset_func=prepare_dataset_func,
+            calibration=CalibrationConfig(dataset=[], prepare_dataset=prepare_dataset_func),
         )
     prepare_dataset_func.assert_not_called()
+
+
+def test_loop_processor_rejects_legacy_calibration_payload(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    with pytest.raises(TypeError, match="must be a CalibrationConfig"):
+        LoopProcessor(tokenizer=None, qcfg=MagicMock(), calibration=[])
 
 
 def test_loop_processor_raises_when_prepare_empties_calibration(monkeypatch, tmp_path):
@@ -86,12 +99,14 @@ def test_loop_processor_raises_when_prepare_empties_calibration(monkeypatch, tmp
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
     monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
 
-    with pytest.raises(ValueError, match="empty after prepare_dataset_func"):
+    with pytest.raises(ValueError, match="empty after CalibrationConfig.prepare_dataset"):
         LoopProcessor(
             tokenizer=None,
             qcfg=MagicMock(),
-            calibration=[{"text": "hi"}],
-            prepare_dataset_func=lambda **kwargs: [],
+            calibration=CalibrationConfig(
+                dataset=[{"text": "hi"}],
+                prepare_dataset=lambda **kwargs: [],
+            ),
         )
 
 
@@ -107,8 +122,10 @@ def test_loop_processor_accepts_nonempty_prepared_calibration(monkeypatch, tmp_p
     processor = LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=[{"text": "a"}, {"text": "b"}],
-        prepare_dataset_func=lambda **kwargs: rows,
+        calibration=CalibrationConfig(
+            dataset=[{"text": "a"}, {"text": "b"}],
+            prepare_dataset=lambda **kwargs: rows,
+        ),
     )
 
     assert processor.num_batches == 2

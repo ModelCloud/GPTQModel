@@ -15,7 +15,7 @@ from torch import nn
 
 from gptqmodel.looper import stage_subset
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import LoopProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization import GPTQ
@@ -42,11 +42,7 @@ def _processor(qcfg: Optional[QuantizeConfig] = None) -> GPTQProcessor:
     return GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg or QuantizeConfig(method=METHOD.GPTQ, bits=4, group_size=4, desc_act=False),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
 
 

@@ -31,7 +31,7 @@ if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
@@ -281,17 +281,15 @@ def test_awq_processor_enables_subset_early_stop():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=calibration,
-        prepare_dataset_func=_prepare_dataset_func,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        calibration_concat_separator=None,
-        batch_size=1,
+        calibration=CalibrationConfig(
+            dataset=calibration,
+            prepare_dataset=_prepare_dataset_func,
+        ),
         gptq_model=dummy_gptq_model,
         model=dummy_model,
     )
 
-    assert processor.execution_config.subset_forward_early_stop is True
+    assert processor.forward.subset_early_stop is True
 
 
 def test_module_looper_subset_callback_invoked():
@@ -364,14 +362,15 @@ class _StubAWQProcessor(LoopProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=calibration,
-            prepare_dataset_func=_prepare_dataset_func,
-            batch_size=1,
-            execution_config=ExecutionConfig(
-                require_fwd=True,
-                fwd_replay_after_process=False,
-                subset_forward_early_stop=True,
+            calibration=CalibrationConfig(
+                dataset=calibration,
+                prepare_dataset=_prepare_dataset_func,
             ),
+            forward=ForwardConfig(
+                                                 required=True,
+                                                 replay_after_process=False,
+                                                 subset_early_stop=True,
+                                             ),
         )
         self.hook_calls: List[str] = []
         self.process_calls: List[str] = []

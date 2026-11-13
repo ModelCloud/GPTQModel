@@ -3,6 +3,7 @@
 
 import torch
 
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
@@ -29,11 +30,7 @@ def test_module_preprocessor_records_auto_module_decoder_plan():
     processor = ModulePreProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=[],
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
 
     processor.preprocess(named)
@@ -61,11 +58,7 @@ def test_module_preprocessor_records_tensor_parallel_padder_and_smoother_plan():
     processor = ModulePreProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=[],
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
 
     processor.preprocess(named)
@@ -91,11 +84,7 @@ def test_module_preprocessor_clears_decoder_state_when_preprocessors_absent():
     processor = ModulePreProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=[],
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
 
     processor.preprocess(named)
