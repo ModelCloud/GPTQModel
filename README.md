@@ -1609,6 +1609,10 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide](docs/multi_gpu_quantization.md). Setting `CUDA_VISIBLE_DEVICES` exposes GPUs to the process; MoE device placement and free-threaded parallel quantization also need to be configured. Multi-GPU runs auto-enable CUDA/HIP peer access and use GIL-safe peer copies for module moves, calibration input staging, and Hessian reduction; a one-time warning reports motherboard/BIOS/hardware P2P incompatibility. Control the behavior with `BaseQuantizeConfig.p2p` (or `GPTQModel.load(..., p2p=...)` for inference): `P2PConfig(mode="off")` skips pre-enablement and `P2PConfig(probe=True)` runs bandwidth diagnostics. Native allocators on CUDA and ROCm delegate peer enablement and direct copies to PyTorch, including after allocator settings change; a non-native ROCm backend such as `cudaMallocAsync` stages through pinned host memory. See [allocator-managed peer enablement](docs/multi_gpu_quantization.md#allocator-managed-peer-enablement). On free-threaded builds never call `torch.cuda.comm.*` from worker threads; see [`pytorch_gil_0_compat.md`](pytorch_gil_0_compat.md).
 
+Saved quantization configs preserve the complete P2P policy; see
+[P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)
+for override precedence and validation.
+
 For asynchronous activation copies from CUDA forward hooks, see the
 [CUDA activation copy lifecycle](docs/cuda-activation-copy-lifecycle.md) for
 device and pinned host buffer ownership across streams.

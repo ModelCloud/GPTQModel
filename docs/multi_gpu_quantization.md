@@ -372,6 +372,46 @@ access is an accelerator concept, so `enable_peer_access` reports
 "fewer than two CUDA/HIP devices", emits no warning, and the CPU move helpers
 use their regular copy path.
 
+### P2P policy persistence
+
+GPT-QModel stores `BaseQuantizeConfig.p2p` under `meta.p2p`. Both
+`to_dict()` / `from_quant_config()` and `save_pretrained()` /
+`from_pretrained()` preserve the complete policy. Loading a config only
+normalizes the policy; `ModuleLooper.__init__` installs it for quantization
+through `configure_p2p`.
+
+```mermaid
+flowchart TD
+    A["BaseQuantizeConfig.to_dict()<br/>writes meta.p2p"] --> B["BaseQuantizeConfig.from_quant_config()"]
+    B --> C{"Top-level p2p present?"}
+    C -->|Yes, including None or an empty dict| D["Keep explicit p2p"]
+    C -->|No| E{"meta.p2p present?"}
+    E -->|Yes| F["meta_field_map promotes meta.p2p"]
+    E -->|No| G["p2p = None"]
+    D --> H["_normalize_p2p_config()"]
+    F --> H
+    G --> H
+    H -->|Valid policy or None| I["BaseQuantizeConfig.p2p"]
+    H -->|Invalid type or fields| J["ValueError / TypeError"]
+    I --> K["ModuleLooper.__init__()<br/>configure_p2p(config.p2p)"]
+    classDef failure fill:#fee,stroke:#b00,color:#900
+    class J failure
+```
+
+The before column refers to `e310049849b109c9da64d2c542a7ea99594f55a0`.
+
+| Input / mechanism | Before | After |
+| --- | --- | --- |
+| Saved `meta.p2p` | `gptqmodel/quantization/config.py:4623` omitted `p2p` from `meta_field_map`, leaving `p2p=None`. | The map restores the saved policy before `_normalize_p2p_config` validates it. |
+| Explicit top-level `p2p` | The presence check at `gptqmodel/quantization/config.py:4682` gave top-level values precedence. | The same check also protects explicit `None` and empty dictionaries from stale metadata. |
+| Invalid saved policy | Ignored with the other unpromoted metadata. | Normalization raises `ValueError` or `TypeError`; it cannot silently install defaults. |
+| Missing or null policy | `None` selected defaults when consumed by `configure_p2p`. | Unchanged: older configs still use defaults. |
+
+`tests/qcfg/test_p2p_meta_roundtrip.py` covers complete dictionary and
+`P2PConfig` round trips, disk persistence, explicit overrides, legacy defaults,
+and invalid metadata. Its fixture restores the incoming process-wide policy.
+The persistence fix was introduced in [#3850](https://github.com/ModelCloud/GPTQModel/pull/3850).
+
 ### Bandwidth diagnostics (`p2p=P2PConfig(probe=True)`)
 
 Probing moves real payload across every directed pair and synchronizes each
