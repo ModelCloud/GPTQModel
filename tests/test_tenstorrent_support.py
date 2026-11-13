@@ -2228,7 +2228,12 @@ def test_resolve_blockfloat_dtype_defaults_to_the_checkpoint():
 
 
 def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
-    """A bf16 checkpoint loads as bf16 by default and can be forced to fp32."""
+    """A bf16 checkpoint loads as bf16 by default and can be forced to fp32.
+
+    The source is built the way ``from_pretrained`` builds one -- bf16 weights
+    with a float32 rotary ``inv_freq`` -- so a blanket ``.to(bf16)`` in the
+    loader would narrow that buffer and change the rotary frequencies.
+    """
 
     import importlib
 
@@ -2240,10 +2245,11 @@ def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
     config = LlamaConfig(
         vocab_size=64, hidden_size=32, intermediate_size=64,
         num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
-        tie_word_embeddings=True, torch_dtype=torch.bfloat16,
+        tie_word_embeddings=True, dtype=torch.bfloat16,
     )
-    model = LlamaForCausalLM(config).to(torch.bfloat16)
+    model = LlamaForCausalLM._from_config(config)
     model.eval()
+    assert model.model.rotary_emb.inv_freq.dtype is torch.float32
     with torch.no_grad():
         for block in model.model.layers:
             for _, module in block.named_modules():
@@ -2260,20 +2266,82 @@ def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
     bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
     import json
 
-    saved = json.load(open(f"{out}/config.json"))
+    with open(f"{out}/config.json") as handle:
+        saved = json.load(handle)
+    assert saved["dtype"] == "bfloat16"
     assert saved["torch_dtype"] == "bfloat16"
 
     auto, _ = bq.load_blockfloat_model(out)
     assert next(auto.parameters()).dtype is torch.bfloat16
+    # The float32 rotary buffer must survive the load, as it does through
+    # from_pretrained; narrowing it shifts every rotary angle.
+    assert auto.model.rotary_emb.inv_freq.dtype is torch.float32
 
     forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
     assert next(forced.parameters()).dtype is torch.float32
+    # An explicit override must also update the authoritative config field,
+    # otherwise a re-save writes `dtype: bfloat16` next to `torch_dtype: float32`
+    # and transformers prefers the former on the next load.
+    assert forced.config.dtype is torch.float32
 
     ids = torch.randint(0, 64, (1, 8))
     with torch.no_grad():
         reference = model(ids).logits.float()
         reloaded = auto(ids).logits.float()
     assert torch.equal(reloaded, reference), float((reloaded - reference).abs().max())
+
+    # Re-save the upcast model and confirm the artifact does not silently fall
+    # back to bf16 on the next load.
+    upcast_dir = str(tmp_path / "upcast")
+    bq.save_blockfloat_model(forced, upcast_dir, bits=4, embed_bits=8)
+    with open(f"{upcast_dir}/config.json") as handle:
+        upcast_config = json.load(handle)
+    assert upcast_config["dtype"] == "float32"
+    assert upcast_config["torch_dtype"] == "float32"
+
+    again, _ = bq.load_blockfloat_model(upcast_dir)
+    assert next(again.parameters()).dtype is torch.float32
+    norm = forced.model.norm.weight.detach()
+    assert torch.equal(again.model.norm.weight.detach(), norm)
+
+
+def test_blockfloat_embedding_follows_module_casts():
+    """``.float()``/``.bfloat16()`` must move the table's output dtype too.
+
+    The table owns no float parameter, so a plain attribute would stay frozen
+    while the rest of the model was cast. A bf16 table feeding fp32 linears then
+    raises a dtype mismatch on the next forward.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    kern = importlib.import_module("gptqmodel.nn_modules.qlinear.tt_blockfloat")
+
+    torch.manual_seed(0)
+    weight = bq.quantize_blockfloat(torch.randn(16, 32), 8)[0]
+    codes, exponents = bq.decompose_blockfloat(weight, bits=8)
+
+    table = kern.TTBlockfloatEmbedding(
+        num_embeddings=16, embedding_dim=32, bits=8, dtype=torch.bfloat16
+    )
+    table.set_quantized_state(codes, exponents)
+
+    ids = torch.tensor([0, 3, 15])
+    assert table.output_dtype is torch.bfloat16
+    assert table(ids).dtype is torch.bfloat16
+
+    table.float()
+    assert table.output_dtype is torch.float32
+    assert table(ids).dtype is torch.float32
+
+    table.bfloat16()
+    assert table.output_dtype is torch.bfloat16
+    assert table(ids).dtype is torch.bfloat16
+
+    # The dtype anchor is a non-persistent buffer: it must not become a key in
+    # the checkpoint.
+    assert "_output_dtype_anchor" not in table.state_dict()
 
 
 def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):

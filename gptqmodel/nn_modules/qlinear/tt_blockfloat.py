@@ -260,11 +260,18 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         # The table owns no float parameter, so it cannot read the activation
-        # dtype off itself the way ``TTBlockfloatLinear`` does. Record the
-        # precision the surrounding model was built at and dequantize into it;
-        # the default used to be float32, which silently upcast every forward
-        # pass of a bf16 model.
-        self.output_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float32
+        # dtype off itself the way ``TTBlockfloatLinear`` does. A plain attribute
+        # would also be frozen at construction -- ``.to()``, ``.float()`` and
+        # ``.bfloat16()`` only convert parameters and buffers -- leaving the
+        # table emitting bf16 into fp32 linears after a cast. A zero-element
+        # non-persistent buffer is converted by ``Module.to``, so the table stays
+        # in step without adding a key to the checkpoint.
+        output_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float32
+        self.register_buffer(
+            "_output_dtype_anchor",
+            torch.zeros(0, dtype=output_dtype),
+            persistent=False,
+        )
         # ``_BlockfloatStorage`` reads ``out_features``/``in_features``; for a
         # table the rows are the outputs.
         self.out_features = num_embeddings
@@ -273,6 +280,12 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         self.block = block
         self.pack_dtype = torch.uint8
         self._init_storage(num_embeddings, embedding_dim, bits, block)
+
+    @property
+    def output_dtype(self) -> torch.dtype:
+        """Precision the table dequantizes into; follows ``Module.to``."""
+
+        return self._output_dtype_anchor.dtype
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize(dtype=self.output_dtype)
