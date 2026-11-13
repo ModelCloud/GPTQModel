@@ -15,6 +15,7 @@ import gptqmodel.quantization.nf12 as nf12_quantization
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
+from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 from gptqmodel.quantization import AutoDtypeCast, QuantizeConfig
 from gptqmodel.utils import auto_dtype_cast
 
@@ -335,3 +336,103 @@ def test_processor_task_releases_dense_storage_then_rebinds_exact_source(monkeyp
     assert task.module is restored
     assert _bits_equal(task.module.weight, expected_weight)
     assert _bits_equal(task.module.bias, expected_bias)
+
+
+def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):
+    """Exercise the live module-installation boundary used by the quantizer."""
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    class PipelineModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed_tokens = nn.Embedding(16, 64, dtype=torch.bfloat16)
+            self.proj = nn.Linear(64, 16, bias=True, dtype=torch.bfloat16)
+            self.hooked = HookedLinear(64, 16)
+            self.hooked.weight = nn.Parameter(torch.randn(16, 64, dtype=torch.bfloat16) * 0.02)
+            self.hooked.bias = nn.Parameter(torch.randn(16, dtype=torch.bfloat16))
+            self.norm = nn.LayerNorm(64, dtype=torch.bfloat16)
+            self.unsupported = nn.Linear(63, 16, bias=False, dtype=torch.bfloat16)
+            self.max_norm_embedding = nn.Embedding(16, 64, max_norm=1.0, dtype=torch.bfloat16)
+
+    class PipelineProcessor:
+        def __init__(self) -> None:
+            self.tasks = {}
+
+        def preprocess(self, named_module: NamedModule) -> None:
+            self.tasks[named_module.name] = SimpleNamespace(module=named_module.module)
+
+        def is_skipped(self, _named_module: NamedModule) -> bool:
+            return False
+
+    model = PipelineModel()
+    ids = torch.tensor([0, 1, 15])
+    x = torch.randn(2, 64, dtype=torch.bfloat16)
+    expected_embedding = model.embed_tokens(ids).clone()
+    expected_proj = model.proj(x).clone()
+    expected_hooked = model.hooked(x).clone()
+    names = [
+        "embed_tokens",
+        "proj",
+        "hooked",
+        "norm",
+        "unsupported",
+        "max_norm_embedding",
+    ]
+    full = {name: getattr(model, name) for name in names}
+    processor = PipelineProcessor()
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = model
+    harness.quantize_config = QuantizeConfig(offload_to_disk=False)
+    harness._turtle_lock = threading.RLock()
+    harness.turtle_model = None
+    harness.auto_dtype_cast_events = []
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = harness
+    looper.input_embeddings_name = "embed_tokens"
+    looper.output_embeddings_name = None
+    looper.layer_module_coverage = SimpleNamespace(
+        record_hit=lambda *_args: None,
+        record_miss=lambda *_args: None,
+    )
+
+    subset = looper.create_named_modules(
+        module=model,
+        full=full,
+        is_lm_head_module=False,
+        layer_index=0,
+        layers_prefix="layer",
+        names=names,
+        processor=processor,
+        fallback=torch.device("cpu"),
+    )
+
+    assert isinstance(model.embed_tokens, auto_dtype_cast.AutoNF12Embedding)
+    assert isinstance(model.proj, NF12Linear)
+    assert isinstance(model.hooked, auto_dtype_cast.AutoNF12HookedLinear)
+    assert isinstance(model.norm, nn.LayerNorm)
+    assert isinstance(model.unsupported, nn.Linear)
+    assert isinstance(model.max_norm_embedding, nn.Embedding)
+
+    assert subset["embed_tokens"].module is model.embed_tokens
+    assert subset["proj"].module is model.proj
+    assert subset["hooked"].module is model.hooked
+    assert subset["norm"].module is model.norm
+    assert subset["unsupported"].module is model.unsupported
+    assert subset["max_norm_embedding"].module is model.max_norm_embedding
+
+    for name in ("embed_tokens", "proj", "hooked"):
+        assert subset[name].state["auto_dtype_cast_was_applied"]
+        assert subset[name].state["auto_dtype_cast_source_spec"] is not None
+        assert processor.tasks[name].module.weight.is_meta
+    assert not processor.tasks["norm"].module.weight.is_meta
+    assert not processor.tasks["unsupported"].module.weight.is_meta
+    assert not processor.tasks["max_norm_embedding"].module.weight.is_meta
+
+    assert _bits_equal(model.embed_tokens(ids), expected_embedding)
+    torch.testing.assert_close(model.proj(x), expected_proj, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(model.hooked(x), expected_hooked, rtol=2e-3, atol=2e-3)
