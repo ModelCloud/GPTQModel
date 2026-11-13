@@ -56,6 +56,9 @@ def vptq_group_setting(
     only possible while the outlier codebook is part of the layout, so
     `enable_outlier=False` keeps `outlier_size` at zero and lets the last group
     carry the remainder instead (the runtime drops its padding on dequantize).
+    Because every group shares one `group_size`, a `group_num` whose ceiling
+    division would start a group past the last channel is rejected instead of
+    leaving an empty trailing codebook.
     """
 
     if in_features < 1:
@@ -86,6 +89,14 @@ def vptq_group_setting(
         else:
             outlier_size = 0
             resolved_group_size = int(math.ceil(remaining_columns / group_num))
+            nonempty_group_num = int(math.ceil(remaining_columns / resolved_group_size))
+            if nonempty_group_num != group_num:
+                raise ValueError(
+                    f"VPTQ: `group_num` ({group_num}) over {remaining_columns} input channels "
+                    f"resolves to `group_size` {resolved_group_size}, which would leave empty "
+                    f"codebook groups {nonempty_group_num + 1}..{group_num}; use at most "
+                    f"{nonempty_group_num} groups or an explicit `group_size`."
+                )
         resolved_group_num = group_num
     elif group_size != -1:
         outlier_size = initial_outlier_size

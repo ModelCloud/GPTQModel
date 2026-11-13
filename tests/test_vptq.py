@@ -887,6 +887,47 @@ def test_vptq_group_num_cannot_exceed_available_channels():
         vptq_group_setting(64, npercent=10.0, group_size=-1, group_num=58, enable_outlier=True)
 
 
+def test_vptq_group_num_rejects_empty_trailing_groups_without_outlier_codebook():
+    """Ceiling division must not start a codebook group past the last channel."""
+
+    # N=4, G=3 -> group_size=2, so group 3 would cover channels [4, 4)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        vptq_group_setting(4, npercent=0.0, group_size=-1, group_num=3, enable_outlier=False)
+    # N=64, G=63 -> group_size=2, so groups 33..63 would be empty
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        vptq_group_setting(64, npercent=0.0, group_size=-1, group_num=63, enable_outlier=False)
+    # the largest nonempty ceiling layout for each channel count still resolves
+    assert (
+        vptq_group_setting(4, npercent=0.0, group_size=-1, group_num=2, enable_outlier=False)
+        == (0, 2, 2)
+    )
+    assert (
+        vptq_group_setting(64, npercent=0.0, group_size=-1, group_num=32, enable_outlier=False)
+        == (0, 2, 32)
+    )
+
+
+def test_vptq_empty_group_layout_fails_before_packing():
+    """The quantizer and runtime module reject the layout before any packing."""
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 1],
+        num_centroids=[-1, 2],
+        num_res_centroids=[-1, -1],
+        npercent=0,
+        group_num=3,
+        kmeans_iters=2,
+        block_size=4,
+        percdamp=0.01,
+    )
+    weight, hessian = synthetic_problem(out_features=4, in_features=4, seed=25)
+    quantizer = build_quantizer(weight, qcfg)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        quantizer.quantize_weight(weight, hessian)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        build_module(qcfg, 4, 4)
+
+
 def test_vptq_group_num_equal_to_in_features_roundtrip():
     """`group_num == in_features` is legal and packs one codebook per channel."""
 

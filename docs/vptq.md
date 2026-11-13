@@ -120,7 +120,11 @@ Configuration constraints:
   set while the outlier codebook is enabled. Without an outlier codebook the
   remainder stays in the last group, and the last group's zero padding is
   dropped when the weight is reconstructed. The same holds for a trailing
-  partial group when `group_size` is set explicitly.
+  partial group when `group_size` is set explicitly. Because every group shares
+  one `group_size`, a `group_num` whose ceiling division would start a group
+  past the last channel is rejected before quantization instead of producing an
+  empty trailing codebook; use a smaller `group_num` or an explicit
+  `group_size`.
 
 ## Supported modules
 
