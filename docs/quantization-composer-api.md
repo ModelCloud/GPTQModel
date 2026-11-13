@@ -3,19 +3,21 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Component composer: Quantize, Default, MoE, and Run
 
-**Status:** revision 0.13 design proposal, 2026-10-29. This is the preferred
+**Status:** revision 0.14 design proposal, 2026-11-13. This is the preferred
 authoring API, not an implemented interface. The
 [API contract](quantization-plan-api.md), [data contract](quantization-data-contract.md),
 and [placement contract](quantization-device-placement.md) specify its lowering
-and advanced controls. No compatibility with previous draft spellings is required.
+and advanced controls. The [typed configuration contract](quantization-config-design.md)
+defines the method configs, weight representations, scale policies and saved
+payload descriptors consumed by this composer. No compatibility with previous draft spellings is required.
 
 ## 1. Serial by default, explicit component concurrency
 
 ```python
 run = (
     Quantize(
-        Language(GPTQ()).Use(textData),
-        Vision(GPTQ()).Use(visionData),
+        Language(GPTQConfig()).Use(textData),
+        Vision(GPTQConfig()).Use(visionData),
         model=model,
     )
     .Default(parallel=DataParallel(devices=[0, 1]))
@@ -28,23 +30,23 @@ run = (
 ```
 
 `textData` and `visionData` are caller-supplied `QDataSet` objects, and `model` is
-the composition handle. Method defaults such as `GPTQ()` remain method-defined.
+the composition handle. Method defaults such as `GPTQConfig()` remain method-defined
+and versioned in the [configuration defaults](quantization-config-design.md#complete-gptq-pipeline-example).
+Concrete configs are the typed method values accepted by `Recipe`; the earlier
+`GPTQ(bits=...)` builder is replaced, not retained as an alias.
 The language action completes before vision starts: **argument order is execution
 order**. `.Default(...)` and `.MoE(...)` do not make components concurrent.
 
 To explicitly request concurrent component quantization:
 
 ```python
-job = (
-    Quantize(
-        Parallel(
-            Language(GPTQ()).Use(textData),
-            Vision(GPTQ()).Use(visionData),
-        ),
-        model=model,
-    )
-    .Default(parallel=DataParallel(devices=[0, 1, 2, 3]))
-)
+job = Quantize(
+    Parallel(
+        Language(GPTQConfig()).Use(textData),
+        Vision(GPTQConfig()).Use(visionData),
+    ),
+    model=model,
+).Default(parallel=DataParallel(devices=[0, 1, 2, 3]))
 run = job.Run()
 ```
 
@@ -103,6 +105,13 @@ canonical owner IDs are resolved before worker placement, including grouped
 expert selection. Scope names do not fabricate independent weights for models
 with a shared multimodal backbone.
 
+The config owns `weights`, optional `activations` and method-specific `solver`.
+`weights.format` owns representation semantics; `weights.scale_solver` owns fitting;
+`GroupWeights`, `BlockWeights`, `ChannelWeights` and `TensorWeights` describe
+partitioning. Targets remain on components, data in `Use`, and placement in the
+existing action settings. No universal `bits` or `group_size` is added to the
+composer or config base.
+
 `Use(*items)` dispatches registered types:
 
 - A `QDataSet` supplies data for the unambiguous method role. `DataBindings`
@@ -114,10 +123,14 @@ with a shared multimodal backbone.
   forms preserve the same declared ordering and compatibility rules.
 
 ```python
-language = Language(GPTQ(bits=4)).Use(EoRA(rank=32)).Use(
-    DataBindings(
-        calibration=textData,
-        adapter=textData.alias(reason="shared EoRA observation corpus"),
+language = (
+    Language(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))))
+    .Use(EoRA(rank=32))
+    .Use(
+        DataBindings(
+            calibration=textData,
+            adapter=textData.alias(reason="shared EoRA observation corpus"),
+        )
     )
 )
 ```
@@ -186,7 +199,7 @@ An optional `Local(...)` value in `devices=` carries budgets, custom module maps
 CPU/NUMA policy, and buffers using the existing placement contract. For example:
 
 ```python
-job = Quantize(Language(GPTQ()).Use(textData), model=model).Default(
+job = Quantize(Language(GPTQConfig()).Use(textData), model=model).Default(
     parallel=TensorParallel(devices=Local(gpus=[0, 1, 2, 3], host_memory="256GiB"))
 )
 ```
@@ -243,6 +256,14 @@ artifact = run.save("quantized-model")
 report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
+`Quantize(..., export=ExportConfig(...))` optionally declares output layout/container
+constraints before compilation. Advanced actions and direct calls accept the same
+`export=` value. Safetensors is the default container. `ExportConfig` is not a
+recipe extension: encoding is selected once by `weights.format`. The compiler
+validates requested outputs against method/format/backend capabilities and existing
+owners; finalization validates actual produced payloads and the assembled mixed
+manifest before `run.save()` can return its pinned `ModelArtifact`.
+
 Compilation consumes no dataset and runs no numerical work. `.Run()` is the
 convenience form that compiles and executes the same bound job. Saving and optional
 evaluation remain separate caller actions, with the previous durability,
@@ -254,7 +275,8 @@ flowchart TD
     Q[Quantize component sequence] --> O[Preserve serial order and explicit Parallel groups]
     O --> D[Resolve Use data and recipe extensions]
     D --> C[Resolve Default and MoE settings]
-    C --> V[Check contexts, routing, ownership, and resources]
+    C --> F[Resolve typed weights, solver and export constraints]
+    F --> V[Check contexts, routing, ownership, and resources]
     V --> L[Compile method-owned component lifecycles]
     L --> R[Run and install stable results]
     R --> S[Explicit save]
@@ -267,6 +289,13 @@ graph descriptors; the old overloaded `Quantize(...)` single-component construct
 is removed, not retained as a compatibility dispatch. An explicit outer
 `Plan.serial(...)` or `Plan.parallel(...)` may contain a `Quantize` action. Its
 component groups retain their boundaries and final completion barrier.
+
+The recipe value is the configuration document's canonical schema: `method` is
+the selector, `method_version` pins its descriptor/defaults, and nested tagged
+objects use `type`. `schema_version` versions that structure; the enclosing
+composer schema independently versions ordering/bindings. `ResolvedModulePlan`
+entries belong to this same `ResolvedPlan`. Final `EncodedModuleSpec` entries form
+its saved manifest's `QuantizedModelSpec`; loaders do not rerun recipe solvers.
 
 Authoring serialization stores an ordered component sequence, explicit parallel
 groups, `.Use` data/extension descriptors, defaults, MoE overrides, and model
@@ -282,10 +311,10 @@ schema: gptqmodel.quantize/v1
 model: {binding: model}
 components:
   - scope: language
-    recipe: {method: gptqmodel/gptq@1}
+    recipe: {schema_version: 1, method: gptq, method_version: 1}
     use: [{dataset: {binding: textData}}]
   - scope: vision
-    recipe: {method: gptqmodel/gptq@1}
+    recipe: {schema_version: 1, method: gptq, method_version: 1}
     use: [{dataset: {binding: visionData}}]
 defaults:
   parallel: {type: data, devices: [0, 1]}

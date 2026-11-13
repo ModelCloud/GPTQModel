@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.13 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.14 design example, 2026-11-13. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -57,17 +57,13 @@ model = GPTQModel.load(checkpoint, revision=revision)
 source = SourceSnapshot(checkpoint, revision=revision)
 
 last_10_experts = (
-    DynamicModuleTargeting()
-    .experts(type="routed")
-    .last(10, per="moe_layer", order_by="expert_id")
+    DynamicModuleTargeting().experts(type="routed").last(10, per="moe_layer", order_by="expert_id")
 )
 
-vision_devices = (
-    Local(gpus=[0])
-    .place(
-        DynamicModuleTargeting(component="vision"),
-        execute="cuda:0", fit="cuda:0",
-    )
+vision_devices = Local(gpus=[0]).place(
+    DynamicModuleTargeting(component="vision"),
+    execute="cuda:0",
+    fit="cuda:0",
 )
 language_devices = (
     Local(gpus=[0, 1, 2, 3], numa_nodes=[0, 1])
@@ -89,28 +85,32 @@ language_devices = (
     )
     .place(
         DynamicModuleTargeting(component="language", role="conditional_memory_table"),
-        storage=ByLayer({
-            1: CPU(numa=0, memory_policy="bind"),
-            14: CPU(numa=1, memory_policy="bind"),
-        }),
-        execute=ByLayer({
-            1: CPU(numa=0, cores=list(range(0, 8))),
-            14: CPU(numa=1, cores=list(range(32, 40))),
-        }),
+        storage=ByLayer(
+            {
+                1: CPU(numa=0, memory_policy="bind"),
+                14: CPU(numa=1, memory_policy="bind"),
+            }
+        ),
+        execute=ByLayer(
+            {
+                1: CPU(numa=0, cores=list(range(0, 8))),
+                14: CPU(numa=1, cores=list(range(32, 40))),
+            }
+        ),
     )
 )
 
 job = Quantize(
-    Vision(GPTQ(bits=8, group_size=128))
-        .Use(ImageDataSet(image_text_samples))
-        .Default(devices=vision_devices),
+    Vision(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8), size=128)))
+    .Use(ImageDataSet(image_text_samples))
+    .Default(devices=vision_devices),
     Language(
-        GPTQ(bits=4, group_size=128),
+        GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128)),
         target=last_10_experts,
         source=source.dequantized(),
     )
-        .Use(TextDataSet(text_samples))
-        .Default(devices=language_devices),
+    .Use(TextDataSet(text_samples))
+    .Default(devices=language_devices),
     model=model,
 )
 

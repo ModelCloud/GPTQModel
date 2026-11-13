@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Device placement inside lifecycle actions
 
-**Status:** revision 0.13 design proposal, 2026-10-29. These APIs and execution
+**Status:** revision 0.14 design proposal, 2026-11-13. These APIs and execution
 guarantees are proposed, not implemented. See the [public API](quantization-plan-api.md),
 [parallel contract](quantization-parallel-execution.md), and
 [DeepSeek example](quantization-example-deepseek-v4.1-flash.md).
@@ -14,9 +14,9 @@ The [component composer](quantization-composer-api.md) configures execution with
 one typed value and an ordinary device list:
 
 ```python
-job = Quantize(Language(GPTQ(bits=4)).Use(textData), model=model).Default(
-    parallel=TensorParallel(devices=[0, 1, 2, 3])
-)
+job = Quantize(
+    Language(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4)))).Use(textData), model=model
+).Default(parallel=TensorParallel(devices=[0, 1, 2, 3]))
 ```
 
 `DataParallel` selects data replicas; `TensorParallel` selects tensor shards.
@@ -131,7 +131,9 @@ language_devices = (
         execute=CPU(numa=0, cores=list(range(0, 8))),
     )
 )
-mapped_language = QuantizeComponent.language(recipe=GPTQ(bits=4), name="language").devices(language_devices)
+mapped_language = QuantizeComponent.language(
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))), name="language"
+).devices(language_devices)
 ```
 
 `dense()` selects the adapter's dense per-layer execution groups: ordinary attention/MLP,
@@ -326,7 +328,7 @@ action fields, such as recipe, source, and weight target, are omitted here:
 
 ```yaml
 devices:
-  kind: local
+  type: local
   gpus: [0, 1, 2, 3]
   numa_nodes: [0, 1]
   placement:

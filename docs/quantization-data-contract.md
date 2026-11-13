@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.13 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.14 design proposal, 2026-11-13. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -65,6 +65,14 @@ sources, model-specific preparation, method-specific observations, optimizer
 training sets, initializer sets, selection/validation sets, adapter data, and
 task evaluation data. Some are currently separate arguments; others are
 implicit slices or method-local loaders.
+
+The [typed method configuration](quantization-config-design.md) consumes these
+same datasets. A scale-solver config contributes its required observations and
+coordinate system to the method's `DataRequirement`; it does not create another
+`CalibrationData` source type or run tokenization inside a config constructor.
+Plain GPTQ Hessian capture and weight-MSE scale search remain distinct consumers.
+An output-MSE policy must declare its calibration/reference requirements and be
+implemented by the method before admission.
 
 ## 2. `QDataSet` contract
 
@@ -238,8 +246,10 @@ The profile does not perform tensor preparation. A project can subclass
 `CalibrationDataSet` to add domain validation while retaining the same cursor
 and identity rules.
 The friendly constructor accepts `scenarios=` and related keyword arguments to
-build the immutable profile. `route=` is an optional override, not boilerplate
-required by the dataset's modality.
+build the immutable profile. For example, `max_length=2048` sets the profile's
+length constraint, enforced later by architecture preparation; it neither opens
+the source during compilation nor guarantees equally long samples. `route=` is
+an optional override, not boilerplate required by the dataset's modality.
 
 Roles are typed bindings, not a closed subclass list:
 
@@ -283,8 +293,12 @@ The preferred composer attaches sources directly:
 
 ```python
 job = Quantize(
-    Vision(GPTQ(bits=8)).Use(ImageDataSet(image_text_samples)),
-    Language(GPTQ(bits=4)).Use(TextDataSet(text_samples)),
+    Vision(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8)))).Use(
+        ImageDataSet(image_text_samples)
+    ),
+    Language(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4)))).Use(
+        TextDataSet(text_samples)
+    ),
     model=model,
 )
 ```
@@ -311,7 +325,7 @@ images = ImageDataSet.from_hf(
 )
 run = model.quantize(
     target="language",
-    recipe=GPTQ(bits=4, group_size=128),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128)),
     data=images,
     devices=Local(gpus="all"),
 )
@@ -327,10 +341,16 @@ texts = TextDataSet(text_samples)
 plan = (
     Plan()
     .data(images, texts)
-    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
-            .devices(Local(gpus=[0, 1])))
-    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
-            .devices(Local(gpus=[0, 1, 2, 3])))
+    .serial(
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))), name="vision"
+        ).devices(Local(gpus=[0, 1]))
+    )
+    .serial(
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))), name="language"
+        ).devices(Local(gpus=[0, 1, 2, 3]))
+    )
 )
 
 # Optional coverage controls; the image route is still inferred.
@@ -368,11 +388,12 @@ mixture policy rather than duplicated bindings.
 Named roles remain compact and chainable:
 
 ```python
-splits = TextDataSet.from_hf(
-    "org/quant-corpus", revision="91af..."
-).split(
-    train=0.8, validation=0.1, evaluation=0.1,
-    by="sample_id", seed=17,
+splits = TextDataSet.from_hf("org/quant-corpus", revision="91af...").split(
+    train=0.8,
+    validation=0.1,
+    evaluation=0.1,
+    by="sample_id",
+    seed=17,
 )
 
 gsq_data = DataBindings(
@@ -381,12 +402,14 @@ gsq_data = DataBindings(
     validate=splits.validation,
 )
 
-plan = (
-    Plan()
-    .add(QuantizeComponent(
-        "language", Recipe(GPTQ(bits=4)).use(StagedGSQ()),
-        data=gsq_data, devices=Local(gpus=[0, 1, 2, 3]), name="language",
-    ))
+plan = Plan().add(
+    QuantizeComponent(
+        "language",
+        Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4)))).use(StagedGSQ()),
+        data=gsq_data,
+        devices=Local(gpus=[0, 1, 2, 3]),
+        name="language",
+    )
 )
 run = model.run(plan.compile(model))
 artifact = run.save("language-quantized")

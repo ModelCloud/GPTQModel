@@ -76,6 +76,10 @@ lossless repacking of arbitrary grouped/asymmetric GPTQ weights.
 
 ## Quantization Support 🛠️
 
+For proposed API changes, see the **[component quantization design](docs/component-quantization-design.md)**
+and **[typed configuration proposal](docs/quantization-config-design.md)**. These are design documents;
+the proposed interfaces are not implemented.
+
 Start with the **[quantization guide and end-to-end recipes](docs/quantization-guide.md)**
 to choose weight and activation precision, prepare calibration data, quantize,
 save, reload, and validate a model. It also maps advanced features to their guides.

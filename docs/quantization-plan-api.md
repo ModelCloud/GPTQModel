@@ -3,12 +3,14 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.13 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.14 design sketch, 2026-11-13. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
 the [data contract](quantization-data-contract.md) defines `QDataSet`, modality
-schemas, lifecycle roles, preparation, streaming, and provenance.
+schemas, lifecycle roles, preparation, streaming, and provenance. The
+[configuration contract](quantization-config-design.md) defines typed method,
+weight-format, scale-solver and encoded-artifact descriptors for this same API.
 
 The preferred authoring surface is the
 [component composer](quantization-composer-api.md):
@@ -16,8 +18,8 @@ The preferred authoring surface is the
 ```python
 job = (
     Quantize(
-        Language(GPTQ()).Use(textData),
-        Vision(GPTQ()).Use(visionData),
+        Language(GPTQConfig()).Use(textData),
+        Vision(GPTQConfig()).Use(visionData),
         model=model,
     )
     .Default(parallel=DataParallel(devices=[0, 1]))
@@ -48,18 +50,26 @@ images = ImageDataSet(image_text_samples)
 # One target, one method. The operation compiles and executes a plan.
 run = model.quantize(
     target="language",
-    recipe=GPTQ(bits=4, group_size=128),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128)),
     data=images,
     devices=Local(gpus="all"),
 )
 run.save("language-quantized")
 
 # A data-free method does not acquire calibration requirements from the wrapper.
-run = model.quantize(target="vision.encoder", recipe=RTN(bits=8))
+run = model.quantize(
+    target="vision.encoder", recipe=RTNConfig(weights=GroupWeights(format=IntFormat(bits=8)))
+)
 run.save("mixed-model")
 ```
 
-An ordinary method configuration is shorthand for `Recipe(method)`. Direct
+An ordinary concrete configuration, such as `GPTQConfig`, is shorthand for
+`Recipe(config)`. Its nested `weights` owns representation and scale fitting;
+its concrete `solver` owns method procedure. It does not own target rules,
+datasets or placement. Direct calls accept `export=ExportConfig(...)` to declare
+output layout/container constraints before fitting, using the same compiler as
+the composer. The [complete INT4 example](quantization-config-design.md#complete-gptq-pipeline-example)
+shows natural ordering and optional MSE scale search. Direct
 operations infer the input route from the dataset schema and architecture adapter;
 GPTQ's single data role makes `data=images` calibration without another wrapper.
 `CalibrationDataSet` is available for explicit role/coverage controls:
@@ -89,7 +99,7 @@ activation calibration are separately named operations on existing representatio
 ```python
 run = model.requantize(
     target="vision.encoder",
-    recipe=GPTQ(bits=4, group_size=64),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=64)),
     source=SourceSnapshot("source-checkpoint"),
     data=multimodal_calibration,
 )
@@ -116,12 +126,20 @@ ownership of a shared multimodal backbone.
 plan = (
     Plan()
     .data(multimodal_calibration)
-    .add(QuantizeComponent.vision(
-        recipe=GPTQ(bits=8), devices=Local(gpus=[0, 1]), name="vision"
-    ))
-    .add(QuantizeComponent.language(
-        recipe=GPTQ(bits=4), devices=Local(gpus=[0, 1, 2, 3]), name="language"
-    ))
+    .add(
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))),
+            devices=Local(gpus=[0, 1]),
+            name="vision",
+        )
+    )
+    .add(
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))),
+            devices=Local(gpus=[0, 1, 2, 3]),
+            name="language",
+        )
+    )
 )
 
 resolved = plan.compile(model)
@@ -159,10 +177,16 @@ Multiple modality sources also need no per-component bindings:
 plan = (
     Plan()
     .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
-    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
-            .devices(Local(gpus=[0, 1])))
-    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
-            .devices(Local(gpus=[0, 1, 2, 3])))
+    .serial(
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))), name="vision"
+        ).devices(Local(gpus=[0, 1]))
+    )
+    .serial(
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))), name="language"
+        ).devices(Local(gpus=[0, 1, 2, 3]))
+    )
 )
 ```
 
@@ -193,17 +217,27 @@ plan = (
     Plan()
     .data(multimodal_calibration, audio_calibration, omni_calibration)
     .parallel(
-        QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
-                .devices(Local(gpus=[0, 1])),
-        QuantizeComponent.audio(recipe=GPTQ(bits=8), name="audio")
-                .devices(Local(gpus=[2, 3])),
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))), name="vision"
+        ).devices(Local(gpus=[0, 1])),
+        QuantizeComponent.audio(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))), name="audio"
+        ).devices(Local(gpus=[2, 3])),
     )
-    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
-            .devices(Local(gpus=[0, 1, 2, 3])))
-    .serial(TuneNorms(
-        target="language", source=SourceSnapshot("source-checkpoint"),
-        data=norm_training_data, devices=Local(gpus=[0, 1, 2, 3]), name="norms",
-    ))
+    .serial(
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))), name="language"
+        ).devices(Local(gpus=[0, 1, 2, 3]))
+    )
+    .serial(
+        TuneNorms(
+            target="language",
+            source=SourceSnapshot("source-checkpoint"),
+            data=norm_training_data,
+            devices=Local(gpus=[0, 1, 2, 3]),
+            name="norms",
+        )
+    )
 )
 ```
 
@@ -259,12 +293,18 @@ independent = (
     Plan()
     .data(multimodal_calibration)
     .parallel(
-        QuantizeComponent.vision(recipe=GPTQ(bits=8),
-                        observations=native_inputs, devices=Local(gpus=[0, 1]),
-                        name="vision"),
-        QuantizeComponent.language(recipe=GPTQ(bits=4),
-                          observations=native_inputs, devices=Local(gpus=[2, 3]),
-                          name="language"),
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))),
+            observations=native_inputs,
+            devices=Local(gpus=[0, 1]),
+            name="vision",
+        ),
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))),
+            observations=native_inputs,
+            devices=Local(gpus=[2, 3]),
+            name="language",
+        ),
     )
 )
 ```
@@ -322,13 +362,13 @@ saves create a new artifact identity that needs its own evaluation.
 ## 4. Stack recipes without flattening their lifecycles
 
 ```python
-scalar = Recipe(GPTQ(bits=4, group_size=128))
+scalar = Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128)))
 with_adapter = scalar.use(EoRA(rank=32))
-higher_precision = scalar.configure(bits=8)
+higher_precision = scalar.configure(weights=GroupWeights(format=IntFormat(bits=8), size=128))
 
-staged_awq = Recipe(AWQ(bits=4, group_size=128)).use(
-    StagedGSQ(epochs=2)
-)
+staged_awq = Recipe(
+    AWQConfig(weights=GroupWeights(format=IntFormat(bits=4, symmetric=False), size=128))
+).use(StagedGSQ(epochs=2))
 
 # Each binding is a QDataSet; the composed program declares its required roles.
 staged_data = DataBindings(
@@ -349,7 +389,6 @@ does not execute its lifecycle stages.
 | `EoRA(rank=32)` | Adapter fitting stages and their residual/base/data requirements. |
 | `StagedGSQ(epochs=2)` | Intrinsic training program, teacher freeze points, initializer, and training/validation roles. |
 | `SmoothMAD()` | Supported preparation transforms, observations if required, and explicit write effects. |
-| `GGUFFormat()` | Output representation and codec requirements, including exact-payload validation. |
 
 Each type registers a versioned `RecipeExtension` descriptor with its category,
 configuration schema, compatibility rules, effects, and lifecycle constraints.
@@ -357,8 +396,10 @@ The registry resolves one descriptor unambiguously; future extensions use the
 same protocol without coordinator branches for class names. Unknown types,
 ambiguous registrations, unsupported combinations, or conflicting singleton
 options fail with the offending object identified. Repeatable extensions must
-declare that capability and have distinct instance identities. Adding a second
-codec or a second nonrepeatable modifier never silently replaces the first.
+declare that capability and have distinct instance identities. A second
+nonrepeatable modifier never silently replaces the first. Format descriptors
+belong exclusively to `weights.format`, and `ExportConfig` belongs on the action;
+passing either as a `.use()` extension is rejected.
 
 `recipe.use(a, b)` and `recipe.use(a).use(b)` produce the same immutable
 specification. The resolved program determines stage execution order. For
@@ -369,27 +410,37 @@ still consumes the uncorrected base and residual. Required training remains
 visible when composition refinement is disabled.
 
 `configure()` returns a recipe with validated changes to its base method's typed
-options and revalidates every attached extension. The base method is supplied
+config and revalidates every attached extension. A supplied `weights`, `solver` or
+`activations` object replaces that object atomically; omission retains the base
+value, while explicit `None` keeps its declared meaning. There is no recursive
+merge of implicit nested defaults and no separate config-level override engine.
+The base method is supplied
 to `Recipe(method)`; another quantizer is not an extension that replaces it.
 Dataset bindings retain plan/operation scopes. Advanced graph devices use
 `action.devices(Local(...))` or the equivalent action/direct-call `devices=`
 argument. They are not recipe extensions or plan-wide resource defaults.
 
-Preparation and export use the same composition operation:
+Preparation remains a recipe extension. Representation and checkpoint layout have
+distinct owners:
 
 ```python
-gguf_recipe = (
-    Recipe(GGUF(quant_type="Q4_K"))
-    .use(SmoothMAD())
-    .use(GGUFFormat())
+gguf_recipe = Recipe(
+    GGUFConfig(weights=BlockWeights(format=GGMLFormat(qtype="q4_k")))
+).use(SmoothMAD())
+
+gguf_job = QuantizeComponent.language(
+    recipe=gguf_recipe,
+    export=ExportConfig(container="safetensors"),
 )
 ```
 
 The method/codec validates this particular combination. A preparation extension
-declares its write scope and cannot change unselected neighbors. A format
-extension specifies the output representation; any quantization fused with
-encoding remains a declared stage of the selected method. A global rotation or
-structural change can instead be a plan operation with its full target scope.
+declares its write scope and cannot change unselected neighbors. The format
+descriptor defines the numerical codec; any quantization fused with encoding
+remains a declared stage of the selected method. Export settings select a
+compatible physical layout/container without redefining the numerical format.
+A global rotation or structural change can instead be a plan operation with its
+full target scope.
 
 A separately requested post-quantization adapter uses `GenerateAdapter(...)` on
 the packed base and explicit source/data roles. It is not the same request as
@@ -400,7 +451,7 @@ requantizing the base with a modifier.
 `target=Target.AUTO` is the default, so callers need not write model-specific
 module paths. A versioned model mapping declares canonical ownership, semantic
 groups, and a default quantization selection for each supported scope. Typed
-declarations such as `Vision(GPTQ(...))` and `Language(GPTQ(...))` establish that
+declarations such as `Vision(GPTQConfig(...))` and `Language(GPTQConfig(...))` establish that
 scope. The advanced graph constructors `QuantizeComponent.vision(...)`,
 `QuantizeComponent.language(...)`, and `RequantizeComponent.language(...)` express
 the same scope as ordinary operations, using the same `add`/`serial`/`parallel`
@@ -412,10 +463,12 @@ not new coordinator branches; callers can use `scope=` directly for them.
 These two values are equivalent:
 
 ```python
-vision_job = QuantizeComponent.vision(recipe=GPTQ(bits=8))
+vision_job = QuantizeComponent.vision(
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8)))
+)
 explicit_default = QuantizeComponent.vision(
     target=Target.AUTO,
-    recipe=GPTQ(bits=8),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))),
 )
 ```
 
@@ -454,13 +507,13 @@ text_rules = (
     .preserve(DynamicModuleTargeting(role="router"))
     .override(
         DynamicModuleTargeting(role="attention_projection"),
-        Recipe(GPTQ(bits=8)),
+        Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8)))),
     )
 )
 
 job = QuantizeComponent(
     target="language",
-    recipe=Recipe(GPTQ(bits=4, group_size=128)),
+    recipe=Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128))),
     rules=text_rules,
     name="language",
 )
@@ -469,7 +522,9 @@ job = QuantizeComponent(
 Rules are scoped to the operation's target. Precedence is plugin defaults, then
 explicit base recipe configuration, then explicitly selected overrides. Overlapping
 overrides that disagree require an explicit priority or disjoint selectors;
-insertion order is not precedence. Preservation is a hard write exclusion and
+insertion order is not precedence. A higher explicit priority wins; conflicting
+values at equal priority fail, while identical requests can coalesce.
+Preservation is a hard write exclusion and
 applies to coupled transforms too. A deliberately different write scope requires
 an explicit new plan edit, not a silent exception inside a method.
 A recipe-valued override replaces the selected recipe, including its modifiers.
@@ -534,7 +589,9 @@ gsq_data = DataBindings(
     train=reconstruction_data,
     validate=held_out_validation,
 )
-staged_gsq = Recipe(GPTQ(bits=4)).use(StagedGSQ(epochs=2))
+staged_gsq = Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4)))).use(
+    StagedGSQ(epochs=2)
+)
 job = QuantizeComponent("language", staged_gsq, data=gsq_data, name="language")
 ```
 
@@ -579,9 +636,9 @@ automatic routing cannot reuse stale candidate features or change during resume.
 The common composer sets a typed mode with a simple device list:
 
 ```python
-job = Quantize(Language(GPTQ(bits=4)).Use(textData), model=model).Default(
-    parallel=TensorParallel(devices=[0, 1, 2, 3])
-)
+job = Quantize(
+    Language(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4)))).Use(textData), model=model
+).Default(parallel=TensorParallel(devices=[0, 1, 2, 3]))
 ```
 
 Use `DataParallel` for data replicas. Omit the setting for supported automatic
@@ -664,18 +721,26 @@ data:
   calibration: {dataset: multimodal_calibration}
 operations:
   - id: vision
-    kind: quantize
+    type: quantize
     scope: vision
     target: auto
-    recipe: {method: gptqmodel/gptq@1, bits: 8}
-    devices: {kind: local, gpus: [0, 1]}
+    recipe:
+      schema_version: 1
+      method: gptq
+      method_version: 1
+      weights: {type: group, format: {type: int, bits: 8}, axis: in_features, size: 128}
+    devices: {type: local, gpus: [0, 1]}
   - id: language
-    kind: quantize
+    type: quantize
     scope: language
     target: auto
     after: [vision]
-    recipe: {method: gptqmodel/gptq@1, bits: 4, group_size: 128}
-    devices: {kind: local, gpus: [0, 1, 2, 3]}
+    recipe:
+      schema_version: 1
+      method: gptq
+      method_version: 1
+      weights: {type: group, format: {type: int, bits: 4}, axis: in_features, size: 128}
+    devices: {type: local, gpus: [0, 1, 2, 3]}
 ```
 
 This is an explicitly ordered two-operation plan. An unordered `add` plan omits
@@ -706,13 +771,26 @@ example, the EoRA recipe above has the following recipe value; its containing
 operation must also bind the declared `calibration` and `adapter` roles:
 
 ```yaml
-method: gptqmodel/gptq@1
-bits: 4
-group_size: 128
+schema_version: 1
+method: gptq
+method_version: 1
+weights:
+  type: group
+  format: {type: int, bits: 4, symmetric: true}
+  axis: in_features
+  size: 128
+  scale_solver: {type: auto}
 extensions:
   - type: gptqmodel/eora@1
     rank: 32
 ```
+
+Built-in `method` tags use short names such as `gptq`, with `method_version`
+pinning the method/defaults contract. The compiler derives the qualified registry
+ID (for example, `gptqmodel/gptq@1`); it is not another writable selector.
+`schema_version` versions the recipe shape independently of the enclosing plan
+schema. The [configuration schema](quantization-config-design.md#canonical-schema)
+also defines explicit null/auto/default handling and strict typed validation.
 
 Extension list order is preserved for declared order-sensitive constraints. The
 same registry and compatibility checks apply to Python and serialized plans;

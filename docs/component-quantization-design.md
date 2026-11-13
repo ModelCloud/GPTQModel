@@ -3,13 +3,13 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.13, 2026-10-29.
+**Status:** design discussion, revision 0.14, 2026-11-13.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
 **Scope:** architecture, proposed APIs, execution flows, alternatives, and validation criteria. No implementation or quantization experiments accompany this proposal.
 
-GPTQModel should support quantizing independently selected parts of a composite
+GPT-QModel should support quantizing independently selected parts of a composite
 model, while coordinating the numerical dependencies between those parts.
 Vision, language, audio, projectors, memory modules, and draft models can have
 different recipes and lifecycles. Their calibration inputs and execution state
@@ -33,6 +33,7 @@ checkpoint-specific example provides a concrete review target:
 
 | Document | Purpose |
 | --- | --- |
+| [Typed configuration and representation](quantization-config-design.md) | Small method configs, typed weights/formats/scale solvers, numerical versus execution ownership, and saved payload contracts. |
 | [Component composer](quantization-composer-api.md) | Preferred component recipes, serial argument order, explicit `Parallel`, typed `Use`, and scoped `Default`/`MoE` overrides. |
 | [2026 architecture audit](quantization-architecture-2026.md) | Source-backed family/pattern coverage, compatibility gaps, and adapter acceptance cases. |
 | [Parallel execution](quantization-parallel-execution.md) | Multi-GPU capture, fitting, model partitioning, resource scheduling, and failure/continuation contracts. |
@@ -48,6 +49,13 @@ API examples below are illustrative, not APIs available in the current package.
 All choices labeled proposed remain open to revision. Discussion or acceptance
 of this document does not start implementation; execution requires a separate
 decision after the design questions have been resolved.
+
+Revision 0.14 incorporates the typed quantization configuration proposal as the
+recipe layer of this architecture. It preserves the composer, data, placement,
+source lineage and save/evaluation contracts. `GPTQConfig(weights=..., solver=...)`
+replaces flat `GPTQ(bits=..., group_size=...)` examples. The additional source
+inventory is pinned to public commit `35987dfb`; the earlier method/architecture
+audits below keep their own dates and source baselines.
 
 ## 1. Problem and current baseline
 
@@ -188,14 +196,17 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
 | `QDataSet` / `DataBindings` | Typed sources with modality/schema identity, inferred input routes, and quantization roles for calibration, initialization, training, validation, selection, adapter, profiling, or plugin-defined needs. The independent evaluator also accepts `QDataSet`; its data is never bound to a quantization plan. |
 | `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
-| `RecipeExtension` | Registered typed contribution selected by `Recipe.use()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
+| `BaseQuantizeConfig` / concrete configs | Typed method configuration: `weights`, optional `activations`, and method-specific `solver` / native optimization settings. Scope, data and devices belong to the enclosing action. |
+| `Recipe` / `RecipeExtension` | Method config plus registered modifiers, preparation and staged refinement, with versioned configuration, effects and composition constraints. |
+| `ExportConfig` | Requested compatible checkpoint layout/container, validated before fitting and against realized payloads at save time. Numerical representation lives in `weights.format`. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
 | `Plan` | Immutable specification of lifecycle actions composed with `serial`/`parallel`, recipes/modifiers, data bindings, order constraints, and internal method/integrity checks. Devices, mappings, and execution modes are configured on each action. |
 | `Local` / placement rules | An action's permitted devices, budgets, owner storage/execution/fitting maps, and stage-buffer/CPU/NUMA constraints, reconciled by the shared scheduler. |
-| `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and internal check policy after compilation. |
+| `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, per-owner `ResolvedModulePlan` entries, and internal check policy after compilation. |
 | `ExecutionLayout` | Physical stage placement, replica/shard ownership, resource reservations, transfers, and collective groups under the resolved numerical plan. |
 | `QuantizationRun` | Program/stage progress, candidate revisions, checkpoints, observations, method diagnostics, and saved-artifact references. |
-| `ModelArtifact` | Handle returned by a successful save, pinning committed payloads and manifest identity; independent evaluation reads this exact artifact. |
+| `QuantizedModelSpec` / `EncodedModuleSpec` | Representation portion of the composition manifest: final format/layout, shape/assignment, scales, codebooks, escapes, transforms, payload references, and aliases. |
+| `ModelArtifact` | Handle returned by a successful save, pinning committed payloads and the composition manifest (including `QuantizedModelSpec`); independent evaluation reads this exact artifact. |
 | `EvaluationReport` | Separate report with artifact identity, suite/data/runtime provenance, metrics, coverage, and held-out status. It does not modify quantization success or the saved manifest. |
 
 ```mermaid
@@ -219,7 +230,7 @@ Components are logical identities such as `vision.encoder`, `vision.projector`,
 `language`, or `audio.encoder`. A named selection such as `vision` can expand to
 several components without becoming another mutable owner.
 The model mapping declares versioned scope/default selections. Typed constructors
-such as `Vision(GPTQ(...))` supply the scope; an omitted target is `Target.AUTO`
+such as `Vision(GPTQConfig(...))` supply the scope; an omitted target is `Target.AUTO`
 and needs no path string. The mapping explicitly decides whether a default group
 includes bridge/projector owners. Ambiguous or absent defaults require a concrete
 selection instead of guessing. An operation's `name` remains only its label.
@@ -297,8 +308,8 @@ The preferred authoring form follows the
 ```python
 run = (
     Quantize(
-        Language(GPTQ()).Use(textData),
-        Vision(GPTQ()).Use(visionData),
+        Language(GPTQConfig()).Use(textData),
+        Vision(GPTQConfig()).Use(visionData),
         model=model,
     )
     .Default(parallel=DataParallel(devices=[0, 1]))
@@ -332,7 +343,7 @@ calibration = CalibrationDataSet(
 
 run = model.quantize(
     target="language",
-    recipe=GPTQ(bits=4, group_size=128),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128)),
     data=calibration,
     devices=Local(gpus="all"),
 )
@@ -340,14 +351,14 @@ run = model.quantize(
 # Language is packed; the selected vision weights are still dense.
 run = model.quantize(
     target="vision.encoder",
-    recipe=GPTQ(bits=8, group_size=64),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8), size=64)),
     data=calibration,
 )
 run.save("mixed-model")
 
 model.requantize(
     target="vision.encoder",
-    recipe=GPTQ(bits=4, group_size=64),
+    recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=64)),
     source=SourceSnapshot("source-checkpoint"),
     data=calibration,
 )
@@ -372,10 +383,16 @@ model = GPTQModel.load("source-checkpoint")
 plan = (
     Plan()
     .data(calibration)
-    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
-            .devices(Local(gpus=[0, 1])))
-    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
-            .devices(Local(gpus=[0, 1, 2, 3])))
+    .serial(
+        QuantizeComponent.vision(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=8))), name="vision"
+        ).devices(Local(gpus=[0, 1]))
+    )
+    .serial(
+        QuantizeComponent.language(
+            recipe=GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4))), name="language"
+        ).devices(Local(gpus=[0, 1, 2, 3]))
+    )
 )
 resolved = plan.compile(model)
 print(resolved.explain())
@@ -413,13 +430,19 @@ Explicit jobs do not cause AUTO to claim other unselected weights as leftovers.
 Recipes can be reused and composed through one typed operation:
 
 ```python
-text_recipe = Recipe(GPTQ(bits=4, group_size=128)).use(EoRA(rank=32))
-awq_recipe = Recipe(AWQ(bits=4)).use(StagedGSQ(epochs=2))
+text_recipe = Recipe(GPTQConfig(weights=GroupWeights(format=IntFormat(bits=4), size=128))).use(
+    EoRA(rank=32)
+)
+awq_recipe = Recipe(AWQConfig(weights=GroupWeights(format=IntFormat(bits=4, symmetric=False)))).use(
+    StagedGSQ(epochs=2)
+)
 ```
 
 `Recipe.use(...)` includes typed behavior in a new immutable recipe. The supplied
 object's registered type determines its contribution: modifier, preparation
-transform, or output format. Chained and variadic forms produce the same
+transform, or staged refinement. Numerical format belongs to `weights.format`,
+and checkpoint layout/container belongs to action-level `ExportConfig`.
+Chained and variadic forms produce the same
 immutable specification. Unknown, ambiguous,
 duplicate, or incompatible extensions fail explicitly; no class-name branches
 are added to the coordinator. The [API contract](quantization-plan-api.md)
@@ -443,7 +466,9 @@ The coordinated sketch is an activation-calibrated GPTQ example. A data-free ope
 can instead be as small as:
 
 ```python
-model.quantize(target="vision.encoder", recipe=RTN(bits=8))
+model.quantize(
+    target="vision.encoder", recipe=RTNConfig(weights=GroupWeights(format=IntFormat(bits=8)))
+)
 ```
 
 The resolved method/backend must support that target. No forward is needed just
@@ -899,6 +924,23 @@ dependencies. Saving preserves untouched packed and dense tensors. Backend
 selection is per operator. External formats are explicit exporters that reject
 unrepresentable mixtures; a single global quantization config is not authoritative.
 
+### Typed payloads inside the composition manifest
+
+The [configuration contract](quantization-config-design.md#complete-artifact-contract)
+defines `EncodedModuleSpec` and `QuantizedModelSpec` inside this manifest.
+Method configs are immutable requests, per-owner resolved plans contain policy,
+and method result artifacts contain realized tensor state. Preserve final GPTQ
+group assignment/permutations, inverse/direct scale conventions, BNB nested
+statistics, VPTQ normalization/codebooks, EXL3 factors and NF12 escape/base data
+where applicable. Shared storage, shards and untouched dense owners keep this
+document's ownership/publication rules.
+
+A loader validates those descriptors and payloads without importing the producer
+or rerunning its scale solver. Intermediate and final schemas have independent
+versions and explicit conversions; no request object is also an artifact handle.
+Scale-policy input requirements join the full method/extension data requirements,
+and later refinement may change scales before final packing.
+
 ## 12. Implementation boundaries under consideration
 
 | Boundary | Responsibility |
@@ -1131,6 +1173,10 @@ The following are proposed acceptance criteria and experiments.
 | V38 | Serial composer and explicit concurrency | Positional `Quantize` items execute in order; `Parallel` retains branch boundaries and joins. Unsupported concurrency or conflicting producer requirements fail without silent serialization, reordering, or observation-policy changes. |
 | V39 | Scoped defaults and MoE | General/component defaults and MoE overrides resolve documented field precedence. Execution mode/pools replace atomically; unsupported coupled groups, replica redistribution, or routing bypass fail. Bypass changes provenance and never expands writes or leaks into saved inference. |
 | V40 | Typed component authoring | `Language`/`Vision`/registered scopes, `Use`, model binding, `Compile`, and `Run` lower to the canonical graph/data contracts. Packed selections require explicit source lineage; no overloaded legacy `Quantize` constructor or process-global model is needed. |
+| V41 | Typed method configs and nested format/scale-solver objects round-trip through Python, direct, composer and serialized authoring inputs with the same resolved per-owner intent. Unsupported cross-products fail before fitting. |
+| V42 | Recipe `Rules` obey priority/conflict/preservation semantics, separately from execution `Default`/`MoE` precedence; explicit null and atomic replacements survive serialization. |
+| V43 | Final encoded descriptors reconstruct scale assignments, auxiliary payloads and tied ownership without requiring producer dependencies. Save fails on incomplete or inconsistent payloads. |
+| V44 | Scale fitting, optional refinement and packing preserve stage/source coordinates and calibration requirements. Weight-MSE fitting remains distinct from proposed output-MSE fitting; numerical proofs require actual implementation. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1184,6 +1230,9 @@ proposed defaults, not final design approval.
 | D21 | `QDataSet` schemas infer input routes and shared downstream consumers; lifecycle roles remain orthogonal and are inferred only when unambiguous. | Which adapter defaults and coverage profiles minimize manual configuration without hiding meaningful task choices? |
 | D22 | Typed execution configuration owns its device list/context; methods resolve stages. Composer defaults are action-local; global scheduling shares physical accounting. Storage, execution, fit, buffers, and NUMA remain distinct constraints. | Which complete recipe/backend profiles and CPU allocation backends provide enforceable locality and practical cost? |
 | D23 | `Quantize` is serial in argument order; `Parallel` explicitly requests component concurrency. `Use` attaches typed data/extensions; `Default`/`MoE` supply scoped overrides. | Which additional semantic-region overrides merit convenient names, and which should remain advanced module queries? |
+| D24 | Small method configs compose typed weight formats, partitions and scale-solver configs; no universal bits/group-size fields or legacy factories. | Which exact native policies and method/format combinations should the first schema admit? |
+| D25 | Shared optional `ScaledWeight.scale_solver` with explicit null/default/auto semantics and method-owned invocation. | How should each native policy express multiple scale roles, required inputs, objectives and coordinates? |
+| D26 | `QuantizedModelSpec` is the representation portion of the composition manifest; `ModelArtifact` remains the saved handle. | Which per-format payload/decode schemas and import adapters can be qualified first? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay

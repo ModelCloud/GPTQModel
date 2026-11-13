@@ -22,6 +22,15 @@ training, activation-scale fitting/measurement, RCO search batches, and task
 evaluation data. That later audit extends data contracts without changing the
 method-lifecycle observations pinned here.
 
+The [typed configuration audit](quantization-config-design.md) adds a separately
+pinned inventory at public commit `35987dfb`: 11 `METHOD` values and 12 concrete
+configs including RTN, with NF12 and load-only TT block-float representation
+contracts. Those newer configuration observations supplement this earlier
+lifecycle inventory; they do not change its source baseline or certify new
+runtime combinations. Revision 0.14 uses concrete method configs as inputs to
+the same method-owned programs, with typed format/partition/scale policies and
+separate encoded payload descriptors.
+
 Revision 0.6 infers dataset input routes from schema and architecture contracts.
 That convenience leaves each composed method's effective data roles and
 observation streams intact: an image source can traverse vision into a language
