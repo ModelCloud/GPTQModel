@@ -77,6 +77,11 @@ The fallback is armed lazily and permanently: the first compiler failure drops
 the compiled callable, logs once, and runs `dequantize_weight` / the module
 forward eagerly. Later calls never re-enter the broken compiler.
 
+`BaseQModel.optimize()` assigns the result to `self.model`, so a module input
+must stay an `nn.Module`. When `torch.compile` returns anything else, the eager
+module is kept and the unusable replacement is reported once instead of being
+stored where a child module is required.
+
 ## Opting out
 
 | Control | Scope | Notes |
@@ -94,5 +99,5 @@ toolchain), so the loading host decides.
 `tests/test_torch_compile_fallback.py` pins the contract: a first-call
 `BackendCompilerFailed` yields the eager result and is not retried, user-code and
 control-flow exceptions still propagate, `fullgraph=True` still fails closed, a
-compiled module falls back to its own `forward`, `compile=False` skips
-compilation, and the config field stays runtime-only.
+compiled module falls back to its own `forward` and stays an `nn.Module`,
+`compile=False` skips compilation, and the config field stays runtime-only.

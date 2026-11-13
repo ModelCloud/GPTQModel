@@ -366,9 +366,15 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
     a deferred compile failure runs the original module instead.
     """
     if not isinstance(compiled, torch.nn.Module):
-        # A caller-installed replacement that is not an nn.Module cannot own a
-        # forward; keep the plain callable fallback instead.
-        return _install_callable_compile_fallback(module, compiled, fullgraph)
+        # Callers assign the result back to an nn.Module attribute
+        # (``BaseQModel.optimize`` does ``self.model = torch_compile(...)``), so
+        # never return a plain callable for a module input. Keep the eager module
+        # and report the unusable compiled object once.
+        log.warn.once(
+            f"`{_compile_label(module)}` torch.compile returned "
+            f"{type(compiled).__name__} instead of nn.Module; using eager execution."
+        )
+        return module
     label = _compile_label(module)
     compiled_forward = compiled.forward
     state = {"fallback": False}

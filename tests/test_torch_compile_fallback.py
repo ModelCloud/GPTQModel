@@ -127,6 +127,14 @@ def test_fullgraph_capture_failure_stays_fatal(monkeypatch):
         compiled(1)
 
 
+def test_compiled_module_never_returns_a_plain_callable(monkeypatch):
+    """Callers assign the result to an nn.Module attribute; it must stay a module."""
+    module = torch.nn.Linear(4, 4, bias=False)
+    monkeypatch.setattr(torch_utils.torch, "compile", lambda *_a, **_k: lambda _x: None)
+    compiled = torch_utils.torch_compile(module)
+    assert compiled is module
+
+
 def test_compiled_module_falls_back_to_its_own_forward(monkeypatch):
     module = torch.nn.Linear(4, 4, bias=False)
     with torch.no_grad():
