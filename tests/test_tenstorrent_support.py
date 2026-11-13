@@ -277,6 +277,57 @@ def test_embedding_with_a_wider_block_stays_on_the_torch_path(monkeypatch):
     assert torch.equal(got, embedding.dequantize()[ids])
 
 
+def test_embedding_accepts_int32_indices(monkeypatch):
+    """F.embedding accepts int32; the binding indexes with int64."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatEmbedding
+
+    hip = _hip_routing(monkeypatch)
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    seen = {}
+
+    def fake_embedding(ids, codes, exponents, bits, rows, cols, dtype):
+        seen["dtype"] = ids.dtype
+        seen["shape"] = tuple(ids.shape)
+        return torch.zeros(*ids.shape, cols)
+
+    monkeypatch.setattr(hip, "embedding", fake_embedding)
+
+    out = embedding(torch.tensor([0, 2], dtype=torch.int32))
+
+    assert seen == {"dtype": torch.int64, "shape": (2,)}
+    assert out.shape == (2, 16)
+
+
+def test_empty_batches_short_circuit_before_the_kernels(monkeypatch):
+    """An empty batch must not reach a launcher that rejects null pointers."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    hip = _hip_routing(monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("an empty batch must not reach the kernel")
+
+    monkeypatch.setattr(hip, "embedding", refuse)
+    monkeypatch.setattr(hip, "linear", refuse)
+
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    empty_ids = torch.zeros(0, dtype=torch.int64)
+    out = embedding(empty_ids)
+    assert out.shape == (0, 16)
+    assert out.dtype == torch.float32
+
+    head = TTBlockfloatTiedHead(embedding, name="head")
+    hidden = torch.zeros(1, 0, 16)
+    projected = head(hidden)
+    assert projected.shape == (1, 0, 3)
+    assert projected.dtype == hidden.dtype
+
+
 def test_bfloat2_b_grid_is_three_levels_and_packs_four_per_byte():
     """bfloat2_b is a sign bit plus one magnitude bit, so a block holds
     ``{-1, 0, +1} x 2**exponent`` and four codes share a byte."""

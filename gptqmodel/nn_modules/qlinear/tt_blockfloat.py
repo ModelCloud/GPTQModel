@@ -370,6 +370,19 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         from ...utils import tt_blockfloat_hip
 
         if self.hip_dispatch(input_ids):
+            # F.embedding accepts int32 or int64; the binding indexes with
+            # int64, so widen the narrower width instead of failing.
+            if input_ids.dtype == torch.int32:
+                input_ids = input_ids.to(torch.int64)
+            if input_ids.numel() == 0:
+                # An empty batch has null data pointers, which the launcher
+                # would reject; F.embedding returned an empty table slice.
+                return torch.empty(
+                    *input_ids.shape,
+                    self.in_features,
+                    dtype=self.output_dtype,
+                    device=input_ids.device,
+                )
             # Dequantise only the gathered rows; the table is never expanded.
             # The output precision follows the module, as the Torch path does.
             return tt_blockfloat_hip.embedding(
@@ -413,6 +426,10 @@ class TTBlockfloatTiedHead(nn.Module):
         # The width, block size and device support all belong to the embedding:
         # this class only holds a reference to it and has no ``bits`` of its own.
         if embedding.hip_dispatch(hidden_states):
+            if hidden_states.numel() == 0:
+                from . import empty_linear_output
+
+                return empty_linear_output(hidden_states, embedding.out_features)
             out = tt_blockfloat_hip.linear(
                 hidden_states.reshape(-1, hidden_states.shape[-1]),
                 embedding.codes,

@@ -776,6 +776,22 @@ int main(int argc, char** argv) {
             hipFree(d_emb);
         }
 
+        // --- empty batch -----------------------------------------------------
+        // A zero-token / zero-row call is a success, not an error: an empty
+        // Torch tensor hands the launcher null data pointers, so the pointer
+        // checks must not run before the empty short-circuit.
+        {
+            const hipError_t emb = ttbf_embedding(
+                nullptr, d_codes, d_exp, bits, 0, rows, k, nullptr,
+                TTBF_DTYPE_BF16, nullptr);
+            const hipError_t lin =
+                ttbf_linear(nullptr, TTBF_DTYPE_BF16, d_codes, d_exp, bits, 0,
+                            rows, k, nullptr, nullptr, nullptr);
+            report(emb == hipSuccess && lin == hipSuccess,
+                   bits == 4 ? "bf4 empty batch succeeds"
+                             : "bf8 empty batch succeeds");
+        }
+
         hipFree(d_codes);
         hipFree(d_exp);
         hipFree(d_x);

@@ -143,13 +143,17 @@ torch::Tensor embedding_dispatch(torch::Tensor ids, torch::Tensor codes,
                                  int64_t rows, int64_t cols, int64_t dtype) {
     check_bits(bits);
     check_weight(codes, exponents, bits, rows, cols);
-    TORCH_CHECK(ids.scalar_type() == at::kLong,
-                "tt_blockfloat_hip: embedding ids must be int64");
+    // F.embedding accepts int32 or int64; the launcher binds int64, so widen the
+    // narrower width here rather than making callers pre-convert.
+    TORCH_CHECK(ids.scalar_type() == at::kLong || ids.scalar_type() == at::kInt,
+                "tt_blockfloat_hip: embedding ids must be int64 or int32, got ",
+                ids.scalar_type());
     TORCH_CHECK(ids.is_cuda() && codes.is_cuda(),
                 "tt_blockfloat_hip: embedding tensors must be on device");
     TORCH_CHECK(ids.device() == codes.device(),
                 "tt_blockfloat_hip: ids and weight must share a device");
-    auto idc = ids.contiguous();
+    auto idc = (ids.scalar_type() == at::kLong ? ids : ids.to(at::kLong))
+                   .contiguous();
     auto shape = idc.sizes().vec();
     shape.push_back(cols);
     auto out = torch::empty(

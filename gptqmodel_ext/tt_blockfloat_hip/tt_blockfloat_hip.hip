@@ -1406,12 +1406,16 @@ hipError_t ttbf_embedding(const int64_t* ids, const uint8_t* codes,
                           int64_t rows, int64_t k, void* out, int dtype,
                           hipStream_t stream) {
     if ((bits != 4 && bits != 8) || tokens < 0 || rows <= 0 || k <= 0 ||
-        (k & 15) != 0 || ids == nullptr || codes == nullptr ||
-        exponents == nullptr || out == nullptr) {
+        (k & 15) != 0 || codes == nullptr || exponents == nullptr) {
         return hipErrorInvalidValue;
     }
     if (tokens == 0) {
+        // An empty batch is a success, and its tensors have null data
+        // pointers, so this has to come before the pointer checks.
         return hipSuccess;
+    }
+    if (ids == nullptr || out == nullptr) {
+        return hipErrorInvalidValue;
     }
     switch (dtype) {
         case TTBF_DTYPE_F32:
@@ -1444,9 +1448,15 @@ hipError_t ttbf_linear(const void* x, int dtype, const uint8_t* codes,
                        const int8_t* exponents, int bits, int64_t m, int64_t n,
                        int64_t k, const void* bias, void* out,
                        hipStream_t stream) {
-    if (m <= 0 || n <= 0 || k <= 0 || (bits != 4 && bits != 8) ||
-        (k & 15) != 0 || x == nullptr || codes == nullptr ||
-        exponents == nullptr || out == nullptr) {
+    if (m < 0 || n <= 0 || k <= 0 || (bits != 4 && bits != 8) ||
+        (k & 15) != 0 || codes == nullptr || exponents == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (m == 0) {
+        // As above: an empty batch must not fail on its null data pointers.
+        return hipSuccess;
+    }
+    if (x == nullptr || out == nullptr) {
         return hipErrorInvalidValue;
     }
     switch (dtype) {
