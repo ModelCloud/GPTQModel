@@ -1,5 +1,5 @@
 #include "allspark_utils.cuh"
-#include <torch/all.h>
+#include "../torch_stable_compat.h"
 
 namespace allspark {
 
@@ -140,13 +140,13 @@ void rearrange_kn_weight_as_n32k16_order(
   void* b_zero_reorder = has_zp ? b_zeros_reorder.value().data_ptr() : nullptr;
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (b_scales.dtype() == at::ScalarType::Half) {
+  if (b_scales.scalar_type() == at::ScalarType::Half) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__half>(
         matB, reinterpret_cast<const __half*>(b_scale),
         reinterpret_cast<const __half*>(b_zero), matB_reorder,
         reinterpret_cast<__half*>(b_scale_reorder),
         reinterpret_cast<__half*>(b_zero_reorder), K, N, N_32align, stream);
-  } else if (b_scales.dtype() == at::ScalarType::BFloat16) {
+  } else if (b_scales.scalar_type() == at::ScalarType::BFloat16) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__nv_bfloat16>(
         matB, reinterpret_cast<const __nv_bfloat16*>(b_scale),
         reinterpret_cast<const __nv_bfloat16*>(b_zero), matB_reorder,

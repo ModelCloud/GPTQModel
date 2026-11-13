@@ -1,9 +1,6 @@
 #pragma once
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "../torch_stable_compat.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>

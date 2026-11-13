@@ -13,8 +13,9 @@ from __future__ import annotations
 
 from gptqmodel.exllamav3 import ext as exllamav3
 from gptqmodel.quantization import gptq_cuda
-from gptqmodel.utils import cpp
+from gptqmodel.utils import allspark
 from gptqmodel.utils import awq
+from gptqmodel.utils import cpp
 from gptqmodel.utils import exllamav2
 from gptqmodel.utils import hadamard
 from gptqmodel.utils import machete
@@ -95,3 +96,7 @@ def test_gptq_block_uses_stable_abi():
 
 def test_machete_uses_stable_abi():
     _assert_stable(machete._MACHETE_TORCH_OPS_EXTENSION)
+
+
+def test_allspark_uses_stable_abi():
+    _assert_stable(allspark._ALLSPARK_EXTENSION)
