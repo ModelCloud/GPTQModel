@@ -254,12 +254,11 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
 
     ``torch.compile`` only builds the wrapper; inductor actually compiles on the
     first invocation, so the construction-time guard cannot observe these. A
-    backend failure is always eligible for the eager fallback:
+    backend failure is eligible for the eager fallback:
     ``torch._dynamo.exc.BackendCompilerFailed``, which also carries the
     ``RuntimeError: Attempting to use a closed pool`` raised by an inductor
-    compile worker. Capture failures such as ``Unsupported`` are only eligible
-    without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
-    contract and must still fail closed.
+    compile worker. Nothing is eligible under ``fullgraph=True``: that is an
+    explicit single-graph contract and must fail closed.
 
     A plain ``RuntimeError`` is only treated as a compiler failure when it
     carries a dynamo/inductor exception in its cause chain or was raised inside
@@ -268,10 +267,10 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     """
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
         return False
-    if isinstance(exc, _dynamo_exception("BackendCompilerFailed", "TorchRuntimeError")):
-        return True
     if fullgraph:
         return False
+    if isinstance(exc, _dynamo_exception("BackendCompilerFailed", "TorchRuntimeError")):
+        return True
     chain = []
     current = exc
     while current is not None and len(chain) < 8:
@@ -317,6 +316,12 @@ def _describe_compile_failure(exc: BaseException) -> str:
     while (root.__cause__ is not None or root.__context__ is not None) and seen < 8:
         root = root.__cause__ or root.__context__
         seen += 1
+    if root is exc:
+        # BackendCompilerFailed keeps the backend error in ``inner_exception``
+        # and does not always chain it as ``__cause__``/``__context__``.
+        inner = getattr(exc, "inner_exception", None)
+        if isinstance(inner, BaseException):
+            root = inner
     outer = f"{type(exc).__name__}: {first_line(exc)}"
     if root is exc:
         return outer
@@ -325,13 +330,18 @@ def _describe_compile_failure(exc: BaseException) -> str:
 
 def _warn_compile_fallback(label: str, exc: BaseException) -> None:
     log.warn.once(
-        f"`{label}` torch.compile failed at first use; staying on eager execution: "
+        f"`{label}` torch.compile failed at first use; running eagerly from now on: "
         f"{_describe_compile_failure(exc)}"
     )
 
 
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
-    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    """Return a callable that retries ``original`` eagerly after a compile failure.
+
+    Retrying is only safe because the wrapped units are pure decode functions
+    (``dequantize_weight`` and friends): recomputing them has no side effect that
+    survives the call. Do not route a stateful callable through this helper.
+    """
     label = _compile_label(original)
     state = {"fallback": False}
 
@@ -361,12 +371,18 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
 
 
 def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgraph: bool):
-    """Install the same fallback on a compiled module's ``forward``.
+    """Install a sticky eager fallback on a compiled module's ``forward``.
 
     ``torch.compile(nn.Module)`` returns an ``OptimizedModule`` that callers keep
     because it is still an ``nn.Module`` (attribute delegation, ``modules()`` and
     hooks depend on it). Replacing ``forward`` leaves that identity intact while
-    a deferred compile failure runs the original module instead.
+    a deferred compile failure switches later calls to the original module.
+
+    Unlike the callable case, the failing call is *not* retried. With
+    ``fullgraph=False`` dynamo compiles and runs graph segment by segment, so an
+    earlier segment of this forward may already have executed (KV-cache writes,
+    in-place ops). Re-running the eager module would apply those effects twice,
+    which is worse than surfacing the failure once.
     """
     if not isinstance(compiled, torch.nn.Module):
         # Callers assign the result back to an nn.Module attribute
@@ -392,7 +408,7 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
                 raise
             state["fallback"] = True
             _warn_compile_fallback(label, exc)
-            return module(*args, **kwargs)
+            raise
 
     compiled.forward = forward
     return compiled

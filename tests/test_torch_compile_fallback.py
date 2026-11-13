@@ -11,9 +11,12 @@ real eager implementation serves the call, while genuine user-code and
 control-flow exceptions still propagate.
 """
 
+import types
+
 import pytest
 import torch
 
+import gptqmodel.models.base as model_base
 import gptqmodel.utils.torch as torch_utils
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT
@@ -145,7 +148,8 @@ def test_compiled_module_never_returns_a_plain_callable(monkeypatch):
     assert compiled is module
 
 
-def test_compiled_module_falls_back_to_its_own_forward(monkeypatch):
+def test_compiled_module_stays_eager_after_a_deferred_failure(monkeypatch):
+    """A module forward is not retried; later calls run the eager module."""
     module = torch.nn.Linear(4, 4, bias=False)
     with torch.no_grad():
         module.weight.copy_(torch.eye(4))
@@ -155,7 +159,90 @@ def test_compiled_module_falls_back_to_its_own_forward(monkeypatch):
     _dynamo_compile(monkeypatch, _closed_pool_error())
     compiled = torch_utils.torch_compile(module)
     assert isinstance(compiled, torch.nn.Module)
+    with pytest.raises(Exception, match="closed pool"):
+        compiled(x)
+    # The failure armed the sticky eager path; the next call never recompiles.
     torch.testing.assert_close(compiled(x), expected)
+
+
+def test_compiled_module_never_replays_side_effects(monkeypatch):
+    """An earlier graph segment may already have run: never retry the forward."""
+    executions = []
+
+    class Counted(torch.nn.Module):
+        def forward(self, x):
+            executions.append(1)
+            return x + 1
+
+    module = Counted()
+    _dynamo_compile(monkeypatch, _closed_pool_error())
+    compiled = torch_utils.torch_compile(module)
+    with pytest.raises(Exception, match="closed pool"):
+        compiled(torch.zeros(2))
+    assert executions == [], "the failing call must not also run the eager module"
+
+
+def test_fullgraph_backend_failure_stays_fatal(monkeypatch):
+    """Nothing degrades under ``fullgraph=True``, including a backend failure."""
+
+    def eager(value):
+        return value
+
+    _dynamo_compile(monkeypatch, _closed_pool_error())
+    compiled = torch_utils.torch_compile(eager, fullgraph=True)
+    with pytest.raises(Exception, match="closed pool"):
+        compiled(1)
+    assert torch_utils._is_compiler_failure(_closed_pool_error(), fullgraph=True) is False
+
+
+def _raise_in(filename, message="boom"):
+    """Raise a RuntimeError whose innermost frame is ``filename``."""
+    try:
+        exec(compile(f"raise RuntimeError({message!r})", filename, "exec"), {})
+    except RuntimeError as exc:
+        return exc
+    raise AssertionError("unreachable")
+
+
+def test_runtime_error_from_a_compiler_frame_is_a_compiler_failure():
+    exc = _raise_in("/site-packages/torch/_inductor/compile_worker/subproc_pool.py")
+    assert torch_utils._is_compiler_failure(exc) is True
+
+
+def test_runtime_error_with_only_an_outer_compiler_frame_is_user_code():
+    """A compiler frame above the raise point must not make user code eligible."""
+    user_ns, driver_ns = {}, {}
+    exec(
+        compile("def boom():\n    raise RuntimeError('user body')\n", "/tmp/user_model.py", "exec"),
+        user_ns,
+    )
+    exec(
+        compile(
+            "def drive(fn):\n    return fn()\n",
+            "/site-packages/torch/_inductor/driver.py",
+            "exec",
+        ),
+        driver_ns,
+    )
+    with pytest.raises(RuntimeError, match="user body") as info:
+        driver_ns["drive"](user_ns["boom"])
+    assert torch_utils._is_compiler_failure(info.value) is False
+
+
+def test_control_flow_is_never_classified_as_a_compiler_failure():
+    assert torch_utils._is_compiler_failure(KeyboardInterrupt()) is False
+    assert torch_utils._is_compiler_failure(SystemExit()) is False
+
+
+def test_torchdynamo_disable_returns_the_eager_object(monkeypatch):
+    monkeypatch.setenv("TORCHDYNAMO_DISABLE", "1")
+
+    def eager(value):
+        return value
+
+    assert torch_utils.torch_compile(eager) is eager
+    module = torch.nn.Linear(2, 2)
+    assert torch_utils.torch_compile(module) is module
 
 
 def _torch_linear(compile_flag=None):
@@ -178,6 +265,50 @@ def test_torch_linear_compile_false_skips_compile():
     module.optimize()
     assert module.optimized
     assert module.dequantize_weight.__func__ is eager
+
+
+def test_torch_linear_dequantize_retries_eagerly(monkeypatch):
+    """The reported failure: a deferred compile failure inside dequantize_weight."""
+    module = _torch_linear()
+    _dynamo_compile(monkeypatch, _closed_pool_error())
+    module.optimize()
+    assert module.optimized
+
+    eager = TorchLinear.dequantize_weight(module)
+    compiled = module.dequantize_weight()
+    torch.testing.assert_close(compiled, eager)
+    # Sticky: the second call never touches the broken compiler again.
+    torch.testing.assert_close(module.dequantize_weight(), eager)
+
+
+def _fake_model(compile_flag):
+    return types.SimpleNamespace(
+        quantized=True,
+        quantize_config=types.SimpleNamespace(compile=compile_flag),
+        model=torch.nn.Linear(2, 2),
+        compiled=False,
+    )
+
+
+def test_model_optimize_honours_compile_false(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        model_base, "torch_compile", lambda target, **_kwargs: calls.append(target) or target
+    )
+    fake = _fake_model(False)
+    model_base.BaseQModel.optimize(fake)
+    assert calls == [], "compile=False must also stop the whole-model compile"
+    assert fake.compiled is False
+
+
+def test_model_optimize_compiles_when_enabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        model_base, "torch_compile", lambda target, **_kwargs: calls.append(target) or target
+    )
+    fake = _fake_model(True)
+    model_base.BaseQModel.optimize(fake)
+    assert calls == [fake.model]
 
 
 def test_torch_linear_rejects_non_bool_compile():

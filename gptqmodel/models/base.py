@@ -2946,6 +2946,15 @@ class BaseQModel(nn.Module):
                            "upgrade it by `pip install -U torch torchaudio torchvision`")
             return self
 
+        # `QuantizeConfig(compile=False)` is the documented per-model opt-out, so
+        # it must also stop the whole-model wrapper compile below. Without this
+        # the flag only reached `TorchLinear.optimize()` and every module built
+        # from the same config still compiled.
+        if not getattr(self.quantize_config, "compile", True):
+            self.compiled = False
+            log.info.once("Optimize: torch.compile disabled by `compile=False`; using eager execution.")
+            return self
+
         # needed by eora
         # torch._dynamo.config.capture_scalar_outputs = True
 
