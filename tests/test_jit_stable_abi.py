@@ -38,3 +38,7 @@ def test_stable_abi_floor_is_torch_2_10():
 
 def test_pack_block_cpu_uses_stable_abi():
     _assert_stable(cpp._pack_block_extension())
+
+
+def test_floatx_cpu_uses_stable_abi():
+    _assert_stable(cpp._floatx_cpu_extension())
