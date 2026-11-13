@@ -241,7 +241,8 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
 
     An embedding is a lookup table, so its cost is bytes rather than arithmetic.
     Storing it as codes keeps it at ``bf8_b`` density instead of a dense
-    float16 table, which is 501 MiB against 279 MiB for Llama-3.2-1B.
+    float16 table: 266.16 MiB against 501.00 MiB for Llama-3.2-1B, measured
+    from the shard headers (250.50 MiB codes + 15.66 MiB exponents).
     """
 
     def __init__(

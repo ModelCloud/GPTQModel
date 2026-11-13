@@ -1141,7 +1141,8 @@ def _quantized_prefixes(model) -> list:
 
     Decoder linears plus the input embedding. The embedding is included because
     a vocabulary table is the single largest tensor in a small model: as codes at
-    ``bf8_b`` it is 279 MiB against 501 MiB of dense float16.
+    ``bf8_b`` it is 266.16 MiB against 501.00 MiB of dense float16 for
+    Llama-3.2-1B (250.50 MiB codes + 15.66 MiB exponents).
 
     A model returned by :func:`build_blockfloat_model` has already been swapped,
     so its quantized modules are ``TTBlockfloat*`` instances rather than
