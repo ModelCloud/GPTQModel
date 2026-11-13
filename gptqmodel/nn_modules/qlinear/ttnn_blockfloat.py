@@ -52,6 +52,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from ...utils.tt_packing import dequantize_tt_packed_4bit, repack_gptq_for_tt
 from ...utils.ttnn_runtime import (
     TTNNMesh,
@@ -63,6 +64,8 @@ from ...utils.ttnn_runtime import (
 )
 from ._g_idx import validate_g_idx_bounds
 
+
+log = setup_logger()
 
 #: Canonical block-float storage formats this kernel can materialise.
 BLOCK_FLOAT_FORMATS = ("ttbf8",)
@@ -191,8 +194,12 @@ class _TTNNBlockFloatMixin:
             if tensor is not None:
                 try:
                     ttnn.deallocate(tensor)
-                except Exception:  # pragma: no cover - best-effort release
-                    pass
+                except Exception as exc:  # pragma: no cover - best-effort release
+                    # The reference was already dropped above, so a failed
+                    # deallocate must not turn a cache clear into an error: the
+                    # caller is mid-lifecycle and the device teardown that
+                    # follows will reclaim it. Record it instead of hiding it.
+                    log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
 
     def release_device(self) -> None:
         self.clear_weight_cache()
