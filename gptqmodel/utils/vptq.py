@@ -94,8 +94,9 @@ def vptq_group_setting(
                 raise ValueError(
                     f"VPTQ: `group_num` ({group_num}) over {remaining_columns} input channels "
                     f"resolves to `group_size` {resolved_group_size}, which would leave empty "
-                    f"codebook groups {nonempty_group_num + 1}..{group_num}; use at most "
-                    f"{nonempty_group_num} groups or an explicit `group_size`."
+                    f"codebook groups {nonempty_group_num + 1}..{group_num}; set "
+                    f"`group_num={nonempty_group_num}` or `group_size={resolved_group_size}` "
+                    "with `group_num=-1`."
                 )
         resolved_group_num = group_num
     elif group_size != -1:
