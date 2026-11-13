@@ -88,6 +88,9 @@ inline constexpr ScalarType kByte = ScalarType::Byte;
 inline constexpr ScalarType kChar = ScalarType::Char;
 inline constexpr ScalarType kShort = ScalarType::Short;
 inline constexpr ScalarType kInt = ScalarType::Int;
+inline constexpr ScalarType kInt32 = ScalarType::Int;
+inline constexpr ScalarType kInt16 = ScalarType::Short;
+inline constexpr ScalarType kInt8 = ScalarType::Char;
 inline constexpr ScalarType kLong = ScalarType::Long;
 inline constexpr ScalarType kHalf = ScalarType::Half;
 inline constexpr ScalarType kFloat = ScalarType::Float;
@@ -100,6 +103,18 @@ inline const Device kCUDA = Device(DeviceType::CUDA);
 
 using torch::stable::get_num_threads;
 using torch::stable::parallel_for;
+using torch::stable::sum;
+
+inline Device device_of(const Tensor& tensor) { return tensor.device(); }
+
+inline Tensor sum(const Tensor& self, int64_t dim) {
+  std::array<int64_t, 1> dims{dim};
+  return torch::stable::sum(
+      self,
+      torch::headeronly::IntHeaderOnlyArrayRef(dims),
+      false,
+      std::nullopt);
+}
 
 /// A minimal TensorOptions replacement. The stable API takes individual
 /// dtype/device/layout arguments, so kernels keep the familiar builder style
@@ -271,6 +286,7 @@ using Tensor = torch::stable::Tensor;
 using TensorOptions = at::TensorOptions;
 using ScalarType = torch::headeronly::ScalarType;
 using IntArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
+using Device = torch::stable::Device;
 
 inline constexpr ScalarType kFloat32 = ScalarType::Float;
 inline constexpr ScalarType kFloat16 = ScalarType::Half;
@@ -278,6 +294,9 @@ inline constexpr ScalarType kDouble = ScalarType::Double;
 inline constexpr ScalarType kFloat = ScalarType::Float;
 inline constexpr ScalarType kHalf = ScalarType::Half;
 inline constexpr ScalarType kInt = ScalarType::Int;
+inline constexpr ScalarType kInt32 = ScalarType::Int;
+inline constexpr ScalarType kInt16 = ScalarType::Short;
+inline constexpr ScalarType kInt8 = ScalarType::Char;
 inline constexpr ScalarType kLong = ScalarType::Long;
 inline constexpr ScalarType kShort = ScalarType::Short;
 inline constexpr ScalarType kByte = ScalarType::Byte;
@@ -300,6 +319,11 @@ using CUDAStream = at::cuda::CompatibleCUDAStream;
 }  // namespace cuda
 }  // namespace c10
 #endif  // USE_CUDA || __CUDACC__
+
+// The original ATen kernels rely on ADL to find at::device_of because their
+// tensor type lived in namespace at. torch::stable::Tensor does not, so make
+// the helper visible at global scope for the migrated sources.
+using at::device_of;
 
 // ---------------------------------------------------------------------------
 // Error checking macros

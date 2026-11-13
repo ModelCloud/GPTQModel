@@ -130,6 +130,12 @@ def torch_stable_abi_target_define(major: int, minor: int) -> str:
 _TORCH_STABLE_ABI_TARGET = (2, 10)
 
 
+def torch_stable_compat_include_path() -> str:
+    """Return the directory that contains ``torch_stable_compat.h``."""
+
+    return str(Path(__file__).resolve().parents[2] / "gptqmodel_ext")
+
+
 def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
     """Drop NVCC scheduling knobs that cannot change generated device code."""
 

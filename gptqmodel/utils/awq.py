@@ -6,11 +6,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    torch_stable_compat_include_path,
 )
 
 
@@ -39,7 +41,7 @@ def _awq_required_cuda_headers() -> tuple[str, ...]:
 
 def _awq_include_paths() -> list[str]:
     return cuda_include_paths_with_fallback(
-        [str(_awq_root())],
+        [str(_awq_root()), torch_stable_compat_include_path()],
         required_header_names=_awq_required_cuda_headers(),
     )
 
@@ -85,6 +87,7 @@ _AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
