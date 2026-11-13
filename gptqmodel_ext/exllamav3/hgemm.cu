@@ -1,8 +1,6 @@
+#include "../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "hgemm.cuh"
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
 #include "util.h"
 #include "util.cuh"
 #include "quant/exl3_devctx.cuh"
@@ -28,8 +26,8 @@ void hgemm
     const at::cuda::OptionalCUDAGuard device_guard(a.device());
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
-    bool output_fp32 = c.dtype() == at::kFloat;
-    bool output_fp16 = c.dtype() == at::kHalf;
+    bool output_fp32 = c.scalar_type() == at::kFloat;
+    bool output_fp16 = c.scalar_type() == at::kHalf;
 
     TORCH_CHECK(output_fp32 || output_fp16, "c must be float32 or float16");
 

@@ -35,6 +35,8 @@
 #include <torch/headeronly/util/Float8_e8m0fnu.h>
 #include <torch/headeronly/util/Half.h>
 
+#include <torch/csrc/inductor/aoti_torch/generated/c_shim_cpu.h>
+
 #if defined(USE_CUDA) || defined(__CUDACC__)
 #include <torch/csrc/inductor/aoti_torch/generated/c_shim_cuda.h>
 #include <cublas_v2.h>
@@ -66,6 +68,9 @@ using DeviceIndex = int32_t;
 
 template <class T>
 using optional = std::optional<T>;
+
+// Kernels written against libtorch spell the empty optional as c10::nullopt.
+using std::nullopt;
 
 }  // namespace c10
 
@@ -302,11 +307,26 @@ inline Tensor mul(const Tensor& lhs, const Tensor& rhs) {
 }
 
 inline Tensor add(const Tensor& lhs, const Tensor& rhs) {
-  std::array<StableIValue, 2> stack{
-      torch::stable::detail::from(lhs), torch::stable::detail::from(rhs)};
+  // aten::add.Tensor carries a Scalar alpha argument, and the stable IValue
+  // bridge cannot marshal Scalar. Use the AOTI per-device shims (also stable
+  // ABI) which take alpha as a plain double.
+  AtenTensorHandle out = nullptr;
+#if defined(USE_CUDA) || defined(__CUDACC__)
+  if (lhs.device().is_cuda()) {
+    STABLE_TORCH_ERROR_CODE_CHECK(
+        aoti_torch_cuda_add_Tensor(lhs.get(), rhs.get(), 1.0, &out));
+    return Tensor(out);
+  }
+#endif
   STABLE_TORCH_ERROR_CODE_CHECK(
-      torch_call_dispatcher("aten::add", "Tensor", stack.data(), TORCH_ABI_VERSION));
-  return torch::stable::detail::to<Tensor>(stack[0]);
+      aoti_torch_cpu_add_Tensor(lhs.get(), rhs.get(), 1.0, &out));
+  return Tensor(out);
+}
+
+inline Tensor& add_(Tensor& self, const Tensor& other) {
+  const Tensor out = add(self, other);
+  torch::stable::copy_(self, out);
+  return self;
 }
 
 inline Tensor div(const Tensor& lhs, const Tensor& rhs) {

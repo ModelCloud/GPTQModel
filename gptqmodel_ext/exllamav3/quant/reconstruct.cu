@@ -1,8 +1,6 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "reconstruct.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
 #include "../util.h"
 #include "../util.cuh"
 #include "../frag.cuh"

@@ -1,7 +1,5 @@
+#include "../../torch_stable_compat.h"
 #include "linear.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 #include "../util.h"
 #include "../quant/bits_k.cuh"
 #include "../quant/exl3_gemm.cuh"
@@ -56,7 +54,7 @@ int64_t bc_linear_exl3_run_configured
     const auto dispatch = exl3_gemm(x, trellis, y, suh, xh, svh, mcg, mul1, fp16_gemv, int8_gemv, fused_gemm, q4nx);
 
     if (bias)
-        y.add_(bias.value());
+        at::add_(y, bias.value());
     return dispatch;
 }
 

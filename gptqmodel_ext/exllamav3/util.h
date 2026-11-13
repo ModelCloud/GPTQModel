@@ -21,9 +21,9 @@
 // TORCH_CHECK_SIZE(x, i, s):                   assert x.size(i) == s
 // OPTPTR(x):                                   x.data_ptr() or nullptr if x is None
 
-#define TORCH_CHECK_DTYPE(__x, __dtype) TORCH_CHECK((__x).dtype() == at::__dtype, #__x " is incorrect datatype, must be " #__dtype)
-#define TORCH_CHECK_DTYPE_OPT(__x, __dtype) TORCH_CHECK((!__x.has_value()) || (__x).value().dtype() == at::__dtype, #__x " is incorrect datatype, must be " #__dtype)
-#define TORCH_CHECK_FLOAT_HALF(__x) TORCH_CHECK((__x).dtype() == at::kHalf || (__x).dtype() == at::kFloat,  #__x " is incorrect datatype, must be kHalf or kFloat")
+#define TORCH_CHECK_DTYPE(__x, __dtype) TORCH_CHECK((__x).scalar_type() == at::__dtype, #__x " is incorrect datatype, must be " #__dtype)
+#define TORCH_CHECK_DTYPE_OPT(__x, __dtype) TORCH_CHECK((!__x.has_value()) || (__x).value().scalar_type() == at::__dtype, #__x " is incorrect datatype, must be " #__dtype)
+#define TORCH_CHECK_FLOAT_HALF(__x) TORCH_CHECK((__x).scalar_type() == at::kHalf || (__x).scalar_type() == at::kFloat,  #__x " is incorrect datatype, must be kHalf or kFloat")
 #define TORCH_CHECK_SHAPES(__x, __dim_x, __y, __dim_y, __scale_y) TORCH_CHECK((__x).size(__dim_x) == (__y).size(__dim_y) * __scale_y, #__x " and " #__y " have incompatible shapes")
 #define TORCH_CHECK_SHAPES_OPT(__x, __dim_x, __y, __dim_y, __scale_y) TORCH_CHECK((!(__x).has_value()) || (__x).value().size(__dim_x) == (__y).size(__dim_y) * __scale_y, #__x " and " #__y " have incompatible shapes")
 #define TORCH_CHECK_SHAPES_FULL(__x, __y) TORCH_CHECK((__x).sizes() == (__y).sizes(), #__x " and " #__y " have incompatible shapes")

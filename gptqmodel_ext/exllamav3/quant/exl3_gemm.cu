@@ -1,14 +1,7 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 
-#include <algorithm>
-#include <limits>
-#include <set>
-#include <shared_mutex>
-#include <ATen/ops/empty.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
 #include "../util.h"
 #include "exl3_kernel_map.cuh"
 #include "exl3_devctx.cuh"
@@ -38,7 +31,7 @@ int exl3_gemm(
     TORCH_CHECK_SHAPES(C, -1, B, 1, 16);
     TORCH_CHECK_DTYPE(A, kHalf);
     TORCH_CHECK_DTYPE(B, kShort);
-    const bool c_fp32 = C.dtype() == at::kFloat;
+    const bool c_fp32 = C.scalar_type() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
     TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
