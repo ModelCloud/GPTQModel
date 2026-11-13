@@ -317,7 +317,12 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
             const float diff = reconstructed - xp[i];
             error = error + diff * diff;
         }
-        if (error < best_error) {
+        // The base candidate is taken unconditionally, matching the reference
+        // (``best = _round_with(base_exponent)`` then compare the neighbours).
+        // A strict comparison against INFINITY would leave ``best_code``
+        // uninitialised whenever every candidate's error overflows -- which
+        // happens for inputs near FLT_MAX, where the squared error is inf.
+        if (candidate == 0 || error < best_error) {
             best_error = error;
             best_exponent = exponent;
 #pragma unroll
@@ -949,19 +954,18 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
             }
         }
 
+        const int64_t gn = base_n + wrow;
+        const int64_t gk = k0 + wc;
         __hip_bfloat16* wdst = s_w[buf] + wrow * kLd + wc;
+        if (r.w_ok) {
 #pragma unroll
-        for (int g = 0; g < kGroups; ++g) {
-            const float factor =
-                r.w_ok ? G::kInvLevels * ttbf_exp2i(r.w_exp[g]) : 0.0f;
-            uint32_t out_words[8];
+            for (int g = 0; g < kGroups; ++g) {
+                const float factor = G::kInvLevels * ttbf_exp2i(r.w_exp[g]);
+                uint32_t out_words[8];
 #pragma unroll
-            for (int q = 0; q < 8; ++q) {
-                const int i = 2 * q;
-                const int c = g * 16 + i;
-                float v0 = 0.0f;
-                float v1 = 0.0f;
-                if (r.w_ok) {
+                for (int q = 0; q < 8; ++q) {
+                    const int i = 2 * q;
+                    const int c = g * 16 + i;
                     int c0;
                     int c1;
                     if (BITS == 4) {
@@ -975,24 +979,61 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
                         c0 = static_cast<int>((w >> (8 * (c & 3))) & 0xFFu);
                         c1 = static_cast<int>((w >> (8 * ((c + 1) & 3))) & 0xFFu);
                     }
-                    v0 = static_cast<float>(c0 - G::kOffset) * factor;
-                    v1 = static_cast<float>(c1 - G::kOffset) * factor;
+                    const float v0 =
+                        static_cast<float>(c0 - G::kOffset) * factor;
+                    const float v1 =
+                        static_cast<float>(c1 - G::kOffset) * factor;
+                    out_words[q] = ttbf_pack2<__hip_bfloat16>(v0, v1);
                 }
-                out_words[q] = ttbf_pack2<__hip_bfloat16>(v0, v1);
+                // 16 bf16 = 32 bytes = two 16-byte stores.
+                uint4 lo;
+                lo.x = out_words[0];
+                lo.y = out_words[1];
+                lo.z = out_words[2];
+                lo.w = out_words[3];
+                uint4 hi;
+                hi.x = out_words[4];
+                hi.y = out_words[5];
+                hi.z = out_words[6];
+                hi.w = out_words[7];
+                *reinterpret_cast<uint4*>(wdst + g * 16) = lo;
+                *reinterpret_cast<uint4*>(wdst + g * 16 + 8) = hi;
             }
-            // 16 bf16 = 32 bytes = two 16-byte stores.
-            uint4 lo;
-            lo.x = out_words[0];
-            lo.y = out_words[1];
-            lo.z = out_words[2];
-            lo.w = out_words[3];
-            uint4 hi;
-            hi.x = out_words[4];
-            hi.y = out_words[5];
-            hi.z = out_words[6];
-            hi.w = out_words[7];
-            *reinterpret_cast<uint4*>(wdst + g * 16) = lo;
-            *reinterpret_cast<uint4*>(wdst + g * 16 + 8) = hi;
+        } else if (gn < n) {
+            // Partial K span.  The API only promises ``k % 16 == 0``, which is
+            // coarser than this thread's ``kCodes``-wide span (64 or 128 for
+            // the shapes in use), so the last tile of a k that is not a
+            // multiple of the tile width ends mid-span.  Zero-fill past the end
+            // rather than dropping the span: dropping it would discard the
+            // valid leading columns too and silently shrink the dot product.
+#pragma unroll 1
+            for (int c = 0; c < kCodes; ++c) {
+                const int64_t col = gk + c;
+                float value = 0.0f;
+                if (col < k) {
+                    const int64_t bit = gn * k + col;
+                    const int code = (BITS == 4)
+                                         ? static_cast<int>(
+                                               (codes[bit >> 1] >>
+                                                (4 * (bit & 1))) &
+                                               0xF)
+                                         : static_cast<int>(codes[bit]);
+                    const float factor =
+                        G::kInvLevels *
+                        ttbf_exp2i(exponents[gn * (k >> 4) + (col >> 4)]);
+                    value = static_cast<float>(code - G::kOffset) * factor;
+                }
+                wdst[c] = __float2bfloat16(value);
+            }
+        } else {
+            // Row beyond the output width: the tile is padding, so zero it
+            // with the same 16-byte stores the fast path uses.  ``kCodes`` is a
+            // whole number of 16-code groups, so the 8-wide step divides.
+#pragma unroll
+            for (int c = 0; c < kCodes; c += 8) {
+                const uint4 zero{};
+                *reinterpret_cast<uint4*>(wdst + c) = zero;
+            }
         }
     };
 

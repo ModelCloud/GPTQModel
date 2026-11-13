@@ -74,7 +74,10 @@ void ref_quantise_block(const float* x, int bits, int* code_out, int* exp_out) {
             const float diff = reconstructed - x[i];
             error += diff * diff;
         }
-        if (error < best_error) {
+        // Candidate 0 is taken unconditionally, matching the Torch reference.
+        // Comparing strictly against INFINITY leaves ``best_code`` untouched
+        // when every candidate overflows, which happens for large inputs.
+        if (candidate == 0 || error < best_error) {
             best_error = error;
             best_exp = exponent;
             std::memcpy(best_code, code, sizeof(code));
@@ -364,6 +367,47 @@ int main(int argc, char** argv) {
                bits == 4 ? "bf4 quantize matches CPU oracle"
                          : "bf8 quantize matches CPU oracle");
 
+        // --- quantize with overflowing squared error -------------------------
+        // Near FLT_MAX every candidate's squared error is inf, so a strict
+        // ``error < best_error`` never initialises the winning codes.  Compare
+        // against the reference *and* assert the magnitude: both sides could
+        // regress to "uninitialised" together and still compare equal.
+        {
+            const int64_t kk = 16;
+            std::vector<float> huge(kk, 1e30f);
+            std::vector<uint8_t> hcodes(bits == 4 ? kk / 2 : kk);
+            std::vector<int8_t> hexp(1);
+            ref_quantize(huge, bits, 1, kk, &hcodes, &hexp);
+
+            uint8_t* dh_codes = nullptr;
+            int8_t* dh_exp = nullptr;
+            float* dh_x = nullptr;
+            hipMalloc(&dh_codes, hcodes.size());
+            hipMalloc(&dh_exp, hexp.size());
+            hipMalloc(&dh_x, huge.size() * sizeof(float));
+            hipMemcpy(dh_x, huge.data(), huge.size() * sizeof(float),
+                      hipMemcpyHostToDevice);
+            const hipError_t hst =
+                ttbf_quantize(dh_x, bits, 1, kk, dh_codes, dh_exp, nullptr);
+            std::vector<uint8_t> hgot(hcodes.size());
+            std::vector<int8_t> hgot_exp(hexp.size());
+            hipMemcpy(hgot.data(), dh_codes, hgot.size(),
+                      hipMemcpyDeviceToHost);
+            hipMemcpy(hgot_exp.data(), dh_exp, hgot_exp.size(),
+                      hipMemcpyDeviceToHost);
+
+            std::vector<float> hdec;
+            ref_dequant(hgot, hgot_exp, bits, 1, kk, &hdec);
+            const float reconstructed = hdec.empty() ? 0.0f : hdec[0];
+            report(hst == hipSuccess && hgot == hcodes && hgot_exp == hexp &&
+                       reconstructed > 5e29f,
+                   bits == 4 ? "bf4 quantize survives overflow"
+                             : "bf8 quantize survives overflow");
+            hipFree(dh_codes);
+            hipFree(dh_exp);
+            hipFree(dh_x);
+        }
+
         if (!dump_dir.empty()) {
             const std::string suffix = bits == 4 ? "4" : "8";
             // Dump dequantisation of the *quantised* codes, so the Torch
@@ -607,6 +651,92 @@ int main(int argc, char** argv) {
                 report(st == hipSuccess && nl1 < 2e-3, label);
                 hipFree(d_a);
                 hipFree(d_o);
+            }
+        }
+
+        // --- K sweep ---------------------------------------------------------
+        // The API only promises ``k % 16 == 0``, but a thread stages a
+        // ``kCodes``-wide span (16, 64 or 128 depending on the tile), so a k
+        // that is not a multiple of the tile width ends the last tile
+        // mid-span.  That used to zero the whole span, dropping the valid
+        // leading columns with it.
+        {
+            const int64_t kn = 3;
+            for (int64_t kk : {static_cast<int64_t>(16), static_cast<int64_t>(32),
+                               static_cast<int64_t>(48), static_cast<int64_t>(80),
+                               static_cast<int64_t>(144), static_cast<int64_t>(160),
+                               static_cast<int64_t>(272)}) {
+                std::vector<float> w(kn * kk);
+                for (auto& v : w) {
+                    v = normal(rng);
+                }
+                std::vector<uint8_t> kcodes;
+                std::vector<int8_t> kexp;
+                ref_quantize(w, bits, kn, kk, &kcodes, &kexp);
+
+                uint8_t* dk_codes = nullptr;
+                int8_t* dk_exp = nullptr;
+                hipMalloc(&dk_codes, kcodes.size());
+                hipMalloc(&dk_exp, kexp.size());
+                hipMemcpy(dk_codes, kcodes.data(), kcodes.size(),
+                          hipMemcpyHostToDevice);
+                hipMemcpy(dk_exp, kexp.data(), kexp.size(),
+                          hipMemcpyHostToDevice);
+
+                bool k_ok = true;
+                // One m per launcher tier, so every tile shape sees a partial K.
+                for (int64_t m : {static_cast<int64_t>(2), static_cast<int64_t>(16),
+                                  static_cast<int64_t>(17), static_cast<int64_t>(65)}) {
+                    std::vector<float> act(m * kk);
+                    for (auto& v : act) {
+                        v = normal(rng);
+                    }
+                    std::vector<__hip_bfloat16> act_b(m * kk);
+                    std::vector<float> act_rounded(m * kk);
+                    for (size_t i = 0; i < act.size(); ++i) {
+                        act_b[i] = from_float<__hip_bfloat16>(act[i]);
+                        act_rounded[i] = to_float<__hip_bfloat16>(act_b[i]);
+                    }
+                    std::vector<float> ref;
+                    ref_linear(act_rounded, kcodes, kexp, bits, m, kn, kk,
+                               nullptr, &ref);
+
+                    __hip_bfloat16* dk_a = nullptr;
+                    __hip_bfloat16* dk_o = nullptr;
+                    hipMalloc(&dk_a, act_b.size() * sizeof(__hip_bfloat16));
+                    hipMalloc(&dk_o, ref.size() * sizeof(__hip_bfloat16));
+                    hipMemcpy(dk_a, act_b.data(),
+                              act_b.size() * sizeof(__hip_bfloat16),
+                              hipMemcpyHostToDevice);
+                    const hipError_t st = ttbf_linear(
+                        dk_a, TTBF_DTYPE_BF16, dk_codes, dk_exp, bits, m, kn,
+                        kk, nullptr, dk_o, nullptr);
+                    std::vector<__hip_bfloat16> outb(ref.size());
+                    hipMemcpy(outb.data(), dk_o,
+                              outb.size() * sizeof(__hip_bfloat16),
+                              hipMemcpyDeviceToHost);
+
+                    double abs_error = 0.0;
+                    double ref_mass = 0.0;
+                    for (size_t i = 0; i < outb.size(); ++i) {
+                        const float rounded = to_float<__hip_bfloat16>(
+                            from_float<__hip_bfloat16>(ref[i]));
+                        abs_error += std::fabs(static_cast<double>(
+                            to_float<__hip_bfloat16>(outb[i]) - rounded));
+                        ref_mass += std::fabs(static_cast<double>(rounded));
+                    }
+                    const double nl1 = abs_error / std::max(1e-6, ref_mass);
+                    k_ok = k_ok && st == hipSuccess && nl1 < 2e-3;
+                    hipFree(dk_a);
+                    hipFree(dk_o);
+                }
+                char label[96];
+                std::snprintf(label, sizeof(label), "%s linear partial-K k=%lld",
+                              bits == 4 ? "bf4" : "bf8",
+                              static_cast<long long>(kk));
+                report(k_ok, label);
+                hipFree(dk_codes);
+                hipFree(dk_exp);
             }
         }
 
