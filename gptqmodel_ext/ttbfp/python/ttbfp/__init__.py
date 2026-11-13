@@ -235,7 +235,11 @@ def pack(x, fmt=BF8_B):
 
 
 def unpack(exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
-    """Decode packed BFP data to a row-major fp32 array."""
+    """Decode packed BFP data to a row-major fp32 array.
+
+    ``cols`` may trim the final partial block; it must not change the
+    stored block count, because the flat row stride depends on it.
+    """
     f, exps, data, rows, nblk = _flat_packed(exps, data, fmt)
     cols = _cols(cols, nblk, flat=True)
     out = np.empty((rows, cols), dtype=np.float32)
@@ -249,6 +253,7 @@ def matmul(a, exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
 
     a: (M, K) float32; exps: (K, nblk); data: (K, nblk*db).
     Returns (M, N) float32, N = nblk*16 unless ``cols`` is given.
+    ``cols`` has the same final-partial-block restriction as unpack().
     """
     a = _f32(a)
     if a.ndim != 2:

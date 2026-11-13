@@ -75,6 +75,11 @@ changes the `k` order, so every branch above is bitwise equal.
 `sign*magnitude` as a signed int8, which turns the decode into
 `vpmovsxbd` + `vcvtdq2ps` + `vmulps`; the decoded values are unchanged.
 
+`cols` may trim only the final partial block.  The flat layout's row stride is
+`ceil(cols/16) * db`, so a `cols` that drops a whole block would change the
+stride; the Python wrappers reject it and ask for a repack.  The block-major
+layouts are indexed by block and do not have this constraint.
+
 ## Where the time goes
 
 Single thread, `K = N = 4096`, process CPU time:
