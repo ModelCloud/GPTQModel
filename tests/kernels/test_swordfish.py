@@ -224,16 +224,13 @@ def _assert_pair(
 class TestSwordfishKernel(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        try:
+        device = swordfish_test_device()
+        with torch.cuda.device(device):
             prewarm_swordfish_extension()
-        except Exception as exc:
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error() or exc}"
-            ) from exc
-        if not swordfish_runtime_available():
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error()}"
-            )
+            if not swordfish_runtime_available(device):
+                raise RuntimeError(
+                    f"Swordfish runtime unavailable: {swordfish_runtime_error(device)}"
+                )
 
     @parameterized.expand(
         [
@@ -446,11 +443,12 @@ class TestSwordfishKernel(unittest.TestCase):
         sf.eval()
         static_x = torch.randn((1, 64), dtype=torch.float16, device=device)
         replay_inputs = (torch.randn_like(static_x), torch.randn_like(static_x))
-        with torch.inference_mode():
+        with torch.cuda.device(device), torch.inference_mode():
             sf(static_x)
             torch.cuda.synchronize(device)
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            capture_stream = torch.cuda.Stream(device=device)
+            with torch.cuda.graph(graph, stream=capture_stream):
                 captured = sf(static_x)
             for replay_x in replay_inputs:
                 static_x.copy_(replay_x)

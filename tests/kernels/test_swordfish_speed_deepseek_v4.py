@@ -110,33 +110,31 @@ def _pack_torch_reference(
 
 def _measure(fn, x, warmup: int = 2, iters: int = 100) -> float:
     """Return average elapsed time in milliseconds."""
-    for _ in range(warmup):
-        fn(x)
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn(x)
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters
+    with torch.cuda.device(x.device):
+        for _ in range(warmup):
+            fn(x)
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn(x)
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / iters
 
 
 @unittest.skipIf(_SKIP_REASON is not None, _SKIP_REASON or "")
 class TestSwordfishSpeedDeepSeekV4(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        try:
+        device = swordfish_test_device()
+        with torch.cuda.device(device):
             prewarm_swordfish_extension()
-        except Exception as exc:
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error() or exc}"
-            ) from exc
-        if not swordfish_runtime_available():
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error()}"
-            )
+            if not swordfish_runtime_available(device):
+                raise RuntimeError(
+                    f"Swordfish runtime unavailable: {swordfish_runtime_error(device)}"
+                )
 
     def _build_backend(self, torch_linear: TorchLinear, backend_class, dtype: torch.dtype, device: torch.device):
         """Instantiate a backend, copy the packed GPTQ buffers, and run post_init."""

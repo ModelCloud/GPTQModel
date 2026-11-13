@@ -92,32 +92,30 @@ def _copy_to_swordfish(torch_linear: TorchLinear, dtype: torch.dtype) -> Swordfi
 class TestSwordfishSpeed(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        try:
+        device = swordfish_test_device()
+        with torch.cuda.device(device):
             prewarm_swordfish_extension()
-        except Exception as exc:
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error() or exc}"
-            ) from exc
-        if not swordfish_runtime_available():
-            raise unittest.SkipTest(
-                f"Swordfish runtime unavailable: {swordfish_runtime_error()}"
-            )
+            if not swordfish_runtime_available(device):
+                raise RuntimeError(
+                    f"Swordfish runtime unavailable: {swordfish_runtime_error(device)}"
+                )
 
     def _measure(self, fn, x, warmup=5, iters=20, blocks=5):
-        for _ in range(warmup):
-            fn(x)
-        torch.cuda.synchronize()
-        block_times = []
-        for _ in range(blocks):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            for _ in range(iters):
+        with torch.cuda.device(x.device):
+            for _ in range(warmup):
                 fn(x)
-            end.record()
-            end.synchronize()
-            block_times.append(start.elapsed_time(end) / iters)
-        return statistics.median(block_times)
+            torch.cuda.synchronize()
+            block_times = []
+            for _ in range(blocks):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                for _ in range(iters):
+                    fn(x)
+                end.record()
+                end.synchronize()
+                block_times.append(start.elapsed_time(end) / iters)
+            return statistics.median(block_times)
 
     def test_swordfish_speed_vs_machete(self):
         in_features = 4096

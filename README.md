@@ -284,7 +284,7 @@ not tuned, so rocBLAS remains the default there too.
 * ✨ Asymmetric `Sym=False` support. 
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
-* 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression. See [accelerator test gates](docs/accelerator-test-gates.md) for device selection and skip/failure rules.
 
 ## Organizations and projects using GPT-QModel 🌐
 

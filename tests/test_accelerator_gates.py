@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """The shared kernel gates must not read HIP's CUDA namespace as NVIDIA CUDA."""
 
+import pytest
 import torch
 
+from gptqmodel.models import _const
 from tests import accelerator_gates
+
+
+def _set_family(monkeypatch, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(_const, "IS_ROCM", hip is not None)
 
 
 def _forbidden_toolchain_lookup(name):
@@ -16,7 +23,7 @@ def _forbidden_capability(*args, **kwargs):
 
 
 def test_hip_build_is_rejected_before_any_capability_probe(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    _set_family(monkeypatch, "7.16.26385")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", _forbidden_capability)
 
@@ -26,14 +33,14 @@ def test_hip_build_is_rejected_before_any_capability_probe(monkeypatch):
 
 def test_hip_build_is_never_reported_as_a_missing_device(monkeypatch):
     """A HIP host must not be skipped as if no accelerator were present."""
-    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    _set_family(monkeypatch, "7.16.26385")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     assert "CUDA-only" in accelerator_gates.cuda_only_skip_reason("Swordfish")
 
 
 def test_nvidia_build_passes_the_family_gate(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
 
     assert accelerator_gates.cuda_only_skip_reason("Swordfish") is None
 
@@ -42,7 +49,7 @@ def _fake_devices(monkeypatch, capabilities, supported):
     """Install ``capabilities`` per ordinal and a matching support probe."""
     import gptqmodel.utils.swordfish as swordfish
 
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: len(capabilities))
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
@@ -102,7 +109,7 @@ def test_swordfish_reports_a_raising_device_probe(monkeypatch):
     def raising(device=None):
         raise RuntimeError("no HIP kernel")
 
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
@@ -120,14 +127,14 @@ def test_swordfish_reports_a_raising_device_probe(monkeypatch):
 
 
 def test_swordfish_without_a_cuda_device_is_skipped(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     assert accelerator_gates.swordfish_skip_reason() == "CUDA is unavailable"
 
 
 def test_nf12_rejects_a_pre_sm80_device_before_any_build(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(accelerator_gates.shutil, "which", _forbidden_toolchain_lookup)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 3)
@@ -146,7 +153,7 @@ def test_nf12_rejects_a_pre_sm80_device_before_any_build(monkeypatch):
 
 
 def test_nf12_reports_the_missing_source_build_tools(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
@@ -160,7 +167,7 @@ def test_nf12_reports_the_missing_source_build_tools(monkeypatch):
     assert "build is unavailable" in reason
 
 
-def test_nf12_reports_a_failed_probe_once(monkeypatch):
+def test_nf12_build_failure_is_not_cached_as_a_skip(monkeypatch):
     import gptqmodel_nf12 as nf12
 
     attempts = []
@@ -169,32 +176,40 @@ def test_nf12_reports_a_failed_probe_once(monkeypatch):
         attempts.append(1)
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
     monkeypatch.setattr(accelerator_gates.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(accelerator_gates, "_nvcc", lambda: "/usr/bin/nvcc")
-    monkeypatch.setattr(accelerator_gates, "_nf12_build_error", None)
-    monkeypatch.setattr(accelerator_gates, "_nf12_probed", False)
     monkeypatch.setattr(nf12, "load", failing_load)
 
-    assert "boom" in accelerator_gates.nf12_skip_reason()
-    assert "boom" in accelerator_gates.nf12_skip_reason()
-    assert len(attempts) == 1
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="boom"):
+            accelerator_gates.nf12_skip_reason()
+    assert len(attempts) == 2
 
 
 def test_nf12_passes_when_the_native_load_succeeds(monkeypatch):
     import gptqmodel_nf12 as nf12
 
-    monkeypatch.setattr(torch.version, "hip", None)
+    _set_family(monkeypatch, None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
     monkeypatch.setattr(accelerator_gates.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(accelerator_gates, "_nvcc", lambda: "/usr/bin/nvcc")
-    monkeypatch.setattr(accelerator_gates, "_nf12_build_error", None)
-    monkeypatch.setattr(accelerator_gates, "_nf12_probed", False)
     monkeypatch.setattr(nf12, "load", lambda: None)
 
     assert accelerator_gates.nf12_skip_reason() is None
+
+
+@pytest.mark.parametrize("override", ["/custom/bin/nvcc", "custom-nvcc"])
+def test_nf12_nvcc_honors_cudacxx(monkeypatch, override):
+    from torch.utils import cpp_extension
+
+    monkeypatch.setenv("CUDACXX", override)
+    monkeypatch.setattr(cpp_extension, "CUDA_HOME", "/unused/cuda")
+    monkeypatch.setattr(accelerator_gates.shutil, "which", lambda name: name if name == override else None)
+
+    assert accelerator_gates._nvcc() == override

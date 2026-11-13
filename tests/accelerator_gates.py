@@ -13,19 +13,18 @@ capability is read, and the NVIDIA-specific checks run only on CUDA builds.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 import torch
 
-
-_nf12_build_error: str | None = None
-_nf12_probed = False
+from gptqmodel.models._const import DEVICE, normalize_device
 
 
 def cuda_only_skip_reason(kernel: str) -> str | None:
     """Return a skip reason for a CUDA-only kernel on a HIP build."""
-    if torch.version.hip is not None:
+    if normalize_device("cuda") == DEVICE.ROCM:
         return f"{kernel} is CUDA-only; ROCm (HIP) is not supported"
     return None
 
@@ -123,14 +122,14 @@ def _nvcc() -> str | None:
     """Locate nvcc the same way ``gptqmodel_nf12._jit`` does."""
     from torch.utils.cpp_extension import CUDA_HOME
 
-    candidate = Path(CUDA_HOME) / "bin" / "nvcc" if CUDA_HOME else "nvcc"
+    candidate = os.environ.get("CUDACXX")
+    if not candidate:
+        candidate = Path(CUDA_HOME) / "bin" / "nvcc" if CUDA_HOME else "nvcc"
     return shutil.which(str(candidate))
 
 
 def nf12_skip_reason() -> str | None:
     """Return why the vendored NF12 native operators cannot be used here."""
-    global _nf12_build_error, _nf12_probed
-
     reason = cuda_only_skip_reason("gptqmodel_nf12")
     if reason is not None:
         return reason
@@ -159,15 +158,10 @@ def nf12_skip_reason() -> str | None:
             "the source build is unavailable"
         )
 
-    # The toolchain can be present while the build still fails (for example an
-    # older toolkit). Probe the real load once and report its error verbatim.
-    if not _nf12_probed:
-        try:
-            import gptqmodel_nf12 as nf12
+    # Once the prerequisites pass, build/load errors are test failures. The
+    # loader already caches successful initialization; never cache an error as
+    # a skip or a compiler/source regression makes the entire suite false green.
+    import gptqmodel_nf12 as nf12
 
-            nf12.load()
-        except Exception as exc:
-            _nf12_build_error = f"gptqmodel_nf12 native operators are unavailable: {exc}"
-        finally:
-            _nf12_probed = True
-    return _nf12_build_error
+    nf12.load()
+    return None
