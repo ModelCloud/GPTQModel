@@ -247,14 +247,15 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
     izeros = _unpack_columnwise(qzeros, bits, out_features, dtype=torch.int32, shifts=shifts)
 
     weight = torch.empty((in_features, out_features), dtype=scales.dtype, device=device)
-    # Align every tile to a group boundary so one broadcast scale/zero slice
-    # serves the whole tile. Both slices are views, so no expansion is written.
+    # Align tiles when a whole group fits. Larger groups are split into
+    # bounded row tiles and use the per-group broadcast below.
     rows_per_tile = max(1, _AWQ_DEQUANT_TILE_BYTES // (out_features * 4))
-    rows_per_tile = max(1, rows_per_tile // group) * group
+    if rows_per_tile >= group:
+        rows_per_tile = (rows_per_tile // group) * group
     group_covered_rows = num_groups * group
     # `out=` is rejected while an input tracks gradients; the explicit
     # expression keeps a trainable scale usable.
-    fused_write = not scales.requires_grad
+    fused_write = not (torch.is_grad_enabled() and scales.requires_grad)
 
     for start in range(0, in_features, rows_per_tile):
         stop = min(start + rows_per_tile, in_features)
@@ -263,7 +264,7 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
             qweight[start:stop], bits, out_features, dtype=torch.int32, shifts=shifts
         )
 
-        if (stop - start) % group == 0 and stop <= group_covered_rows:
+        if start % group == 0 and (stop - start) % group == 0 and stop <= group_covered_rows:
             tiles = (stop - start) // group
             first_group = start // group
             # `reshape` also accepts the sliced view that a packed word count
@@ -279,10 +280,11 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
                 target.copy_(
                     block * scales[first_group:first_group + tiles].unsqueeze(1)
                 )
+            del block, codes
             continue
 
-        # A tail that does not fill a whole group, or rows past the last group,
-        # is rare and small: broadcast one group row at a time.
+        # Partial groups (including groups larger than the tile budget) and
+        # rows past the last group broadcast one group row at a time.
         first_group = min(start // group, num_groups - 1)
         last_group = min((stop - 1) // group, num_groups - 1)
         for group_index in range(first_group, last_group + 1):
@@ -298,10 +300,15 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
             if lo >= hi:
                 continue
             block = codes[lo - start:hi - start]
-            block.sub_(izeros[group_index])
             if fused_write:
+                block.sub_(izeros[group_index])
                 torch.mul(block, scales[group_index], out=weight[lo:hi])
             else:
+                # Backward saves these integer differences for the scale
+                # gradient. A later in-place update to another codes view
+                # would invalidate the saved tensor through its version counter.
+                block = block - izeros[group_index]
                 weight[lo:hi] = block * scales[group_index]
+        del block, codes
 
     return weight
