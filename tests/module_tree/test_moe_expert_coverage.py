@@ -70,6 +70,7 @@ FIXED_MODELS = (
     "bailing_hybrid",
     "afmoe",
     "ernie4_5_vl_moe",
+    "jamba",
 )
 
 # Configs whose default layer mix does not exercise every branch of the tree.
@@ -83,8 +84,20 @@ def _mix_granitemoehybrid_layers(cfg):
     ]
 
 
+def _mix_jamba_layers(cfg):
+    """Shrink the 32-layer default and interleave every Jamba decoder branch."""
+
+    cfg.num_hidden_layers = 4
+    cfg.attn_layer_period = 2
+    cfg.attn_layer_offset = 1
+    cfg.expert_layer_period = 2
+    cfg.expert_layer_offset = 1
+    cfg.num_experts = 2
+
+
 CONFIG_OVERRIDES = {
     "granitemoehybrid": _mix_granitemoehybrid_layers,
+    "jamba": _mix_jamba_layers,
 }
 
 # Model types whose routed experts the *installed* Defuser still leaves fused as
@@ -104,7 +117,6 @@ DEFUSER_FUSED_EXPERTS = frozenset({
     "glm_moe_dsa",
     "gpt2",
     "inkling_mm_model",
-    "jamba",
     "laguna",
     "lfm2",
     "lfm2_vl",

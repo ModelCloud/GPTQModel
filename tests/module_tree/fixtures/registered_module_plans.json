@@ -1312,6 +1312,9 @@
         ["mamba.in_proj"],
         ["mamba.out_proj"],
         ["pre_ff_layernorm:!"],
+        ["feed_forward.router:!"],
+        ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj"],
+        ["feed_forward.experts.{expert_index}.down_proj"],
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"]
       ]

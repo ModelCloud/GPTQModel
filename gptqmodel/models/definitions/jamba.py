@@ -6,12 +6,24 @@ import torch
 from ...utils.model import nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class JambaQModel(BaseQModel):
-    fusable = FusableConfig("jamba").merge(LlamaFusableConfig())
+    # `feed_forward` is the MoE root on sparse layers, so the fusion planner
+    # must not treat it as a dense gate/up parent. Only attention is admitted.
+    fusable = FusableConfig("jamba").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     require_pkgs = ["mamba-ssm"]
+
+    # Routed expert cardinality for the sparse decoder layers. Jamba keeps the
+    # field on the top-level config and reuses `num_experts` for the dense
+    # (non-MoE) layers, so the placeholder always expands to the same count.
+    dynamic_expert_index = "num_experts"
+
+    # MoE lifecycle hooks for the gate_proj/up_proj/down_proj expert layout
+    # produced by Defuser's Jamba conversion.
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     # Jamba interleaves Mamba and attention decoder layers inside one `layers`
     # list, so a decoder layer owns either `mamba` or `self_attn`, never both.
@@ -28,7 +40,19 @@ class JambaQModel(BaseQModel):
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "mamba": ("in_proj:0", "out_proj:1"),
             "pre_ff_layernorm": ("pre_ff_layernorm:!",),
-            "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            # Expert layers route through `feed_forward.experts`, while dense
+            # layers keep the projections directly on `feed_forward`. The
+            # `""` entry declares the dense fallback; `layer_modules_strict`
+            # stays False because a layer only owns one of the two shapes.
+            "feed_forward:moe": {
+                # The top-k router keeps its checkpoint dtype; it is declared
+                # so its weight is owned by the plan rather than undeclared.
+                "router:!": (),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
         },
     ]
 
