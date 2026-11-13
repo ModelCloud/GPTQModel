@@ -1362,12 +1362,12 @@ than one with randomly initialised decoder layers.
 Requires ``gptqmodel``.
 \"\"\"
 
-from transformers import LlamaForCausalLM
+from {BASE_MODULE} import {BASE_CLASS}
 
 from gptqmodel.nn_modules.qlinear.tt_blockfloat import swap_blockfloat_modules
 
 
-class TTBlockfloatForCausalLM(LlamaForCausalLM):
+class TTBlockfloatForCausalLM({BASE_CLASS}):
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
         quant = dict(getattr(config, "quantization_config", None) or {})
@@ -1391,6 +1391,36 @@ class TTBlockfloatForCausalLM(LlamaForCausalLM):
         # mark and the default implementation would raise.
         return None
 """
+
+
+def _modeling_base(model) -> "tuple[str, str]":
+    """Import location of the architecture this checkpoint was exported from.
+
+    The shipped modeling file has to subclass the checkpoint's own causal-LM
+    class, not a fixed one: ``from_pretrained`` instantiates it with the saved
+    config, and a Llama subclass rejects an OPT config. Prefer the live model's
+    class when it comes from ``transformers``; fall back to the declared
+    ``model_type`` for wrappers and subclasses, and fail closed when neither
+    names an importable architecture.
+    """
+
+    cls = type(model)
+    if cls.__module__.startswith("transformers."):
+        return cls.__module__, cls.__name__
+
+    from transformers.models.auto.modeling_auto import (
+        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    )
+
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    class_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+    if class_name is None:
+        raise ValueError(
+            f"{cls.__name__} (model_type={model_type!r}) has no known "
+            "Transformers causal-LM class, so the exported checkpoint cannot "
+            "ship a modeling file that reconstructs its architecture."
+        )
+    return "transformers", class_name
 
 
 def save_blockfloat_model(
@@ -1548,11 +1578,16 @@ def save_blockfloat_model(
     # Without it, ``from_pretrained`` reports the codes as unexpected, leaves the
     # decoder layers at their random initial values, and returns a model that
     # generates garbage with no error.
+    base_module, base_class = _modeling_base(model)
+    modeling_source = (
+        _MODELING_SOURCE.replace("{BASE_MODULE}", base_module)
+        .replace("{BASE_CLASS}", base_class)
+    )
     config["auto_map"] = {"AutoModelForCausalLM": f"{MODELING_FILE[:-3]}.TTBlockfloatForCausalLM"}
     with open(os.path.join(output_dir, "config.json"), "w") as handle:
         json.dump(config, handle, indent=2)
     with open(os.path.join(output_dir, MODELING_FILE), "w") as handle:
-        handle.write(_MODELING_SOURCE)
+        handle.write(modeling_source)
 
     if tokenizer is not None:
         tokenizer.save_pretrained(output_dir)
