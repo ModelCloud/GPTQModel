@@ -33,7 +33,7 @@ quantizer validated bit-for-bit against the upstream `tt-llk` helpers and fused
 dequantize+GEMM microkernels for scalar, AVX2+FMA and AVX-512. This makes it
 possible to check a converted checkpoint, reproduce a TT numerical result, or
 develop against the block-float formats on a laptop or CI runner. Build it with
-`make -C gptqmodel_ext/ttbfp`; it is not imported by `gptqmodel`. See
+`make -C gptqmodel_ext/ttbfp` for CPU development and testing. See
 [`docs/tt-blockfloat-cpu.md`](tt-blockfloat-cpu.md) for the dtype definition,
 layouts, dispatch, and measured performance.
 
@@ -863,4 +863,3 @@ The following remain future work and are not claimed here:
 - On-device GPTQ quantization and calibration.
 - Promoting `TTNNLinear` into `AUTO`. It stays explicit-only until model-level
   token parity is measured, matching the standard set by `XLALinear`.
-
