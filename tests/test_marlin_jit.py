@@ -202,7 +202,7 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     assert "const float *__restrict__ global_scale_ptr" in kernel_h
     assert 'global_scale = torch::empty({0}, options_fp32);' in gemm_cu
     assert 'global_scale.scalar_type() == at::ScalarType::Float' in gemm_cu
-    assert "global_scale.data_ptr<float>()" in gemm_cu
+    assert "global_scale.mutable_data_ptr<float>()" in gemm_cu
     assert "float global_scale_f32 = 1.0f;" in template_h
     assert "c0 *= global_scale_f32;" in template_h
     assert "c1 *= global_scale_f32;" in template_h

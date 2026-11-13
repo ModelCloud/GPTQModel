@@ -1,7 +1,4 @@
-#include <ATen/DeviceGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/types.h>
+#include "../torch_stable_compat.h"
 #include <tuple>
 #include "core/scalar_type.hpp"
 

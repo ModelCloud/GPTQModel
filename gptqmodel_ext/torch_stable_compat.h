@@ -157,6 +157,19 @@ class TensorOptions {
 
 inline Device device_of(const Tensor& tensor) { return tensor.device(); }
 
+inline bool is_alias_of(const Tensor& lhs, const Tensor& rhs) {
+  if (!lhs.defined() || !rhs.defined()) {
+    return false;
+  }
+  const auto* lhs_begin = static_cast<const char*>(lhs.data_ptr());
+  const auto* rhs_begin = static_cast<const char*>(rhs.data_ptr());
+  const size_t lhs_bytes = static_cast<size_t>(lhs.numel()) * lhs.element_size();
+  const size_t rhs_bytes = static_cast<size_t>(rhs.numel()) * rhs.element_size();
+  const auto* lhs_end = lhs_begin + lhs_bytes;
+  const auto* rhs_end = rhs_begin + rhs_bytes;
+  return lhs_begin < rhs_end && rhs_begin < lhs_end;
+}
+
 inline bool is_floating_point(const Tensor& tensor) {
   const ScalarType dtype = tensor.scalar_type();
   return dtype == ScalarType::Half || dtype == ScalarType::BFloat16 ||
@@ -322,6 +335,12 @@ inline CompatibleCUDAStream getCurrentCUDAStream(int32_t device_index = -1) {
 
 inline int32_t current_device_index() {
   return torch::stable::accelerator::getCurrentDeviceIndex();
+}
+
+inline void record_stream(const Tensor&, cudaStream_t) {
+  // The stable ABI does not expose Tensor::record_stream. Callers keep the
+  // workspace alive for the duration of the op; this is a lifetime hint, not
+  // a correctness requirement.
 }
 
 inline const cudaDeviceProp* getDeviceProperties(int32_t device_index) {
