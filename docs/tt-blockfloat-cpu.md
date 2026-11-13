@@ -1,9 +1,8 @@
 # Tenstorrent block floats on CPU (`ttbfp`)
 
-`gptqmodel_ext/ttbfp/` is a standalone C++/NumPy library that reproduces
+`gptqmodel_ext/ttbfp/` provides C++ kernels and NumPy bindings that reproduce
 Tenstorrent's block-float tensor formats on ordinary CPUs, so models and
-kernels that use them can be tested on non-Tenstorrent hardware.  It is not
-part of the `gptqmodel` Python package and `setup.py` does not build it; see
+kernels that use them can be tested on non-Tenstorrent hardware. See
 [`gptqmodel_ext/ttbfp/README.md`](../gptqmodel_ext/ttbfp/README.md).
 
 ## Dtype naming
