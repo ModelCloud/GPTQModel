@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ---------------------------------------------------------------------------
-# NF12 / NF12-AD reference implementation.
+# NF12 / NF12 reference implementation.
 #
 # Original implementation: https://github.com/dphnAI/nf12
 # Copyright (c) 2026 AlpinDale and the nf12 contributors.
@@ -21,6 +21,7 @@ in *flat group id* order (SPEC 4.3).
 from __future__ import annotations
 
 import torch
+
 
 __all__ = [
     "MAX_EXP_BASE",

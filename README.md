@@ -27,7 +27,7 @@
 ## Latest News 🗞️🚀
 
 * **7.10.0**:
-  * **Models:** Added Ricursive Ripple (`ricursive`) quantization support for the 65B preview checkpoint, including load-time Transformers 5 generation/masking patches, per-head Q/K norm and gated-attention handling, and `v_proj` Hessian isolation. Added OLMo Hybrid (`olmo_hybrid`) quantization support for the alternating gated-DeltaNet/full-attention layout. Fixed pre-lm-head norm resolution across multimodal model definitions.
+  * **Models:** Added Ricursive Ripple (`ricursive`) quantization support for the 65B preview checkpoint, including load-time Transformers 5 generation/masking patches, per-head Q/K norm and gated-attention handling, and `v_proj` Hessian isolation. Added OLMo Hybrid (`olmo_hybrid`) quantization support for the alternating gated-DeltaNet/full-attention layout. Fixed pre-lm-head norm resolution across multimodal model definitions. Added Granite SWA and Granite MoE SWA (`granite_swa`, `granitemoe_swa`) quantization support, including packed routed-expert defusion for the sparse variant while keeping the learnable attention sinks in their source dtype.
   * **Performance:** Accelerated Ricursive Ripple decode by up to 10x per row at batch 16 with fused RMSNorm and native GQA attention, and added chunked MLP prefill to bound activation memory. The CUDA expandable-segments allocator is now installed before Torch initializes, so wide-layer multi-GPU runs actually use it.
   * **Checkpointing:** Added `gptqmodel.reshard()` for per-layer safetensors sharding with one global shard, byte-for-byte tensor copies, preserved metadata, and config/tokenizer copying. Added a one-time warning when quantization shards are not layer-wise.
   * **Multi-GPU:** Honored explicit device lists for quantization placement, routed cross-device moves per direction to avoid asymmetric ROCm SIGSEGVs, and documented `cudaMallocAsync` for wide-layer Hessian allocation.
@@ -138,10 +138,13 @@ and CUDA GGML outputs add FP32 bias before low-precision rounding.
 representation is no longer supported. `AWQ_TORCH_INT8` / `TORCH_INT8_AWQ`
 are retired and fail with migration guidance. Use `BACKEND.AUTO` to select a
 compatible packed kernel or `BACKEND.TORCH` for a portable fallback. Native
-8-bit GPTQ still uses the existing per-channel INT8 requantizer; it is not a
-lossless repacking of arbitrary grouped/asymmetric GPTQ weights.
+8-bit GPTQ keeps the checkpoint's own per-group scales and zero points, so the
+runtime layout is a lossless repack of grouped/asymmetric GPTQ weights rather
+than a second quantization: a group whose scale is far smaller than its
+sibling's no longer collapses to zero.
 See [Torch INT8 checkpoint lifecycle](docs/torch-int8-checkpoint-lifecycle.md)
-for save/reload ownership and runtime cache invalidation.
+for save/reload ownership, the group-preserving layout, and runtime cache
+invalidation.
 
 ## Quantization Support 🛠️
 
@@ -174,7 +177,7 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | VPTQ                      | ✅          | x | x | x | x             |
-| NF12-AD                   | ✅          | x | x | x | x             |
+| NF12                      | ✅          | x | x | x | x             |
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
@@ -199,7 +202,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
-| `METHOD.NF12_AD` (`nf12`) | `FORMAT.NF12_AD` (`nf12`) | `BACKEND.NF12_AD` (`nf12_ad`) |
+| `METHOD.NF12` (`nf12`) | `FORMAT.NF12` (`nf12`) | `BACKEND.NF12` (`nf12`) |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
@@ -267,6 +270,12 @@ firmware, and hardware measurements. Tenstorrent runtime packages are installed
 from the pinned `requirements/tenstorrent-py312.txt` manifest because the PJRT
 plugin is not available from the default PyPI index.
 
+Block-float checkpoints (`bf4_b` / `bf8_b`) can also be validated and
+benchmarked without the cards: the CUDA kernels in
+`gptqmodel_ext/tt_blockfloat_cuda` reproduce the storage exactly, so a
+checkpoint produces the same numbers there as it will on Tensix. See the
+[block-float CUDA emulation notes](gptqmodel_ext/tt_blockfloat_cuda/README.md).
+
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
 
@@ -303,7 +312,7 @@ not tuned, so rocBLAS remains the default there too.
 * ✨ Asymmetric `Sym=False` support. 
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
-* 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression. See [accelerator test gates](docs/accelerator-test-gates.md) for device selection and skip/failure rules.
 
 ## Organizations and projects using GPT-QModel 🌐
 
@@ -355,7 +364,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
 | GPT-OSS | `gpt_oss` |
 | GPT-J | `gptj` |
-| Granite / Granite MoE / Granite MoE Hybrid | `granite`, `granitemoe`, `granitemoehybrid` |
+| Granite / Granite SWA / Granite MoE / Granite MoE SWA / Granite MoE Hybrid | `granite`, `granite_swa`, `granitemoe`, `granitemoe_swa`, `granitemoehybrid` |
 | GRIN-MoE | `grinmoe` |
 | Helium | `helium` |
 | HRM | `hrm_text` |
@@ -450,12 +459,12 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`), NF12-AD `sm_80+` | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12-AD, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`), NF12 `sm_80+` | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12, BitBLAS, Triton, BitsAndBytes, Torch |
 | 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM/GEMV, ParoQuant Triton, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, FP8 Torch, Torch (fused GPTQ GEMV/GEMM on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
-| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, NF12-AD Torch, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, NF12-AD Torch, MLX via conversion |
+| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, NF12 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 **ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
@@ -465,8 +474,12 @@ matching ROCm PyTorch build. ROCm 10.1 ships HIP 7.16; `torch.version.hip`
 reports the HIP runtime version, not the ROCm release, so version checks use
 `torch.version.rocm`.
 
-ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
-matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
+ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` use the
+matching expanded `rocm-sdk-devel` tree, and otherwise fall back to the
+version-matched `/opt/rocm/core-*` SDK for the template headers, the
+`libamdhip64.so` symlink and the device bitcode. See
+[`docs/rocm-jit-toolkit-paths.md`](docs/rocm-jit-toolkit-paths.md) for the
+resolution order and failure paths.
 JIT builds on ROCm always use the HIP/torch headers only: NVIDIA `nvidia` wheel
 headers are never added to a hipcc command line, even when those packages are
 installed in the environment, because their `vector_types.h` conflicts with
@@ -494,6 +507,19 @@ the Triton path for A/B runs.
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
+
+### Tenstorrent block floats on CPU
+
+[`gptqmodel_ext/ttbfp/`](gptqmodel_ext/ttbfp/) is a standalone, bit-exact CPU
+implementation of Tenstorrent's `bf8_b` / `bf4_b` / `bf2_b` block-float
+formats, so models and kernels that use them can run without Tenstorrent
+hardware. It ships a quantizer validated against the upstream `tt-llk`
+helpers, fused dequantize+GEMM microkernels for scalar / AVX2+FMA / AVX-512,
+block-major and bf8_b-only int8 kernel-native layouts, and a 280-test
+bitwise-parity suite. It is not built by `setup.py` and is not imported by
+`gptqmodel`; build it with `make -C gptqmodel_ext/ttbfp`. See
+[`docs/tt-blockfloat-cpu.md`](docs/tt-blockfloat-cpu.md) for the dtype
+naming, dispatch flow and measured performance.
 
 ### Native MLX quantization on Apple silicon
 
@@ -537,6 +563,9 @@ uv pip install -v gptqmodel
 ```
 
 The package depends on `ninja` for first-use JIT kernel compilation.
+NumPy is not a base dependency: the quantization core is NumPy-free, and the
+`gguf`, `bitblas`, and `mlx` extras declare it for the paths that need it. See
+[NumPy-free core](docs/numpy-free-core.md).
 
 AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
 Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
@@ -766,7 +795,7 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 
 #### Other Quantization Formats 📦
 
-`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12ADConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12Config`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
 `GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
 
@@ -964,12 +993,12 @@ the [NF12 HIP toolchain notes](gptqmodel_ext/nf12_hip/README.md).
 ```py
 import torch
 from gptqmodel import GPTQModel
-from gptqmodel.quantization import NF12ADConfig
+from gptqmodel.quantization import NF12Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-NF12"
 
-model = GPTQModel.load(model_id, NF12ADConfig(), dtype=torch.bfloat16)
+model = GPTQModel.load(model_id, NF12Config(), dtype=torch.bfloat16)
 model.quantize(calibration=None)
 model.save(quant_path)
 ```
@@ -1382,7 +1411,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
-* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12-AD inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
+* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12 inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)

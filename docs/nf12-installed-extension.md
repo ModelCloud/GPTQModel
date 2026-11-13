@@ -5,7 +5,7 @@
 
 GPT-QModel ships the lightweight `gptqmodel_nf12` Python API and the vendored
 CUDA sources in one wheel. Inference callers can encode a BF16 matrix once and
-keep only packed NF12 storage. The legacy `gptqmodel.utils.nf12_ad` entry points
+keep only packed NF12 storage. The legacy `gptqmodel.utils.nf12` entry points
 delegate to the same package; callers no longer need an installed `nf12` wheel.
 
 ```mermaid
@@ -20,7 +20,7 @@ flowchart TD
     H --> I["Run native BF16 linear, embedding, or MoE"]
     D --> I
     F -- no --> J["Raise a specific runtime error"]
-    J --> K["Legacy nf12_ad.available returns false"]
+    J --> K["Legacy nf12.available returns false"]
     classDef failure fill:#f9d8d8,stroke:#b42318,color:#111;
     class J,K failure;
 ```
@@ -59,9 +59,9 @@ flowchart LR
 
 | Previous mechanism | Current mechanism |
 | --- | --- |
-| `gptqmodel/utils/nf12_ad.py:173` tried `_load_installed` before `_build_and_load` at `:187` | `gptqmodel/utils/nf12_ad.py:25` delegates to `gptqmodel_nf12.load` |
+| `gptqmodel/utils/nf12.py:173` tried `_load_installed` before `_build_and_load` at `:187` | `gptqmodel/utils/nf12.py:25` delegates to `gptqmodel_nf12.load` |
 | An external `nf12` wheel could own the operator registration | `gptqmodel_nf12/_library.py:39` loads GPT-QModel's vendored CUDA source build, or reuses a complete registered operator set |
-| Legacy CUDA runtime exposed BF16 `linear` at `gptqmodel/utils/nf12_ad.py:318` | `gptqmodel_nf12/api.py:131` provides BF16 linear and `:142` adds `linear_fp32` for FP32 routing and score projections |
+| Legacy CUDA runtime exposed BF16 `linear` at `gptqmodel/utils/nf12.py:318` | `gptqmodel_nf12/api.py:131` provides BF16 linear and `:142` adds `linear_fp32` for FP32 routing and score projections |
 
 The native CUDA API supports NVIDIA SM80 or newer. GPT-QModel's separate HIP
 runtime and CPU codec remain the fallbacks for the existing quantizer and

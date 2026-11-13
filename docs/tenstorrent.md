@@ -24,6 +24,19 @@ defined at the bit level, for both weights and arithmetic, in
 [`hw/dtypes.md`](../hw/dtypes.md). Hardware measurements for this box are in
 [`hw/tenstorrent.md`](../hw/tenstorrent.md).
 
+## CPU kernels
+
+[`gptqmodel_ext/ttbfp/`](../gptqmodel_ext/ttbfp/) executes the same packed
+`bf8_b`/`bf4_b`/`bf2_b` block floats on ordinary CPUs, with no Tenstorrent
+runtime, PJRT plugin, or card present. It is a standalone C/C++ extension with a
+quantizer validated bit-for-bit against the upstream `tt-llk` helpers and fused
+dequantize+GEMM microkernels for scalar, AVX2+FMA and AVX-512. This makes it
+possible to check a converted checkpoint, reproduce a TT numerical result, or
+develop against the block-float formats on a laptop or CI runner. Build it with
+`make -C gptqmodel_ext/ttbfp`; it is not imported by `gptqmodel`. See
+[`docs/tt-blockfloat-cpu.md`](tt-blockfloat-cpu.md) for the dtype definition,
+layouts, dispatch, and measured performance.
+
 The two backends are mutually exclusive within one process. TT-Metal allows a
 single runtime owner per chip, and initializing the PJRT plugin is irreversible,
 so a process that has used `XLALinear` cannot then open a `ttnn.MeshDevice`.
@@ -659,6 +672,111 @@ mutating the validated inference environment.
 `tt-flash` is the firmware/SPI maintenance utility. It does not flash weights
 and is not in the inference execution path. Firmware updates are intentionally
 outside this change.
+
+## Emulating bf8/bf4 on ROCm
+
+`gptqmodel_ext/tt_blockfloat_hip` executes the same packed `codes` and int8
+`exponents` a Tenstorrent device consumes on AMD GPUs. It exists to test and
+emulate `bf8_b` / `bf4_b` without Tenstorrent hardware; it does not
+replace the device kernels.
+
+The HIP kernels unpack bf4 nibbles / bf8 bytes in registers and fuse the
+dequantisation into the GEMM, so an expanded weight exists only in shared
+memory for one K tile. Decode (`m == 1`) uses a bandwidth-bound GEMV that reads
+each packed weight row once; prefill uses a 32x64x32 register-tiled fp32 GEMM,
+or RDNA4 WMMA when the activation is bf16 (bf8/bf4 values are exact in bf16).
+The WMMA path picks its CTA block, warp block and K tile from the token count:
+16x64/32x64 with 16x16 warps and a 256-wide K tile for up to 32 tokens, 64x64
+up to 64, and a 128x128 block with 32x32 warps and a 64-wide K tile above that.
+The dequantised values are exact float32 grid points, so results match
+`recompose_blockfloat` followed by an fp32 GEMM.
+
+`TTBlockfloatLinear`, `TTBlockfloatEmbedding` and `TTBlockfloatTiedHead`
+dispatch to these kernels when the module is on a ROCm device and fall back to
+torch otherwise. See `gptqmodel_ext/tt_blockfloat_hip/README.md` for the
+standalone `hipcc` validation harness and the measured R9700 numbers: ~18 us
+for a 4096x4096 bf4 decode, which is 91% of the card's measured read bandwidth
+once exponents are counted and therefore at the roofline, and 35 us for a
+32x4096x4096 bf16 prefill (186 us at 512 tokens). Prefill throughput is set by
+two tile properties: the M block fixes how many times the packed weight is
+re-read (once per block, and the 9 MiB weight no longer fits the 8 MiB L2), and
+the warp block fixes LDS traffic per WMMA (1 KiB at 16x16, 512 B at 32x32).
+Choosing both per shape raised the large-M rate from 38 to 92 TFLOP/s. Small-M
+prefill is parallelism-limited rather than arithmetic-limited: 16 tokens is 256
+output tiles and 32 tokens is 512, so the card only gets 8 and 16 warps per CU,
+giving 17 TFLOP/s at 16 tokens and 31 at 32. Larger warp blocks do not help
+there -- at 32 tokens a 32x32 warp block halves LDS traffic but leaves four
+warps on the card and measured slower -- so that ceiling needs a split-K
+workspace, which is not implemented.
+
+Large-M prefill is at a hardware plateau rather than a tuning miss.  A workgroup
+may request 64 KB of LDS and a CU has 128 KB, so a 128x128 block at K = 64
+(36864 B) gets three CTAs per CU and no more; 128 VGPRs per thread at those
+1536 threads is the matching register limit.  Warp blocks that cut LDS traffic
+(64x32) drop the warp count from 48 to 24 and measure slower, and a depth-2
+register prefetch that would hide the staging latency needs a second set of
+staging registers and falls to two CTAs per CU.  Both were measured on the
+R9700: 207-208 us and 262 us against 185 us at the time.
+
+Any `in_features` that is a multiple of 16 is supported, including one that is
+not a multiple of the tile width: the last tile of such a `k` stages a partial
+span, and the kernel zero-fills past `k` instead of dropping the span. The
+quantiser likewise takes its base exponent candidate unconditionally, so a block
+whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
+reference codes rather than zeros.
+
+`bfloat2_b` is the third block-float width the Tensix packer understands
+(`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the
+Blackhole matrix-engine input formats), so the p300c silicon can hold it.  It
+is not a usable weight format and is not reachable through `ttnn`: two bits are
+one sign and one magnitude, so a block holds only `{-1, 0, +1} x 2**exponent`,
+and `ttnn` exposes only `bfloat16`, `bfloat8_b`, `bfloat4_b`, `float32` and the
+integer types (the vendor spellings; everywhere else this repository says
+`bf8_b` and `bf4_b`).  The grid is therefore defined in
+`gptqmodel.utils.tt_blockfloat_quant` (`quantize_bfloat2_b`, four codes per
+byte, exact pack/unpack) so its cost can be measured, but the HIP kernels do
+not implement it and a `bits == 2` module takes the torch path.
+
+## Emulating bf8/bf4 on CUDA
+
+A `bf4_b` / `bf8_b` checkpoint is portable storage, not a device binding, so it
+can be validated and benchmarked without a Tenstorrent part. The CUDA kernels in
+`gptqmodel_ext/tt_blockfloat_cuda` reproduce the storage exactly — same codes,
+same `int8` exponent per 16 values, same round-to-nearest-even grid — so a
+checkpoint produces the same numbers there as it will on Tensix. They are used
+automatically when a block-float module is on a CUDA device of sm_80 or newer;
+the torch path remains the fallback everywhere else, and a failed extension build
+logs once and falls back rather than failing a forward pass.
+
+CUDA capability is checked against the module's actual tensor device. The
+extension build result is shared across devices, but a device below sm_80 never
+uses that result and never marks the extension unavailable for another GPU.
+
+```mermaid
+flowchart TD
+    A["TTBlockfloatLinear._kernel_linear(x)<br/>or TTBlockfloatEmbedding._kernel_embedding(input_ids)"] --> B["tt_blockfloat_cuda.ready(tensor.device)"]
+    B --> C{"supported(device)<br/>NVIDIA sm_80 or newer?"}
+    C -- no --> D["return None; module uses Torch dense fallback"]
+    C -- yes --> E{"_READY known?"}
+    E -- no --> F["prewarm() builds extension once"]
+    F --> G{"build succeeded?"}
+    G -- no --> D
+    G -- yes --> H["CUDA packed-code kernel"]
+    E -- yes --> I{"cached build succeeded?"}
+    I -- no --> D
+    I -- yes --> H
+    style D fill:#ffe0e0,stroke:#b00020
+```
+
+| Dispatch point | Before | Current |
+| --- | --- | --- |
+| Linear and embedding calls | `tt_blockfloat.py:233,438` called `ready()` without the tensor device | Both call `ready(tensor.device)`, preserving the CUDA ordinal |
+| Build cache | `tt_blockfloat_cuda.py:122` cached the combined current-device capability and build result | `ready(device)` checks the target on every call and caches only `prewarm()` |
+
+That path exists to exercise the dtype, not to serve CUDA inference: the
+Tenstorrent backends above are what this repository supports on the cards. See
+`gptqmodel_ext/tt_blockfloat_cuda/README.md` for the measured numbers and the two
+GEMM paths.
 
 ## Scope and follow-up
 

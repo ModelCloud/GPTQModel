@@ -21,18 +21,19 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.swordfish import (
+    prewarm_swordfish_extension,
+    swordfish_runtime_available,
+    swordfish_runtime_error,
+)
+from tests.accelerator_gates import swordfish_skip_reason, swordfish_test_device
 
 
 log = setup_logger()
 
 
 def _skip_reason() -> str | None:
-    if not torch.cuda.is_available():
-        return "CUDA not available"
-    major, minor = torch.cuda.get_device_capability()
-    if major < 10:
-        return f"Swordfish requires Blackwell (sm100+); found sm{major}{minor}"
-    return None
+    return swordfish_skip_reason()
 
 
 _SKIP_REASON = _skip_reason()
@@ -109,26 +110,31 @@ def _pack_torch_reference(
 
 def _measure(fn, x, warmup: int = 2, iters: int = 100) -> float:
     """Return average elapsed time in milliseconds."""
-    for _ in range(warmup):
-        fn(x)
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn(x)
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters
+    with torch.cuda.device(x.device):
+        for _ in range(warmup):
+            fn(x)
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn(x)
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / iters
 
 
 @unittest.skipIf(_SKIP_REASON is not None, _SKIP_REASON or "")
 class TestSwordfishSpeedDeepSeekV4(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        from gptqmodel.utils.swordfish import prewarm_swordfish_extension
-
-        prewarm_swordfish_extension()
+        device = swordfish_test_device()
+        with torch.cuda.device(device):
+            prewarm_swordfish_extension()
+            if not swordfish_runtime_available(device):
+                raise RuntimeError(
+                    f"Swordfish runtime unavailable: {swordfish_runtime_error(device)}"
+                )
 
     def _build_backend(self, torch_linear: TorchLinear, backend_class, dtype: torch.dtype, device: torch.device):
         """Instantiate a backend, copy the packed GPTQ buffers, and run post_init."""
@@ -199,7 +205,7 @@ class TestSwordfishSpeedDeepSeekV4(unittest.TestCase):
         bits = 4
         group_size = 128
         dtype = torch.bfloat16
-        device = torch.device("cuda:0")
+        device = swordfish_test_device()
 
         backends: List[Tuple[str, type]] = [("Swordfish", SwordfishLinear)]
         unavailable: List[str] = []

@@ -68,10 +68,25 @@ def main():
                 scales = torch.randint(1, 4, zeros.shape).half() / 256
                 weight = ((codes.float().reshape(-1, group_size, out_features) - zeros[:, None].float())
                           * scales[:, None].float()).reshape(in_features, out_features)
+                # Historical, prohibited layout: one scale per output channel.
                 channel_scale = (weight.abs().amax(0) / 127).clamp_min(1e-10)
                 historical_codes = (weight / channel_scale).round().clamp(-128, 127).to(torch.int8)
+                # Group-preserving layout: the checkpoint's own ``code - zero``
+                # residuals and per-group scales, one kernel row per group.
+                group_codes = ((codes.float().reshape(-1, group_size, out_features)
+                                - zeros[:, None].float())
+                               .permute(0, 2, 1).contiguous().to(torch.int8))
+                group_scales = scales.float().contiguous()
+                group_lengths = (group_size,) * (in_features // group_size)
                 for dtype in (torch.float16, torch.bfloat16):
-                    historical = Int8PackedModule(historical_codes.t().contiguous(), channel_scale.to(dtype)).eval()
+                    historical = Int8PackedModule(
+                        historical_codes.t().unsqueeze(0).contiguous(),
+                        channel_scale.to(dtype).unsqueeze(0),
+                        group_lengths=(in_features,),
+                    ).eval()
+                    grouped = Int8PackedModule(
+                        group_codes, group_scales, group_lengths=group_lengths
+                    ).eval()
                     for method in ("GPTQ", "AWQ"):
                         aten_cls = TorchAtenLinear if method == "GPTQ" else TorchAtenAwqLinear
                         avx_cls = TorchCpuAvx512Linear if method == "GPTQ" else TorchCpuAvx512AwqLinear
@@ -81,12 +96,14 @@ def main():
                             activation = torch.arange(tokens * in_features).reshape(tokens, -1).remainder(9).sub(4).to(dtype) / 16
                             raw = activation.float() @ weight
                             row = {"shape": shape, "group": group_size, "dtype": str(dtype), "method": method, "tokens": tokens}
-                            for name, layer in (("aten", aten), ("packed_avx512", packed), ("historical_int8", historical)):
+                            for name, layer in (("aten", aten), ("packed_avx512", packed),
+                                                ("historical_int8", historical),
+                                                ("grouped_int8", grouped)):
                                 if layer is None:
                                     continue
                                 output = layer(activation)
                                 error = metrics(output, raw)
-                                if name != "historical_int8":
+                                if name not in ("historical_int8", "grouped_int8"):
                                     torch.testing.assert_close(output, raw.to(dtype), rtol=0, atol=0)
                                     assert layer.qweight.untyped_storage().nbytes() == in_features * out_features // 2
                                 latency, _ = _bench(partial(layer, activation), warmup=args.warmup, iters=args.iters)

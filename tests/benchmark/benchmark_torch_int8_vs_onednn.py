@@ -249,7 +249,13 @@ def main() -> int:
     int8_weight_scales_bf16 = weight_state["int8_weight_scales_bf16"]
     int8_weight_zero_points = weight_state["int8_weight_zero_points"]
 
-    torch_int8_module = Int8PackedModule(int8_weight_nk, int8_weight_scales_bf16).eval()
+    # The benchmark feeds a dense per-output-channel INT8 matrix, which the
+    # group kernel represents as one group spanning all input channels.
+    torch_int8_module = Int8PackedModule(
+        int8_weight_nk.unsqueeze(0),
+        int8_weight_scales_bf16.unsqueeze(0),
+        group_lengths=(in_features,),
+    ).eval()
 
     config_rows = [
         ["model_dir", str(args.model_dir)],

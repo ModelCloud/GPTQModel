@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **203 registered model types**: **102 qualified** and **101 not
+accounts for all **205 registered model types**: **102 qualified** and **103 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
@@ -236,6 +236,8 @@ layout alone does not authorize it.
 | `glm5_next` | `Glm5NextQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `glm_moe_dsa` | `GlmMoeDsaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `glmasr` | `GlmASRGPTQ` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
+| `granite_swa` | `GraniteSWAQModel` | Per-layer sliding-window attention dispatch and post-attention attention-sink scaling are not modeled by the current fused qkv/gate_up executor. |
+| `granitemoe_swa` | `GraniteMoeSWAQModel` | Per-layer sliding-window attention dispatch and post-attention attention-sink scaling are not modeled by the current fused qkv/gate_up executor. |
 | `gpt2` | `GPT2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `gpt_bigcode` | `GptBigCodeQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `gpt_neox` | `GPTNeoXQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

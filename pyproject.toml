@@ -64,6 +64,9 @@ sglang = [
 ]
 bitblas = [
     "bitblas==0.1.0.post1",
+    "numpy>=2.2.6; python_version < \"3.11\"",
+    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 bitsandbytes = [
     "bitsandbytes>=0.50.2",
@@ -71,6 +74,9 @@ bitsandbytes = [
 gguf = [
     "gguf>=0.19.0",
     "llama-cpp-python>=0.3.36",
+    "numpy>=2.2.6; python_version < \"3.11\"",
+    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 hf = [
     "optimum>=2.3.0",
@@ -102,6 +108,9 @@ mlx = [
     "mlx>=0.32.4",
     "mlx_lm>=0.31.3; python_version < \"3.11\"",
     "mlx_lm>=0.32.2; python_version >= \"3.11\"",
+    "numpy>=2.2.6; python_version < \"3.11\"",
+    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 
 # Single source of truth for lint/format rules. Keeping this at the repository

@@ -8,6 +8,7 @@ NF12 decoder and the native inference operators.
 
 from __future__ import annotations
 
+import shutil
 import threading
 from types import SimpleNamespace
 
@@ -16,15 +17,27 @@ import torch
 import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
+from tests.accelerator_gates import nf12_skip_reason
 
 
 def _cuda():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    device = torch.device("cuda:0")
-    if torch.cuda.get_device_capability(device)[0] < 8:
-        pytest.skip("NF12 needs SM80 or newer")
-    return device
+    reason = nf12_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    return torch.device("cuda:0")
+
+
+def test_native_runtime_stays_testable_without_build_tools(monkeypatch):
+    device = _cuda()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    assert nf12_skip_reason() is None
+    weight = torch.ones((16, 64), device=device, dtype=torch.bfloat16)
+    x = torch.ones((2, 64), device=device, dtype=torch.bfloat16)
+    packed = nf12.encode(weight)
+    actual = nf12.linear(x, packed)
+    assert actual.dtype == x.dtype
+    assert torch.equal(actual, torch.full((2, 16), 64, device=device, dtype=x.dtype))
 
 
 @pytest.mark.parametrize("shape", [

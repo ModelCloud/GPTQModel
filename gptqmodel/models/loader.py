@@ -16,9 +16,8 @@ import weakref
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
-from typing import Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union
 
-import numpy as np
 import torch
 import transformers
 
@@ -47,7 +46,6 @@ from ..nn_modules.qlinear.allspark import AllSparkLinear
 from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
-from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..nn_modules.qlinear.vptq_torch import VPTQLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import (
@@ -62,7 +60,6 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
-from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
@@ -112,7 +109,41 @@ from ..utils.torch import xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
+if TYPE_CHECKING:
+    from ..utils import internal_gguf
+
+
+def __getattr__(name: str):
+    """Resolve GGUF-only names on first use so the core never imports NumPy."""
+    if name == "internal_gguf":
+        from ..utils import internal_gguf as value
+    elif name == "GGUFTorchLinear":
+        from ..nn_modules.qlinear.gguf import GGUFTorchLinear as value
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
+
+
 log = setup_logger()
+
+_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
+
+
+def _native_quantized_loader_enabled() -> bool:
+    """Mirror internal_gguf's env check without importing its NumPy-backed module."""
+    raw = os.getenv(_GGUF_QUANTIZED_LOADER_ENV)
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+
+
+def _ggml_quantization_type():
+    """Import the GGUF enum only when a GGUF checkpoint is actually present."""
+    from ..utils.internal_gguf import GGMLQuantizationType
+
+    return GGMLQuantizationType
+
 
 ATTN_IMPLEMENTATION = "attn_implementation"
 
@@ -788,6 +819,7 @@ def _resolve_native_gguf_profile(
     profile: PROFILE,
 ) -> PROFILE:
     """Resolve user profile intent for native GGUF checkpoints."""
+    from ..utils import internal_gguf
 
     if (
         native_gguf_qspec is not None
@@ -805,6 +837,7 @@ def _should_use_dense_native_gguf_path(
     profile: PROFILE,
 ) -> bool:
     """Fast Bonsai mode stays on the dense HF GGUF import path."""
+    from ..utils import internal_gguf
 
     return (
         native_gguf_qspec is not None
@@ -907,9 +940,10 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
         quantize_config_from_checkpoint,
     )
 
-    if not isinstance(dtype, torch.dtype):
-        dtype = torch.float32
-
+    # ``dtype`` is passed through as-is: ``None``/the normaliser's "not
+    # provided" sentinel means "the checkpoint's declared precision", which is
+    # what the GPTQ/AWQ routes get from ``from_pretrained``. Forcing float32
+    # here doubled the resident model for no numerical gain.
     model, restored, info = build_tt_blockfloat_model(model_local_path, dtype=dtype)
 
     model_config = model.config.to_dict()
@@ -1056,12 +1090,14 @@ def _resolve_native_quantized_gguf_checkpoint(
     model_local_path: str,
     hf_gguf_load_kwargs: Dict[str, str],
 ) -> tuple[Optional[str], Optional[internal_gguf.GGUFQuantizedCheckpointSpec]]:
-    if not internal_gguf.native_quantized_loader_enabled():
+    if not _native_quantized_loader_enabled():
         return None, None
 
     gguf_checkpoint_path = _resolve_local_gguf_checkpoint_path(model_local_path, hf_gguf_load_kwargs)
     if gguf_checkpoint_path is None:
         return None, None
+
+    from ..utils import internal_gguf
 
     try:
         spec = internal_gguf.inspect_quantized_checkpoint(gguf_checkpoint_path)
@@ -1131,6 +1167,9 @@ def _load_quantized_gguf_checkpoint_into_model(
     gguf_checkpoint_path: str,
     tensor_key_mapping: dict[str, str],
 ) -> None:
+    from ..nn_modules.qlinear.gguf import GGUFTorchLinear
+    from ..utils import internal_gguf
+
     reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
     loaded: set[str] = set()
 
@@ -1145,7 +1184,14 @@ def _load_quantized_gguf_checkpoint_into_model(
 
         if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             resolved_target_name = f"{module_name}.qweight" if module_name else "qweight"
-            packed = torch.from_numpy(np.array(tensor.data, dtype=np.uint8, copy=True, order="C"))
+            # ``astype`` is the array's own copy-and-cast, so it keeps the old
+            # ``np.array(..., dtype=uint8, copy=True, order="C")`` semantics
+            # (by-value cast, C-order, native byte order) without importing
+            # NumPy into this module. ``as_tensor`` rejects big-endian dtypes
+            # and negative strides, both of which the raw memmap view can carry.
+            packed = torch.as_tensor(
+                tensor.data.astype("uint8", copy=True), dtype=torch.uint8
+            )
             expected = _lookup_model_slot_tensor(model, resolved_target_name)
             if tuple(packed.shape) != tuple(expected.shape):
                 raise RuntimeError(
@@ -1355,7 +1401,7 @@ def ModelLoader(cls):
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
                 native_gguf_qspec is not None
-                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+                and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
                 and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
@@ -1799,7 +1845,7 @@ def ModelLoader(cls):
 
         if (
             native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+            and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q1_0
             and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON, BACKEND.MLX}
         ):
             raise ValueError(
@@ -1808,7 +1854,7 @@ def ModelLoader(cls):
             )
         elif (
             native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q2_0
+            and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q2_0
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
@@ -2518,8 +2564,13 @@ def ModelLoader(cls):
                     or isinstance(module, (VPTQLinear, AllSparkLinear, AllSparkAwqLinear))
                 ):
                     keep_in_fp32_modules.append(f"{prefix}bias")
-                    if isinstance(module, (GGUFTorchLinear, TorchFP8Linear, VPTQLinear,
-                                          AllSparkLinear, AllSparkAwqLinear)):
+                    is_gguf_linear = False
+                    if hasattr(module, "gguf_tensor_qtype"):
+                        from ..nn_modules.qlinear.gguf import GGUFTorchLinear
+
+                        is_gguf_linear = isinstance(module, GGUFTorchLinear)
+                    if is_gguf_linear or isinstance(module, (TorchFP8Linear, VPTQLinear,
+                                                             AllSparkLinear, AllSparkAwqLinear)):
                         fp32_bf16_buffer_names.append(f"{prefix}bias")
             load_checkpoint_in_model_then_tie_weights(
                 model,

@@ -28,7 +28,7 @@ from .config import (
                      GPTQConfig,
                      HessianConfig,
                      MSEConfig,
-                     NF12ADConfig,
+                     NF12Config,
                      NormConfig,
                      NormType,
                      ParoConfig,

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// NF12 / NF12-AD kernel computation.
+// NF12 kernel computation.
 //
 // Algorithm: "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit
 // Weight Compression", Liberman, Fang, Zhang, Dao, and Fu (Together AI, 2026).
@@ -10,7 +10,7 @@
 // Licensed under the Apache License, Version 2.0.
 //
 // Vendored into GPT-QModel (https://github.com/ModelCloud/GPTQModel) and
-// modified for the NF12-AD (AlpinDale) method/format. See
+// modified for the NF12 method/format. See
 // gptqmodel_ext/nf12/README.md for the list of local modifications.
 // ---------------------------------------------------------------------------
 /* SPDX-License-Identifier: Apache-2.0

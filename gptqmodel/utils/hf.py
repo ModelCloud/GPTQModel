@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
-import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
@@ -25,15 +24,31 @@ from transformers import (
     PreTrainedModel,
 )
 
-from ..nn_modules.qlinear.gguf import (
-    PRISM_Q1_0_G128_BLOCK_SIZE,
-    PRISM_Q1_0_G128_NAME,
-    PRISM_Q1_0_G128_TYPE_SIZE,
-    PRISM_Q1_0_G128_VALUE,
-    _dequantize_prism_q1_0_g128,
-    _is_prism_q1_0_g128,
-)
-from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
+from ..utils import _MONKEY_PATCH_LOCK
+
+
+_GGUF_LAZY_ATTRS = frozenset({
+    "PRISM_Q1_0_G128_BLOCK_SIZE",
+    "PRISM_Q1_0_G128_NAME",
+    "PRISM_Q1_0_G128_TYPE_SIZE",
+    "PRISM_Q1_0_G128_VALUE",
+    "_dequantize_prism_q1_0_g128",
+    "_is_prism_q1_0_g128",
+})
+
+
+def __getattr__(name: str):
+    """Resolve GGUF/PRISM names lazily so this module never imports NumPy."""
+    if name in _GGUF_LAZY_ATTRS:
+        from ..nn_modules.qlinear import gguf as gguf_module
+
+        value = getattr(gguf_module, name)
+    elif name == "internal_gguf":
+        from ..utils import internal_gguf as value
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 
 # Compatibility wrapper for no_init_weights across different transformers versions
@@ -387,6 +402,8 @@ def _load_gguf_checkpoint_torch_direct(
     model_to_load=None,
     torch_dtype=None,
 ):
+    from ..utils import internal_gguf
+
     if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
@@ -450,7 +467,15 @@ def _load_gguf_checkpoint_torch_direct(
             continue
 
         if not torch.is_tensor(weights):
-            weights = torch.from_numpy(np.array(weights, copy=True, order="C"))
+            # GGUF processors return nested sequences or array-likes. Normalize
+            # through the array's own API so big-endian dtypes and negative
+            # strides become a native C-contiguous buffer, then let Torch own
+            # the copy. No NumPy import is required.
+            dtype = getattr(weights, "dtype", None)
+            newbyteorder = getattr(dtype, "newbyteorder", None)
+            if newbyteorder is not None:
+                weights = weights.astype(newbyteorder("="), order="C", copy=True)
+            weights = torch.as_tensor(weights).clone().contiguous()
             if target_device is not None:
                 weights = weights.to(device=target_device)
 
@@ -495,6 +520,16 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
 
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
+    from ..nn_modules.qlinear.gguf import (
+        PRISM_Q1_0_G128_BLOCK_SIZE,
+        PRISM_Q1_0_G128_NAME,
+        PRISM_Q1_0_G128_TYPE_SIZE,
+        PRISM_Q1_0_G128_VALUE,
+        _dequantize_prism_q1_0_g128,
+        _is_prism_q1_0_g128,
+    )
+    from ..utils import internal_gguf
+
     try:
         import transformers.modeling_gguf_pytorch_utils as gguf_utils
         from transformers.utils import import_utils as hf_import_utils

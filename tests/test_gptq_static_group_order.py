@@ -117,7 +117,6 @@ def test_static_group_aware_pack_roundtrip_matches_independent_affine_oracle(
 
     with torch.no_grad():
         layer.weight.copy_(actual_weight)
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "1")
     packed = TorchLinear(
         bits=4,
         group_size=16,

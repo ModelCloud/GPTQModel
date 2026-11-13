@@ -391,7 +391,7 @@ def prepare_calibration_dataset(
             if len(tensor.shape) == 1:
                 tensor = tensor.unsqueeze(0)
             tensor = tensor.long()
-            return tensor.cpu().numpy().tolist()
+            return tensor.cpu().tolist()
         return [tensor]
 
     new_calibration_dataset = []

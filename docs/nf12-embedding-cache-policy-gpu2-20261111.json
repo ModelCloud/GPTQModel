@@ -50,7 +50,7 @@
       "store_policy": 0,
       "source_sha256": "479c1def321e6bac48d91b97a043e2333efae4c974bd7abd088ad1ff54234828",
       "lib_sha256": "603b86e8a46e51e19a9c83c823d5b5b9d3cde9f0368ab078738de60a19da16a6",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_load_cg.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_load_cg.so"
     },
     {
       "label": "load_ca",
@@ -58,7 +58,7 @@
       "store_policy": 0,
       "source_sha256": "7a6ce0c74c1da24b723e802cde599c094711c770d2b7a19a3e3fa898320f1762",
       "lib_sha256": "19d499a57d8ec6a3f2b36bcfae36a0a91d357ed9946c246a71d3c41bfc0e00b0",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_load_ca.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_load_ca.so"
     },
     {
       "label": "load_cs",
@@ -66,7 +66,7 @@
       "store_policy": 0,
       "source_sha256": "1b04e77ee37f41c7ad28a1c8f8e4d098243f2023272d6181a03136eebb797bb9",
       "lib_sha256": "8d7a0e88ef0a8a51e57c330fdd6729e2fd76fbf8bec3bbe67bb4f6795fe7e432",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_load_cs.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_load_cs.so"
     },
     {
       "label": "store_cg",
@@ -74,7 +74,7 @@
       "store_policy": 1,
       "source_sha256": "39c9f98ef0c17ffb14be628edef987d89081621200297e2f8d99c4cd89ae6003",
       "lib_sha256": "570ade7e48edd774d6cd3964b9db8f2ec378ccb2f0e47035b4e799ea259fc8c5",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_store_cg.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_store_cg.so"
     },
     {
       "label": "store_wb",
@@ -82,7 +82,7 @@
       "store_policy": 2,
       "source_sha256": "cb37e2383c08c88df4d547d515860980dbae34808639f98a60d30f32acbb2ee3",
       "lib_sha256": "254898e6823b819b274a8f25318f15025ccea582890a765522f849cfb73aebb2",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_store_wb.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_store_wb.so"
     },
     {
       "label": "store_cs",
@@ -90,7 +90,7 @@
       "store_policy": 3,
       "source_sha256": "77b541cc033d953a3df4515f197cbb92e3498104b7b493910cfd93d3799e9679",
       "lib_sha256": "56cc3e12f98d554b685ddb4a50dc5c2656231dead19ae80bd6c3f9e8772f35d6",
-      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_ad_store_cs.so"
+      "lib": "/root/nf12-next-gpu2/.bench-cache/variants/libnf12_store_cs.so"
     }
   ],
   "sass_sm80_int64": {

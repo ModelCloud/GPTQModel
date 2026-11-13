@@ -46,12 +46,12 @@ def is_tt_blockfloat_checkpoint(model_local_path: str) -> bool:
 def build_tt_blockfloat_model(
     model_local_path: str, *, dtype=None
 ):
-    """Build the torch model, returning ``(model, restored, info)``."""
+    """Build the torch model, returning ``(model, restored, info)``.
 
-    import torch
+    ``dtype`` is passed through unchanged so ``None`` means "the checkpoint's
+    own precision" (bf16 for a bf16 source), the same as ``from_pretrained``.
+    """
 
-    if not isinstance(dtype, torch.dtype):
-        dtype = torch.float32
     return build_blockfloat_model(model_local_path, dtype=dtype)
 
 

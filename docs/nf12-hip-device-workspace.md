@@ -1,6 +1,6 @@
 # NF12 HIP device and split-K workspace flow
 
-`nf12_ad_hip.linear_dispatch` selects the NF12 matrix-core route for 16 to 256
+`nf12_hip.linear_dispatch` selects the NF12 matrix-core route for 16 to 256
 tokens on gfx1200/gfx1201. Selection queries the **current HIP device**, so the
 binding first checks that `x`, `packed`, and `escapes` share a device, then holds
 `device_guard(packed)` through selection, allocation, and launch. The guard
@@ -11,13 +11,13 @@ flowchart TD
     A["linear_dispatch receives x, packed, escapes"] --> B{"All three on the same HIP device?"}
     B -- No --> X["TORCH_CHECK raises"]
     B -- Yes --> C["device_guard(packed)"]
-    C --> D{"nf12_ad_wmma_supported(m) on packed device?"}
+    C --> D{"nf12_wmma_supported(m) on packed device?"}
     D -- No --> E["Fused small-M or decode_dispatch fallback"]
-    D -- Yes --> F["nf12_ad_wmma_workspace_bytes from wmma_launch_plan"]
+    D -- Yes --> F["nf12_wmma_workspace_bytes from wmma_launch_plan"]
     F --> G{"Split-K needs FP32 partial planes?"}
     G -- Yes --> H["torch::empty on packed device and current stream"]
     G -- No --> I["Pass null workspace"]
-    H --> J["nf12_ad_linear_wmma validates workspace size"]
+    H --> J["nf12_linear_wmma validates workspace size"]
     I --> J
     J -- Too small --> Y["hipErrorInvalidValue"]
     J -- Valid --> K["WMMA and optional reduce on current_stream"]
@@ -34,11 +34,11 @@ after the call's queued work finishes on its stream. No decoded weight is kept.
 
 | Mechanism | Before | Current |
 | --- | --- | --- |
-| WMMA device selection | `nf12_ad_wmma_supported` read the ambient device before a guard (`58b00cc:gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:265`; `58b00cc:gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:346-350`) | `linear_dispatch` validates tensor devices and guards `packed` before routing (`gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:197-203`) |
-| Split-K scratch | One process-wide `g_partial` pointer was reused by all calls and streams (`58b00cc:gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:353-376`) | `linear_dispatch` owns a local allocator tensor, sized by the shared launch plan (`gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:285-298`; `gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:412-449`) |
+| WMMA device selection | `nf12_wmma_supported` read the ambient device before a guard (`58b00cc:gptqmodel_ext/nf12_hip/nf12_torch.cpp:265`; `58b00cc:gptqmodel_ext/nf12_hip/nf12_wmma.hip:346-350`) | `linear_dispatch` validates tensor devices and guards `packed` before routing (`gptqmodel_ext/nf12_hip/nf12_torch.cpp:197-203`) |
+| Split-K scratch | One process-wide `g_partial` pointer was reused by all calls and streams (`58b00cc:gptqmodel_ext/nf12_hip/nf12_wmma.hip:353-376`) | `linear_dispatch` owns a local allocator tensor, sized by the shared launch plan (`gptqmodel_ext/nf12_hip/nf12_torch.cpp:285-298`; `gptqmodel_ext/nf12_hip/nf12_wmma.hip:412-449`) |
 | Invalid inputs | WMMA could launch with tensors on different devices, or reuse scratch from another device | A tensor-device mismatch raises before dispatch; an undersized workspace returns `hipErrorInvalidValue` |
 
-The independent Torch FP32 oracle in `tests/test_nf12_ad_codec.py` checks the
+The independent Torch FP32 oracle in `tests/test_nf12_codec.py` checks the
 multi-device and concurrent-stream results on suitable RDNA4 hosts. The
 `m <= 15` fused route and the `m > 256` decode-then-GEMM route retain their
 existing math and packed-weight storage.
@@ -60,10 +60,10 @@ flowchart TD
     B --> C["x.contiguous().reshape to m by k"]
     C --> D["out_sizes = x.sizes(); out_sizes.back() = n"]
     D --> E{"m < 16 and fused small-M supported?"}
-    E -- Yes --> F["nf12_ad_linear_fused on x2"]
+    E -- Yes --> F["nf12_linear_fused on x2"]
     F --> F1["return out.reshape(out_sizes)"]
-    E -- No --> G{"nf12_ad_wmma_supported(m)?"}
-    G -- Yes --> H["nf12_ad_linear_wmma on x2 with caller-sized workspace"]
+    E -- No --> G{"nf12_wmma_supported(m)?"}
+    G -- Yes --> H["nf12_linear_wmma on x2 with caller-sized workspace"]
     H --> H1["return out.reshape(out_sizes)"]
     G -- No --> I["decode_dispatch per row slice"]
     I --> J["at::matmul / at::addmm on x2"]
@@ -74,7 +74,7 @@ flowchart TD
 
 | Mechanism | Before | Current |
 | --- | --- | --- |
-| Fused small-M eligibility | Required `x.dim() == 2 && x.is_contiguous()`, so a 3-D or sliced input silently took a slower route (`08cf3857b:gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:214`) | Route decision uses only `m`, after `x2 = x.contiguous().reshape({m, k})` (`gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp:218-221`) |
+| Fused small-M eligibility | Required `x.dim() == 2 && x.is_contiguous()`, so a 3-D or sliced input silently took a slower route (`08cf3857b:gptqmodel_ext/nf12_hip/nf12_torch.cpp:214`) | Route decision uses only `m`, after `x2 = x.contiguous().reshape({m, k})` (`gptqmodel_ext/nf12_hip/nf12_torch.cpp:218-221`) |
 | Kernel input pointer | Passed `x.data_ptr()` to the fused and WMMA kernels (`08cf3857b:...:240`, `:290`) | Passes `x2.data_ptr()`, which is contiguous by construction (`...:246`, `:296`) |
 | GEMM operand | `at::matmul(x, ...)` / `at::addmm(bs, x, ...)` (`08cf3857b:...:338`) | `at::matmul(x2, ...)` / `at::addmm(bs, x2, ...)` (`...:339-341`) |
 | Output shape | Returned `[m, n]`, flattening `[2, 8, 256]` to `[16, 256]` (`08cf3857b:...:245`, `:296`, `:338`) | Returns `out.reshape(out_sizes)` / `dense.reshape(out_sizes)` (`...:251`, `:302`, `:345`) |
@@ -84,8 +84,8 @@ Failure path: a shape the kernels cannot honour (`n % 16 != 0`, `k % 64 != 0`,
 normalization never converts a rejection into a wrong answer. The raw HIP dense
 entry points consume contiguous rows and expose no leading-dimension parameter.
 
-`tests/test_nf12_ad_codec.py` asserts the 3-D shape round-trip, the padded
-row-slice result against `F.linear`, and the `NF12ADLinear` module shape on a
+`tests/test_nf12_codec.py` asserts the 3-D shape round-trip, the padded
+row-slice result against `F.linear`, and the `NF12Linear` module shape on a
 RDNA4 host.
 
 ## Bounded WMMA capability cache
@@ -111,7 +111,7 @@ flowchart TD
     class X failure;
 ```
 
-| Mechanism | Before (`eeab711:gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:463-467`) | Current |
+| Mechanism | Before (`eeab711:gptqmodel_ext/nf12_hip/nf12_wmma.hip:463-467`) | Current |
 | --- | --- | --- |
 | Ordinal below 64 | Cached architecture answer | Same cached answer |
 | Ordinal 64 or above | Returned false before probing, despite the cache comment promising a fresh probe | Calls `wmma_arch_ok(device)` without indexing the bounded cache |
@@ -121,21 +121,21 @@ flowchart TD
 
 Native MoE callers are checked before a launch: decode slices stay inside the
 specified weight, BF16 row strides satisfy vector alignment, and byte spans fit
-signed 64-bit indexing. `nf12_ad_validation.cuh` is staged with the JIT sources
+signed 64-bit indexing. `nf12_validation.cuh` is staged with the JIT sources
 and included in source distributions. The helpers mirror NF12's common C-ABI
 validation; no device allocation, synchronization, or retained weight cache is
 introduced.
 
 ```mermaid
 flowchart TD
-    A["nf12_ad_moe_decode / silu_mul / combine"] --> B{"Dimensions, slice and metadata valid?"}
+    A["nf12_moe_decode / silu_mul / combine"] --> B{"Dimensions, slice and metadata valid?"}
     B -- No --> X["hipErrorInvalidValue; no writes"]
     B -- Yes --> C{"Empty operation?"}
     C -- Yes --> R["hipSuccess; no launch"]
     C -- No --> D{"BF16 buffers aligned; strides and byte spans valid?"}
     D -- No --> X
     D -- Yes --> L["Existing native kernel on caller stream"]
-    G["nf12_ad_moe_grouped_operands"] --> H{"Metadata valid?"}
+    G["nf12_moe_grouped_operands"] --> H{"Metadata valid?"}
     H -- No --> X
     H -- Yes --> I{"Gather supplied?"}
     I -- Yes --> D
@@ -146,9 +146,9 @@ flowchart TD
 
 | Before at `b19447f37` | Current behavior |
 | --- | --- |
-| Decode accepted slices past N (`nf12_ad_moe.hip:482`) | Reject `rows > n - row0` without overflow or output writes |
-| SiLU and combine accepted undersized/misaligned strides (`nf12_ad_moe.hip:469`, `:454`) | Check pointers, vector row strides, and input/output byte spans |
-| Grouped gather accepted invalid buffers and assignment bounds (`nf12_ad_moe.hip:503`) | Check metadata and optional gather buffers; no-gather mode computes only group ends |
+| Decode accepted slices past N (`nf12_moe.hip:482`) | Reject `rows > n - row0` without overflow or output writes |
+| SiLU and combine accepted undersized/misaligned strides (`nf12_moe.hip:469`, `:454`) | Check pointers, vector row strides, and input/output byte spans |
+| Grouped gather accepted invalid buffers and assignment bounds (`nf12_moe.hip:503`) | Check metadata and optional gather buffers; no-gather mode computes only group ends |
 
 The native regression suite adds 24 rejection cases: 8 decode slice/stride
 cases, 12 SiLU/combine buffer cases, and 4 grouped-gather cases. All return
@@ -180,8 +180,8 @@ flowchart TD
 
 | Mechanism | Before at `1e676331e` | Current |
 | --- | --- | --- |
-| Dense WMMA grid check | X/Y above 32767 rejected as invalid (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:631`) | X up to 2147483647 and Y up to 65535; larger grids are unsupported |
-| Routed WMMA grid check | Same restriction (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:767`) | Same corrected limits |
+| Dense WMMA grid check | X/Y above 32767 rejected as invalid (`gptqmodel_ext/nf12_hip/nf12_wmma.hip:631`) | X up to 2147483647 and Y up to 65535; larger grids are unsupported |
+| Routed WMMA grid check | Same restriction (`gptqmodel_ext/nf12_hip/nf12_wmma.hip:767`) | Same corrected limits |
 
 R9700 boundary tests use one 16-by-64 expert, BF16 ones, and guarded output.
 The expected output is exactly 64, independently of the encoder. No expanded
@@ -216,7 +216,7 @@ flowchart TD
     C --> D{"Expert interval empty?"}
     D -- Yes --> E["WMMA and decode skip expert; grouped operands publish group end"]
     D -- No --> F["Consume bounded interval; advance previous to next"]
-    G["nf12_ad_moe_align"] --> H{"Valid dimensions and assignment count?"}
+    G["nf12_moe_align"] --> H{"Valid dimensions and assignment count?"}
     H -- No --> X["hipErrorInvalidValue"]
     H -- Yes --> I{"Zero assignments?"}
     I -- Yes --> J["hipMemsetAsync offsets when supplied; return its status"]
@@ -227,16 +227,16 @@ flowchart TD
     class X failure;
 ```
 
-`nf12_ad_moe_decode` also admits grid-X counts up to `INT32_MAX`; grid Y retains
+`nf12_moe_decode` also admits grid-X counts up to `INT32_MAX`; grid Y retains
 the 65535-expert limit. A 524288-by-64 expert needs 32768 X blocks and a 64 MiB
 BF16 output, so the former 32767-block limit rejected a small valid decode.
 
 | Mechanism | Before at `9b0ff2a52` | Current source |
 | --- | --- | --- |
-| Routed expert intervals | Upper-only clamps allowed a negative row and decreasing intervals (`gptqmodel_ext/nf12_hip/nf12_ad_wmma.hip:159`; `gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:268`) | Shared running maximum (`gptqmodel_ext/nf12_hip/nf12_ad_format_hip.cuh:61`), consumed by WMMA, decode, and grouped operands |
-| Grouped operands | Started at zero regardless of the first offset (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:324`) | Starts from normalized offset zero (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:326`) |
-| Empty routing | Workspace rejection preceded empty handling (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:407`) | Zero assignments publish zero offsets before scratch checks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:405`) |
-| Decode launch | Rejected more than 32767 X blocks (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:495`) | Uses the signed 32-bit X limit (`gptqmodel_ext/nf12_hip/nf12_ad_moe.hip:494`) |
+| Routed expert intervals | Upper-only clamps allowed a negative row and decreasing intervals (`gptqmodel_ext/nf12_hip/nf12_wmma.hip:159`; `gptqmodel_ext/nf12_hip/nf12_moe.hip:268`) | Shared running maximum (`gptqmodel_ext/nf12_hip/nf12_format_hip.cuh:61`), consumed by WMMA, decode, and grouped operands |
+| Grouped operands | Started at zero regardless of the first offset (`gptqmodel_ext/nf12_hip/nf12_moe.hip:324`) | Starts from normalized offset zero (`gptqmodel_ext/nf12_hip/nf12_moe.hip:326`) |
+| Empty routing | Workspace rejection preceded empty handling (`gptqmodel_ext/nf12_hip/nf12_moe.hip:407`) | Zero assignments publish zero offsets before scratch checks (`gptqmodel_ext/nf12_hip/nf12_moe.hip:405`) |
+| Decode launch | Rejected more than 32767 X blocks (`gptqmodel_ext/nf12_hip/nf12_moe.hip:495`) | Uses the signed 32-bit X limit (`gptqmodel_ext/nf12_hip/nf12_moe.hip:494`) |
 
 ## Exact-byte encoder scheduling
 
@@ -247,8 +247,8 @@ independent byte oracle, including every BF16 bit pattern.
 
 ```mermaid
 flowchart TD
-    A["nf12_ad_analyze: analyze_kernel, four super-atoms per warp"] --> B["Select exponent base and escape allocation size"]
-    B --> C["nf12_ad_encode validates geometry, pointers, workspace"]
+    A["nf12_analyze: analyze_kernel, four super-atoms per warp"] --> B["Select exponent base and escape allocation size"]
+    B --> C["nf12_encode validates geometry, pointers, workspace"]
     C -- Invalid --> X["hipErrorInvalidValue"]
     C -- Valid --> D["count_kernel: two super-atoms per unit"]
     D --> E["scan_kernel: prefix sums in tiles of 2048 units"]
@@ -261,8 +261,8 @@ flowchart TD
 ```
 
 The former schedule used 16 super-atoms per analysis warp and eight per
-count/write unit (`9b0ff2a52:gptqmodel_ext/nf12_hip/nf12_ad_encode.hip:55`).
-The current constants are at `gptqmodel_ext/nf12_hip/nf12_ad_encode.hip:59`;
+count/write unit (`9b0ff2a52:gptqmodel_ext/nf12_hip/nf12_encode.hip:55`).
+The current constants are at `gptqmodel_ext/nf12_hip/nf12_encode.hip:59`;
 capacity validation still precedes writing at line 348. Additional persistent
 weight/cache storage is **zero bytes**. The encoder's transient prefix workspace
 for a 4096-by-4096 weight grows from 16400 to 65552 bytes; the histogram minimum
@@ -294,10 +294,10 @@ units from the repository root:
 ```bash
 env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=2 PYTHON_GIL=0 \
   OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MAX_JOBS=2 \
-  GPTQMODEL_NF12_AD_HIP_BUILD_ROOT=/tmp/gptqmodel-review-round2-native \
+  GPTQMODEL_NF12_HIP_BUILD_ROOT=/tmp/gptqmodel-review-round2-native \
   /opt/venvs/rocm101t/bin/python -m pytest \
-  tests/test_nf12_hip_review_contracts.py tests/test_nf12_ad_codec.py \
-  tests/test_nf12_ad_runtime_load.py tests/test_validate_nf12_ad.py -q -rs
+  tests/test_nf12_hip_review_contracts.py tests/test_nf12_codec.py \
+  tests/test_nf12_runtime_load.py tests/test_validate_nf12.py -q -rs
 ```
 
 Result: **51 passed, 1 skipped in 25.84 seconds**.
@@ -351,23 +351,23 @@ flowchart TD
 
 | Before at `21e9961a4` | Current |
 | --- | --- |
-| Bias added to partial zero (`nf12_ad_wmma.hip:402`) | Add after reduction (`nf12_ad_wmma.hip:423`) |
-| Routed grids with more than 65535 Y tiles rejected (`nf12_ad_wmma.hip:772`) | Use bounded Y/Z dimensions (`nf12_ad_wmma.hip:781`) |
-| Native routed validation omitted buffer checks and rejected empty work (`nf12_ad_wmma.hip:766`) | Share `valid_moe_linear_buffers`, allow validated empty work (`nf12_ad_wmma.hip:768`) |
-| Decode E > 65535 returned unsupported (`nf12_ad_moe.hip:516`) | Return invalid-value, matching the CUDA codec contract |
+| Bias added to partial zero (`nf12_wmma.hip:402`) | Add after reduction (`nf12_wmma.hip:423`) |
+| Routed grids with more than 65535 Y tiles rejected (`nf12_wmma.hip:772`) | Use bounded Y/Z dimensions (`nf12_wmma.hip:781`) |
+| Native routed validation omitted buffer checks and rejected empty work (`nf12_wmma.hip:766`) | Share `valid_moe_linear_buffers`, allow validated empty work (`nf12_wmma.hip:768`) |
+| Decode E > 65535 returned unsupported (`nf12_moe.hip:516`) | Return invalid-value, matching the CUDA codec contract |
 
 ## Shared BF16T split-K dispatch
 
 `linear_wmma_impl<WeightSource>` computes one `WmmaPlan` for both NF12 and
-BF16T weights. `NF12_AD_SWITCH` dispatches the selected tile and K-split counts
+BF16T weights. `NF12_SWITCH` dispatches the selected tile and K-split counts
 for either source, so the BF16T reference fills the same partial planes and
 uses the same reducer as NF12.
 
 ```mermaid
 flowchart TD
     A["linear_wmma_impl<WeightSource>"] --> B["wmma_plan(n, k, m)"]
-    B --> C["NF12_AD_SWITCH for NF12 or BF16T"]
-    C --> D["NF12_AD_DISPATCH: splits 1, 2, 4, or 8"]
+    B --> C["NF12_SWITCH for NF12 or BF16T"]
+    C --> D["NF12_DISPATCH: splits 1, 2, 4, or 8"]
     D --> E["wmma_kernel with matching kSplits"]
     E --> F{"splits == 1?"}
     F -->|"yes"| G["write BF16 output directly"]

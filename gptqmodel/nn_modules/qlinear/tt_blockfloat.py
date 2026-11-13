@@ -51,16 +51,19 @@ def packed_code_bytes(numel: int, bits: int) -> int:
     an odd number of codes with one spare nibble, so the byte count rounds up:
     rounding down would declare a buffer one byte smaller than the tensor the
     packer produces, and the checkpoint would fail to load for an odd
-    ``out_features * in_features``.
+    ``out_features * in_features``.  2-bit packs four per byte and pads the same
+    way.
     """
 
+    if bits == 2:
+        return (numel + 3) // 4
     if bits == 4:
         return (numel + 1) // 2
     if bits == 8:
         return numel
     raise ValueError(
         f"no Tenstorrent block-float format at {bits!r} bits; "
-        "supported widths are 4 and 8"
+        "supported widths are 2, 4 and 8"
     )
 
 
@@ -96,12 +99,37 @@ class _BlockfloatStorage(nn.Module):
             "exponents", torch.zeros(exponents_shape, dtype=torch.int8)
         )
 
+    def hip_dispatch(self, tensor: torch.Tensor) -> bool:
+        """Whether the HIP kernels can serve ``tensor`` for this storage.
+
+        The kernels bind one exponent per 16 values, so storage with a wider
+        ``block`` must stay on the Torch path even when the device and dtype
+        are supported. Call sites that bind an activation flatten it to 2-D
+        themselves.
+        """
+
+        from ...utils import tt_blockfloat_hip
+
+        return (
+            tensor.is_cuda
+            and self.block == BLOCKFLOAT_BLOCK
+            and tt_blockfloat_hip.available(tensor.device)
+            and tt_blockfloat_hip.supports_bits(self.bits)
+        )
+
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Rebuild the exact grid weights as ``[out_features, in_features]``."""
 
+        from ...utils import tt_blockfloat_hip
         from ...utils.tt_blockfloat_quant import _unpack_codes, recompose_blockfloat
 
         shape = tuple(int(v) for v in self.code_shape)
+        if self.hip_dispatch(self.codes):
+            # The HIP kernel expands the packed stream directly, so the host
+            # never materialises the unpacked uint8 code matrix.
+            return tt_blockfloat_hip.dequantize(
+                self.codes, self.exponents, self.bits, shape, dtype
+            )
         codes = _unpack_codes(self.codes, self.bits, shape)
         weight = recompose_blockfloat(
             codes, self.exponents, bits=self.bits, block=self.block
@@ -131,6 +159,28 @@ class _BlockfloatStorage(nn.Module):
         self.codes = packed
         self.exponents = exponents.to(torch.int8).contiguous()
 
+    def set_packed_state(
+        self, packed_codes: torch.Tensor, exponents: torch.Tensor
+    ) -> None:
+        """Install codes that are already packed at the storage density."""
+
+        expected_codes, expected_exponents = _buffer_shape(
+            self.out_features, self.in_features, self.bits, self.block
+        )
+        packed_codes = packed_codes.to(torch.uint8).contiguous()
+        if tuple(packed_codes.shape) != tuple(expected_codes):
+            raise ValueError(
+                f"{self.name}: packed code shape {tuple(packed_codes.shape)} "
+                f"does not match {tuple(expected_codes)}"
+            )
+        if tuple(exponents.shape) != tuple(expected_exponents):
+            raise ValueError(
+                f"{self.name}: exponent shape {tuple(exponents.shape)} does not "
+                f"match {tuple(expected_exponents)} (one exponent per {self.block} values)"
+            )
+        self.codes = packed_codes
+        self.exponents = exponents.to(torch.int8).contiguous()
+
     def dense_weight(self) -> torch.Tensor:
         """Dense view of the weights, computed on demand and never retained.
 
@@ -140,6 +190,53 @@ class _BlockfloatStorage(nn.Module):
         """
 
         return self.dequantize()
+
+    def _kernel_linear(self, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+        """Run the block-float GEMM on this device, or return ``None``.
+
+        The kernel reads the packed codes and exponents directly, so no dense
+        weight is built.  That is the whole point of the emulation: on a CUDA
+        part a ``bf4_b`` layer then costs what it will cost on Tensix,
+        rather than what a dequantise-then-matmul costs.
+
+        Returning ``None`` keeps every other device on the dense path.
+        """
+
+        from ...utils import tt_blockfloat_hip
+
+        if self.hip_dispatch(x):
+            # Fused unpack + GEMM: the packed weight is read once and expanded
+            # only into shared memory, so no dense weight is created here.
+            # The binding takes a 2-D activation, so flatten the leading
+            # dimensions and restore them afterwards; transformers pass
+            # [batch, sequence, hidden] and F.linear accepted that.
+            out = tt_blockfloat_hip.linear(
+                x.reshape(-1, x.shape[-1]),
+                self.codes,
+                self.exponents,
+                self.bits,
+                bias,
+            )
+            # Restore the caller's leading dimensions, including the 1-D case
+            # where there are none and F.linear returns [out_features].
+            return out.reshape(*x.shape[:-1], out.shape[-1])
+
+        if x.device.type != "cuda" or self.codes.device != x.device:
+            return None
+        if self.bits not in (4, 8):
+            return None
+        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
+
+        if not bf_cuda.ready(x.device):
+            return None
+
+        shape = x.shape
+        flat = x.reshape(-1, shape[-1])
+        out = bf_cuda.linear(flat, self.codes, self.exponents, self.bits, bias)
+        return out.reshape(*shape[:-1], out.shape[-1])
 
 
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
@@ -202,10 +299,19 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     def pack(self, linear: nn.Module, scales=None, zeros=None, g_idx=None, **kwargs):
         """Quantise a dense ``linear`` onto the block-float grid."""
 
+        from ...utils import tt_blockfloat_hip
         from ...utils.tt_blockfloat_quant import quantize_blockfloat
 
         weight = linear.weight.detach().to(torch.float32)
-        self.load_codes_from(quantize_blockfloat(weight, self.bits, block=self.block)[0])
+        if self.hip_dispatch(weight):
+            # Quantise on the GPU: the exponent search and packing stay on the
+            # device instead of round-tripping a dense fp32 copy through torch.
+            codes, exponents = tt_blockfloat_hip.quantize(weight, self.bits)
+            self.set_packed_state(codes, exponents)
+        else:
+            self.load_codes_from(
+                quantize_blockfloat(weight, self.bits, block=self.block)[0]
+            )
         if getattr(linear, "bias", None) is not None:
             self.bias = linear.bias.detach().to(torch.float16).contiguous()
         return self
@@ -225,11 +331,13 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
             return self.empty_linear_output(x)
 
         out_dtype = x.dtype
-        weight = self.dequantize(dtype=x.dtype)
         bias = None if self.bias is None else self.bias.to(x.dtype)
-        out = F.linear(x, weight, bias)
-        # Release the temporary before the activation leaves this scope.
-        del weight
+        out = self._kernel_linear(x, bias)
+        if out is None:
+            weight = self.dequantize(dtype=x.dtype)
+            out = F.linear(x, weight, bias)
+            # Release the temporary before the activation leaves this scope.
+            del weight
 
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
@@ -253,11 +361,25 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         bits: int = 8,
         block: int = BLOCKFLOAT_BLOCK,
         name: str = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.name = name or type(self).__name__
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
+        # The table owns no float parameter, so it cannot read the activation
+        # dtype off itself the way ``TTBlockfloatLinear`` does. A plain attribute
+        # would also be frozen at construction -- ``.to()``, ``.float()`` and
+        # ``.bfloat16()`` only convert parameters and buffers -- leaving the
+        # table emitting bf16 into fp32 linears after a cast. A zero-element
+        # non-persistent buffer is converted by ``Module.to``, so the table stays
+        # in step without adding a key to the checkpoint.
+        output_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float32
+        self.register_buffer(
+            "_output_dtype_anchor",
+            torch.zeros(0, dtype=output_dtype),
+            persistent=False,
+        )
         # ``_BlockfloatStorage`` reads ``out_features``/``in_features``; for a
         # table the rows are the outputs.
         self.out_features = num_embeddings
@@ -267,8 +389,82 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         self.pack_dtype = torch.uint8
         self._init_storage(num_embeddings, embedding_dim, bits, block)
 
+    @property
+    def output_dtype(self) -> torch.dtype:
+        """Precision the table dequantizes into; follows ``Module.to``."""
+
+        return self._output_dtype_anchor.dtype
+
+    def _kernel_embedding(self, input_ids: torch.Tensor):
+        """Gather-and-dequantise on the block-float kernels, or return ``None``."""
+
+        from ...utils import tt_blockfloat_hip
+
+        if self.hip_dispatch(input_ids):
+            # F.embedding accepts int32 or int64; the binding indexes with
+            # int64, so widen the narrower width instead of failing.
+            if input_ids.dtype == torch.int32:
+                input_ids = input_ids.to(torch.int64)
+            if input_ids.numel() == 0:
+                # An empty batch has null data pointers, which the launcher
+                # would reject; F.embedding returned an empty table slice.
+                return torch.empty(
+                    *input_ids.shape,
+                    self.in_features,
+                    dtype=self.output_dtype,
+                    device=input_ids.device,
+                )
+            # Dequantise only the gathered rows; the table is never expanded.
+            # The output precision follows the module, as the Torch path does.
+            return tt_blockfloat_hip.embedding(
+                input_ids,
+                self.codes,
+                self.exponents,
+                self.bits,
+                self.out_features,
+                self.in_features,
+                self.output_dtype,
+            )
+
+        if input_ids.device.type != "cuda" or self.codes.device != input_ids.device:
+            return None
+        if self.bits not in (4, 8):
+            return None
+        if self.output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
+
+        if not bf_cuda.ready(input_ids.device):
+            return None
+
+        shape = input_ids.shape
+        flat = input_ids.reshape(-1).to(torch.int64)
+        out = bf_cuda.embedding(
+            flat,
+            self.codes,
+            self.exponents,
+            self.bits,
+            self.out_features,
+            self.in_features,
+            self.output_dtype,
+        )
+        return out.reshape(*shape, self.in_features)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize()
+        if input_ids.numel() == 0:
+            # An empty gather still has a shape and a dtype to preserve; the
+            # table's own precision, and a zero-block launch is an error.
+            return torch.empty(
+                *input_ids.shape,
+                self.in_features,
+                dtype=self.output_dtype,
+                device=input_ids.device,
+            )
+        kernel = self._kernel_embedding(input_ids)
+        if kernel is not None:
+            return kernel
+        weight = self.dequantize(dtype=self.output_dtype)
         return F.embedding(input_ids, weight)
 
 
@@ -294,7 +490,18 @@ class TTBlockfloatTiedHead(nn.Module):
         return self._embedding[0]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        weight = self.embedding.dequantize(dtype=hidden_states.dtype)
+        if hidden_states.numel() == 0:
+            return torch.empty(
+                *hidden_states.shape[:-1],
+                self.embedding.out_features,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        embedding = self.embedding
+        kernel = embedding._kernel_linear(hidden_states)
+        if kernel is not None:
+            return kernel
+        weight = embedding.dequantize(dtype=hidden_states.dtype)
         return F.linear(hidden_states, weight)
 
     def tie_weights(self) -> None:
@@ -339,6 +546,9 @@ def swap_blockfloat_modules(
                 bits=bits,
                 block=block,
                 name=prefix,
+                # Follow the precision the model was built at, so the table does
+                # not upcast the rest of the forward to float32.
+                dtype=module.weight.dtype,
             )
         elif isinstance(module, nn.Linear):
             replacement = TTBlockfloatLinear(

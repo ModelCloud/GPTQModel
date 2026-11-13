@@ -73,6 +73,7 @@ from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
+from .tensor import tensor_buffer
 from .torch import HAS_CUDA, as_torch_device, torch_empty_cache
 
 
@@ -2605,7 +2606,7 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
 def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
     """Read tensor shapes from a safetensors file, directory, or index.
 
-    NF12-AD stores a data-dependent escape table. The module cannot know its
+    NF12 stores a data-dependent escape table. The module cannot know its
     row count from `in_features`/`out_features` alone, so the loader must size
     that buffer before accelerate assigns checkpoint tensors.
     """
@@ -2664,7 +2665,7 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             module = model.get_submodule(module_name)
         except AttributeError:
             continue
-        if getattr(module, "QUANT_TYPE", None) != "nf12_ad":
+        if getattr(module, "QUANT_TYPE", None) != "nf12":
             continue
         buffer_name = suffix[1:]
         current = getattr(module, buffer_name, None)
@@ -2836,19 +2837,11 @@ def _copy_file_stream(
         raise IOError(f"Source tensor content digest differs for {src_path}")
 
 
-def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
-    tensor = tensor.detach().to("cpu").contiguous()
-    if dtype is torch.bfloat16:
-        view = tensor.view(torch.int16)
-        out.write(view.numpy().tobytes())
-        return
-
-    try:
-        out.write(tensor.numpy().tobytes())
-    except TypeError:
-        # PyTorch float8 dtypes and some future storage dtypes may not expose a NumPy bridge.
-        # Fall back to the raw byte view so safetensors still receives the exact tensor payload.
-        out.write(tensor.view(torch.uint8).numpy().tobytes())
+def _write_tensor_bytes(out, tensor: torch.Tensor) -> None:
+    # Write the exact storage payload. The raw uint8 view covers bfloat16 and
+    # float8, which have no direct NumPy bridge, and needs no NumPy at all.
+    _owner, buffer = tensor_buffer(tensor)
+    out.write(buffer)
 
 
 def _safetensors_header(
@@ -2913,12 +2906,12 @@ def _tensor_payload_sha256(entry: TensorSource) -> str | None:
             with safe_open(source.path, framework="pt", device="cpu") as handler:
                 tensor = handler.get_tensor(source.weight_name or entry.name)
             writer = _Sha256Writer()
-            _write_tensor_bytes(writer, tensor.to(source.torch_dtype), entry.torch_dtype)
+            _write_tensor_bytes(writer, tensor.to(source.torch_dtype))
             return writer.digest.hexdigest()
         return None
 
     writer = _Sha256Writer()
-    _write_tensor_bytes(writer, source.detach(), entry.torch_dtype)
+    _write_tensor_bytes(writer, source.detach())
     return writer.digest.hexdigest()
 
 
@@ -3051,10 +3044,10 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
                     with safe_open(source.path, framework="pt", device="cpu") as handler:
                         tensor = handler.get_tensor(source.weight_name or entry.name)
                     tensor = tensor.to(source.torch_dtype)
-                    _write_tensor_bytes(out, tensor, source.torch_dtype)
+                    _write_tensor_bytes(out, tensor)
             else:
                 tensor = source.detach()
-                _write_tensor_bytes(out, tensor, entry.torch_dtype)
+                _write_tensor_bytes(out, tensor)
                 del tensor
 
         file_size = out.tell()

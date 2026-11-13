@@ -52,6 +52,8 @@ from .gpt_neo import GptNeoQModel
 from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
 from .granitemoe import GraniteMoeQModel
+from .granitemoe_swa import GraniteMoeSWAQModel
+from .granite_swa import GraniteSWAQModel
 from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel

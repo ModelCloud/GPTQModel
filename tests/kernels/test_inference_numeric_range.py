@@ -117,11 +117,38 @@ def test_cpu_int4_affine_offset_range(dtype, backend, scale):
 
 
 @pytest.mark.parametrize('dtype', DTYPES + [torch.float32])
-def test_cpu_int8_tiny_channel_scale(dtype):
+def test_cpu_int8_tiny_group_scale(dtype):
     from gptqmodel.nn_modules.qlinear.torch_int8 import Int8PackedModule
-    m = Int8PackedModule(torch.full((64, 128), 127, dtype=torch.int8),
-                         torch.full((64,), 2**-24 / 127))
+    # One group of 128 channels: 127 codes at the tiny checkpoint scale.
+    m = Int8PackedModule(torch.full((1, 64, 128), 127, dtype=torch.int8),
+                         torch.full((1, 64), 2**-24 / 127),
+                         group_lengths=(128,))
     check(m, torch.full((1, 128), 1024., dtype=dtype), .0078125)
+
+
+@pytest.mark.parametrize('dtype', DTYPES + [torch.float32])
+def test_cpu_int8_group_scale_range_spread(dtype):
+    """A 1024x group-scale spread must not flatten the small group to zero."""
+    from gptqmodel.nn_modules.qlinear.torch_int8 import Int8PackedModule
+    codes = torch.zeros((2, 8, 64), dtype=torch.int8)
+    codes[0] = 1
+    codes[1] = -1
+    scales = torch.stack((torch.full((8,), 1.0), torch.full((8,), 2.0 ** -10)))
+    m = Int8PackedModule(codes, scales, group_lengths=(64, 64))
+    check(m, torch.ones((1, 128), dtype=dtype), 64.0 - 64.0 * 2.0 ** -10)
+
+
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_cpu_int8_zero_point_offset_is_applied(dtype):
+    """Asymmetric offsets are folded into a per-group additive term."""
+    from gptqmodel.nn_modules.qlinear.torch_int8 import Int8PackedModule
+    codes = torch.full((1, 16, 32), -1, dtype=torch.int8)
+    scales = torch.full((1, 16), 0.5)
+    offset = torch.full((1, 16), 1.5)
+    m = Int8PackedModule(codes, scales, offset, group_lengths=(32,))
+    # scale * (code - 128) + scale * (128 - zero); with zero = 125 this is
+    # 0.5 * (-1) + 1.5 = 1.0 per channel, summed over 32 channels.
+    check(m, torch.ones((1, 32), dtype=dtype), 32.0)
 
 
 @pytest.mark.parametrize('device', DEVICES)

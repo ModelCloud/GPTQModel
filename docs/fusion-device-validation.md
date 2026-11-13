@@ -216,7 +216,7 @@ preambles execute once, including when execution uses the original continuation.
 | native kernels CUDA | 146 | 34 |
 | native kernels ROCm | 87 | 93 |
 
-The full module-tree run includes all 203 registry aliases, 102 real-model
+The full module-tree run includes all 205 registry aliases, 102 real-model
 topology cases and 472 native-parent oracle cases. Skips are retained with their
 pytest reasons; an inactive vendor runtime is not counted as native validation.
 Renamed runtime-parent/weight regressions cover GPTQ and AWQ, including a

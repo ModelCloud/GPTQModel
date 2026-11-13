@@ -8,7 +8,6 @@
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -68,7 +67,9 @@ def _invert_permutation(values) -> torch.Tensor:
     inverse = [0] * len(values)
     for index, value in enumerate(values):
         inverse[int(value)] = index
-    return torch.tensor(inverse, dtype=torch.long)
+    # These fixed permutation tables are used after a meta-device checkpoint
+    # restore, so they must contain real data even inside torch.device("meta").
+    return torch.tensor(inverse, dtype=torch.long, device="cpu")
 
 
 def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
@@ -248,14 +249,20 @@ class QQQLinear(GroupedQuantLinear):
             for j in range(4):
                 perm.extend([p + 256 * j for p in perm1])
 
-        perm = np.array(perm)
         if self.group_size == self.in_features:
-            interleave = np.array([4, 0, 5, 1, 6, 2, 7, 3])
+            interleave = [4, 0, 5, 1, 6, 2, 7, 3]
         else:
-            interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-        perm = perm.reshape((-1, 8))[:, interleave].ravel()
-        perm = torch.from_numpy(perm)
-        perm_i = _invert_permutation(perm.tolist())
+            interleave = [0, 2, 4, 6, 1, 3, 5, 7]
+        perm = [
+            perm[row * 8 + column]
+            for row in range(len(perm) // 8)
+            for column in interleave
+        ]
+        # Checkpoint restore constructs this module under torch.device("meta").
+        # Invert the Python layout before materializing it: meta tensors cannot
+        # be copied back to a list.
+        perm_i = _invert_permutation(perm)
+        perm = torch.tensor(perm, dtype=torch.long, device="cpu")
         scale_perm = []
         for i in range(8):
             scale_perm.extend([i + 8 * j for j in range(8)])
