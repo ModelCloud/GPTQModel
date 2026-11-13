@@ -1261,6 +1261,80 @@ def test_blockfloat_vendor_attrs_exist_on_ttnn():
         assert hasattr(ttnn, attr), f"ttnn has no {attr} dtype for {bits} bits"
 
 
+def test_packed_code_bytes_rounds_up_and_rejects_other_widths():
+    """The byte count must match what the packer actually emits.
+
+    ``_pack_codes`` pads an odd number of codes with one spare nibble, so a
+    floor division would declare a buffer one byte shorter than the tensor that
+    is written, and the checkpoint would fail to load whenever
+    ``out_features * in_features`` is odd.
+    """
+
+    import importlib
+
+    kern = importlib.import_module("gptqmodel.nn_modules.qlinear.tt_blockfloat")
+
+    assert kern.packed_code_bytes(4, 4) == 2
+    assert kern.packed_code_bytes(8, 4) == 4
+    assert kern.packed_code_bytes(3, 4) == 2  # ceil(3 / 2), not 1
+    assert kern.packed_code_bytes(1, 4) == 1
+    assert kern.packed_code_bytes(3, 8) == 3
+    with pytest.raises(ValueError, match="no Tenstorrent block-float format"):
+        kern.packed_code_bytes(8, 6)
+
+
+def test_resolve_layer_widths_rejects_corrupt_storage():
+    """A checkpoint whose code buffers cannot be interpreted must say so.
+
+    Inferring a width from a length that matches neither 4 nor 8 bits decodes
+    every code at the wrong scale and produces plausible-looking garbage, so
+    each malformed case raises instead of guessing.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    def state(shape, codes_len, *, with_shape=True):
+        entry = {
+            "a.codes": torch.zeros(codes_len, dtype=torch.uint8),
+            "a.code_shape": torch.tensor(list(shape), dtype=torch.int64),
+        }
+        if not with_shape:
+            del entry["a.code_shape"]
+        return entry
+
+    # 4-bit, 8 values -> 4 bytes; 8-bit -> 8 bytes.
+    assert bq._resolve_layer_widths(state((2, 4), 4), {"bits": 4}) == {"a": 4}
+    assert bq._resolve_layer_widths(state((2, 4), 8), {"bits": 8}) == {"a": 8}
+    # The declared width is not trusted when the payload disagrees.
+    assert bq._resolve_layer_widths(state((2, 4), 8), {"bits": 4}) == {"a": 8}
+    assert bq._resolve_layer_widths(state((2, 4), 4), {"bits": 8}) == {"a": 4}
+    # Odd element count still packs two codes per byte with one spare nibble.
+    assert bq._resolve_layer_widths(state((1, 3), 2), {"bits": 4}) == {"a": 4}
+
+    with pytest.raises(ValueError, match="no `.code_shape`"):
+        bq._resolve_layer_widths(state((2, 4), 4, with_shape=False), {"bits": 4})
+    with pytest.raises(ValueError, match="not a positive"):
+        bq._resolve_layer_widths(state((0, 4), 4), {"bits": 4})
+    with pytest.raises(ValueError, match="declares 6 bits"):
+        bq._resolve_layer_widths(
+            state((2, 4), 4), {"bits": 4, "bits_per_layer": {"a": 6}}
+        )
+    with pytest.raises(ValueError, match="Neither matches"):
+        bq._resolve_layer_widths(
+            {
+                "a.codes": torch.zeros(5, dtype=torch.uint8),
+                "a.code_shape": torch.tensor([1, 3], dtype=torch.int64),
+            },
+            {"bits": 4},
+        )
+    with pytest.raises(ValueError, match="must be an object"):
+        bq._resolve_layer_widths(
+            state((2, 4), 4), {"bits": 4, "bits_per_layer": ["a", 4]}
+        )
+
+
 def test_blockfloat_beats_uniform_int4_for_heavy_tails():
     """Block-float should win where a per-group int4 scale clips an outlier."""
 

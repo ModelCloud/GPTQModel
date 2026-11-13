@@ -47,10 +47,21 @@ def packed_code_bytes(numel: int, bits: int) -> int:
     """Bytes needed to store ``numel`` codes at ``bits`` per value.
 
     4-bit packs two codes per byte and 8-bit one, matching
-    :func:`~gptqmodel.utils.tt_blockfloat_quant._pack_codes`.
+    :func:`~gptqmodel.utils.tt_blockfloat_quant._pack_codes`. That packer pads
+    an odd number of codes with one spare nibble, so the byte count rounds up:
+    rounding down would declare a buffer one byte smaller than the tensor the
+    packer produces, and the checkpoint would fail to load for an odd
+    ``out_features * in_features``.
     """
 
-    return numel // 2 if bits == 4 else numel
+    if bits == 4:
+        return (numel + 1) // 2
+    if bits == 8:
+        return numel
+    raise ValueError(
+        f"no Tenstorrent block-float format at {bits!r} bits; "
+        "supported widths are 4 and 8"
+    )
 
 
 def _buffer_shape(out_features: int, in_features: int, bits: int, block: int):

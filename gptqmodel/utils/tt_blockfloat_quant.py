@@ -1255,24 +1255,68 @@ def _resolve_layer_widths(state: dict, quantization_config: dict) -> dict:
 
     from ..nn_modules.qlinear.tt_blockfloat import packed_code_bytes
 
-    declared = {
-        str(key): int(value)
-        for key, value in (quantization_config.get("bits_per_layer") or {}).items()
-    }
-    default_bits = int(quantization_config.get("bits", 4))
+    raw_declared = quantization_config.get("bits_per_layer") or {}
+    if not isinstance(raw_declared, dict):
+        raise ValueError(
+            "`quantization_config.bits_per_layer` must be an object mapping a "
+            f"module prefix to a bit width, got {type(raw_declared).__name__}"
+        )
+    try:
+        declared = {str(key): int(value) for key, value in raw_declared.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"`quantization_config.bits_per_layer` has a non-integer width: {exc}"
+        ) from exc
+    try:
+        default_bits = int(quantization_config.get("bits", 4))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "`quantization_config.bits` must be an integer bit width, got "
+            f"{quantization_config.get('bits')!r}"
+        ) from exc
 
     widths = {}
     for name in state:
         if not name.endswith(".codes"):
             continue
         prefix = name[: -len(".codes")]
-        shape = tuple(int(v) for v in state.get(f"{prefix}.code_shape", []))
+        code_shape = state.get(f"{prefix}.code_shape")
+        if code_shape is None:
+            raise ValueError(
+                f"{prefix}: the checkpoint has a `.codes` tensor but no "
+                "`.code_shape`, so the packed length cannot be interpreted. "
+                "The checkpoint is corrupt; re-export it."
+            )
+        shape = tuple(int(v) for v in code_shape)
         if len(shape) != 2:
-            continue
+            raise ValueError(
+                f"{prefix}: `.code_shape` is {list(shape)}, but a block-float "
+                "code buffer is a 2-D [out_features, in_features] tensor. The "
+                "checkpoint is corrupt; re-export it."
+            )
+        if min(shape) <= 0:
+            raise ValueError(
+                f"{prefix}: `.code_shape` is {list(shape)}, which is not a "
+                "positive [out_features, in_features] pair. The checkpoint is "
+                "corrupt; re-export it."
+            )
         width = declared.get(prefix, default_bits)
+        if width not in (4, 8):
+            raise ValueError(
+                f"{prefix}: `quantization_config` declares {width!r} bits, but "
+                "a Tenstorrent block float stores 4 or 8 bits per value."
+            )
         numel = shape[0] * shape[1]
         if state[name].numel() != packed_code_bytes(numel, width):
             width = 8 if state[name].numel() == numel else 4
+        expected = packed_code_bytes(numel, width)
+        if state[name].numel() != expected:
+            raise ValueError(
+                f"{prefix}: `.codes` holds {state[name].numel()} values, but "
+                f"shape {list(shape)} needs {packed_code_bytes(numel, 4)} at 4 "
+                f"bits or {packed_code_bytes(numel, 8)} at 8 bits. Neither "
+                "matches, so the stored width cannot be inferred."
+            )
         widths[prefix] = width
     return widths
 
