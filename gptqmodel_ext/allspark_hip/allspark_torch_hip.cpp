@@ -30,7 +30,8 @@ int allspark_hip_pick_splitk(int M, int N, int N32, int K, int sm_count);
 void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
                          const void* Bz, void* C, void* ws, int M, int N,
                          int N32, int K, int splitk, int dtype, int out_fp32,
-                         void* stream, uint32_t* ran);
+                         const void* bias, int bias32, void* stream,
+                         uint32_t* ran);
 
 void allspark_hip_launch_repack(const void* B, const void* Bs, const void* Bz,
                                 void* Bq_out, void* Bs_out, void* Bz_out, int K,
@@ -128,7 +129,8 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
     torch::Tensor a, torch::Tensor b_qweight, torch::Tensor b_scales,
     std::optional<torch::Tensor> b_qzeros, int64_t n, int64_t group_size,
     int64_t sm_count, int64_t sm_version, int64_t cublas_m_threshold,
-    bool has_zp, bool n32k16_reorder) {
+    bool has_zp, bool n32k16_reorder,
+    std::optional<torch::Tensor> bias) {
   TORCH_CHECK(a.dim() == 2, "a must be a matrix");
   const int64_t K = a.size(1), M = a.size(0), N = n;
   TORCH_CHECK(group_size == -1 || group_size == K,
@@ -161,11 +163,31 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
     bz = b_qzeros->data_ptr();
   }
 
+  // The bias is applied inside the FP32 epilogue, before the single narrowing
+  // cast. Adding it to the returned low-precision tensor instead would round
+  // (or overflow) the partial sum first: FP16 65536 - 32768 is 32768, but the
+  // narrowed partial sum is already inf.
+  const void* bias_ptr = nullptr;
+  int bias32 = 0;
+  if (bias.has_value()) {
+    const auto& b = *bias;
+    TORCH_CHECK(b.is_cuda() && b.device() == a.device(),
+                "bias must be on the same CUDA device as the input");
+    TORCH_CHECK(b.is_contiguous(), "bias must be contiguous");
+    TORCH_CHECK(b.dim() == 1 && b.numel() == N,
+                "bias must be one element per output channel");
+    TORCH_CHECK(b.scalar_type() == a.scalar_type() ||
+                    b.scalar_type() == at::ScalarType::Float,
+                "bias must be float16, bfloat16 or float32");
+    bias_ptr = b.data_ptr();
+    bias32 = b.scalar_type() == at::ScalarType::Float;
+  }
+
   allspark_hip_launch(a.data_ptr(), b_qweight.data_ptr(), b_scales.data_ptr(), bz,
                       c.data_ptr(), ws_ptr, static_cast<int>(M),
                       static_cast<int>(N), static_cast<int>(N32),
-                      static_cast<int>(K), splitk, dtype_code(a), 0,
-                      current_stream(), nullptr);
+                      static_cast<int>(K), splitk, dtype_code(a), 0, bias_ptr,
+                      bias32, current_stream(), nullptr);
   check_launch();
   return c;
 }
@@ -206,7 +228,7 @@ torch::Tensor allspark_hip_gemm_f32_dispatch(torch::Tensor a,
   allspark_hip_launch(a.data_ptr(), b_qweight.data_ptr(), b_scales.data_ptr(),
                       bz, c.data_ptr(), ws_ptr, static_cast<int>(M),
                       static_cast<int>(N), static_cast<int>(N32),
-                      static_cast<int>(K), splitk, dtype_code(a), 1,
+                      static_cast<int>(K), splitk, dtype_code(a), 1, nullptr, 0,
                       current_stream(), nullptr);
   check_launch();
   return c;
@@ -289,7 +311,7 @@ bool allspark_hip_selftest(torch::Tensor ref) {
   auto ran = torch::zeros({1}, opts.dtype(torch::kInt32));
 
   allspark_hip_launch(a.data_ptr(), bq.data_ptr(), bs.data_ptr(), nullptr,
-                      c.data_ptr(), nullptr, M, N, N, K, 1, 0, 0,
+                      c.data_ptr(), nullptr, M, N, N, K, 1, 0, 0, nullptr, 0,
                       current_stream(),
                       reinterpret_cast<uint32_t*>(ran.data_ptr()));
   check_launch();
@@ -304,7 +326,8 @@ TORCH_LIBRARY(gptqmodel_allspark_hip, m) {
   m.def(
       "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_qzeros, int n, int group_size, int sm_count, int sm_version, "
-      "int cublas_m_threshold, bool has_zp, bool n32k16_reorder) -> Tensor");
+      "int cublas_m_threshold, bool has_zp, bool n32k16_reorder, "
+      "Tensor? bias=None) -> Tensor");
   m.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_zeros, bool has_zp, Tensor(a!) b_qweight_reorder, "

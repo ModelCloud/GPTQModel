@@ -148,7 +148,7 @@ void decode_gemm(const Tensor& x2, const nf12_weight_t& w, std::optional<Tensor>
 
 template <typename Launch>
 Tensor run_linear(const Tensor& x, int64_t n, int64_t k, const std::optional<Tensor>& bias, int32_t device,
-                  const char* op, const nf12_weight_t* w, Launch&& launch) {
+                  const char* op, const nf12_weight_t* w, Launch&& launch, bool staged_b1 = false) {
   check_cuda_tensor(x, "x", device);
   STD_TORCH_CHECK(x.scalar_type() == ScalarType::BFloat16, "nf12.", op, ": x must be bfloat16");
   STD_TORCH_CHECK(x.dim() >= 1 && x.size(x.dim() - 1) == k, "nf12.", op, ": x must have shape [..., ", k, "]");
@@ -156,6 +156,7 @@ Tensor run_linear(const Tensor& x, int64_t n, int64_t k, const std::optional<Ten
   std::vector<int64_t> out_sizes(x.sizes().begin(), x.sizes().end());
   out_sizes.back() = n;
   const int64_t m = x.numel() / k;
+  if (staged_b1) STD_TORCH_CHECK(m >= 1 && m <= 8, "nf12.", op, ": expected 1..8 staged B1 rows");
   Tensor x2 = x.dim() == 2 ? x : torch::stable::reshape(x, {m, k});
   Tensor y = torch::stable::new_empty(x, out_sizes);
   if (m == 0) return y;
@@ -171,13 +172,14 @@ Tensor run_linear(const Tensor& x, int64_t n, int64_t k, const std::optional<Ten
     if (!aligned16(bias_buf->data_ptr())) bias_buf = torch::stable::clone(*bias_buf);
     bias_ptr = bias_buf->data_ptr();
   }
-  const int64_t rows = w != nullptr ? nf12_linear_decode_gemm_rows(m, n, k, device) : 0;
+  const int64_t rows = w != nullptr && !staged_b1 ? nf12_linear_decode_gemm_rows(m, n, k, device) : 0;
   if (rows > 0) {
     decode_gemm(x2, *w, bias_buf, y.dim() == 2 ? y : torch::stable::reshape(y, {m, n}), rows, current_stream(device));
     return y;
   }
 
-  const size_t ws_bytes = nf12_linear_workspace_bytes(m, n, k, device);
+  const size_t ws_bytes = staged_b1 ? nf12_linear_staged_b1_workspace_bytes(m, n, k, device)
+                                    : nf12_linear_workspace_bytes(m, n, k, device);
   std::optional<Tensor> ws;
   if (ws_bytes > 0) ws = byte_buffer(x, ws_bytes);
   const int64_t ldx = m == 1 ? k : x2.stride(0);
@@ -233,6 +235,19 @@ Tensor linear(const Tensor& x, const Tensor& packed, const Tensor& escapes, int6
                     });
 }
 
+Tensor linear_staged_b1(const Tensor& x, const Tensor& packed, const Tensor& escapes, int64_t exp_base,
+                        const std::optional<Tensor>& bias) {
+  const int32_t device = packed.get_device_index();
+  const torch::stable::accelerator::DeviceGuard guard(device);
+  const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
+  STD_TORCH_CHECK(x.dim() == 2, "nf12.linear_staged_b1: x must be a 2-D BF16 matrix");
+  return run_linear(x, w.n, w.k, bias, device, "linear_staged_b1", &w,
+                    [&](const void* xp, int64_t m, int64_t ldx, const void* bp, void* yp, int64_t ldy, void* ws,
+                        size_t ws_bytes, cudaStream_t stream) {
+                      return nf12_linear_staged_b1(xp, m, ldx, &w, bp, yp, ldy, ws, ws_bytes, stream);
+                    }, true);
+}
+
 Tensor pack_bf16t(const Tensor& w_in) {
   const int32_t device = w_in.get_device_index();
   const torch::stable::accelerator::DeviceGuard guard(device);
@@ -263,7 +278,8 @@ Tensor linear_bf16t(const Tensor& x, const Tensor& w_bf16t, const std::optional<
                     });
 }
 
-Tensor embedding(const Tensor& ids_in, const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
+Tensor embedding_impl(const Tensor& ids_in, const Tensor& packed, const Tensor& escapes, int64_t exp_base,
+                      int repeats) {
   const int32_t device = packed.get_device_index();
   const torch::stable::accelerator::DeviceGuard guard(device);
   const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
@@ -272,19 +288,37 @@ Tensor embedding(const Tensor& ids_in, const Tensor& packed, const Tensor& escap
   STD_TORCH_CHECK(id_type == ScalarType::Int || id_type == ScalarType::Long,
                   "nf12.embedding: ids must be an int32 or int64 tensor");
   std::vector<int64_t> out_sizes(ids_in.sizes().begin(), ids_in.sizes().end());
+  if (repeats == 4) out_sizes.push_back(4);
   out_sizes.push_back(w.k);
   Tensor out = torch::stable::new_empty(packed, out_sizes, ScalarType::BFloat16);
   const int64_t num_ids = ids_in.numel();
   if (num_ids == 0) return out;
   const Tensor ids = ids_in.is_contiguous() ? ids_in : torch::stable::contiguous(ids_in);
   const cudaStream_t stream = current_stream(device);
-  check_status(id_type == ScalarType::Int
-                   ? nf12_embedding(&w, static_cast<const int32_t*>(ids.data_ptr()), num_ids, out.data_ptr(), w.k,
-                                    stream)
-                   : nf12_embedding_i64(&w, static_cast<const int64_t*>(ids.data_ptr()), num_ids, out.data_ptr(), w.k,
-                                        stream),
-               "embedding");
+  nf12_status_t status;
+  if (repeats == 4) {
+    status = id_type == ScalarType::Int
+                 ? nf12_embedding_repeat4(&w, static_cast<const int32_t*>(ids.data_ptr()), num_ids, out.data_ptr(),
+                                          4 * w.k, stream)
+                 : nf12_embedding_i64_repeat4(&w, static_cast<const int64_t*>(ids.data_ptr()), num_ids,
+                                              out.data_ptr(), 4 * w.k, stream);
+  } else {
+    status = id_type == ScalarType::Int
+                 ? nf12_embedding(&w, static_cast<const int32_t*>(ids.data_ptr()), num_ids, out.data_ptr(), w.k,
+                                  stream)
+                 : nf12_embedding_i64(&w, static_cast<const int64_t*>(ids.data_ptr()), num_ids, out.data_ptr(), w.k,
+                                      stream);
+  }
+  check_status(status, "embedding");
   return out;
+}
+
+Tensor embedding(const Tensor& ids_in, const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
+  return embedding_impl(ids_in, packed, escapes, exp_base, 1);
+}
+
+Tensor embedding_repeat4(const Tensor& ids_in, const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
+  return embedding_impl(ids_in, packed, escapes, exp_base, 4);
 }
 
 // A contiguous 1-D tensor of `dtype` on `device` (copied if strided).
@@ -678,9 +712,11 @@ STABLE_TORCH_LIBRARY(nf12, m) {
   m.def("encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)");
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
+  m.def("linear_staged_b1(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
   m.def("pack_bf16t(Tensor w) -> Tensor");
   m.def("linear_bf16t(Tensor x, Tensor w_bf16t, Tensor? bias=None) -> Tensor");
   m.def("embedding(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("embedding_repeat4(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("encode_moe(Tensor w) -> (Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base)");
   m.def("moe_align(Tensor topk_ids, int num_experts) -> (Tensor sorted, Tensor expert_offsets)");
   m.def("moe_decode(Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base) -> Tensor");
@@ -703,9 +739,11 @@ STABLE_TORCH_LIBRARY_IMPL(nf12, CUDA, m) {
   m.impl("encode", TORCH_BOX(&encode));
   m.impl("decode", TORCH_BOX(&decode));
   m.impl("linear", TORCH_BOX(&linear));
+  m.impl("linear_staged_b1", TORCH_BOX(&linear_staged_b1));
   m.impl("pack_bf16t", TORCH_BOX(&pack_bf16t));
   m.impl("linear_bf16t", TORCH_BOX(&linear_bf16t));
   m.impl("embedding", TORCH_BOX(&embedding));
+  m.impl("embedding_repeat4", TORCH_BOX(&embedding_repeat4));
   m.impl("encode_moe", TORCH_BOX(&encode_moe));
   m.impl("moe_align", TORCH_BOX(&moe_align));
   m.impl("moe_decode", TORCH_BOX(&moe_decode));

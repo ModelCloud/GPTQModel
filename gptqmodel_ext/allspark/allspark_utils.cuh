@@ -44,6 +44,11 @@ struct SM8x_GEMM_W8A16_Splitk_Params {
   float* C_split_ptr;       // FP32 partials for non-fused splitk reduce
   float* C_tmp_ptr;         // for fused splitk reduce
   uint32_t* red_count_ptr;  // for fused splitk reduce
+  // Optional per-output-channel bias, added to the FP32 accumulators before the
+  // single narrowing cast to C_ptr. `C_bias_f32` selects a float32 buffer (a
+  // checkpoint bias wider than the activation dtype). Null means no bias.
+  const void* C_bias_ptr;
+  int C_bias_f32;
 };
 
 struct alignas(16) BlockTileSplitkParams {
@@ -56,7 +61,8 @@ struct alignas(16) BlockTileSplitkParams {
 template <typename FType, int BLOCK, int N_MATRIX>
 __global__ void f16_gemm_splitk_reduce_kernel(const float* C_split, FType* C,
                                               uint32_t n, uint32_t n_matrix,
-                                              uint32_t matrix_size) {
+                                              uint32_t matrix_size,
+                                              const void* bias, int bias32) {
   int idx = blockIdx.x * BLOCK + threadIdx.x;
 
   if (idx >= matrix_size) {
@@ -71,18 +77,31 @@ __global__ void f16_gemm_splitk_reduce_kernel(const float* C_split, FType* C,
     sum += static_cast<float>(C_split[idx + i * matrix_size]);
   }
 
+  // The bias joins the FP32 reduction before the only narrowing cast, so a
+  // partial sum outside FType's finite range is not rounded first.
+  if (bias != nullptr) {
+    const uint32_t col = n > 0 ? (idx % n) : 0;
+    if (bias32) {
+      sum += static_cast<const float*>(bias)[col];
+    } else {
+      sum += static_cast<float>(static_cast<const FType*>(bias)[col]);
+    }
+  }
+
   C[idx] = static_cast<FType>(sum);
 }
 
 template <typename FType>
 void f16_gemm_splitk_reduce(const float* C_split, FType* C, const uint32_t m,
                             const uint32_t n, const uint32_t n_matrix,
-                            cudaStream_t stream) {
+                            cudaStream_t stream, const void* bias = nullptr,
+                            int bias32 = 0) {
   const int BLOCK = 128;
   uint32_t matrix_size = m * n;
   int grid = (matrix_size + BLOCK - 1) / BLOCK;
 
-  void (*kernel)(const float*, FType*, uint32_t, uint32_t, uint32_t) = nullptr;
+  void (*kernel)(const float*, FType*, uint32_t, uint32_t, uint32_t,
+                 const void*, int) = nullptr;
 
   switch (n_matrix) {
     case 4:
@@ -117,7 +136,8 @@ void f16_gemm_splitk_reduce(const float* C_split, FType* C, const uint32_t m,
       break;
   }
 
-  kernel<<<grid, BLOCK, 0, stream>>>(C_split, C, n, n_matrix, matrix_size);
+  kernel<<<grid, BLOCK, 0, stream>>>(C_split, C, n, n_matrix, matrix_size, bias,
+                                    bias32);
 }
 
 template <typename T>

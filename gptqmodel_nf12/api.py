@@ -139,12 +139,40 @@ def linear(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None
     return torch.ops.nf12.linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
 
 
+def linear_staged_b1(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Fuse 1..8 staged BF16 rows with the ordinary B1 kernel configuration.
+
+    The route is intended for speculative verification whose row outputs must
+    match separate one-row calls. Unsupported one-row dispatches fail closed.
+    """
+    _check_input(x, weight.shape[1])
+    if x.ndim != 2 or not 1 <= x.shape[0] <= 8:
+        raise ValueError("nf12: linear_staged_b1 requires a BF16 [1..8, K] matrix")
+    load()
+    return torch.ops.nf12.linear_staged_b1(x, weight.packed, weight.escapes, weight.exp_base, bias)
+
+
 def linear_fp32(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None,
                 rows: torch.Tensor | None = None) -> torch.Tensor:
     """Run an FP32 projection, optionally on selected output rows, from NF12."""
     from ._fp32 import linear_fp32 as impl
 
     return impl(x, weight, bias, rows)
+
+
+def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
+                          bias: torch.Tensor | None = None) -> torch.Tensor:
+    """Project 1..8 FP32 verifier rows with the ordinary B1 reduction tree."""
+    from ._fp32 import linear_fp32_staged_b1 as impl
+
+    return impl(x, weight, bias)
+
+
+def prepare_fp32_gate(weight: NF12Weight) -> None:
+    """Prepare a lossless compressed view for 128/384x5120 FP32 B1 routers."""
+    from ._fp32 import prepare_fp32_gate as impl
+
+    impl(weight)
 
 
 def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
@@ -163,6 +191,25 @@ def embedding(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
         raise ValueError(f"nf12: ids must be int32 or int64, got {ids.dtype}")
     load()
     return torch.ops.nf12.embedding(ids, weight.packed, weight.escapes, weight.exp_base)
+
+
+def embedding_repeat4(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
+    """Look up packed rows and write ``[*ids.shape, 4, K]``.
+
+    Every repeated row preserves the BF16 bits of ``embedding(ids, weight)``.
+    IDs outside the table produce four ``+0.0`` rows.
+    An older loaded NF12 operator library uses its single-copy lookup followed
+    by an activation repeat; the current library writes all copies in one launch.
+    """
+    _check_cuda(ids, "ids")
+    if ids.dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"nf12: ids must be int32 or int64, got {ids.dtype}")
+    load()
+    native = getattr(torch.ops.nf12, "embedding_repeat4", None)
+    if callable(native):
+        return native(ids, weight.packed, weight.escapes, weight.exp_base)
+    single = torch.ops.nf12.embedding(ids, weight.packed, weight.escapes, weight.exp_base)
+    return single.unsqueeze(-2).repeat_interleave(4, dim=-2)
 
 
 def pack_bf16t(w: torch.Tensor) -> torch.Tensor:

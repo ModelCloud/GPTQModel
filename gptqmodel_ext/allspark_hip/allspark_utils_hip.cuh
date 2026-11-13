@@ -94,6 +94,11 @@ struct SM8x_GEMM_W8A16_Splitk_Params {
   float* C_tmp_ptr;         // split-K fp32 partials (non-fused reduce)
   float* C32_ptr;           // when set, write fp32 accumulators here instead
   uint32_t* red_count_ptr;  // fused split-K counter (unused here)
+  // Optional per-output-channel bias; added to the FP32 accumulator before the
+  // single cast to the output dtype. `C_bias_f32` selects a float32 buffer (a
+  // checkpoint bias wider than the activation dtype) instead of an FType one.
+  const void* C_bias_ptr;
+  int C_bias_f32;
 };
 
 // ---------------------------------------------------------------------------

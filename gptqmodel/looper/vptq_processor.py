@@ -9,7 +9,17 @@ import torch
 import transformers
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
+    CalibrationTypes,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -44,18 +54,17 @@ class VPTQProcessor(LoopProcessor):
     required: Hessians are always built from the calibration data.
     """
 
+    lifecycle = ProcessorLifecycleConfig(
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
-        require_fwd: bool = True,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Initializes VPTQ processing and optional weight-delta tracking."""
 
@@ -63,12 +72,7 @@ class VPTQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(require_fwd=require_fwd),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -85,8 +89,10 @@ class VPTQProcessor(LoopProcessor):
         del kwargs
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:  # noqa: E712
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
+        bind_resolved_module_config(module, resolved_cfg)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
 
@@ -259,6 +265,7 @@ class VPTQProcessor(LoopProcessor):
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
+                resolved_module_config=get_resolved_module_config(module),
             )
 
         qmodule = model.model.get_submodule(module.full_name)

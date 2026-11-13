@@ -55,6 +55,8 @@ struct LinearArgs {
 
 size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
 cudaError_t linear(const LinearArgs& args);
+size_t linear_staged_b1_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
+cudaError_t linear_staged_b1(const LinearArgs& args);
 // Recommended N-slice height for decode + external BF16 GEMM (SPEC.md 6).
 // Zero selects the fused route.
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev);
@@ -131,6 +133,6 @@ cudaError_t moe_grouped_operands(const __nv_bfloat16* x, int64_t ldx, const int3
 // Exactly one of ids32/ids64 is non-null (SPEC.md 10).
 cudaError_t embedding(const uint8_t* packed, const uint4* escapes, uint32_t num_escapes, uint32_t exp_base, int64_t n,
                       int64_t k, const int32_t* ids32, const int64_t* ids64, int64_t num_ids, __nv_bfloat16* out,
-                      int64_t ldo, cudaStream_t stream);
+                      int64_t ldo, int repeats, cudaStream_t stream);
 
 }

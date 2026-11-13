@@ -26,8 +26,7 @@ import pcre
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..looper.gptq_processor import GPTQProcessor
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import CalibrationTypes, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..models.module_plan import _model_module_plan
@@ -38,10 +37,6 @@ from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
-from .awq_processor import AWQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
-from .vptq_processor import VPTQProcessor
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -230,8 +225,10 @@ def _resolve_subset_calibration_coverage_policy(
 ) -> CalibrationCoveragePolicy:
     """Resolve how this subset handles modules that never receive calibration traffic."""
 
-    validate_input_coverage = isinstance(
-        processor, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor, VPTQProcessor)
+    lifecycle = getattr(processor, "lifecycle", None)
+    validate_input_coverage = (
+        lifecycle is not None
+        and lifecycle.calibration is CalibrationTypes.EACH_MODULE_NEEDS_INPUT
     )
     fallback_enabled = fallback is not None
     prune_uncovered_modules = validate_input_coverage and not fallback_enabled
@@ -424,7 +421,7 @@ def build_subset_plan(
     - how uncovered calibration modules are handled
     """
 
-    execution_config = processor.execution_config
+    forward = processor.forward
     calibration_coverage_policy = _resolve_subset_calibration_coverage_policy(
         processor, fallback
     )
@@ -590,7 +587,7 @@ def build_subset_plan(
 
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
-    execute_forward = execution_config.require_fwd
+    execute_forward = forward.required
     batch_count, forward_row_counts, forward_total_rows = (
         _collect_subset_forward_progress(
             looper,
@@ -628,7 +625,7 @@ def build_subset_plan(
         subset_total=subset_total,
         execute_forward=execute_forward,
         replay_after_process=execute_forward
-        and execution_config.fwd_replay_after_process,
+        and forward.replay_after_process,
         forward_mode="serial" if subset_forward_serial else "parallel",
         batch_count=batch_count,
         forward_row_counts=forward_row_counts,
@@ -658,13 +655,13 @@ def build_layer_subset_plans(
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
-    execution_config = processor.execution_config
+    forward = processor.forward
     if embedding_module_name is not None:
         module_name_groups = [[embedding_module_name]]
     else:
         module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-    if execution_config.fwd_all_modules_in_single_pass:
+    if forward.all_modules_in_single_pass:
         # Native-style processors consume one merged replay over the whole layer.
         # Build one plan up front so the layer stage does not keep re-deriving
         # merged subset state while it is also coordinating execution.
@@ -872,7 +869,7 @@ def _run_single_subset_pass(
     subset_names = plan.ordered_module_names or list(subset.keys())
     subset_index = plan.subset_index
     subset_total = plan.subset_total
-    execution_config = processor.execution_config
+    forward = processor.forward
     calibration_coverage_policy = plan.calibration_coverage_policy
     forward_row_counts = plan.forward_row_counts
     batch_count = plan.batch_count
@@ -887,7 +884,7 @@ def _run_single_subset_pass(
     if (
         execute_forward
         and not plan.need_forward_outputs
-        and not execution_config.capture_layer_forward_context
+        and not forward.capture_layer_context
         and callable(restore_capture)
     ):
         capture_restored = bool(
@@ -999,8 +996,8 @@ def _run_single_subset_pass(
                         processor, original_hook, hook_source
                     )
                 enable_stop = (
-                    execution_config.fwd_replay_after_process
-                    or execution_config.subset_forward_early_stop
+                    forward.replay_after_process
+                    or forward.subset_early_stop
                 )
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
@@ -1045,7 +1042,7 @@ def _run_single_subset_pass(
             )
 
     capture_layer_forward_context = (
-        execute_forward and execution_config.capture_layer_forward_context
+        execute_forward and forward.capture_layer_context
     )
     if capture_layer_forward_context:
         subset_capture_override = getattr(
@@ -1391,9 +1388,22 @@ def _run_single_subset_pass(
                 if calibration_coverage_policy.record_dynamic_exclusions:
                     if processor.qcfg.dynamic is None:
                         processor.qcfg.dynamic = {}
-                    processor.qcfg.dynamic[
-                        f"-:{pcre.escape(skipped_module.full_name)}"
-                    ] = {}
+                    pattern = f"-:{pcre.escape(skipped_module.full_name)}"
+                    if pattern not in processor.qcfg.dynamic:
+                        processor.qcfg.dynamic[pattern] = {}
+                        runtime_exclusions = getattr(
+                            processor.qcfg,
+                            "_runtime_dynamic_exclusions",
+                            None,
+                        )
+                        if runtime_exclusions is None:
+                            runtime_exclusions = set()
+                            setattr(
+                                processor.qcfg,
+                                "_runtime_dynamic_exclusions",
+                                runtime_exclusions,
+                            )
+                        runtime_exclusions.add(pattern)
 
     quant_target_devices: Dict[str, torch.device] = {}
     active_subset_names = [name for name in subset_names if name in subset]
@@ -1740,7 +1750,7 @@ def run_subset_stage(
         # No forward required; still run process() for each module.
         if DEBUG_ON:
             logger.debug(
-                "StageSubset: processor=%s layer=%s subset=%s/%s skipping forward (require_fwd=False)",
+                "StageSubset: processor=%s layer=%s subset=%s/%s skipping forward (forward.required=False)",
                 processor_name,
                 layer_index,
                 plan.subset_index + 1,

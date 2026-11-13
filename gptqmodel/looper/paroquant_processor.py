@@ -33,7 +33,18 @@ from torch import nn
 from torch.nn import Module
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
+    CalibrationTypes,
+    CheckpointSupport,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -212,39 +223,42 @@ class _LayerShardLoader:
 class ParoQuantProcessor(LoopProcessor):
     """Standalone ParoQuant lifecycle: capture, optimize, export, then pack."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+            activation_capture=True,
+        ),
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
+        calibration: CalibrationConfig,
         gptq_model,
         model,
-        require_fwd: bool = True,
+        forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
     ):
         """Configure a looper that captures activations and quantizes after replay."""
         capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
+        if forward is None:
+            forward = ForwardConfig(
+                required=True,
+                replay_after_process=True,
+                subset_early_stop=True,
+                activation_capture=True,
+                capture_layer_context=capture_group_layer_context,
+            )
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=True,
-                subset_forward_early_stop=True,
-                enable_activation_capture=True,
-                capture_layer_forward_context=capture_group_layer_context,
-            ),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -306,9 +320,11 @@ class ParoQuantProcessor(LoopProcessor):
             return
         log.info("ParoQuant: prewarmed fused rotation extension.")
 
-    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
+    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, resolved_cfg=None):
         """Resolve per-module dynamic overrides while enforcing ParoQuant format."""
-        format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
+        format_override = resolved_cfg.get("format", None) if resolved_cfg is not None else (
+            self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
+        )
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PARO does not support dynamic format override `{target_format}`.")
@@ -374,11 +390,12 @@ class ParoQuantProcessor(LoopProcessor):
                 features[name] = tensors[0]
         return features
 
-    def _module_quant_params(self, module_name: str) -> tuple[int, int, bool]:
-        """Read effective bit-width, group size, and symmetry for one module."""
-        bits = int(self.qcfg.dynamic_get(module_name, "bits", self.qcfg.runtime_bits))
-        group_size = int(self.qcfg.dynamic_get(module_name, "group_size", self.qcfg.group_size))
-        sym = bool(self.qcfg.dynamic_get(module_name, "sym", self.qcfg.sym))
+    def _module_quant_params(self, module_name: str, *, resolved_cfg=None) -> tuple[int, int, bool]:
+        """Read resolved bit-width, group size, and symmetry for one module."""
+        resolved_cfg = resolved_cfg or self.qcfg.resolve_module_config(module_name)
+        bits = int(resolved_cfg.get("bits", self.qcfg.runtime_bits))
+        group_size = int(resolved_cfg.get("group_size", self.qcfg.group_size))
+        sym = bool(resolved_cfg.get("sym", self.qcfg.sym))
         return bits, group_size, sym
 
     @staticmethod
@@ -457,7 +474,9 @@ class ParoQuantProcessor(LoopProcessor):
         inputs: torch.Tensor,
     ) -> tuple[float, float]:
         """Optimize one module and stash its packed runtime tensors in `module.state`."""
-        bits, group_size, sym = self._module_quant_params(module.full_name)
+        bits, group_size, sym = self._module_quant_params(
+            module.full_name, resolved_cfg=get_resolved_module_config(module),
+        )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         original_weight = weight.detach().clone()
@@ -695,7 +714,9 @@ class ParoQuantProcessor(LoopProcessor):
 
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:
         """Materialize one ParoQuant optimizer wrapper from the current live module state."""
-        bits, group_size, sym = self._module_quant_params(module.full_name)
+        bits, group_size, sym = self._module_quant_params(
+            module.full_name, resolved_cfg=get_resolved_module_config(module),
+        )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
@@ -2565,8 +2586,10 @@ class ParoQuantProcessor(LoopProcessor):
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""
-        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
+        bind_resolved_module_config(module, resolved_cfg)
 
         self.fallback = normalize_fallback(fallback, self.qcfg.fallback)
         layer_state = self._get_layer_state(module.layer_index)
@@ -2680,7 +2703,8 @@ class ParoQuantProcessor(LoopProcessor):
             channel_scales = module.state.pop("channel_scales").clone()
 
         module.weight.data = move_to(pack_weight, device=CPU)
-        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
+        resolved_cfg = get_resolved_module_config(module)
+        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
@@ -2706,6 +2730,7 @@ class ParoQuantProcessor(LoopProcessor):
                     format=self.format,
                     register_buffers=False,
                     init_kwargs=self.qcfg.quant_linear_init_kwargs(),
+                    resolved_module_config=resolved_cfg,
                 )
 
         qmodule = model.model.get_submodule(module.full_name)

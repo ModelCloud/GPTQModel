@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from gptqmodel.looper.loop_processor import ExecutionConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
@@ -45,11 +45,19 @@ class TestMoEExpertBatching(unittest.TestCase):
         self.looper._dense_vram_strategy_explicit = False
         self.looper._moe_vram_strategy_explicit = False
 
+        # A MagicMock auto-creates attributes, so the capture-frontier restore
+        # hook added in #3600 looks callable and its mock return value is truthy,
+        # which makes `_run_single_subset_pass` skip the forward pass these tests
+        # assert on. A real processor without that hook returns None here.
+        self.processor.restore_subset_capture_frontier = None
+        self.processor.restore_subset_capture_batches = None
         self.processor.name.return_value = "GPTQProcessor"
-        self.processor.execution_config = ExecutionConfig(
-            require_fwd=True,
-            fwd_replay_after_process=True,
-        )
+        self.processor.forward = ForwardConfig(
+                                                          required=True,
+                                                          replay_after_process=True,
+                                                      )
+        self.processor.restore_subset_capture_frontier.return_value = False
+        self.processor.plan_subset_zero_route_recovery.return_value = ()
         # Mock processor tasks
         self.processor.tasks = {}
         self.processor.begin_shared_input_capture.return_value = {}
@@ -102,7 +110,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
 
     def test_batch_size_zero_is_rejected_not_treated_as_disabled(self):
         """batch_size=0 used to read as "batching disabled"; it is invalid now.
@@ -144,9 +152,12 @@ class TestMoEExpertBatching(unittest.TestCase):
         self._run_subset_stage(subset)
 
         # 20 total modules (10 experts × 2 modules) with batch_size 2 modules = 10 batches
-        # Each batch calls _run_forward_batches once, and torch_empty_cache is called 3 times per batch
-        # (once after forward pass, once after quant pass, once after chunk processing)
-        self.assertEqual(self.looper._run_forward_batches.call_count, 10)
+        # Each chunk runs two forwards since #3600: the capture pass and the
+        # causal replay (execution_config.fwd_replay_after_process is set in
+        # setUp). torch_empty_cache is still called 3 times per chunk - once
+        # after the forward, once after the quant pass, once between chunks -
+        # because the replay pass does not flush.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 20)
         self.assertEqual(mock_empty_cache.call_count, 30)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -171,9 +182,8 @@ class TestMoEExpertBatching(unittest.TestCase):
         self._run_subset_stage(subset)
 
         # 7 experts (modules) with batch_size 3 = 3 batches (3 + 3 + 1)
-        # Each batch calls _run_forward_batches once, and torch_empty_cache is called 3 times per batch
-        # (once after forward pass, once after quant pass, once after chunk processing)
-        self.assertEqual(self.looper._run_forward_batches.call_count, 3)
+        # Two forwards per chunk (capture + replay since #3600), 3 flushes per chunk.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 6)
         self.assertEqual(mock_empty_cache.call_count, 9)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -197,8 +207,8 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(subset)
 
-        # Should process all in one batch
-        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
+        # One chunk, so capture plus replay: two forwards.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_one_expert_per_batch(self, mock_empty_cache):
@@ -222,9 +232,8 @@ class TestMoEExpertBatching(unittest.TestCase):
         self._run_subset_stage(subset)
 
         # 4 experts with batch_size 1 = 4 batches
-        # Each batch calls _run_forward_batches once, and torch_empty_cache is called 3 times per batch
-        # (once after forward pass, once after quant pass, once after chunk processing)
-        self.assertEqual(self.looper._run_forward_batches.call_count, 4)
+        # Two forwards per chunk (capture + replay since #3600), 3 flushes per chunk.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 8)
         self.assertEqual(mock_empty_cache.call_count, 12)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -237,8 +246,8 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        # Should process all in one batch since no batch_size is available
-        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
+        # One chunk, so capture plus replay: two forwards.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_no_batching_when_moe_is_none(self, mock_empty_cache):
@@ -247,7 +256,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_non_expert_modules(self, mock_empty_cache):
@@ -274,8 +283,9 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(subset)
 
-        # 6 total modules (4 expert + 2 non-expert) with batch_size 2 modules = 3 batches
-        self.assertEqual(self.looper._run_forward_batches.call_count, 3)
+        # 6 total modules (4 expert + 2 non-expert) with batch_size 2 modules = 3 chunks,
+        # each running capture plus replay: six forwards.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 6)
 
 if __name__ == '__main__':
     unittest.main()

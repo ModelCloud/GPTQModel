@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -77,6 +78,9 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
         layer.scales = torch.zeros((1, 32), dtype=torch.float16)
         layer.qzeros = torch.zeros((1, 32), dtype=torch.float16)
         layer.scales_and_zeros = torch.zeros((1, 32, 2), dtype=torch.float16)
+        # Mirror the real CPU transform's runtime-layout markers.
+        layer._cpu_transformed = True
+        layer._cpu_transform_dtype = torch.float16
 
     monkeypatch.setattr(layer, "transform", fake_transform)
     monkeypatch.setattr(
@@ -104,16 +108,116 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     layer.__dict__.pop("_suspend_fused_train_restore")
 
     layer.to(dtype=torch.bfloat16)
+    # A low-precision move re-finalizes from the checkpoint snapshot because the
+    # affine offsets are scale-dtype coupled.
     assert tuple(layer.qweight.shape) == original_shape
     assert layer.scales.dtype == torch.bfloat16
 
     layer.train()
+    assert tuple(layer.qweight.shape) == original_shape
     x.requires_grad_(True)
     out = layer(x)
     assert str(getattr(layer.linear_mode, "name", layer.linear_mode)).upper() == "TRAIN"
     assert tuple(layer.qweight.shape) == original_shape
     assert out.requires_grad
     out.sum().backward()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
+)
+def test_cpu_layer_accepts_new_activation_dtype_after_move(
+    module_name,
+    class_name,
+    source_dtype,
+    target_dtype,
+):
+    """A low-precision move must re-finalize the fused affine layout.
+
+    The runtime ``qzeros`` holds offsets computed from the pre-move scale
+    dtype, so keeping the packed runtime layout would pair the narrowed scales
+    with stale offsets. Compare the moved layer with a checkpoint-layout copy
+    that is moved before its first forward, which finalizes the same operands
+    for the target dtype.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    if target_dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {target_dtype}")
+
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, source_dtype, "cpu")
+    fresh = copy.deepcopy(layer)
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=source_dtype))
+    layer.to(dtype=target_dtype)
+
+    fresh.to(dtype=target_dtype)
+    fresh.eval()
+    activation = torch.randn(2, 5, 256, dtype=target_dtype)
+    with torch.no_grad():
+        actual = layer(activation)
+        expected = fresh(activation)
+
+    assert actual.dtype == target_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+    ),
+)
+def test_device_move_restores_checkpoint_layout(module_name, class_name):
+    """A device move must not hand one backend's packed layout to another.
+
+    The CPU int4pack packing is not the XPU packing, so the runtime layout is
+    only valid for the device that produced it. ``meta`` is used as the move
+    target because the CPU backends have no second real device; the decision
+    under test is the device change, not the destination kernel.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.float16, "cpu")
+    checkpoint_shape = tuple(layer.qweight.shape)
+    checkpoint_dtype = layer.qweight.dtype
+
+    layer.eval()
+    with torch.no_grad():
+        layer(torch.randn(2, 5, 256, dtype=torch.float16))
+    runtime_shape = tuple(layer.qweight.shape)
+    assert (runtime_shape, layer.qweight.dtype) != (checkpoint_shape, checkpoint_dtype)
+
+    layer._apply(lambda tensor: tensor.to("meta") if isinstance(tensor, torch.Tensor) else tensor)
+
+    assert tuple(layer.qweight.shape) == checkpoint_shape
+    assert layer.qweight.dtype == checkpoint_dtype
+    assert layer.linear_mode is None
+    assert getattr(layer, "_cpu_transformed", False) is False
+    assert layer._fused_train_state is None
 
 
 def test_gemv_fast_rejects_unaligned_shapes_before_packing():
@@ -402,7 +506,7 @@ def test_exllamav2_handle_tracks_replaced_packed_tensors(monkeypatch):
     freed = []
     made = []
 
-    def make_q_matrix(tensors):
+    def make_q_matrix(tensors, **_kwargs):
         made.append(tensors["qweight"].clone())
         return len(made)
 
@@ -462,32 +566,512 @@ def test_exllamav2_gptq_forward_compacts_noncontiguous_activations(monkeypatch):
     assert out.dtype == torch.float16
 
 
-def test_exllamav3_bf16_uses_fp32_native_input_and_output():
+def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
+    """Wide activations must not reach the FP16-only native EXL3 kernel.
+
+    #3717 pinned a native path that upcast wide inputs to FP32. #3731
+    (``86a59903e``) replaced it with the bounded Torch reconstruction path,
+    which receives the caller dtype as-is and upcasts internally inside
+    ``ExllamaV3TorchLinear._forward_eager``. Because that inner takes a single
+    ``x`` argument, the native ``(x, _params, out_dtype=...)`` call would still
+    be reached here under the stale contract and explode.
+    """
     seen = {}
 
-    class Inner:
-        def forward(self, x, _params, *, out_dtype=None):
+    class TorchInner:
+        def forward(self, x):
             seen["input_dtype"] = x.dtype
-            seen["out_dtype"] = out_dtype
-            return torch.ones(x.shape[:-1] + (4,), dtype=out_dtype)
+            return torch.ones(x.shape[:-1] + (4,), dtype=x.dtype)
 
-    layer = SimpleNamespace(_ensure_inner=lambda: Inner(), out_features=4)
+    class NativeInner:
+        def forward(self, x, _params, *, out_dtype=None):
+            seen["native"] = (x.dtype, out_dtype)
+            return torch.ones(x.shape[:-1] + (4,), dtype=out_dtype or x.dtype)
+
+    layer = SimpleNamespace(
+        _ensure_torch_inner=lambda: TorchInner(),
+        _ensure_inner=lambda: pytest.fail("wide inputs must not use the native kernel"),
+        out_features=4,
+    )
+    # 1e10 overflows FP16 (max 65504); routing through the FP32 Torch inner
+    # keeps the result finite.
     x = torch.tensor([[1e10, 1e-10]], dtype=torch.bfloat16)
 
     out = ExllamaV3Linear.forward(layer, x)
 
-    assert seen == {
-        "input_dtype": torch.float32,
-        "out_dtype": torch.float32,
-    }
+    # The Torch inner owns the FP32 upcast; the wrapper only sees the caller dtype.
+    assert seen == {"input_dtype": torch.bfloat16}
     assert out.dtype == torch.bfloat16
     assert torch.isfinite(out).all()
 
-    fp16 = torch.ones((1, 2), dtype=torch.float16)
-    out = ExllamaV3Linear.forward(layer, fp16)
+    # FP16 keeps the FP16 native kernel with an explicit out_dtype.
+    seen.clear()
+    layer._ensure_torch_inner = lambda: pytest.fail("FP16 must keep the native path")
+    layer._ensure_inner = lambda: NativeInner()
+    out = ExllamaV3Linear.forward(layer, torch.ones((1, 2), dtype=torch.float16))
 
-    assert seen == {
-        "input_dtype": torch.float16,
-        "out_dtype": torch.float16,
-    }
+    assert seen == {"native": (torch.float16, torch.float16)}
     assert out.dtype == torch.float16
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected_dtype"),
+    (
+        ("TorchAtenLinear", torch.bfloat16),
+        ("TorchAtenAwqLinear", torch.bfloat16),
+        ("TorchFusedLinear", torch.bfloat16),
+        ("TorchFusedAwqLinear", torch.bfloat16),
+        ("TorchCpuAvx512Linear", torch.bfloat16),
+        ("TorchCpuAvx512AwqLinear", torch.bfloat16),
+    ),
+)
+def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expected_dtype):
+    """A plain inference forward must not corrupt what ``save()`` writes.
+
+    The CPU W4A16 kernels rewrite ``qweight``/``qzeros``/``scales`` into their
+    int4pack runtime layout *in place*. The checkpoint layout survives only in
+    ``_fused_train_state``, so the export path and ``load_state_dict`` must
+    both restore it first. Otherwise ``state_dict()``/``save()`` emit runtime
+    shapes under checkpoint keys and the written file cannot be loaded into a
+    fresh model.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    module = importlib.import_module(
+        {
+            "TorchAtenLinear": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+            "TorchAtenAwqLinear": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+            "TorchFusedLinear": "gptqmodel.nn_modules.qlinear.torch_fused",
+            "TorchFusedAwqLinear": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+            "TorchCpuAvx512Linear": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+            "TorchCpuAvx512AwqLinear": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+        }[class_name]
+    )
+    cls = getattr(module, class_name)
+    if not getattr(cls, "SUPPORTS_DTYPES", [expected_dtype]) or expected_dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {expected_dtype}")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    config = LlamaConfig(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype=expected_dtype).eval()
+    parent = model.model.layers[0].mlp
+    for name in ("gate_proj", "up_proj"):
+        projection, _weight, _bias, _checkpoint = _projection(
+            cls, getattr(parent, name), expected_dtype, "cpu"
+        )
+        setattr(parent, name, projection)
+
+    def exported():
+        return {
+            name: (tuple(entry.shape), entry.torch_dtype)
+            for name, entry in get_state_dict_for_save(model).items()
+            if name.endswith(("gate_proj.qweight", "gate_proj.qzeros", "gate_proj.bias"))
+        }
+
+    pristine = exported()
+    x = torch.randn(2, 5, 256, dtype=expected_dtype)
+    with torch.inference_mode():
+        baseline = parent(x).clone()
+
+    # One inference forward moves the operands into the int4pack runtime layout.
+    assert tuple(parent.gate_proj.qweight.shape) != pristine[
+        "model.layers.0.mlp.gate_proj.qweight"
+    ][0]
+
+    # The export path restores the checkpoint layout before serializing.
+    assert exported() == pristine
+
+    # Loading that checkpoint back into the now-transformed model restores the
+    # layout first, so strict loading does not report a size mismatch.
+    checkpoint = {
+        name: tensor.clone() for name, tensor in model.state_dict().items()
+    }
+    with torch.inference_mode():
+        parent(x)
+    model.load_state_dict(checkpoint, strict=True)
+    assert exported() == pristine
+
+    # The round trip is numerically lossless.
+    with torch.inference_mode():
+        restored = parent(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+
+def _transformed_layer(cls, *, seed=17):
+    """Build a finalized CPU layer and drive one inference forward."""
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    dtype = torch.bfloat16
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(seed)
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    layer, _weight, _bias, _checkpoint = _projection(
+        cls, model.model.layers[0].mlp.gate_proj, dtype, "cpu"
+    )
+    x = torch.randn(2, 5, 256, dtype=dtype)
+
+    class _Holder(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.proj = module
+
+        def forward(self, x):
+            return self.proj(x)
+
+    holder = _Holder(layer).eval()
+    with torch.inference_mode():
+        baseline = holder(x).clone()
+    return holder, x, baseline
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module_path, assign):
+    """A transformed layer must accept its own runtime ``state_dict()`` back.
+
+    After a CPU inference forward the live operands are in the int4pack layout.
+    Taking ``state_dict()`` in that state and loading it back is a self
+    round-trip: the incoming ``qweight``/``qzeros`` describe the *runtime*
+    layout, not the checkpoint held in ``_fused_train_state``.
+
+    ``scales`` keeps its checkpoint shape in both layouts, so a gate that
+    accepted any single matching operand mistook this dict for a checkpoint,
+    restored the snapshot, and then failed strict loading with a size mismatch
+    (``qweight`` 64x64 into 16x64). The load must instead keep the live layout
+    and remain numerically lossless.
+    """
+
+    from tests.test_torch_weight_storage import state_tensors
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support {torch.bfloat16}")
+
+    holder, x, baseline = _transformed_layer(cls)
+    layer = holder.proj
+    assert layer._fused_train_state, "the forward must have captured a snapshot"
+    for tensor in state_tensors(layer):
+        assert tensor.numel() < layer.in_features * layer.out_features
+    # ``scales`` is shape-identical across both layouts; it must never be the
+    # operand that decides the load.
+    live_qweight = tuple(layer.qweight.shape)
+    snapshot_qweight = tuple(layer._buffers[layer._fused_train_state["qweight"]].shape)
+    assert live_qweight != snapshot_qweight
+    assert tuple(layer.scales.shape) == tuple(
+        layer._buffers[layer._fused_train_state["scales"]].shape
+    )
+
+    state = {name: value.clone() for name, value in layer.state_dict().items()}
+    layer.load_state_dict(state, assign=assign)
+
+    # The load kept the live layout instead of restoring the checkpoint shapes.
+    assert tuple(layer.qweight.shape) == live_qweight
+
+    with torch.inference_mode():
+        restored = holder(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+    for tensor in state_tensors(layer):
+        assert tensor.numel() < layer.in_features * layer.out_features
+
+    # A self round-trip still needs its original packed checkpoint layout for save.
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    exported = get_state_dict_for_save(holder)
+    assert exported["proj.qweight"].shape == snapshot_qweight
+
+
+def test_changed_runtime_state_cannot_silently_export_stale_checkpoint():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
+    checkpoint = dict(state)
+    for name, buffer_name in holder.proj._fused_train_state.items():
+        checkpoint[name] = holder.proj._buffers[buffer_name].clone()
+    state["scales"].mul_(2)
+    holder.proj.load_state_dict(state, assign=True)
+
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+    holder.proj.load_state_dict(checkpoint)
+    assert get_state_dict_for_save(holder)["proj.qweight"].shape == checkpoint["qweight"].shape
+
+
+def test_runtime_load_materializes_inference_g_idx():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, x, baseline = _transformed_layer(TorchAtenLinear)
+    with torch.inference_mode():
+        holder.proj.g_idx = holder.proj.g_idx.clone()
+    assert torch.is_inference(holder.proj.g_idx)
+    state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
+    holder.proj.load_state_dict(state, assign=False)
+
+    with torch.inference_mode():
+        actual = holder(x).clone()
+    torch.testing.assert_close(actual.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_path):
+    """The layout gate must not be fooled by a shape the transform preserves.
+
+    This pins the gate itself: given a runtime dict, only the operands whose
+    shape actually changed decide. A load that supplies changes only in the
+    shape-preserving ``scales`` operand must still be classified as runtime.
+    """
+
+    from gptqmodel.nn_modules.qlinear._fused_train_state import (
+        state_dict_matches_checkpoint_layout,
+        state_dict_matches_runtime_layout,
+    )
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support {torch.bfloat16}")
+
+    holder, _x, _baseline = _transformed_layer(cls)
+    layer = holder.proj
+    runtime = {name: value.clone() for name, value in layer.state_dict().items()}
+    assert state_dict_matches_runtime_layout(layer, runtime)
+    assert not state_dict_matches_checkpoint_layout(layer, runtime)
+
+    checkpoint = {
+        name: layer._buffers[buffer_name].clone()
+        for name, buffer_name in layer._fused_train_state.items()
+    }
+    assert state_dict_matches_checkpoint_layout(layer, checkpoint)
+    assert not state_dict_matches_runtime_layout(layer, checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_accepts_partial_checkpoint_state(class_name, module_path, assign):
+    from tests.test_torch_weight_storage import state_tensors
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if torch.bfloat16 not in getattr(cls, "SUPPORTS_DTYPES", [torch.bfloat16]):
+        pytest.skip(f"{class_name} does not support bfloat16")
+    holder, x, baseline = _transformed_layer(cls)
+    layer = holder.proj
+    saved = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    missing = holder.load_state_dict({"proj.qweight": saved}, strict=False, assign=assign)
+    assert "proj.qzeros" in missing.missing_keys
+    assert torch.equal(layer.qweight, saved)
+    with torch.inference_mode():
+        actual = holder(x)
+        holder(x)
+    torch.testing.assert_close(actual.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+    assert all(tensor.numel() < layer.in_features * layer.out_features for tensor in state_tensors(layer))
+
+
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_keeps_partial_runtime_state(assign):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+    from tests.test_torch_weight_storage import state_tensors
+
+    holder, x, _ = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    updated = layer.qweight.clone()
+    updated.view(-1)[0] ^= 1
+    layer.load_state_dict({"qweight": updated}, strict=False, assign=assign)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert torch.equal(layer.qweight, updated)
+    with torch.inference_mode():
+        assert torch.isfinite(holder(x)).all()
+        holder(x)
+    assert all(tensor.numel() < layer.in_features * layer.out_features for tensor in state_tensors(layer))
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+
+@pytest.mark.parametrize("assign", (False, True))
+def test_transformed_cpu_layer_keeps_shared_shape_update(assign):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    holder, x, baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    updated = layer.scales.clone() * 2
+    layer.load_state_dict({"scales": updated}, strict=False, assign=assign)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert torch.equal(layer.scales, updated)
+    with torch.inference_mode():
+        actual = holder(x)
+    assert not torch.equal(actual, baseline)
+    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
+        get_state_dict_for_save(holder)
+
+
+def test_transformed_cpu_layer_rejects_mixed_layout_without_mutation():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_qweight = layer.qweight.clone()
+    checkpoint_qweight = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    with pytest.raises(RuntimeError, match="mixed or invalid CPU int4pack"):
+        layer.load_state_dict({"qweight": checkpoint_qweight, "qzeros": layer.qzeros.clone()}, strict=False)
+    assert torch.equal(layer.qweight, runtime_qweight)
+    assert layer._fused_train_state
+
+
+def test_empty_partial_load_does_not_restore_transformed_layer():
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+
+    holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
+    layer = holder.proj
+    runtime_shape = tuple(layer.qweight.shape)
+    layer.load_state_dict({}, strict=False)
+    assert tuple(layer.qweight.shape) == runtime_shape
+    assert layer._fused_train_state
+
+
+@pytest.mark.parametrize(
+    ("class_name", "module_path"),
+    (
+        ("TorchAtenLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel"),
+        ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
+        ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
+        ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
+        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
+        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+    ),
+)
+def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_path):
+    """Fusing CPU projections must not corrupt what ``save()`` writes.
+
+    ``FusionKernelSpec.prepare()`` finalizes sources outside their own
+    ``forward``, so it never hit the ``capture_fused_train_state`` call that a
+    plain inference forward makes. The fused group then published int4pack
+    shapes under the source checkpoint keys and the export path had no snapshot
+    to restore, so a fused model serialized a checkpoint that no fresh model
+    could load. ``fuse(False)`` inherited the same gap.
+    """
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.models.fusion import FusionDecision, _FusionGroup
+    from gptqmodel.utils.model import get_state_dict_for_save
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    dtype = torch.bfloat16
+    if not getattr(cls, "SUPPORTS_DTYPES", [dtype]) or dtype not in cls.SUPPORTS_DTYPES:
+        pytest.skip(f"{class_name} does not support {dtype}")
+
+    torch.manual_seed(31)
+    config = LlamaConfig(
+        hidden_size=512,
+        intermediate_size=1024,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=64,
+        attention_bias=True,
+        mlp_bias=True,
+    )
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    parent = model.model.layers[0].mlp
+    modules = []
+    for name in ("gate_proj", "up_proj"):
+        projection, _weight, _bias, _checkpoint = _projection(
+            cls, getattr(parent, name), dtype, "cpu"
+        )
+        setattr(parent, name, projection)
+        modules.append(projection)
+
+    def exported():
+        return {
+            name: tuple(entry.shape)
+            for name, entry in get_state_dict_for_save(model).items()
+            if name.endswith(("gate_proj.qweight", "gate_proj.qzeros", "gate_proj.scales"))
+        }
+
+    pristine = exported()
+    x = torch.randn(2, 7, 512, dtype=dtype)
+    with torch.inference_mode():
+        baseline = parent(x).clone()
+
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    try:
+        group.install()
+        # Install finalizes the sources and publishes fused views; the export
+        # must still describe the checkpoint it replaced.
+        assert exported() == pristine
+        with torch.inference_mode():
+            fused = parent(x).clone()
+        torch.testing.assert_close(fused.float(), baseline.float(), rtol=2e-3, atol=2e-3)
+        assert exported() == pristine
+    finally:
+        group.remove()
+
+    # Unfusing without an intervening export must land on checkpoint shapes too.
+    assert exported() == pristine
+    with torch.inference_mode():
+        restored = parent(x).clone()
+    torch.testing.assert_close(restored.float(), baseline.float(), rtol=2e-3, atol=2e-3)

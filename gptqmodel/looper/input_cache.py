@@ -187,6 +187,24 @@ def _xxh3_128_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _atomic_safetensors_file(path: Path, tensors: dict[str, torch.Tensor]) -> None:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as output:
+        temporary = Path(output.name)
+    try:
+        save_safetensors_file(tensors, temporary)
+        with temporary.open("rb") as source:
+            os.fsync(source.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _contained_path(root: Path, name: Any) -> Path:
     """Resolve a manifest-relative shard path and reject escapes."""
 
@@ -257,6 +275,8 @@ class DiskBackedLayerOutputSequence(Sequence[List[torch.Tensor]]):
 
     @classmethod
     def open(cls, root: str | os.PathLike, *, verify_hashes: bool = True):
+        """Optionally skip eager hashes; every later batch read still verifies its shard."""
+
         root = Path(root).resolve()
         manifest_path = root / "manifest.json"
         try:
@@ -317,13 +337,18 @@ class DiskBackedLayerOutputSequence(Sequence[List[torch.Tensor]]):
             raise IndexError(index)
         shard_index = index // self._shard_batches
         shard = self._shards[shard_index]
-        path = self.root / shard["path"]
+        path = _contained_path(self.root, shard["path"])
         with safe_open(path, framework="pt", device="cpu") as source:
             tensor = source.get_tensor(
                 "hidden"
                 if self._shard_batches == 1
                 else f"batch_{index:09d}"
             )
+        # open() checks the manifest's shards once, but replay may access a
+        # shard much later. Check the bytes read for this access before issuing
+        # its tensor to the caller, including sequences returned by finalize().
+        if _xxh3_128_file(path) != shard["xxh3_128"]:
+            raise ValueError("disk-backed layer output shard hash differs")
         expected_shape = tuple(shard["shapes"][index - int(shard["start"])])
         if tuple(tensor.shape) != expected_shape:
             raise ValueError("disk-backed layer output tensor shape differs")
@@ -338,6 +363,12 @@ class DiskBackedLayerOutputSequence(Sequence[List[torch.Tensor]]):
         diagnostic = TensorLifetimeDiagnostic.__new__(TensorLifetimeDiagnostic)
         diagnostic._issued_tensor_refs = self._issued_tensor_refs
         return diagnostic.lifetime_diagnostic()
+
+
+@dataclass(frozen=True)
+class _StagedLayerOutputBatch:
+    path: Path
+    xxh3_128: str
 
 
 class DiskBackedLayerOutputWriter:
@@ -367,7 +398,7 @@ class DiskBackedLayerOutputWriter:
         self.expected_batches = int(expected_batches)
         self.provenance = json.loads(json.dumps(provenance, sort_keys=True))
         self.shard_batches = int(shard_batches)
-        self._pending: dict[int, dict[int, torch.Tensor]] = {}
+        self._pending: dict[int, dict[int, torch.Tensor | _StagedLayerOutputBatch]] = {}
         self._shards: dict[int, dict[str, Any]] = {}
         self._committed_indices: set[int] = set()
         self._lock = threading.RLock()
@@ -398,6 +429,9 @@ class DiskBackedLayerOutputWriter:
             self._restore_progress(progress_path)
         else:
             self._write_progress()
+        # Only complete shards occur in progress.json. A previous run may have
+        # left uncommitted batch spills after abort or an interrupted put().
+        self._discard_uncommitted_stages()
 
     def __len__(self) -> int:
         return self.expected_batches
@@ -485,6 +519,24 @@ class DiskBackedLayerOutputWriter:
             self._shards[shard_index] = shard
             self._committed_indices.update(range(start, start + expected_count))
 
+    def _staged_batch_path(self, index: int) -> Path:
+        return self.temporary / f"pending-{index:09d}.safetensors"
+
+    def _discard_uncommitted_stages(self) -> None:
+        for pattern in ("pending-*.safetensors", ".pending-*.tmp"):
+            for path in self.temporary.glob(pattern):
+                path.unlink()
+
+    @staticmethod
+    def _pending_tensor(value: torch.Tensor | _StagedLayerOutputBatch) -> torch.Tensor:
+        if isinstance(value, torch.Tensor):
+            return value
+        with safe_open(value.path, framework="pt", device="cpu") as source:
+            tensor = source.get_tensor("hidden")
+        if _xxh3_128_file(value.path) != value.xxh3_128:
+            raise ValueError("disk-backed output pending batch hash differs")
+        return tensor
+
     def _flush_shard(self, shard_index: int) -> None:
         pending = self._pending.get(shard_index)
         if not pending:
@@ -496,44 +548,34 @@ class DiskBackedLayerOutputWriter:
             return
         filename = f"outputs-{shard_index:06d}.safetensors"
         final_path = self.temporary / filename
-        with tempfile.NamedTemporaryFile(
-            dir=self.temporary,
-            prefix=f".{filename}.",
-            suffix=".tmp",
-            delete=False,
-        ) as output:
-            temporary = Path(output.name)
-        try:
-            ordered = (
-                {"hidden": pending[start]}
-                if self.shard_batches == 1
-                else {
-                    f"batch_{index:09d}": pending[index]
-                    for index in range(start, start + count)
-                }
-            )
-            save_safetensors_file(ordered, temporary)
-            with temporary.open("rb") as source:
-                os.fsync(source.fileno())
-            os.replace(temporary, final_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        batches = [
+            self._pending_tensor(pending[index])
+            for index in range(start, start + count)
+        ]
+        ordered = (
+            {"hidden": batches[0]}
+            if self.shard_batches == 1
+            else {
+                f"batch_{index:09d}": batch
+                for index, batch in zip(range(start, start + count), batches)
+            }
+        )
+        _atomic_safetensors_file(final_path, ordered)
         record = {
             "path": filename,
             "start": start,
-            "shapes": [
-                list(pending[index].shape)
-                for index in range(start, start + count)
-            ],
-            "dtype": str(pending[start].dtype),
+            "shapes": [list(batch.shape) for batch in batches],
+            "dtype": str(batches[0].dtype),
             "bytes": final_path.stat().st_size,
             "xxh3_128": _xxh3_128_file(final_path),
         }
         self._shards[shard_index] = record
+        self._write_progress()
         self._committed_indices.update(expected_indices)
         del self._pending[shard_index]
-        self._write_progress()
+        for value in pending.values():
+            if isinstance(value, _StagedLayerOutputBatch):
+                value.path.unlink(missing_ok=True)
 
     def put(self, index: int, value: List[torch.Tensor]) -> None:
         with self._lock:
@@ -553,10 +595,17 @@ class DiskBackedLayerOutputWriter:
             if tensor.ndim == 0 or int(tensor.shape[0]) <= 0:
                 raise ValueError("disk-backed output batch has no rows")
             shard_index = index // self.shard_batches
-            pending = self._pending.setdefault(shard_index, {})
-            if index in pending:
+            pending = self._pending.get(shard_index)
+            if pending is not None and index in pending:
                 raise RuntimeError("disk-backed output batch was written twice")
-            pending[index] = tensor
+            # A one-batch shard flushes immediately. Multi-batch shards spill
+            # each arrival, so many incomplete shards cannot retain activations.
+            pending_value: torch.Tensor | _StagedLayerOutputBatch = tensor
+            if self.shard_batches > 1:
+                path = self._staged_batch_path(index)
+                _atomic_safetensors_file(path, {"hidden": tensor})
+                pending_value = _StagedLayerOutputBatch(path, _xxh3_128_file(path))
+            self._pending.setdefault(shard_index, {})[index] = pending_value
             self._flush_shard(shard_index)
 
     def append(self, value: List[torch.Tensor]) -> None:
@@ -565,7 +614,7 @@ class DiskBackedLayerOutputWriter:
             index = len(self._committed_indices) + sum(
                 len(values) for values in self._pending.values()
             )
-        self.put(index, value)
+            self.put(index, value)
 
     def finalize(self) -> DiskBackedLayerOutputSequence:
         with self._lock:
@@ -615,3 +664,4 @@ class DiskBackedLayerOutputWriter:
         with self._lock:
             self._pending.clear()
             self._closed = True
+            self._discard_uncommitted_stages()

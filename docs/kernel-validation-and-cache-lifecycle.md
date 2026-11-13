@@ -41,19 +41,32 @@ stateDiagram-v2
     state "Inference fused" as Fused
     state "Training dense" as Training
 
-    Packed --> Fused: eval forward
+    Packed --> Fused: eval forward or fusion
     Fused --> Training: train true
     Fused --> Packed: device or dtype move
-    Fused --> Fused: state load rebuilds derived cache
+    Fused --> Packed: checkpoint save
+    Fused --> Packed: checkpoint-shaped load
+    Fused --> Fused: runtime-layout load rebuilds derived cache
     Training --> Packed: train false
 ```
 
 `capture_fused_train_state` stores only the checkpoint's packed `qweight`,
-`qzeros`, and `scales`. `restore_fused_train_state` restores those tensors when
-training resumes or a device/dtype move reaches `clear_weight_cache`. The
-snapshot is registered as non-persistent buffers so it follows the same move
-and dtype conversion, contains packed state, and is discarded after restoration
-or before a state-dict load.
+`qzeros`, and `scales`; the AVX512 kernels also keep the `bias` they widen to
+FP32. It runs from an inference forward and from `FusionKernelSpec.prepare()`,
+because fusion finalizes sources without going through their `forward`.
+`restore_fused_train_state` restores those tensors when training resumes, a
+device/dtype move reaches `clear_weight_cache`, or an export restores the
+checkpoint layout. The snapshot is registered as non-persistent buffers so it
+follows the same move and dtype conversion, contains packed state, and never
+appears in `state_dict()`.
+
+The int4pack runtime layout shares the checkpoint's keys but not its shapes, so
+the checkpoint could not be serialized or reloaded while a layer was
+transformed. `get_state_dict_for_save()` therefore restores every transformed
+module before collecting tensors, and `_load_from_state_dict()` restores first
+when the incoming tensors match the checkpoint shapes. A state dict that
+matches the live int4pack operands is the model's own runtime dict; it keeps the
+existing self-round-trip behavior and only rebuilds derived caches.
 
 ## Derived cache invalidation
 

@@ -87,10 +87,9 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_warning_logged = False
 
     def post_init(self):
-        if self.scales is not None and self.scales.dtype not in (torch.float16, torch.bfloat16):
-            self.scales = self.scales.to(dtype=torch.float16)
-        if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16):
-            self.bias = self.bias.to(dtype=torch.float16)
+        # `scales` and `bias` keep the precision they were loaded with. The
+        # activation dtype is applied to temporary operands inside `forward`,
+        # never written back to the stored buffers.
         self.clear_weight_cache()
         super().post_init()
 
@@ -120,11 +119,13 @@ class AwqTorchLinear(AWQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros.float() * scales.float()
 
-        scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
-        self.register_buffer("scales", scales.clone().to(scale_dtype))
+        # Torch AWQ converts scales for each forward, so packing need not
+        # narrow a source scale before writing the checkpoint.
+        self.register_buffer("scales", scales.clone())
         if linear.bias is not None:
-            bias_dtype = linear.bias.dtype if linear.bias.dtype in (torch.float16, torch.bfloat16) else scale_dtype
-            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
+            # The bias is added after a wide reduction, so keep the source
+            # precision even when AWQ scales are stored in half precision.
+            self.register_buffer("bias", linear.bias.clone())
         else:
             self.bias = None
 
@@ -142,13 +143,33 @@ class AwqTorchLinear(AWQuantLinear):
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)
 
-    def _ensure_runtime_dtype(self, *, device: torch.device, dtype: torch.dtype) -> None:
-        if self.scales.device != device or self.scales.dtype != dtype:
-            self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
-        if self.bias is not None and (
-            self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
-        ):
-            self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+    def _scales_for_compute(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Return the stored scales converted for this computation only.
+
+        ``self.scales`` keeps the checkpoint dtype. Rewriting it in place to
+        the activation dtype (the previous behavior) permanently rounded the
+        stored precision, so a later forward with another dtype, or a re-saved
+        checkpoint, could no longer recover the original scale. A BF16 scale
+        below the FP16 subnormal range became zero this way.
+        """
+        scales = self.scales
+        if scales.device != device or scales.dtype != dtype or not scales.is_contiguous():
+            scales = scales.to(device=device, dtype=dtype).contiguous()
+        return scales
+
+    def _bias_for_compute(self, *, device: torch.device) -> torch.Tensor | None:
+        """Return the bias on ``device`` without narrowing its stored dtype.
+
+        ``matmul_fp32_reduce`` adds a bias that is wider than the activation
+        dtype after a wide reduction, so the checkpoint value is never rounded
+        (or overflowed) before it cancels the product.
+        """
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != device or not bias.is_contiguous():
+            bias = bias.to(device=device).contiguous()
+        return bias
 
     def _dequantize_weight_for_inference(
         self,
@@ -156,15 +177,20 @@ class AwqTorchLinear(AWQuantLinear):
         *,
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        # `dequantize_gemm` multiplies the integer codes by the scales, so the
+        # weight follows the temporary scale dtype. The Torch AWQ forward uses
+        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # Keep FP32 scales in FP32 there: a half intermediate could underflow
+        # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self.scales,
+            scales=self._scales_for_compute(device=x_flat.device, dtype=dtype),
             bits=self.bits,
             group_size=self.group_size,
         )
-        if weight.dtype not in (torch.float16, torch.bfloat16):
-            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise AssertionError(f"weight {weight.dtype} is not float16, bfloat16, or float32")
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight
@@ -276,14 +302,12 @@ class AwqTorchLinear(AWQuantLinear):
         elif not x_flat.is_contiguous():
             x_flat = x_flat.contiguous()
 
-        self._ensure_runtime_dtype(device=device, dtype=compute_dtype)
-
         # This is the portable/reference AWQ implementation.  Its arithmetic
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
         # Subclasses such as ParoQuant use the shared dequantize helper.
         weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = matmul_fp32_reduce(x_flat, weight, bias=self.bias)
+        output = matmul_fp32_reduce(x_flat, weight, bias=self._bias_for_compute(device=device))
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

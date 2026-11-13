@@ -28,6 +28,7 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.planar_packing import (
     PLANAR_BITS,
+    planar_decode_rows,
     planar_pack_cols,
     planar_pack_rows,
     planar_unpack_cols,
@@ -54,6 +55,25 @@ def test_planar_rows_roundtrip(bits: int):
     assert packed.dtype == torch.int32
     assert packed.shape == (160 * bits // 32, 48)
     assert torch.equal(planar_unpack_rows(packed, bits), codes)
+
+
+@pytest.mark.parametrize("bits", PLANAR_BITS)
+def test_planar_row_decode_matches_index_select(bits: int):
+    torch.manual_seed(bits + 100)
+    codes = _rand_codes(160, 48, bits)
+    packed = planar_pack_rows(codes, bits)
+    expected = planar_unpack_rows(packed, bits)
+
+    # Every row, a shuffled subset, repeated rows, and the endpoints.
+    for row_ids in (
+        torch.arange(160),
+        torch.randperm(160)[:37],
+        torch.tensor([0, 0, 31, 32, 63, 96, 159]),
+        torch.empty(0, dtype=torch.long),
+    ):
+        got = planar_decode_rows(packed, row_ids, bits)
+        assert got.shape == (row_ids.numel(), 48)
+        assert torch.equal(got, expected.index_select(0, row_ids))
 
 
 @pytest.mark.parametrize("bits", PLANAR_BITS)

@@ -112,6 +112,40 @@ def planar_unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
     return result.reshape(blocks * _WORD_BITS, cols).to(torch.int32)
 
 
+def planar_decode_rows(packed: torch.Tensor, row_ids: torch.Tensor, bits: int) -> torch.Tensor:
+    """Decode only `row_ids` logical rows from `[n * bits // 32, cols]` int32 words.
+
+    Equivalent to ``planar_unpack_rows(packed, bits).index_select(0, row_ids)``
+    but reads only the words that back the requested rows, so a lookup of a few
+    rows does not materialize the whole table. Every plane word holds whole
+    fields, so a row is decoded from at most one word per plane.
+    """
+    _require_planar_bits(bits)
+    _require_int32_words(packed.dtype)
+    rows, cols = packed.shape
+    if rows % bits != 0:
+        raise ValueError(
+            f"planar {bits}-bit qweight expects rows divisible by {bits}, got shape {tuple(packed.shape)}"
+        )
+    if row_ids.numel() == 0:
+        return torch.empty((0, cols), dtype=torch.int32, device=packed.device)
+
+    block_ids = torch.div(row_ids, _WORD_BITS, rounding_mode="floor").to(torch.long)
+    offsets = row_ids.remainder(_WORD_BITS).to(torch.long)
+
+    codes = torch.zeros((row_ids.numel(), cols), dtype=torch.int64, device=packed.device)
+    plane_row = 0
+    for width, bit_offset in _PLANES[bits]:
+        pack_factor = _WORD_BITS // width
+        word_ids = block_ids * bits + plane_row + torch.div(offsets, pack_factor, rounding_mode="floor")
+        shifts = (offsets.remainder(pack_factor) * width).view(-1, 1)
+        values = packed.index_select(0, word_ids).to(torch.int64)
+        codes |= ((values >> shifts) & ((1 << width) - 1)) << bit_offset
+        plane_row += width
+
+    return codes.to(torch.int32)
+
+
 def planar_pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype = torch.int32) -> torch.Tensor:
     """Pack `[rows, n]` logical codes along dim 1 into `[rows, n * bits // 32]` int32 words."""
     _require_planar_bits(bits)

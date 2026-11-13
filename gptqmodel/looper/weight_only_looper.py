@@ -25,6 +25,7 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.loop_processor import CalibrationConfig
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
@@ -52,6 +53,7 @@ from ..utils.looper_helpers import (
     find_last_quantized_layer_index,
     move_module_to_device,
     normalize_device_like,
+    plan_layer_count,
     select_forward_devices,
 )
 from ..utils.model import (
@@ -948,18 +950,23 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             preprocessor = ModulePreProcessor(
                 tokenizer=self.gptq_model.tokenizer,
                 qcfg=quant_config,
-                calibration=None,
-                prepare_dataset_func=None,
-                calibration_concat_size=None,
-                calibration_sort=None,
-                calibration_concat_separator=None,
-                batch_size=1,
+                calibration=CalibrationConfig(),
             )
 
+        last_quantized_layer_index = find_last_quantized_layer_index(
+            self.gptq_model.quantize_config,
+            layer_modules=layer_modules,
+            layer_names=layer_names,
+            layer_count=layer_count,
+        )
+        planned_layer_count = plan_layer_count(
+            layer_count,
+            last_quantized_layer_index,
+        )
         try:
             plan = LoopPlan(tuple(
                 LoopStep("layer", index, get_layer_name(layer_names, index))
-                for index in range(layer_count)
+                for index in range(planned_layer_count)
             ) + ((LoopStep("lm_head", layer_count, lm_head_name),) if quant_lm_head_in_loop else ()))
             start_step = self.extensions.start(LoopContext(
                 plan, self.gptq_model, (self.processor,), {}, self,
@@ -971,16 +978,6 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 self.processor.finalize(model=self.gptq_model)
                 self.gptq_model._model_free_weight_only_replacements_only = True
                 return total_log
-
-            # Trailing layers whose tracked modules are all dynamically excluded never
-            # need another forward or finalize pass, so the loop can stop once the
-            # final eligible layer has been processed.
-            last_quantized_layer_index = find_last_quantized_layer_index(
-                self.gptq_model.quantize_config,
-                layer_modules=layer_modules,
-                layer_names=layer_names,
-                layer_count=layer_count,
-            )
 
             for progress_index in range(len(embedding_targets), total_layers):
                 layer_index = progress_index - len(embedding_targets)

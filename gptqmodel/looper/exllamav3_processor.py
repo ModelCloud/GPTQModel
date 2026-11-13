@@ -30,8 +30,11 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    ExecutionConfig,
+    CalibrationConfig,
+    CheckpointSupport,
+    ForwardConfig,
     LoopProcessor,
+    ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -670,26 +673,25 @@ def clone_exllamav3_config_for_module(
     if not qcfg.module_is_included(module_full_name):
         return None
 
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    resolved_cfg = qcfg.resolve_module_config(module_full_name)
+    if resolved_cfg.excluded:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = qcfg.dynamic_get(
-            module_full_name, "head_bits", qcfg_clone.head_bits
-        )
+        qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
+        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
-        out_scales_override = qcfg.dynamic_get(module_full_name, "out_scales", None)
+        out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
             qcfg_clone.out_scales = out_scales_override
 
-        codebook_override = qcfg.dynamic_get(module_full_name, "codebook", None)
+        codebook_override = resolved_cfg.get("codebook", None)
         if codebook_override is not None:
             qcfg_clone.codebook = codebook_override
 
-        calibration_override = qcfg.dynamic_get(module_full_name, "calibration", None)
+        calibration_override = resolved_cfg.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
@@ -700,17 +702,21 @@ def clone_exllamav3_config_for_module(
 class EXL3Processor(LoopProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
-        require_fwd: bool = True,
-        calibration_concat_separator: Optional[str] = None,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
         lm_head_name: str = "lm_head",
     ):
         """Initializes EXL3 processing and tracks the lm_head naming convention."""
@@ -719,16 +725,7 @@ class EXL3Processor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=True,
-                subset_forward_early_stop=True,
-            ),
+            forward=forward,
         )
 
         self.avg_losses = []
@@ -2141,7 +2138,7 @@ class EXL3Processor(LoopProcessor):
                 )
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
-        """Builds the capture task and effective EXL3 config for one module."""
+        """Builds the capture task and resolved EXL3 config for one module."""
 
         del fallback, kwargs
 

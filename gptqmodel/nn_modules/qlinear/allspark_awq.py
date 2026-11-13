@@ -12,8 +12,14 @@ per-group zero point, so both share one kernel:
 The AWQ tensors are unpacked with the shared AWQ packer helpers, then repacked
 into the fragment order of the active extension: the WMMA order in
 ``gptqmodel_ext/allspark_hip`` on ROCm, the N32K16 order in
-``gptqmodel_ext/allspark`` on CUDA. Only the packed form is retained; the dense
-weight never exists outside ``post_init``.
+``gptqmodel_ext/allspark`` on CUDA. The dense weight never exists outside
+``post_init``.
+
+``qweight``/``qzeros``/``scales`` remain registered as the canonical
+checkpoint layout; ``qweight_packed``/``scales_packed``/``zeros_packed`` are a
+non-persistent derived cache keyed on them. Deleting the checkpoint tensors
+would drop the weight out of ``state_dict()``/``get_state_dict_for_save()`` and
+break a strict reload of the checkpoint the module was loaded from.
 
 The two kernels apply the zero point at different points, which is the one
 device-specific detail here:
@@ -49,6 +55,7 @@ from ...utils.allspark_hip import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -137,13 +144,30 @@ class AllSparkAwqLinear(AWQuantLinear):
         if register_buffers:
             if self.scales is not None and self.scales.dtype != self.compute_dtype:
                 self.scales = self.scales.to(dtype=self.compute_dtype)
-            if self.bias is not None and self.bias.dtype != self.compute_dtype:
-                self.bias = self.bias.to(dtype=self.compute_dtype)
+            # Keep a checkpoint bias at its stored width: the kernel adds it to
+            # the FP32 accumulator, so narrowing an FP32 -65536 to FP16 -inf
+            # here would defeat the wide epilogue.
+            if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                self.bias = self.bias.to(dtype=torch.float32)
         self._repacked = False
+        self._packed_key = None
         # Pick the kernel family once. The two extensions use different packed
         # layouts (WMMA fragments on ROCm, N32K16 on CUDA), and pairing a buffer
         # with the wrong kernel yields garbage rather than an error.
         self._hip = IS_ROCM
+
+    def _apply(self, fn, recurse=True):
+        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        bias = getattr(self, "bias", None)
+        if bias is None or bias.dtype != torch.float32:
+            return super()._apply(fn, recurse=recurse)
+
+        def preserve_bias_width(tensor):
+            if tensor is bias:
+                return fn(tensor.view(torch.uint8)).view(torch.float32)
+            return fn(tensor)
+
+        return super()._apply(preserve_bias_width, recurse=recurse)
 
     @property
     def _kernel_group_size(self) -> int:
@@ -177,10 +201,10 @@ class AllSparkAwqLinear(AWQuantLinear):
         scale_dtype = self.scales.dtype if getattr(self, "scales", None) is not None else self.compute_dtype
         self.register_buffer("scales", scales.clone().to(scale_dtype))
         if linear.bias is not None:
-            bias_dtype = (linear.bias.dtype
-                          if linear.bias.dtype in (torch.float16, torch.bfloat16)
-                          else scale_dtype)
-            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
+            # Keep the source width; an FP32 bias must stay FP32 through the
+            # kernel's FP32 epilogue instead of narrowing to the activation
+            # dtype first.
+            self.register_buffer("bias", linear.bias.clone())
         else:
             self.bias = None
 
@@ -194,12 +218,51 @@ class AllSparkAwqLinear(AWQuantLinear):
         qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)
+        # A re-pack replaces the checkpoint tensors, so any kernel layout built
+        # from the previous ones is stale.
+        self.clear_weight_cache()
 
     @torch.no_grad()
     def post_init(self):
-        if self._repacked:
-            return
+        """Build (or refresh) the kernel-layout cache from the checkpoint tensors."""
+        self._ensure_repacked()
 
+    def _source_key(self):
+        """Identity/version key of the checkpoint tensors this cache derives from."""
+        return (
+            tensor_cache_key(getattr(self, "qweight", None)),
+            tensor_cache_key(getattr(self, "qzeros", None)),
+            tensor_cache_key(getattr(self, "scales", None)),
+        )
+
+    def packed_ready(self) -> bool:
+        """Report whether the derived kernel layout matches the current sources."""
+        return bool(
+            self._repacked
+            and self._packed_key is not None
+            and self._packed_key == self._source_key()
+        )
+
+    def clear_weight_cache(self) -> None:
+        """Invalidate the derived kernel layout; the checkpoint stays authoritative.
+
+        ``BaseQuantLinear`` calls this after ``load_state_dict`` and on
+        device/dtype moves. The packed buffers are kept so a fused group's
+        shared views stay alive; the next forward re-derives them from the
+        checkpoint tensors that just moved or changed.
+        """
+        self._repacked = False
+        self._packed_key = None
+
+    @torch.no_grad()
+    def _ensure_repacked(self) -> None:
+        key = self._source_key()
+        if self._repacked and self._packed_key == key:
+            return
+        self._repack(key)
+
+    @torch.no_grad()
+    def _repack(self, key=None) -> None:
         self.validate_device(self.qweight.device)
         # Honor dtype moves performed after construction, before repacking.
         scales = self.scales.data.reshape(-1, self.out_features).contiguous()
@@ -230,16 +293,16 @@ class AllSparkAwqLinear(AWQuantLinear):
         self.register_buffer("scales_packed", packed_scales, persistent=False)
         self.register_buffer("zeros_packed", packed_zeros, persistent=False)
         self._repacked = True
-        del self.qweight, self.qzeros, self.scales
-        self.qweight = None
-        self.qzeros = None
-        self.scales = None
+        self._packed_key = self._source_key() if key is None else key
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self._repacked:
-            self.post_init()
+        # Versioned checkpoint tensors reveal in-place writes. Inference-mode
+        # tensors need an explicit clear_weight_cache() after mutation.
+        if not self.packed_ready():
+            self._ensure_repacked()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features).contiguous()
+        bias = getattr(self, "bias", None)
         if self._hip:
             out = allspark_hip_gemm(
                 x2d,
@@ -248,6 +311,7 @@ class AllSparkAwqLinear(AWQuantLinear):
                 self.out_features,
                 b_qzeros=self.zeros_packed,
                 group_size=self._kernel_group_size,
+                bias=bias,
             )
         else:
             out = allspark_gemm(
@@ -256,9 +320,6 @@ class AllSparkAwqLinear(AWQuantLinear):
                 self.scales_packed,
                 self.out_features,
                 b_qzeros=self.zeros_packed,
+                bias=bias,
             )
-        out = out.reshape(shape)
-        bias = getattr(self, "bias", None)
-        if bias is not None:
-            out = out + bias
-        return out.to(x.dtype)
+        return out.reshape(shape).to(x.dtype)

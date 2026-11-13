@@ -564,3 +564,101 @@ def test_midpoint_adjudication_rejects_non_ties(invalid):
     else:
         with pytest.raises(AssertionError):
             _assert_visible_midpoint_neighbors(out, raw, ref, f"negative control {invalid}", **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Bias epilogue
+# ---------------------------------------------------------------------------
+# The bias must join the FP32 accumulator before the single narrowing cast.
+# Adding it to the returned FP16/BF16 tensor rounds (and overflows) the partial
+# sum first: with 4096 unit weights and 16-valued activations the product is
+# 65536, which is already `inf` in FP16, so the finite bias result 32768 is lost.
+
+
+def _unit_weight_case(n: int, k: int, m: int, dtype: torch.dtype):
+    """Every weight is exactly 1.0 in GPTQ 8-bit (code 255, scale 1/127)."""
+    codes = torch.full((k, n), 255, dtype=torch.uint8, device="cuda")
+    scales = torch.full((n,), 1.0 / 127.0, dtype=dtype, device="cuda")
+    a = torch.full((m, k), 16.0, dtype=dtype, device="cuda")
+    return codes, scales, a
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bias_dtype", [None, torch.float32])
+def test_bias_added_before_output_rounding(dtype, bias_dtype):
+    """FP16 `65536 + (-32768)` is `32768`; a narrowed partial sum is `inf`."""
+    n, k, m = 128, 4096, 2
+    codes, scales, a = _unit_weight_case(n, k, m, dtype)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
+    wanted = bias_dtype or dtype
+    bias = torch.full((n,), -32768.0, dtype=wanted, device="cuda")
+    out = allspark_hip_gemm(a, packed, packed_scales, n, bias=bias)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all(), "bias was added after the FP16/BF16 rounding"
+    expected = torch.full_like(out, 16.0 * k - 32768.0)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_bias_matches_fp64_oracle_with_splitk_and_fallback(dtype):
+    """Ordinary biases must match the oracle through both execution paths."""
+    for m in (1, 4, 16, 32):
+        n, k = 256, 4096
+        codes, scales, a = _make_case(n, k, m, dtype, seed=900 + m)
+        packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
+        gen = torch.Generator(device="cuda").manual_seed(900 + m)
+        bias = (torch.randn(n, device="cuda", dtype=torch.float32, generator=gen) * 3).to(dtype)
+        out = allspark_hip_gemm(a, packed, packed_scales, n, bias=bias)
+        ref = _oracle(codes, scales, a, dtype) + bias.to(torch.float64)[None, :]
+        assert out.dtype == dtype
+        torch.testing.assert_close(out, ref.to(dtype), rtol=RTOL, atol=ATOL)
+
+
+def test_bias_rejected_for_wrong_shape_and_device():
+    n, k, m = 128, 256, 2
+    dtype = torch.float16
+    codes, scales, a = _make_case(n, k, m, dtype, seed=901)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
+    with pytest.raises(ValueError, match="one element per output channel"):
+        allspark_hip_gemm(a, packed, packed_scales, n, bias=torch.zeros(n - 1, device="cuda"))
+    with pytest.raises(ValueError, match="activation device"):
+        allspark_hip_gemm(a, packed, packed_scales, n,
+                          bias=torch.zeros(n, dtype=torch.float16))
+    with pytest.raises(ValueError, match="float16, bfloat16 or float32"):
+        allspark_hip_gemm(a, packed, packed_scales, n,
+                          bias=torch.zeros(n, dtype=torch.float64, device="cuda"))
+    # A 16-bit bias of the other dtype is widened losslessly to FP32 instead of
+    # being silently read with the wrong element size.
+    other = torch.bfloat16 if dtype is torch.float16 else torch.float16
+    out = allspark_hip_gemm(a, packed, packed_scales, n,
+                            bias=torch.zeros(n, dtype=other, device="cuda"))
+    assert out.dtype == dtype and torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_bias_does_not_expand_persistent_storage(dtype):
+    """The bias is applied in the epilogue; no dense or wide weight is retained."""
+    n, k, m = 256, 256, 4
+    codes, scales, a = _make_case(n, k, m, dtype, seed=902)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
+    module = _HipLinear(packed, packed_scales, n)
+    module.bias = bias
+    del codes, scales
+    baseline = _tensor_bytes(module)
+    for _ in range(3):
+        out = allspark_hip_gemm(a, packed, packed_scales, n, bias=bias)
+        assert out.dtype == dtype
+        torch.cuda.synchronize()
+        assert _tensor_bytes(module) == baseline
+    # The prefill fallback (M > 16) builds only per-call temporaries for the
+    # dense weight and the wide product.
+    torch.cuda.synchronize()
+    gc.collect()
+    before = torch.cuda.memory_allocated()
+    prefill = allspark_hip_gemm(a.repeat(8, 1), packed, packed_scales, n, bias=bias)
+    torch.cuda.synchronize()
+    assert prefill.dtype == dtype and torch.isfinite(prefill).all()
+    del prefill
+    gc.collect()
+    assert torch.cuda.memory_allocated() == before

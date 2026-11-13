@@ -82,8 +82,11 @@ GPT-QModel provides a consistent API for calibration, quantization, quality eval
 Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
 
 GPTQ Hessian capture and repeated finalization are described in the [Hessian accumulation flow](docs/gptq-hessian-accumulation.md).
+Disk-backed replay outputs use [bounded staging and shard verification on every read](docs/looper-checkpoint-redesign.md#disk-backed-layer-output-staging-and-reads).
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
+Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
+GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
 The legacy `GPTQ_TORCH_CACHE_WEIGHTS` / `GPTQ_TORCH_LOOKAHEAD` flags and
@@ -96,6 +99,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
+page explains how a token lookup reads only its packed rows, why small tables
+and large token counts still use whole-table decode, and what that means for
+packed-weight storage.
 The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
 documents wide streaming reductions, bias before low-precision output
 rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
@@ -105,6 +112,9 @@ documents fused low-precision bias addition and FP32 checkpoint bias handling.
 The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
 reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
 failure paths in one place.
+The [AllSpark W8A16 bias epilogue](docs/allspark-bias-epilogue.md)
+documents how the CUDA and RDNA4 kernels add a checkpoint bias to the
+FP32 accumulator before output rounding.
 The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
 documents weight update invalidation and the explicit-clear contract for
 inference tensors.
@@ -139,12 +149,13 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
+The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts. Expert cardinality follows the same rule: a `#` placeholder expands only when the definition declares `dynamic_expert_index` and the owning config node resolves it, so **[expert cardinality resolution](docs/model-tree-resolution.md#expert-cardinality-resolution)** covers that step and why a surviving placeholder is a silent miss.
 
 Use the **[module-plan guide](docs/module-plan-guide.md)** for `model.module_plan()`, terminal/JSON inspection, model-definition tags, and the required new-model tests. The **[DeepSeek V4.1 Flash inventory](docs/deepseek-v41-module-inventory.md)** shows its verified checkpoint structure and remaining integration requirements.
 
-The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `FusableConfig` and uses the compiled module plan for opt-in post-quantization QKV and gate/up fusion. The [model qualification matrix](docs/fusion-model-coverage.md) lists validated profiles for 101 model types and explicit qualification gaps for the remaining registry entries. Definitions reuse immutable role profiles with `FusableConfig("qwen2").merge(LlamaFusableConfig())`; concrete paths and parents resolve exclusively from the compiled tree, with no HF class-path allowlist; unqualified model types raise when fusion is requested. Fusion is disabled by default. Use `plan = model.fuse()` to apply it and receive the plan, `plan.print()` or `plan.to_dict()` to inspect eligibility and skip reasons, and `model.fuse(False)` to disable it and return `None`. Original projection weights become views into the fused packed storage, preserving checkpoint keys without retaining duplicate weights. AUTO retains native ATen/AVX512 on CPU, Marlin on NVIDIA, and eligible Torch/Triton paths on AMD. See [CPU, CUDA and ROCm validation](docs/fusion-device-validation.md) and the [complete kernel inventory](docs/fusion-kernel-inventory.md) for tested native backends, dtypes, accuracy results and explicit exclusions.
+The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `FusableConfig` and uses the compiled module plan for opt-in post-quantization QKV and gate/up fusion. The [model qualification matrix](docs/fusion-model-coverage.md) lists validated profiles for 101 model types and explicit qualification gaps for the remaining registry entries. Definitions reuse immutable role profiles with `FusableConfig("qwen2").merge(LlamaFusableConfig())`; concrete paths and parents resolve exclusively from the compiled tree, with no HF class-path allowlist; unqualified model types raise when fusion is requested. Fusion is disabled by default. Use `plan = model.fuse()` to apply it and receive the plan, `plan.print()` or `plan.to_dict()` to inspect eligibility and skip reasons, and `model.fuse(False)` to disable it and return `None`. Original projection weights become views into the fused packed storage, preserving checkpoint keys without retaining duplicate weights. AUTO retains native ATen/AVX512 on CPU, Marlin on NVIDIA, and eligible Torch/Triton paths on AMD. See [CPU, CUDA and ROCm validation](docs/fusion-device-validation.md), the [complete kernel inventory](docs/fusion-kernel-inventory.md), and the [ExLlamaV2 descriptor lifecycle](docs/exllamav2-descriptor-lifecycle.md) for native handle ownership and cache invalidation.
 
 | Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
 |---------------------------|------------|---|---|---|---------------|
@@ -210,7 +221,8 @@ and reorders activations only when the `g_idx` permutation is not the identity;
 `BACKEND.AWQ_TORCH_FUSED` uses the same packed layout without a `g_idx`
 activation reorder. See
 [Torch Fused INT4 transformations](docs/torch_fused_int4_transformations.md)
-for asymmetric GPTQ zero-point offsets, packing, and activation-reorder contracts.
+for asymmetric GPTQ zero-point offsets, packing, activation-reorder contracts,
+and the checkpoint-layout restore versus runtime `state_dict()` round-trip.
 
 `BACKEND.QQQ_TORCH` uses the same packed INT4 CPU layout with a QQQ-specific
 integer GEMM that preserves round-to-nearest-even and INT8 saturation for
@@ -232,7 +244,9 @@ columns at a time and never retains a dense dequantized weight;
 Native backend availability, shape validation, wide activation inputs, and
 derived cache invalidation follow the
 [kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
-contract.
+contract. Opt-in AllSpark W8A16 keeps its GPTQ/AWQ checkpoint tensors
+authoritative and its N32K16/WMMA kernel layout a derived cache; see
+[AllSpark checkpoint layout](docs/allspark-checkpoint-layout.md).
 
 Tenstorrent Blackhole cards use an explicit `DEVICE.XLA` family and a packed
 4-bit kernel. `XLALinear` runs through Torch/XLA and the TT PJRT plugin, and the
@@ -256,6 +270,8 @@ GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `M
 AWQ FP16 boundary staging and packed decode follow the [AWQ affine range contract](docs/awq-affine-range.md).
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
+The [Marlin device-profile validator](docs/marlin-device-profile-validation.md)
+checks device ordinals before asking Torch or the extension for a profile.
 
 On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
 loads one Tensile library per (dtype, layout) pair on first use, and those one-time loads
@@ -731,8 +747,9 @@ raise `CheckpointStopped`. A hard kill resumes from the last published layer;
 the unfinished layer is repeated. Resume validation requires the same source
 weights, calibration data, quantization settings, software versions, and device
 topology. Current checkpoint support is limited to Llama and Qwen3 MoE model
-types, requires `offload_to_disk=True`, and does not yet support dynamic
-exclusions, rotation, or embedding/`lm_head` quantization.
+types, requires `offload_to_disk=True`, and supports per-module dynamic
+overrides and exclusions. Rotation and embedding/`lm_head` quantization remain
+unsupported.
 
 See **[Quantization checkpointing and resume](checkpoint.md)** for resume
 policies, supported methods, safe-stop behavior, storage requirements, recovery
@@ -955,6 +972,8 @@ model.save(quant_path)
 The packed weight is saved as `nf12_packed` (uint8, `N x K*3/2`) with
 `nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
 checkpoint rather than a dense weight.
+The [four-copy embedding path](docs/nf12-embedding-repeat4.md) decodes one
+packed row and writes the initial hyper-connection activations in one launch.
 
 The [NF12 validation backend and performance flow](docs/nf12-validation-backends.md)
 explains device selection, native encoder measurements, and Torch fallback.
@@ -962,6 +981,10 @@ The [NF12 fallback epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype
 bias handling and BF16 weight-range preservation before output rounding.
 The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
 how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
+The [NF12 staged B1 and prefill projection flow](docs/nf12-staged-b1-projections.md) explains
+the verifier-row fusion, prepared compressed FP32 router view, and Ampere profile.
+The [NF12 embedding prefill dispatch](docs/nf12-embedding-prefill-dispatch.md) records
+the SM80 packed lookup geometry, exact-row contract, and observed Lite shapes.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
 layout normalization, routing bounds, and exact-byte encoder scheduling.
@@ -1117,6 +1140,8 @@ Modules that consume the *same* activation tensor (e.g. `q_proj`/`k_proj`/`v_pro
 Only add `:in=` tags after verifying them against a real (tiny, CPU) model with `gptqmodel.models.shared_input.probe_shared_inputs(layer, plan, forward)`; it hooks every planned module, runs `forward`, and reports groups whose inputs differ (`mismatches`), identical inputs that were not declared (`undeclared`), planned modules that do not exist (`missing_modules`) and groups that never ran (`unverified`, e.g. un-routed experts). `report.ok` is strict (`fully_verified`); use `has_errors` when un-routed experts are expected. See `tests/module_tree/test_shared_input*.py` for the covered definitions.
 
 ### Pair with Evaluation for post-quantization LLM Benchmarks 📊
+
+For kernel timing claims, follow the [A/B benchmark methodology](docs/benchmark-methodology.md).
 
 GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a benchmarking toolkit with 153 benchmark suites.
 Use Evalution to measure post-quantization accuracy recovery instead of relying only on narrow regression language-model metrics.

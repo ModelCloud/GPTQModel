@@ -13,8 +13,12 @@ Two device paths share this module and the ``allspark`` backend:
 
 The packed weight layout is *not* interchangeable between them: the CUDA
 kernel tiles N in 32-column blocks, the WMMA port pads N to 128. ``post_init``
-picks the matching repack, and ``qweight_packed``/``scales_packed`` are
-non-persistent buffers so a checkpoint never carries the wrong layout.
+picks the matching repack. The checkpoint-format ``qweight``/``scales`` stay
+registered as the canonical, exportable state; ``qweight_packed`` and
+``scales_packed`` are a non-persistent *derived* cache keyed on those tensors.
+A checkpoint therefore never carries the wrong layout, and ``state_dict()``,
+``get_state_dict_for_save()`` and ``load_state_dict()`` keep describing the
+checkpoint the module was loaded from.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from ...utils.allspark_hip import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -151,19 +156,72 @@ class AllSparkLinear(GPTQQuantLinear):
             ),
         )
         if bias:
+            # Keep the checkpoint width. The kernel adds the bias to its FP32
+            # accumulator, so a value outside the activation dtype's finite
+            # range (an FP32 -65536 is -inf as FP16) must not be narrowed here;
+            # the loader preserves this buffer through an FP16/BF16 load.
             self.register_buffer(
-                "bias", torch.zeros((out_features), dtype=self.compute_dtype)
+                "bias", torch.zeros((out_features), dtype=torch.float32)
             )
         else:
             self.bias = None
 
         self._repacked = False
+        self._packed_key = None
+
+    def _apply(self, fn, recurse=True):
+        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        bias = self.bias
+        if bias is None or bias.dtype != torch.float32:
+            return super()._apply(fn, recurse=recurse)
+
+        def preserve_bias_width(tensor):
+            if tensor is bias:
+                return fn(tensor.view(torch.uint8)).view(torch.float32)
+            return fn(tensor)
+
+        return super()._apply(preserve_bias_width, recurse=recurse)
 
     @torch.no_grad()
     def post_init(self):
-        """Unpack the GPTQ 8-bit codes and reorder them into the kernel layout."""
-        if self._repacked:
+        """Build (or refresh) the kernel-layout cache from the checkpoint tensors."""
+        self._ensure_repacked()
+
+    def _source_key(self):
+        """Identity/version key of the checkpoint tensors this cache derives from."""
+        return (
+            tensor_cache_key(getattr(self, "qweight", None)),
+            tensor_cache_key(getattr(self, "scales", None)),
+        )
+
+    def packed_ready(self) -> bool:
+        """Report whether the derived kernel layout matches the current sources."""
+        return bool(
+            self._repacked
+            and self._packed_key is not None
+            and self._packed_key == self._source_key()
+        )
+
+    def clear_weight_cache(self) -> None:
+        """Invalidate the derived kernel layout; the checkpoint stays authoritative.
+
+        ``BaseQuantLinear`` calls this after ``load_state_dict`` and on
+        device/dtype moves. The packed buffers are kept so a fused group's
+        shared views stay alive; the next forward re-derives them from the
+        checkpoint tensors that just moved or changed.
+        """
+        self._repacked = False
+        self._packed_key = None
+
+    @torch.no_grad()
+    def _ensure_repacked(self) -> None:
+        key = self._source_key()
+        if self._repacked and self._packed_key == key:
             return
+        self._repack(key)
+
+    @torch.no_grad()
+    def _repack(self, key=None) -> None:
         qweight = self.qweight.data
         self.validate_device(qweight.device)
         k4, n = qweight.shape
@@ -189,22 +247,30 @@ class AllSparkLinear(GPTQQuantLinear):
         self.register_buffer("qweight_packed", packed, persistent=False)
         self.register_buffer("scales_packed", packed_scales, persistent=False)
         self._repacked = True
-        del self.qweight, self.scales
-        self.qweight = None
-        self.scales = None
+        self._packed_key = self._source_key() if key is None else key
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self._repacked:
-            self.post_init()
+        # Versioned checkpoint tensors reveal in-place writes. Inference-mode
+        # tensors need an explicit clear_weight_cache() after mutation.
+        if not self.packed_ready():
+            self._ensure_repacked()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features).contiguous()
+        # The bias is added inside the kernel's FP32 epilogue, never to the
+        # already narrowed output: FP16 65536 + (-32768) is 32768, while the
+        # narrowed partial sum is inf.
+        bias = self.bias
         if self._hip:
             out = allspark_hip_gemm(
-                x2d, self.qweight_packed, self.scales_packed, self.out_features
+                x2d,
+                self.qweight_packed,
+                self.scales_packed,
+                self.out_features,
+                bias=bias,
             )
         else:
-            out = allspark_gemm(x2d, self.qweight_packed, self.scales_packed, self.out_features)
-        out = out.reshape(shape)
-        if self.bias is not None:
-            out = out + self.bias
-        return out.to(x.dtype)
+            out = allspark_gemm(
+                x2d, self.qweight_packed, self.scales_packed, self.out_features,
+                bias=bias,
+            )
+        return out.reshape(shape).to(x.dtype)

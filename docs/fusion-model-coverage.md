@@ -163,7 +163,7 @@ leaves. Multimodal profiles cover only the declared decoder text stack.
 | `mllama_text_model` | `MLlamaTextQModel` | `qkv`, `gate_up` | `MllamaTextSelfAttention`, `MllamaTextMLP` |
 | `muse_glimmer` | `MuseGlimmerQModel` | `qkv`, `gate_up` | `MuseGlimmerTextAttention`, `MuseGlimmerTextMLP` |
 | `olmo` | `LlamaQModel` | `qkv`, `gate_up` | `OlmoAttention`, `OlmoMLP` |
-| `olmo2` | `LlamaQModel` | `qkv`, `gate_up` | `Olmo2Attention`, `Olmo2MLP` |
+| `olmo2` | `Olmo2QModel` | `qkv`, `gate_up` | `Olmo2Attention`, `Olmo2MLP` |
 | `olmo3` | `Olmo3QModel` | `qkv`, `gate_up` | `Olmo3Attention`, `Olmo3MLP` |
 | `olmoe` | `OlmoeQModel` | `qkv` | `OlmoeAttention` |
 | `opt` | `OptQModel` | `qkv` | `OPTAttention` |

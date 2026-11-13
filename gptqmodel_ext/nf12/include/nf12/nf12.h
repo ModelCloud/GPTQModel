@@ -84,6 +84,14 @@ size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device);
 nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w, const void* bias_bf16,
                           void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream);
 
+/* Fuse 1..8 independent B1 projections into one packed-weight traversal while
+ * preserving the one-row small-M kernel configuration and row arithmetic.
+ * Unsupported one-row dispatches return NF12_ERROR_UNSUPPORTED. */
+size_t nf12_linear_staged_b1_workspace_bytes(int64_t m, int64_t n, int64_t k, int device);
+nf12_status_t nf12_linear_staged_b1(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
+                                    const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace,
+                                    size_t workspace_bytes, cudaStream_t stream);
+
 /* Heuristic N-slice height for decode + external BF16 GEMM (SPEC.md 6, 8.1).
  * Returns a multiple of 16, or 0 to retain nf12_linear or reject invalid arguments.
  * For n0 % 16 == 0, slice [n0, n0 + rows) has the view
@@ -166,6 +174,13 @@ nf12_status_t nf12_embedding(const nf12_weight_t* w, const int32_t* ids, int64_t
                              cudaStream_t stream);
 nf12_status_t nf12_embedding_i64(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
                                  int64_t ldo, cudaStream_t stream);
+
+/* Writes out[i, repeat, :] for repeat in [0,4) in one packed-weight lookup.
+ * ldo is the output stride between consecutive IDs, in BF16 elements. */
+nf12_status_t nf12_embedding_repeat4(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids, void* out_bf16,
+                                     int64_t ldo, cudaStream_t stream);
+nf12_status_t nf12_embedding_i64_repeat4(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16,
+                                         int64_t ldo, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

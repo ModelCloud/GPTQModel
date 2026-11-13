@@ -64,6 +64,14 @@ class FusionKernelSpec:
         axes.append(("bias", 0))
         return tuple(axes)
 
+    def runtime_ready(self, module):
+        """Report whether a source currently holds its finalized runtime layout."""
+        if self.layout == "cpu_legacy":
+            from ..looper.linear_mode import LinearMode
+
+            return module.linear_mode == LinearMode.INFERENCE
+        return bool(getattr(module, "_cpu_transformed", False))
+
     def input_dtype(self, module):
         if self.layout == "cpu_avx512":
             return torch.bfloat16
@@ -74,6 +82,18 @@ class FusionKernelSpec:
             for module in modules:
                 module._refresh_int8_runtime()
             return
+        if self.layout == "allspark":
+            # The checkpoint tensors stay authoritative, so a source whose
+            # derived layout was invalidated by a load or a device/dtype move
+            # re-derives it here before the group concatenates the operands.
+            # Only a materialized CUDA/ROCm source may repack; anything else
+            # stays ineligible through ``shape_error`` instead of raising
+            # inside a forward.
+            for module in modules:
+                weight = getattr(module, "qweight", None)
+                if isinstance(weight, torch.Tensor) and weight.device.type == "cuda":
+                    module._ensure_repacked()
+            return
         if self.layout == "exllamav2":
             for module in modules:
                 metadata = getattr(module, "q_tensors", None) or {}
@@ -81,17 +101,23 @@ class FusionKernelSpec:
                 module._fusion_q_invperm = metadata.get("q_invperm")
         if not self.cpu:
             return
+        from ..nn_modules.qlinear._fused_train_state import capture_fused_train_state
+
         for module in modules:
             if self.layout == "cpu_legacy":
                 from ..looper.linear_mode import LinearMode
 
                 if module.linear_mode is None:
+                    # Fusion transforms sources outside their own ``forward``,
+                    # so the checkpoint layout must be captured here as well.
+                    capture_fused_train_state(module)
                     module.transform_cpu(dtype or module.scales.dtype)
                 module.linear_mode = LinearMode.INFERENCE
                 self.rebind(module)
                 continue
             if not getattr(module, "_cpu_transformed", False):
                 target = dtype or module.scales.dtype
+                capture_fused_train_state(module)
                 if self.layout == "cpu_avx512" and not self.gptq:
                     module.transform_cpu()
                 else:
@@ -132,8 +158,21 @@ class FusionKernelSpec:
             if tuple(module.qzeros.shape) != (groups, n // 8) or tuple(module.scales.shape) != (groups, n):
                 return "ExLlamaV2 native group metadata shape differs"
         elif self.layout == "allspark":
-            if (not module._repacked or n % 32 or
-                    tuple(module.qweight_packed.shape) != (n, k) or module.scales_packed.numel() != n):
+            if n % 32:
+                return "AllSpark fusion requires complete N=32 tiles"
+            source_names = ("qweight", "scales") if self.gptq else ("qweight", "qzeros", "scales")
+            sources = [getattr(module, name, None) for name in source_names]
+            weight = sources[0]
+            if (not isinstance(weight, torch.Tensor) or weight.device.type != "cuda"
+                    or any(not isinstance(source, torch.Tensor) or source.device != weight.device
+                           for source in sources[1:])):
+                return "AllSpark fusion requires materialized CUDA/ROCm checkpoint operands on one device"
+            if not module.packed_ready():
+                # ``prepare()`` rebuilds the derived layout from the checkpoint
+                # tensors; a source that cannot be repacked stays ineligible.
+                return ""
+            if (tuple(module.qweight_packed.shape) != (n, k)
+                    or module.scales_packed.numel() != n):
                 return "AllSpark fusion requires finalized unpadded native N32 tiles"
             if self.zero_name is not None and module.zeros_packed.numel() != n:
                 return "AllSpark native zero-point layout differs"
@@ -187,6 +226,7 @@ class FusionKernelSpec:
             fused.q_tensors.update({name: getattr(fused, name) for name in ("qweight", "qzeros", "scales")})
             fused.q_handle, _ = exllamav2_clone_q_matrix(fused, awq=not self.gptq)
             fused._fusion_native_view = False
+            self._set_exllamav2_handle_key(fused)
         if self.layout in ("cpu_aten", "cpu_legacy", "cpu_avx512"):
             if self.layout != "cpu_avx512":
                 fused.scales_and_zeros = torch.cat([module.scales_and_zeros for module in modules], dim=1)
@@ -200,11 +240,19 @@ class FusionKernelSpec:
         if self.cpu:
             # g_idx/ret_idx are input-channel metadata and remain shared.
             fused.linear_mode = first.linear_mode
-        clear = getattr(fused, "clear_weight_cache", None)
-        if clear is not None:
-            clear()
-        self.rebind(fused)
+        if self.layout != "exllamav2":
+            clear = getattr(fused, "clear_weight_cache", None)
+            if clear is not None:
+                clear()
+            self.rebind(fused)
         return fused
+
+    def _set_exllamav2_handle_key(self, module):
+        from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+
+        tensors = (module.q_tensors.values() if self.gptq else
+                   (module.qweight, module.qzeros, module.scales))
+        module._q_handle_key = tuple(tensor_cache_key(tensor) for tensor in tensors)
 
     def rebind(self, module):
         if self.layout == "gptq_fp8":
@@ -216,10 +264,20 @@ class FusionKernelSpec:
             module.int8_module = Int8PackedModule(module.int8_weight_nk, module.int8_channel_scale).eval()
             module._int8_source_signature = module._source_signature()
             return
+        if self.layout == "allspark":
+            # ``_share_operands``/``combine`` just installed the finalized
+            # packed operands; declare the derived cache consistent with them so
+            # the next forward does not repack from the checkpoint tensors.
+            module._packed_key = module._source_key()
+            module._repacked = True
+            return
         if self.layout == "exllamav2":
             metadata = getattr(module, "q_tensors", None)
             if metadata is not None:
                 module.q_tensors = {**metadata, **{name: getattr(module, name) for name in ("qweight", "qzeros", "scales")}}
+            if module.q_handle is None:
+                module._fusion_native_view = False
+                module._ensure_q_handle()
             if module.qweight.is_contiguous():
                 from ..utils.exllamav2 import exllamav2_clone_q_matrix, exllamav2_free_q_matrix
 
@@ -227,8 +285,10 @@ class FusionKernelSpec:
                 module.q_handle, _ = exllamav2_clone_q_matrix(module, awq=not self.gptq)
                 exllamav2_free_q_matrix(old, awq=not self.gptq)
                 module._fusion_native_view = False
+                self._set_exllamav2_handle_key(module)
             else:
                 module._fusion_native_view = True
+                self._set_exllamav2_handle_key(module)
             return
         if self.layout != "cpu_legacy":
             return

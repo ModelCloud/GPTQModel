@@ -61,7 +61,8 @@ QMatrix::QMatrix
 
     uint32_t* _gptq_qzeros,
     half* _gptq_scales,
-    uint32_t* _gptq_g_idx
+    uint32_t* _gptq_g_idx,
+    bool already_shuffled
 ) :
     device(_device),
     height(_height),
@@ -125,7 +126,7 @@ QMatrix::QMatrix
         rows_3 = height;
         rows_2 = height;
 
-        if (_gptq_g_idx)
+        if (_gptq_g_idx && !already_shuffled)
         {
             if (!make_sequential(_gptq_g_idx))
             {
@@ -144,7 +145,8 @@ QMatrix::QMatrix
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
 
-    shuffle_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
+    if (!already_shuffled)
+        shuffle_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
 }
 
 QMatrix::~QMatrix()

@@ -6,6 +6,9 @@ Q/K/V or gate/up projections for inference. Definition-owned contracts qualify
 [qualification matrix](fusion-model-coverage.md). MoE expert paths remain
 excluded; compatible attention in MoE models can qualify independently.
 Introduced in [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567).
+The [ExLlamaV2 descriptor lifecycle](exllamav2-descriptor-lifecycle.md)
+documents how its destructive native shuffle is preserved across cache clears,
+device moves, checkpoint loads, and fused projection ownership.
 
 Fusion requires a definition-owned `FusableConfig` and is disabled by default
 for loading and quantization. Enable it explicitly:
@@ -432,6 +435,14 @@ to disjoint views into that allocation. Their checkpoint names, shapes, and
 values remain intact; their former separate allocations are released. The wider
 native kernel consumes the contiguous fused tensors directly, so source views
 add no projection work to the normal fused token path.
+
+CPU sources are an exception while the group is installed: finalizing them
+replaces the checkpoint operands with int4pack storage, so the checkpoint shapes
+survive only in the `capture_fused_train_state` snapshot that
+`FusionKernelSpec.prepare()` takes before it transforms. Saving restores that
+snapshot first, and so does `fuse(False)`; the source views are then cloned back
+to independent checkpoint-layout tensors instead of being read as native
+operands.
 
 Direct source calls and fallback parents still work. Marlin creates temporary
 contiguous **packed** copies of strided source operands for that call and releases

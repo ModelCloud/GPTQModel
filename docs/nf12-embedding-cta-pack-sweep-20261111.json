@@ -1,0 +1,247 @@
+{
+  "schema": "nf12-sm80-embedding-cta-pack-sweep-v1",
+  "gpu": "NVIDIA PG506-230 SM80 GPU 7",
+  "weight": "released DeepSeek-V4.1-Flash-1017 embed.weight [129280,5120]",
+  "method": "16-call CUDA graphs, 6 paired ABBA rounds per candidate, median graph-call latency; same IDs and encoded weight; temporary dispatch selector removed from final code",
+  "code_ids": "first 3072 token IDs from Lite code_b1_b12_256k fixture b10_r0 before service header; sha256 canonical IDs 42a0ef9ee24e9b4ef75ee58b80a40cfdd597cbf1dd75a94b3d502eaa5cd4730e",
+  "cases": [
+    {
+      "ids_kind": "code_prefix",
+      "m": 312,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 5.696,
+        "candidate_us": 5.312,
+        "speedup": 1.0723
+      },
+      "pack16": {
+        "baseline_us": 5.632,
+        "candidate_us": 5.248,
+        "speedup": 1.0732
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 313,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 5.632,
+        "candidate_us": 5.344,
+        "speedup": 1.0539
+      },
+      "pack16": {
+        "baseline_us": 5.6,
+        "candidate_us": 5.312,
+        "speedup": 1.0542
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 512,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 7.04,
+        "candidate_us": 6.592,
+        "speedup": 1.068
+      },
+      "pack16": {
+        "baseline_us": 7.04,
+        "candidate_us": 6.464,
+        "speedup": 1.0891
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 1024,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 10.752,
+        "candidate_us": 10.176,
+        "speedup": 1.0566
+      },
+      "pack16": {
+        "baseline_us": 10.752,
+        "candidate_us": 9.984,
+        "speedup": 1.0769
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 1536,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 14.528,
+        "candidate_us": 13.568,
+        "speedup": 1.0708
+      },
+      "pack16": {
+        "baseline_us": 14.528,
+        "candidate_us": 13.376,
+        "speedup": 1.0861
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 2048,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 18.368,
+        "candidate_us": 17.184,
+        "speedup": 1.0689
+      },
+      "pack16": {
+        "baseline_us": 18.368,
+        "candidate_us": 17.024,
+        "speedup": 1.0789
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "code_prefix",
+      "m": 3072,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 26.08,
+        "candidate_us": 26.08,
+        "speedup": 1.0
+      },
+      "pack16": {
+        "baseline_us": 23.616,
+        "candidate_us": 24.0,
+        "speedup": 0.984
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 312,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 5.568,
+        "candidate_us": 5.312,
+        "speedup": 1.0482
+      },
+      "pack16": {
+        "baseline_us": 5.568,
+        "candidate_us": 5.504,
+        "speedup": 1.0116
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 313,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 5.568,
+        "candidate_us": 5.44,
+        "speedup": 1.0235
+      },
+      "pack16": {
+        "baseline_us": 5.568,
+        "candidate_us": 5.568,
+        "speedup": 1.0
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 512,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 7.104,
+        "candidate_us": 6.784,
+        "speedup": 1.0472
+      },
+      "pack16": {
+        "baseline_us": 7.168,
+        "candidate_us": 6.976,
+        "speedup": 1.0275
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 1024,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 14.88,
+        "candidate_us": 14.976,
+        "speedup": 0.9936
+      },
+      "pack16": {
+        "baseline_us": 14.88,
+        "candidate_us": 14.784,
+        "speedup": 1.0065
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 1536,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 24.32,
+        "candidate_us": 24.608,
+        "speedup": 0.9883
+      },
+      "pack16": {
+        "baseline_us": 24.256,
+        "candidate_us": 24.352,
+        "speedup": 0.9961
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 2048,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 31.36,
+        "candidate_us": 31.456,
+        "speedup": 0.9969
+      },
+      "pack16": {
+        "baseline_us": 31.584,
+        "candidate_us": 31.488,
+        "speedup": 1.003
+      },
+      "exact_bf16_bits": true
+    },
+    {
+      "ids_kind": "uniform_random",
+      "m": 3072,
+      "k": 5120,
+      "n": 129280,
+      "pack8": {
+        "baseline_us": 44.864,
+        "candidate_us": 45.024,
+        "speedup": 0.9964
+      },
+      "pack16": {
+        "baseline_us": 44.768,
+        "candidate_us": 45.024,
+        "speedup": 0.9943
+      },
+      "exact_bf16_bits": true
+    }
+  ]
+}

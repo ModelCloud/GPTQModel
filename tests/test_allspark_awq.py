@@ -276,7 +276,10 @@ def test_awq_module_runs_on_rdna4():
         mod.qzeros = torch.nn.Parameter(qzeros, requires_grad=False)
         mod.scales = torch.nn.Parameter(scales, requires_grad=False)
         mod.post_init()
-        assert mod.qweight is None and mod.qzeros is None
+        # The checkpoint tensors stay registered as the canonical layout; the
+        # kernel layout is a derived, non-persistent cache.
+        assert mod.qweight is not None and mod.qzeros is not None
+        assert mod.packed_ready()
         assert mod.scales_packed.dtype == dtype
         a = torch.stack((a, a), dim=-1).reshape(m, k * 2)[:, ::2]
         assert not a.is_contiguous()
@@ -324,7 +327,8 @@ def test_awq_pack_roundtrip_from_dense_weight(dtype):
     # post_init drops the on-disk tensors, so keep copies for the oracle.
     qw, qz, sc = mod.qweight.clone(), mod.qzeros.clone(), mod.scales.clone()
     mod.post_init()
-    assert mod.qweight is None and mod.qzeros is None
+    assert mod.qweight is not None and mod.qzeros is not None
+    assert mod.packed_ready()
 
     x = (torch.randn(4, k, dtype=torch.float32, device="cuda") * 0.5).to(dtype)
     out = mod(x)
@@ -443,3 +447,118 @@ def test_awq_repack_rejects_invalid_format(bad):
     if bad == "zero_device": qz = qz.cpu()
     with pytest.raises(ValueError):
         allspark_hip_repack_awq(qw, qz, scales, n, k, -1)
+
+
+# ---------------------------------------------------------------------------
+# Bias epilogue (HIP path)
+# ---------------------------------------------------------------------------
+
+
+def test_awq_module_bias_added_before_output_rounding():
+    """The AWQ wrapper must not add bias to the narrowed FP16/BF16 output."""
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+
+    k, n, dtype = 4096, 128, torch.float16
+    dense = torch.nn.Linear(k, n, bias=True, device="cuda", dtype=dtype)
+    dense.weight.data.fill_(1.0)
+    dense.bias.data.fill_(-32768.0)
+    mod = AllSparkAwqLinear(bits=8, group_size=-1, sym=False, desc_act=False,
+                            in_features=k, out_features=n, bias=True,
+                            dtype=dtype, register_buffers=True).cuda()
+    zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
+    mod.pack(dense, torch.ones(n, 1, device="cuda", dtype=dtype), zeros)
+    mod.post_init()
+
+    x = torch.full((2, k), 16.0, dtype=dtype, device="cuda")
+    with torch.no_grad():
+        out = mod(x)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all(), "bias was added after the FP16 rounding"
+    torch.testing.assert_close(out, torch.full_like(out, 16.0 * k - 32768.0),
+                               rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_awq_module_bias_matches_oracle_without_weight_expansion(dtype):
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+
+    k, n = 512, 256
+    torch.manual_seed(21)
+    dense = torch.nn.Linear(k, n, bias=True, device="cuda", dtype=dtype)
+    dense.weight.data.normal_(0.0, 0.02)
+    dense.bias.data.normal_(0.0, 2.0)
+    mod = AllSparkAwqLinear(bits=8, group_size=-1, sym=False, desc_act=False,
+                            in_features=k, out_features=n, bias=True,
+                            dtype=dtype, register_buffers=True).cuda()
+    per_channel = (dense.weight.data.abs().amax(dim=1) / 127).clamp_min(1e-8).reshape(n, 1)
+    zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
+    mod.pack(dense, per_channel, zeros)
+    mod.post_init()
+    packed_bytes = sum(t.numel() * t.element_size() for _, t in mod.named_buffers())
+
+    x = torch.randn(4, k, device="cuda", dtype=dtype) * 0.02
+    with torch.no_grad():
+        out = mod(x)
+    codes = (dense.weight.data.t() / per_channel.reshape(1, n)).round() + 128
+    ref = x.double() @ (((codes.double() - 128)
+                         * per_channel.double().reshape(1, n)).to(dtype)).double()
+    ref = ref + dense.bias.data.double()[None, :]
+    rounded = ref.to(dtype)
+    ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+           - rounded.double()).abs()
+    excess = ((out.double() - ref).abs() - ulp).clamp_min(0)
+    assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+    for _ in range(2):
+        with torch.no_grad():
+            mod(x)
+    assert sum(t.numel() * t.element_size() for _, t in mod.named_buffers()) == packed_bytes
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_awq_module_export_keeps_checkpoint_layout(dtype):
+    """AWQ AllSpark must keep its checkpoint tensors registered and exportable.
+
+    ``post_init`` used to delete ``qweight``/``qzeros``/``scales`` after the
+    repack, so ``state_dict()``/``get_state_dict_for_save()`` exported only
+    ``bias`` and the original checkpoint could not be reloaded strictly.
+    """
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    n, k, m = 512, 512, 4
+    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, -1, dtype, seed=63)
+    module = AllSparkAwqLinear(
+        bits=8, group_size=-1, sym=False, desc_act=False,
+        in_features=k, out_features=n, bias=True, dtype=dtype, register_buffers=True,
+    ).cuda().to(dtype)
+    module.qweight = torch.nn.Parameter(qweight, requires_grad=False)
+    module.qzeros = torch.nn.Parameter(qzeros, requires_grad=False)
+    module.scales = torch.nn.Parameter(scales, requires_grad=False)
+    module.bias = torch.nn.Parameter(
+        torch.randn(n, dtype=dtype, device="cuda") * 0.01, requires_grad=False
+    )
+
+    pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
+    assert set(pristine) == {"qweight", "qzeros", "scales", "bias"}
+    module.post_init()
+    assert module.packed_ready()
+    assert {name: tuple(t.shape) for name, t in module.state_dict().items()} == pristine
+    assert {
+        name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()
+    } == pristine
+    packed = {"qweight_packed", "scales_packed", "zeros_packed"}
+    assert packed <= set(dict(module.named_buffers()))
+    assert not packed & set(module.state_dict())
+
+    baseline = module(a).clone()
+    checkpoint = {name: tensor.clone() for name, tensor in module.state_dict().items()}
+    module.load_state_dict(checkpoint, strict=True)
+    torch.testing.assert_close(module(a), baseline, rtol=RTOL, atol=ATOL)
+
+    fresh = AllSparkAwqLinear(
+        bits=8, group_size=-1, sym=False, desc_act=False,
+        in_features=k, out_features=n, bias=True, dtype=dtype, register_buffers=True,
+    ).cuda().to(dtype)
+    fresh.load_state_dict(checkpoint, strict=True)
+    fresh.post_init()
+    torch.testing.assert_close(fresh(a), baseline, rtol=RTOL, atol=ATOL)

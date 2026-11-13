@@ -93,6 +93,7 @@ from .muse_glimmer import MuseGlimmerQModel
 from .nanbeige import NanbeigeQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
+from .olmo2 import Olmo2QModel
 from .olmo3 import Olmo3QModel
 from .olmoe import OlmoeQModel
 from .openvla import OpenVLAQModel

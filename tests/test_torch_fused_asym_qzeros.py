@@ -120,8 +120,9 @@ def test_fused_cpu_asymmetric_qzeros_survive_eval_train_and_cache_clear():
     torch.testing.assert_close(first, expected.to(x.dtype), rtol=2e-3, atol=2e-3)
 
     layer.clear_weight_cache()
-    for name, tensor in checkpoint.items():
-        assert torch.equal(layer.state_dict()[name], tensor)
+    # A cache clear keeps the live packed layout; it must not restore the
+    # checkpoint snapshot over it.
+    assert layer.qweight.dtype == torch.uint8
     again = layer(x)
     torch.testing.assert_close(again, first, rtol=0, atol=0)
     _assert_packed_only(layer)

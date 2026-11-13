@@ -5,8 +5,25 @@ import pytest
 import torch
 
 from gptqmodel import CheckpointConfig, QuantizeConfig
+from gptqmodel.looper.gptq_checkpoint import validate_checkpoint_support
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import FORMAT, METHOD
+
+
+def test_checkpoint_support_accepts_dynamic_configuration(tmp_path):
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        offload_to_disk=True,
+        offload_to_disk_path=str(tmp_path / "offload"),
+        dynamic={r"+:.*q_proj$": {"bits": 8}},
+    )
+    model = SimpleNamespace(
+        quantize_config=config,
+        model=SimpleNamespace(config=SimpleNamespace(model_type="llama")),
+    )
+
+    validate_checkpoint_support(model)
 
 
 @pytest.mark.parametrize("existing_checkpoint", [False, True])
@@ -71,11 +88,17 @@ def test_unsupported_checkpoint_fails_before_model_or_disk_mutation(
         "kill-hessian-early",
     ],
 )
-def test_eora_checkpoint_recovery(tmp_path, family, mode):
+def test_eora_checkpoint_recovery(tmp_path, monkeypatch, family, mode):
+    import os
+
     from test_checkpoint_quantization import test_subprocess_recovery
 
-    if torch.cuda.device_count() < 2:
+    visible_gpus = torch.cuda.device_count()
+    if visible_gpus < 2:
         pytest.skip("requires two CUDA devices")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    selected = visible.split(",")[:2] if visible else ["0", "1"]
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(selected))
     test_subprocess_recovery(
         tmp_path, family, mode, device="cuda:0", required_gpus=2, eora=True
     )

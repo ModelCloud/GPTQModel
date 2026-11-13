@@ -10,7 +10,18 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
+    CalibrationTypes,
+    CheckpointSupport,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import DEVICE
@@ -25,7 +36,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.qqq import QQQ_ROCM_UNSUPPORTED, QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, _normalize_mse, resolve_quant_format
+from ..quantization.config import METHOD, QuantizeConfig, apply_scalar_module_overrides, resolve_quant_format
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
@@ -40,18 +51,18 @@ log = setup_logger()
 class QQQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with the QQQ workflow."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
-        require_fwd: bool = True,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
-        calibration_concat_separator: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
     ):
         """Initializes QQQ processing and optional weight-delta tracking."""
@@ -60,12 +71,7 @@ class QQQProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(require_fwd=require_fwd),
+            forward=forward,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
@@ -108,34 +114,13 @@ class QQQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
-        # Skip only modules explicitly excluded by a `dynamic` rule. `dynamic_get`
-        # returns None when no rule matches (the common case, including
-        # `dynamic=None`), so a truthiness test here silently skipped every
-        # module and quantized nothing.
-        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
+        bind_resolved_module_config(module, resolved_cfg)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
-
-        # dynamic overrides
-        if self.qcfg.dynamic is not None:
-            qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
-            qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = _normalize_mse(
-                self.qcfg.dynamic_get(module.full_name, "mse", None), base=qcfg_clone.mse,
-            )
-
-            qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
-            desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
-            if desc_act_override is not None:
-                qcfg_clone.desc_act = desc_act_override
-            act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
-            if act_group_aware_override is not None:
-                qcfg_clone.act_group_aware = act_group_aware_override
-            qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
-            qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-
-            qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
+        apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
@@ -334,6 +319,7 @@ class QQQProcessor(LoopProcessor):
                 format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 backend=backend,
                 register_buffers=False,
+                resolved_module_config=get_resolved_module_config(module),
             )
 
         # pack module

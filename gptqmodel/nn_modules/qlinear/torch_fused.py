@@ -16,7 +16,11 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
-from ._fused_train_state import capture_fused_train_state, restore_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    refinalize_fused_state_after_apply,
+    restore_fused_train_state,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -141,12 +145,14 @@ class TorchFusedLinear(PackableQuantLinear):
         packed ``qweight`` stays valid, so ``linear_mode`` is preserved and the
         op is simply rebuilt from the current packed weight and metadata; no
         dense weight is created.
-        """
-        if restore_fused_train_state(self):
-            self.linear_mode = None
-            self.torch_fused_op = None
-            self.scales_and_zeros = None
 
+        The checkpoint snapshot is deliberately *not* restored here. This hook
+        also runs for moves and explicit cache clears, where the caller expects
+        the live packed buffers to stay authoritative. Restoring the snapshot
+        would overwrite uncommitted metadata changes and put the checkpoint
+        layout back into the inference kernel. Only an explicit checkpoint load,
+        export, or training resume restores it.
+        """
         self.ret_idx = None
         self._ret_idx_key = None
         self._ret_idx_identity = None
@@ -178,6 +184,23 @@ class TorchFusedLinear(PackableQuantLinear):
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
         self._fused_state_key = key
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the checkpoint layout after an invalidating move.
+
+        The runtime int4pack layout is device- and scale-dtype-coupled, so a
+        cross-device or low-precision move restores the checkpoint snapshot and
+        lets the next forward transform the new target. A same-device move to
+        FP32 keeps the live layout because it only widens the offsets.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        return result
 
     def _build_ret_idx(self) -> torch.Tensor:
         key = tensor_cache_key(self.g_idx)

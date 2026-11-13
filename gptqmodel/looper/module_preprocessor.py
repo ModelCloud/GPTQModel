@@ -9,9 +9,19 @@ from typing import Any, Dict, List, Optional
 import torch
 import transformers
 
-from ..looper.loop_processor import ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    CalibrationConfig,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+)
 from ..looper.named_module import NamedModule
-from ..quantization.config import AutoModuleDecoderConfig, SmootherConfig, TensorParallelPadderConfig
+from ..quantization.config import (
+    AutoModuleDecoderConfig,
+    QuantizeConfig,
+    SmootherConfig,
+    TensorParallelPadderConfig,
+)
 
 
 def _get_number_of_rows_and_cols(layer: torch.nn.Module) -> tuple[int, int]:
@@ -28,27 +38,25 @@ class ModulePreProcessor(LoopProcessor):
     """Annotate modules with an ordered preprocessor plan before quantization."""
 
     _TP_TARGETS = (2, 4, 8)
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(required=False, replay_after_process=False)
+    )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *,
+        qcfg: QuantizeConfig,
+        tokenizer=None,
+        calibration: Optional[CalibrationConfig] = None,
+        forward: Optional[ForwardConfig] = None,
+    ):
         """Initialize a no-forward planning processor for module preprocessors."""
 
-        kwargs = dict(kwargs)
-        kwargs.pop("calculate_w_wq_diff", None)
-        qcfg = kwargs.pop("qcfg")
-        tokenizer = kwargs.pop("tokenizer", None)
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            calibration_concat_separator=None,
-            batch_size=1,
-            execution_config=ExecutionConfig(
-                require_fwd=False,
-                fwd_replay_after_process=False,
-            ),
+            calibration=calibration or CalibrationConfig(),
+            forward=forward,
         )
         self.qcfg = qcfg
 

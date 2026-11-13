@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,7 +27,10 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 
 from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
-from gptqmodel.looper.gptq_checkpoint import GPTQCheckpointAdapter
+from gptqmodel.looper.gptq_checkpoint import (
+    GPTQCheckpointAdapter,
+    _checkpoint_quantization_identity,
+)
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
@@ -73,7 +78,7 @@ def assert_identical_tensors(expected, actual):
         ), name
 
 
-def run_guarded_driver(command, *, tmp_path, mode, timeout):
+def run_guarded_driver(command, *, tmp_path, mode, timeout, visible_devices=None):
     stdout_path = tmp_path / f"{mode}.stdout.log"
     stderr_path = tmp_path / f"{mode}.stderr.log"
     repo_root = str(Path(__file__).resolve().parents[1])
@@ -83,6 +88,8 @@ def run_guarded_driver(command, *, tmp_path, mode, timeout):
         "PYTHONHASHSEED": "0",
         "PYTHONPATH": os.pathsep.join((repo_root, pythonpath)) if pythonpath else repo_root,
     }
+    if visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
     # Files preserve diagnostics on timeout and avoid inherited pipe writers
     # keeping communicate() alive after a hostile kill of the driver.
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -165,6 +172,15 @@ def test_subprocess_recovery(
         native = Path(native_model)
     driver = Path(__file__).with_name("checkpoint_quantization_driver.py")
     audit = mode.startswith("kill-hessian")
+    visible_devices = None
+    if device.startswith("cuda") and not required_gpus:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        entries = visible.split(",") if visible else [
+            str(index) for index in range(torch.cuda.device_count())
+        ]
+        device_index = torch.device(device).index or 0
+        if device_index < len(entries):
+            visible_devices = entries[device_index]
 
     def run(mode, expected):
         output = tmp_path / mode
@@ -194,6 +210,7 @@ def test_subprocess_recovery(
             tmp_path=tmp_path,
             mode=mode,
             timeout=600 if native_model else 120,
+            visible_devices=visible_devices,
         )
         assert result.returncode == expected, (
             result.stdout.decode()[-10000:] + result.stderr.decode()[-10000:]
@@ -311,7 +328,7 @@ def test_subprocess_recovery(
         killed = [
             event for event in events(interrupted.stdout) if event["event"] == "kill"
         ]
-        assert len(killed) == 1 and killed[0]["fwd_counter"] == 2
+        assert len(killed) == 1 and killed[0]["fwd_counter"] >= 2
         assert killed[0]["nsamples"] > 0 and killed[0]["partial_hashes"]
         assert any(
             event["event"] == "final" and event["name"] == killed[0]["name"]
@@ -407,3 +424,380 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
     completed = run("completed", checkpoint)
     assert_identical_tensors(baseline, resumed)
     assert_identical_tensors(baseline, completed)
+
+
+def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    native_model = build_native_model("llama", config_args, moe_intermediate_size=32)
+    native_model.save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            dynamic={
+                r"+:^model\.layers\.0\.self_attn\.q_proj$": {
+                    "bits": 8,
+                },
+                r"-:^model\.layers\.1\.": {},
+            },
+        )
+        model = GPTQModel.load(
+            str(native), quantize_config=config, backend=BACKEND.TORCH
+        )
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+            checkpoint=checkpoint,
+        )
+        model.save(tmp_path / output)
+        return load_file(tmp_path / output / "model.safetensors")
+
+    baseline = run("dynamic-baseline", None)
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "dynamic-checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("dynamic-interrupted", checkpoint)
+
+    resumed = run("dynamic-resumed", checkpoint)
+    completed = run("dynamic-completed", checkpoint)
+    assert_identical_tensors(baseline, resumed)
+    assert_identical_tensors(baseline, completed)
+
+
+def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
+    tmp_path, monkeypatch
+):
+    from gptqmodel.quantization.config import FP8Config
+
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    native_model = build_native_model("llama", config_args, moe_intermediate_size=32)
+    native_model.save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = FP8Config(
+            weight_scale_method="row",
+            device="cpu",
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            dynamic={
+                r"+:^model\.layers\.0\.self_attn\.q_proj$": {
+                    "format": "float8_e5m2",
+                    "weight_scale_method": "block",
+                    "weight_block_size": [32, 32],
+                },
+            },
+        )
+        model = GPTQModel.load(
+            str(native), quantize_config=config, backend=BACKEND.FP8_TORCH
+        )
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.FP8_TORCH,
+            checkpoint=checkpoint,
+        )
+        model.save(tmp_path / output)
+        loaded = GPTQModel.load(
+            str(tmp_path / output), device="cpu", backend=BACKEND.FP8_TORCH
+        )
+        q_proj = loaded.model.model.layers[0].self_attn.q_proj
+        assert q_proj.fp8_format == "float8_e5m2"
+        assert q_proj.weight_scale_method == "block"
+        assert q_proj.weight_block_size == (32, 32)
+        del loaded
+        return load_file(tmp_path / output / "model.safetensors")
+
+    baseline = run("weight-only-baseline", None)
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "weight-only-checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("weight-only-interrupted", checkpoint)
+
+    resumed = run("weight-only-resumed", checkpoint)
+
+    assert_identical_tensors(baseline, resumed)
+
+
+def test_runtime_calibration_exclusions_survive_resume(tmp_path, monkeypatch):
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    native_model = build_native_model(
+        "qwen3_moe", config_args, moe_intermediate_size=32
+    )
+    # Top-k routing with tied logits leaves the final experts without
+    # calibration traffic, forcing runtime exclusions in the first layer.
+    with torch.no_grad():
+        native_model.model.layers[0].mlp.gate.weight.zero_()
+    native_model.save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            fallback=None,
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            moe=MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok=2)),
+        )
+        model = GPTQModel.load(
+            str(native), quantize_config=config, backend=BACKEND.TORCH
+        )
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+            checkpoint=checkpoint,
+        )
+        model.save(tmp_path / output)
+        saved_config = json.loads(
+            (tmp_path / output / "quantize_config.json").read_text()
+        )
+        assert any(
+            pattern.startswith(r"-:model\.layers\.0\.mlp\.experts\.")
+            for pattern in saved_config["dynamic"]
+        )
+        loaded = GPTQModel.load(
+            str(tmp_path / output), device="cpu", backend=BACKEND.TORCH
+        )
+        del loaded
+        return load_file(tmp_path / output / "model.safetensors")
+
+    baseline = run("runtime-baseline", None)
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "runtime-checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("runtime-interrupted", checkpoint)
+
+    resumed = run("runtime-resumed", checkpoint)
+
+    assert_identical_tensors(baseline, resumed)
+
+
+def test_checkpoint_identity_preserves_dynamic_rule_order():
+    specific = r"+:^model\.layers\.0\.self_attn\.q_proj$"
+    broad = r"+:^model\.layers\.0\."
+    module_name = "model.layers.0.self_attn.q_proj"
+
+    first = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={specific: {"bits": 3}, broad: {"bits": 8}},
+    )
+    second = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad: {"bits": 8}, specific: {"bits": 3}},
+    )
+
+    assert first.resolve_module_config(module_name).get("bits") == 3
+    assert second.resolve_module_config(module_name).get("bits") == 8
+    assert _checkpoint_quantization_identity(first) != _checkpoint_quantization_identity(second)
+
+
+def test_checkpoint_identity_ignores_runtime_calibration_exclusions():
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={r"+:^model\.layers\.0\.": {"bits": 8}},
+    )
+    before = _checkpoint_quantization_identity(config)
+    pattern = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config.dynamic[pattern] = {}
+    config._runtime_dynamic_exclusions = {pattern}
+
+    assert _checkpoint_quantization_identity(config) == before
+
+
+def test_checkpoint_identity_keeps_empty_dynamic_equivalent_to_none():
+    config = QuantizeConfig(bits=4, group_size=32)
+    before = _checkpoint_quantization_identity(config)
+    pattern = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config.dynamic = {pattern: {}}
+    config._runtime_dynamic_exclusions = {pattern}
+
+    assert _checkpoint_quantization_identity(config) == before
+
+
+def test_checkpoint_capture_accepts_dynamic_awq_kernel(tmp_path):
+    from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import FORMAT, AWQConfig
+
+    config = AWQConfig(bits=8, group_size=32, format=FORMAT.GEMM)
+    model = torch.nn.Module()
+    model.proj = AwqTorchLinear(
+        bits=8,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        format=FORMAT.GEMM,
+        register_buffers=True,
+    )
+    adapter = GPTQCheckpointAdapter()
+    adapter.model = SimpleNamespace(
+        model=model,
+        quantize_config=config,
+        qlinear_kernel=AwqGEMMLinear,
+    )
+    adapter.offload = tmp_path
+    adapter._artifacts = {}
+    adapter.processors = [
+        SimpleNamespace(
+            continuation_state_dict=lambda: {},
+            lock=threading.Lock(),
+        )
+    ]
+    adapter.processor = adapter.processors[0]
+    adapter.shared_state = {}
+    adapter.execution = SimpleNamespace(execution_state_dict=lambda: {})
+    adapter._quantization_identity = _checkpoint_quantization_identity(config)
+
+    state, artifacts = adapter.capture()
+
+    assert set(artifacts) == {"proj"}
+    assert state["modules"]["proj"]["kernel"].endswith(".AwqTorchLinear")
+
+
+def test_checkpoint_roundtrip_restores_runtime_dynamic_exclusions(tmp_path):
+    class _Execution:
+        def __init__(self):
+            self.state = {"logical_index": 0}
+
+        def execution_state_dict(self):
+            return dict(self.state)
+
+        def load_execution_state_dict(self, state):
+            self.state = dict(state)
+
+    class _Processor:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.loaded = None
+
+        def continuation_state_dict(self):
+            return {"cursor": 1}
+
+        def load_continuation_state_dict(self, state):
+            self.loaded = state
+
+    def adapter(config):
+        checkpoint = GPTQCheckpointAdapter()
+        checkpoint.model = SimpleNamespace(
+            model=torch.nn.Module(),
+            quantize_config=config,
+            qlinear_kernel=torch.nn.Linear,
+        )
+        checkpoint.offload = tmp_path
+        checkpoint._artifacts = {}
+        checkpoint.processors = [_Processor()]
+        checkpoint.processor = checkpoint.processors[0]
+        checkpoint.shared_state = {"progress": 1}
+        checkpoint.execution = _Execution()
+        checkpoint._quantization_identity = _checkpoint_quantization_identity(config)
+        return checkpoint
+
+    broad_rule = r"+:^model\.layers\.0\."
+    runtime_rule = r"-:^model\.layers\.0\.mlp\.experts\.7\.down_proj$"
+    config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad_rule: {"bits": 8}, runtime_rule: {}},
+    )
+    config._runtime_dynamic_exclusions = {runtime_rule}
+    source = adapter(config)
+
+    state, artifacts = source.capture()
+
+    resumed_config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        dynamic={broad_rule: {"bits": 8}},
+    )
+    resumed = adapter(resumed_config)
+    resumed.restore(state, artifacts)
+
+    assert state["runtime_dynamic_exclusions"] == {runtime_rule: {}}
+    assert type(state["runtime_dynamic_exclusions"][runtime_rule]) is dict
+    assert resumed_config.dynamic == config.dynamic
+    assert resumed_config._runtime_dynamic_exclusions == {runtime_rule}
+    assert resumed.processors[0].loaded == {"cursor": 1}

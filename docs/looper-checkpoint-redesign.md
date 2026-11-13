@@ -27,8 +27,13 @@ FP8, GGUF and bitsandbytes processor paths for Llama and Qwen3 MoE, with
 and ParoQuant, the methods that support EoRA generation without checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
-kernels or deprecated export formats. Other model families, dynamic exclusions,
-rotation, embedding/lm_head quantization and GPTAQ/FOEM remain unsupported.
+kernels or deprecated export formats. Other model families, rotation,
+embedding/lm_head quantization and GPTAQ/FOEM remain unsupported.
+Per-module dynamic overrides and exclusions are supported: packed module
+schemas retain the effective packing settings, and the execution plan ends at
+the last layer containing quantized work. The checkpoint identity includes the
+ordered dynamic rules, so changing them rejects resume before any state is
+restored.
 Checkpointed quantization runs on the main thread so it can temporarily install
 and restore SIGINT/SIGTERM handlers. Normal quantization is unchanged.
 
@@ -141,7 +146,7 @@ Continuation tensors and device-valued metadata retain explicit device indices;
 CPU tensors stay on CPU and active CUDA tensors return to their recorded GPUs.
 Completed packed modules intentionally remain offloaded/meta until saving,
 except EXL3, whose ordinary completed state uses CPU buffers read by its writer.
-The composed adapter schema is version 3; topology and tensor codec schemas
+The composed adapter schema is version 4; topology and tensor codec schemas
 remain version 2. Older adapter checkpoints are rejected rather than guessed
 or migrated.
 
@@ -196,6 +201,69 @@ shared writable scratch-buffer use across streams without allocating a large
 workspace per thread. These guarantees apply to
 uninterrupted execution too; a checkpoint cannot repair nondeterministic inputs
 or shared random-state races in the underlying algorithm.
+
+## Disk-backed layer-output staging and reads
+
+`DiskBackedLayerOutputWriter` collects indexed replay batches. With
+`shard_batches=1`, `put()` still writes directly. For larger configured shards,
+`put()` writes each arrival to
+an atomic safetensors spill and retains only its path and digest until the
+shard is complete. `_flush_shard()` holds at most one shard's tensors while it
+assembles the final shard. The number of spill files can grow with outstanding
+batches, but their activation payloads do not remain in process RAM. Only a
+complete shard enters `progress.json`; `abort()` and a restarted writer discard
+uncommitted spills.
+`append()` reserves its next index and writes it under the same lock, so
+concurrent callers cannot choose the same batch index.
+
+`DiskBackedLayerOutputSequence.open()` checks the manifest and, by default,
+all shard hashes at open time. Each later `__getitem__()` checks the current
+shard path and hash before returning its batch, including when `finalize()`
+skipped the redundant open-time hash. A changed shard fails closed even after
+an earlier read from the same sequence. Each access hashes its entire shard;
+the extra I/O is the cost of detecting changes between replay reads.
+
+```mermaid
+flowchart TD
+    AA["DiskBackedLayerOutputWriter.append"] --> AB["Lock, reserve next index, call put"]
+    AB --> A
+    A["DiskBackedLayerOutputWriter.put"] --> B{"shard_batches == 1?"}
+    B -- "yes" --> C["_pending holds one tensor until _flush_shard"]
+    B -- "no" --> D["_atomic_safetensors_file stages batch"]
+    D --> E["_pending holds path and xxh3_128"]
+    C --> F{"_flush_shard has every batch?"}
+    E --> F
+    F -- "no" --> G["Return with incomplete payloads on disk"]
+    F -- "yes" --> H["_pending_tensor loads and hashes staged batches"]
+    H --> I{"staged hash matches?"}
+    I -- "no" --> X["ValueError; shard not committed"]
+    I -- "yes" --> J["_atomic_safetensors_file writes complete shard"]
+    J --> K["_write_progress records shard hash"]
+    K --> L["Delete staged batches"]
+    M["DiskBackedLayerOutputWriter.__init__ or abort"] --> N["_discard_uncommitted_stages"]
+    P["DiskBackedLayerOutputSequence.__getitem__"] --> Q{"_contained_path accepts shard path?"}
+    Q -- "no" --> Z["ValueError; path rejected"]
+    Q -- "yes" --> R["safe_open loads requested batch"]
+    R --> S{"_xxh3_128_file matches manifest?"}
+    S -- "no" --> Y["ValueError; no tensor returned"]
+    S -- "yes" --> T{"tensor shape matches manifest?"}
+    T -- "no" --> W["ValueError; shape differs"]
+    T -- "yes" --> U["Return batch"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X,Y,Z,W failure
+```
+
+| Mechanism | Before | Now |
+| --- | --- | --- |
+| Out-of-order multi-batch shards | `gptqmodel/looper/input_cache.py:559` retained every arriving tensor in `_pending` until its shard completed. | `put()` stages each batch on disk; `_pending` holds path and digest metadata. `_flush_shard()` materializes only one complete shard at a time. |
+| Uncommitted batch recovery | Incomplete batches existed only in process RAM and disappeared on abort. | Staged files are removed by `abort()` or the next writer initialization; only shards recorded in `progress.json` are reusable. |
+| Concurrent sequential appends | `gptqmodel/looper/input_cache.py:581-585` computed an index and released the lock before `put()`, allowing another caller to choose the same index. | `append()` holds the writer's reentrant lock through `put()`, so each call claims one distinct index. |
+| Reads after opening | `gptqmodel/looper/input_cache.py:320-329` checked shape but did not recheck the shard hash. | `__getitem__()` checks containment and the manifest's shard hash on every read before issuing the tensor. |
+
+The disk-backed writer was introduced in PR #3588. Focused regressions in
+`tests/test_disk_backed_layer_outputs.py` cover out-of-order payload spills,
+restart cleanup, staged-file mutation, and same-shape shard replacement after
+both `finalize()` and `open()`.
 
 ## Scope and operational limits
 

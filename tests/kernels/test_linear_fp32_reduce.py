@@ -331,3 +331,94 @@ def test_vptq_cuda_unrepresentable_wide_bias_skips_fused_kernel(dtype, monkeypat
     oracle_weight = module.dequantize().to(dtype=torch.float64)
     oracle = (x.double() @ oracle_weight.t() + module.bias.double()).to(dtype)
     torch.testing.assert_close(actual, oracle, rtol=0, atol=0)
+
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
+except Exception:
+    NVFP4Tensor = None
+
+
+@pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp4_accelerator_forward_is_graph_capturable(dtype):
+    """The FP4 accelerator wrapper shares the value-dependent gate.
+
+    The stored bias must be a value the activation dtype cannot represent.
+    ``-65536`` is exact in BF16, so a BF16 fixture with that value never reaches
+    `bias_narrows_losslessly`: it takes the narrow ephemeral cast and the stock
+    torchao ``F.linear``. ``0.1`` is inexact in both dtypes, so both
+    parameterizations select `linear_wide_bias` and the capture/compile
+    short-circuit is genuinely pinned for each.
+
+    The replay also reads the *live* bias: ``.data.fill_`` does not bump a
+    version counter, so a graph that baked the captured value in, or that
+    cached a representability answer, would drift from the oracle after the
+    write. This is the FP4 counterpart of
+    ``test_vptq_bias_epilogue_captures_and_replays_live_values``.
+    """
+
+    import gptqmodel.nn_modules.qlinear.fp4 as fp4_module
+
+    weight = torch.randn(16, 64, dtype=torch.bfloat16) * 0.04
+    packed = NVFP4Tensor.to_nvfp4(weight, block_size=16)
+    module = (
+        fp4_module.TorchFP4Linear(
+            in_features=64,
+            out_features=16,
+            weight=packed.qdata,
+            weight_scale=packed.scale,
+            weight_block_size=16,
+            orig_dtype=torch.bfloat16,
+            bias=torch.full((16,), 0.1, device="cuda", dtype=torch.float32),
+        )
+        .to("cuda")
+        .eval()
+    )
+    x = torch.full((1, 64), 4096.0, device="cuda", dtype=dtype)
+
+    # Exact in neither FP16 nor BF16, so both dtypes take the wide epilogue.
+    assert module._epilogue_bias(x, module.bias)[1] is True
+
+    with torch.inference_mode():
+        expected = module(x)
+    # ``0.1`` keeps every FP16/BF16 output finite, so the comparison validates
+    # arithmetic instead of comparing ``-inf`` with ``-inf``.
+    assert torch.isfinite(expected).all()
+    density = module._native_weight().dequantize(x.dtype)
+    oracle = (x.double() @ density.double().t() + module.bias.double()).to(dtype)
+    torch.testing.assert_close(expected, oracle, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        with torch.inference_mode():
+            module(x)
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    with torch.inference_mode():
+        with torch.cuda.graph(graph):
+            captured = module(x)
+    graph.replay()
+    assert captured.dtype is dtype
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+    # `.data.fill_` is invisible to the version counter, so a captured graph
+    # that baked the bias value in or cached the gate answer would keep the old
+    # result. Re-read the live buffer on every replay instead. The values stay
+    # inside the FP16/BF16 range so the comparison measures the epilogue rather
+    # than saturating at the same `-inf` on both sides; `0.5` and `3.5` are
+    # exact in both dtypes and `0.1` is exact in neither.
+    for live_bias in (0.5, 0.1, 3.5):
+        module.bias.data.fill_(live_bias)
+        graph.replay()
+        torch.cuda.synchronize()
+        live_oracle = (x.double() @ density.double().t() + module.bias.double()).to(dtype)
+        torch.testing.assert_close(captured, live_oracle, rtol=0, atol=0)
+
+    module.bias.data.fill_(0.1)
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+    with torch.inference_mode():
+        traced = compiled(x)
+    torch.testing.assert_close(traced, expected, rtol=0, atol=0)

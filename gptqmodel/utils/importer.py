@@ -383,10 +383,10 @@ def _iter_dynamic_contracts(
     pack_dtype: torch.dtype,
     format_value: FORMAT,
 ):
-    """Yield distinct effective quantization configs from base + optional dynamic overrides.
+    """Yield distinct resolved quantization configs from base + optional dynamic overrides.
 
     When `dynamic` is provided, auto-selection tests each kernel against the union of
-    effective (bits, group_size, desc_act, sym, pack_dtype) contracts. This lets a
+    resolved (bits, group_size, desc_act, sym, pack_dtype) contracts. This lets a
     mixed-bitwidth model use a kernel that only supports 4-bit weights for its 4-bit
     layers even when the base `bits` is 3.
     """
@@ -1364,7 +1364,7 @@ def select_quant_linear(
         last_err = None
         global message_logged
         # For multi-select (used by make_quant/create_quant_layer) we test each kernel
-        # against the union of effective quant contracts (base + dynamic). This lets
+        # against the union of resolved quant contracts (base + dynamic). This lets
         # mixed-bitwidth models pick different kernels per layer, e.g. a 4-bit-only
         # kernel for 4-bit dynamic layers while the base bits is 3. For single-select
         # we keep the original base contract with the full dynamic map so callers

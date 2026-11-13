@@ -317,18 +317,91 @@ class BaseQuantLinear(nn.Module):
             clear()
 
     def _load_from_state_dict(self, *args, **kwargs):
-        """Invalidate derived-weight caches after a state-dict load.
+        """Restore checkpoint layout, then load, then invalidate derived caches.
 
-        ``load_state_dict`` may copy into an existing buffer, which does not
-        replace the Python object. Cache keys catch versioned tensors, but an
-        inference tensor has no version counter, so clear unconditionally.
+        A CPU inference forward rewrites ``qweight``/``qzeros``/``scales`` into
+        the kernel's int4pack layout *in place*; the checkpoint shapes are only
+        kept in the ``_fused_train_state`` snapshot. A state dict that matches
+        that snapshot is a checkpoint, so the snapshot must be restored **before**
+        the copy or strict loading reports a size mismatch (and ``save()`` would
+        serialize runtime shapes). A state dict that instead matches the live
+        int4pack operands is the model's own ``state_dict()``; restoring would
+        make that previously valid self round-trip fail.
+
+        The two layouts are told apart by the operands whose shape the
+        transform actually changes (``qweight``/``qzeros``); see
+        :func:`state_dict_matches_checkpoint_layout`. A runtime-layout load
+        keeps the live tensors and the checkpoint snapshot. Its post-copy cache
+        clear must not restore that snapshot. A changed runtime state cannot
+        always be converted back to checkpoint format, so export rejects it.
+
+        ``load_state_dict`` may also copy into an existing buffer, which does
+        not replace the Python object. Cache keys catch versioned tensors, but
+        an inference tensor has no version counter, so clear after a local load.
         """
 
+        layout = None
         if getattr(self, "_fused_train_state", None) is not None:
-            from ._fused_train_state import discard_fused_train_state
+            from ._fused_train_state import classify_fused_state_layout
 
-            discard_fused_train_state(self)
+            state_dict = args[0] if args else kwargs.get("state_dict")
+            prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+            if state_dict is not None:
+                layout = classify_fused_state_layout(self, state_dict, prefix)
+            if layout == "invalid":
+                raise RuntimeError(
+                    f"{self.__class__.__name__} cannot load mixed or invalid CPU int4pack "
+                    "operand shapes; supply one checkpoint or runtime layout."
+                )
+            if layout == "checkpoint":
+                # Only a checkpoint load restores the snapshot. The cache clear
+                # hook keeps the live packed buffers authoritative for moves and
+                # explicit clears, so restore explicitly before the copy.
+                from ._fused_train_state import restore_fused_train_state
+
+                self._fused_train_state_exportable = True
+                if restore_fused_train_state(self):
+                    # ``restore_fused_train_state`` resets the runtime-layout
+                    # flags; clear the remaining derived caches (``ret_idx``).
+                    self._clear_runtime_weight_cache()
+            elif layout == "runtime":
+                # The snapshot describes an older checkpoint layout the caller
+                # is deliberately replacing. Keep the live transformed tensors
+                # the load is about to write, and let the clear below rebuild
+                # derived metadata from them.
+                from ._fused_train_state import (
+                    materialize_fused_runtime_state,
+                    runtime_state_matches_live,
+                )
+
+                # Keep the checkpoint snapshot for a true self round-trip.
+                # A modified runtime layout has no guaranteed inverse back to
+                # checkpoint zero codes, so export must fail explicitly.
+                self._fused_train_state_exportable = (
+                    getattr(self, "_fused_train_state_exportable", True)
+                    and runtime_state_matches_live(self, state_dict, prefix)
+                )
+                local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+                assign = isinstance(local_metadata, dict) and bool(
+                    local_metadata.get("assign_to_params_buffers", False)
+                )
+                if not assign:
+                    # A forward ran the transform inside ``inference_mode``;
+                    # copying into inference tensors outside it is rejected.
+                    materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
+        if layout == "runtime":
+            # Invalidate derived metadata without restoring the snapshot that
+            # a later checkpoint export still needs.
+            was_suspended = getattr(self, "_suspend_fused_train_restore", False)
+            self._suspend_fused_train_restore = True
+            try:
+                self._clear_runtime_weight_cache()
+            finally:
+                if not was_suspended:
+                    self.__dict__.pop("_suspend_fused_train_restore", None)
+        elif layout != "empty":
+            self._clear_runtime_weight_cache()
 
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
@@ -845,6 +918,34 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         self.pack_factor = self.pack_dtype_bits // self.bits
 
 
+def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
+    """Reject scales that become nonfinite or zero in the GPTQ FP16 layout.
+
+    Check the cast result rather than comparing the source to ``finfo.max``:
+    a finite FP32 value at the FP16 overflow midpoint also rounds to infinity.
+    A nonzero scale that rounds to zero would erase the corresponding weights.
+    Ordinary finite FP16 rounding remains part of this checkpoint layout.
+    """
+    stored = scales.to(dtype=t.float16)
+    finite = t.isfinite(scales)
+    nonfinite = ~finite
+    overflow = finite & ~t.isfinite(stored)
+    underflow = finite & (scales != 0) & (stored == 0)
+    bad = nonfinite | overflow | underflow
+    if bool(bad.any()):
+        count = int(bad.sum())
+        finite_bad = bad & finite
+        worst = float(scales[finite_bad].abs().max()) if bool(finite_bad.any()) else None
+        magnitude = f"; largest finite source magnitude is {worst:.3e}" if worst is not None else ""
+        raise ValueError(
+            f"{name}: {count} scale value(s) cannot be stored as fp16 "
+            f"(max {t.finfo(t.float16).max:.0f}; source nonfinite={int(nonfinite.sum())}, "
+            f"cast overflow={int(overflow.sum())}, cast underflow={int(underflow.sum())})"
+            f"{magnitude}."
+        )
+    return stored
+
+
 class WeightOnlyQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bits: int,
@@ -1133,16 +1234,20 @@ class PackableQuantLinear(GPTQQuantLinear):
             buf.append(self.wf_unsqueeze_neg_one)
         return buf
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def unpack_zero_points(self) -> t.Tensor:
+        """Decode the packed zero points to `[num_groups, out_features]` codes.
+
+        This is the single owner of the zero-point layout for every GPTQ width
+        and format, including the continuous 3-bit (10-1-10-1-10) words and the
+        split-plane `gptq_p` words. The decoded table is metadata: it is small
+        (groups x out features) and may be cached, unlike unpacked weights.
+        """
         if self.planar:
-            zeros = planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
-            weight = planar_unpack_rows(self.qweight, self.bits)
-            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            return planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
 
         self._init_wf_unsqueeze_buffers()
         wf_zero = getattr(self, "wf_unsqueeze_zero", None)
-        wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
-        if wf_zero is None or wf_neg_one is None:
+        if wf_zero is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} requires wf unpack buffers for dequantization. "
                 "Enable `enable_wf_unsqueeze` and call post_init()."
@@ -1151,39 +1256,62 @@ class PackableQuantLinear(GPTQQuantLinear):
         if self.bits in [2, 4, 8]:
             zeros = _torch_right_shift(
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
+                wf_zero,
             ).to(self.dequant_dtype)
             zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
-            zeros = zeros[:, :self.scales.shape[1]]
+            return zeros[:, :self.scales.shape[1]]
 
+        if self.bits != 3:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not unpack zero points for {self.bits}-bit weights."
+            )
+
+        zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
+            -1, -1, -1, 12
+        )
+        zeros = _torch_right_shift(zeros, wf_zero)  # self.wf.unsqueeze(0)
+        zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | (_torch_left_shift(zeros[:, :, 1, 0], 2) & 0x4)
+        zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | (_torch_left_shift(zeros[:, :, 2, 0], 1) & 0x6)
+        zeros = zeros & 0x7
+        return t.cat(
+            [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
+            dim=2,
+        ).reshape(self.scales.shape)
+
+    def dequantize_weight(self, num_itr: int = 1):
+        zeros = self.unpack_zero_points()
+        if self.planar:
+            weight = planar_unpack_rows(self.qweight, self.bits)
+            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+
+        wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
+        if wf_neg_one is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} requires wf unpack buffers for dequantization. "
+                "Enable `enable_wf_unsqueeze` and call post_init()."
+            )
+
+        if self.bits in [2, 4, 8]:
             weight = t.bitwise_and(
                 _torch_right_shift(
                     t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
+                    wf_neg_one  # self.wf.unsqueeze(-1)
                 ).to(self.dequant_dtype),
                 self.maxq
             )
         elif self.bits == 3:
-            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
-                -1, -1, -1, 12
-            )
-            zeros = _torch_right_shift(zeros, self.wf_unsqueeze_zero)  # self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | (_torch_left_shift(zeros[:, :, 1, 0], 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | (_torch_left_shift(zeros[:, :, 2, 0], 1) & 0x6)
-            zeros = zeros & 0x7
-            zeros = t.cat(
-                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
-                dim=2,
-            ).reshape(self.scales.shape)
-
             weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
                 -1, -1, 12, -1
             )
-            weight = _torch_right_shift(weight, self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+            weight = _torch_right_shift(weight, wf_neg_one) & 0x7  # self.wf.unsqueeze(-1)
             weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | (_torch_left_shift(weight[:, 1, 0], 2) & 0x4)
             weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | (_torch_left_shift(weight[:, 2, 0], 1) & 0x6)
             weight = weight & 0x7
             weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
+        else:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not unpack {self.bits}-bit weights."
+            )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
         return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
@@ -1276,7 +1404,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         num_groups = scales.shape[0]
 
         # small buffers
-        self.register_buffer("scales", scales.to(dtype=t.float16))
+        self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
         elif not hasattr(self, "bias"):
@@ -1577,7 +1705,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         zeros_dev = zeros_g.to(device=target_device)
         scale_zeros_dev = scale_zeros_g.to(device=target_device)
 
-        self.register_buffer("scales", scales_g.to(device="cpu", dtype=t.float16))
+        self.register_buffer("scales", _scales_for_storage(scales_g, name=f"{self.name}.scales").to(device="cpu"))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to(device="cpu", dtype=t.float16))
         else:
@@ -1731,7 +1859,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
             # TODO why clone?
             # self.scales = scales.clone().to(dtype=t.float16)
-            self.register_buffer("scales", scales.to(dtype=t.float16))
+            self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
 
             if hasattr(linear, "bias") and linear.bias is not None:
                 # TODO why clone?

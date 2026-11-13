@@ -8,7 +8,21 @@ Importing this package does not initialize the full GPTQModel framework.
 """
 
 from ._library import library_path, load
-from .api import NF12Weight, decode, embedding, encode, linear, linear_bf16_fp32, linear_bf16t, linear_fp32, pack_bf16t
+from .api import (
+    NF12Weight,
+    decode,
+    embedding,
+    embedding_repeat4,
+    encode,
+    linear,
+    linear_bf16_fp32,
+    linear_bf16t,
+    linear_fp32,
+    linear_fp32_staged_b1,
+    linear_staged_b1,
+    pack_bf16t,
+    prepare_fp32_gate,
+)
 from .moe import (
     NF12MoEWeight,
     encode_moe,
@@ -32,6 +46,7 @@ __all__ = [
     "NF12Weight",
     "decode",
     "embedding",
+    "embedding_repeat4",
     "encode",
     "encode_moe",
     "fused_moe",
@@ -40,6 +55,8 @@ __all__ = [
     "linear_bf16_fp32",
     "linear_bf16t",
     "linear_fp32",
+    "linear_fp32_staged_b1",
+    "linear_staged_b1",
     "load",
     "moe_align",
     "moe_combine",
@@ -48,4 +65,5 @@ __all__ = [
     "moe_silu_mul",
     "pack_bf16t",
     "pack_bf16t_moe",
+    "prepare_fp32_gate",
 ]

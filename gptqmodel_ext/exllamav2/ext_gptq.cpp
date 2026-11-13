@@ -16,7 +16,8 @@ int64_t make_q_matrix(
     std::optional<torch::Tensor> q_groups_opt,
     std::optional<torch::Tensor> gptq_qzeros_opt,
     std::optional<torch::Tensor> gptq_scales_opt,
-    std::optional<torch::Tensor> gptq_g_idx_opt
+    std::optional<torch::Tensor> gptq_g_idx_opt,
+    bool already_shuffled
 )
 {
     torch::Tensor q_perm = q_perm_opt.value_or(torch::Tensor());
@@ -86,7 +87,8 @@ int64_t make_q_matrix(
         (!q_groups.defined() || q_groups.device().is_meta()) ? NULL : (uint16_t*) q_groups.data_ptr(),
         (!gptq_qzeros.defined() || gptq_qzeros.device().is_meta()) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
         (!gptq_scales.defined() || gptq_scales.device().is_meta()) ? NULL : (half*) gptq_scales.data_ptr(),
-        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr()
+        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
+        already_shuffled
     );
 
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
@@ -143,7 +145,7 @@ void gemm_half_q_half(
 
 TORCH_LIBRARY(gptqmodel_exllamav2, m)
 {
-    m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx) -> int");
+    m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx, bool already_shuffled=False) -> int");
     m.def("clone_q_matrix(int handle, Tensor weight, Tensor zeros, Tensor scales, Tensor? perm=None, Tensor? invperm=None) -> int");
     m.def("free_q_matrix(int handle) -> ()", &free_q_matrix);
     m.def("gemm_half_q_half(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");

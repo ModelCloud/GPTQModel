@@ -82,6 +82,10 @@ def _register_fakes() -> None:
     def _linear(x, packed, escapes, exp_base, bias=None):
         return x.new_empty((*x.shape[:-1], packed.shape[0]))
 
+    @torch.library.register_fake("nf12::linear_staged_b1")
+    def _linear_staged_b1(x, packed, escapes, exp_base, bias=None):
+        return x.new_empty((x.shape[0], packed.shape[0]))
+
     @torch.library.register_fake("nf12::pack_bf16t")
     def _pack_bf16t(w):
         n, k = w.shape
@@ -94,6 +98,10 @@ def _register_fakes() -> None:
     @torch.library.register_fake("nf12::embedding")
     def _embedding(ids, packed, escapes, exp_base):
         return packed.new_empty((*ids.shape, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
+
+    @torch.library.register_fake("nf12::embedding_repeat4")
+    def _embedding_repeat4(ids, packed, escapes, exp_base):
+        return packed.new_empty((*ids.shape, 4, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
 
     @torch.library.register_fake("nf12::encode_moe")
     def _encode_moe(w):

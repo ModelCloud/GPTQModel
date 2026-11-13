@@ -285,6 +285,239 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
         return True
 
+    nf12_gate_ready = [False]
+
+    def nf12_gate() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        with nf12_lock:
+            if not nf12_gate_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        weight = torch.full((384, 5120), 0.015625,
+                                            dtype=torch.bfloat16, device="cuda")
+                        weight[0, 0] = -0.0
+                        packed = nf12.encode(weight)
+                        nf12.prepare_fp32_gate(packed)
+                        x = torch.full((6, 5120), 0.125, device="cuda")
+                        nf12.linear_fp32_staged_b1(x, packed)
+                        nf12.linear_fp32(x[:1], packed)
+                        # The replacement route uses a different Triton
+                        # kernel. Compile it before workers race through the
+                        # cache test; Triton's cold JIT is not this cache.
+                        changed = nf12.encode(-weight)
+                        packed.packed = changed.packed
+                        packed.escapes = changed.escapes
+                        packed.exp_base = changed.exp_base
+                        nf12.linear_fp32(x[:1], packed)
+                nf12_gate_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        weight = torch.full((384, 5120), 0.015625,
+                            dtype=torch.bfloat16, device="cuda")
+        weight[0, 0] = -0.0
+        packed = nf12.encode(weight)
+        nf12.prepare_fp32_gate(packed)
+        x = torch.full((6, 5120), 0.125, device="cuda")
+        staged = nf12.linear_fp32_staged_b1(x, packed)
+        ordinary = nf12.linear_fp32(x[:1], packed)
+        torch.cuda.current_stream().synchronize()
+        if not (torch.equal(staged[0:1], ordinary)
+                and bool(torch.all((staged - torch.nn.functional.linear(x, weight.float())).abs() < 1e-4))):
+            raise AssertionError("concurrent NF12 gate preparation or B1 projection changed values")
+        changed = nf12.encode(-weight)
+        packed.packed = changed.packed
+        packed.escapes = changed.escapes
+        packed.exp_base = changed.exp_base
+        fallback = nf12.linear_fp32(x[:1], packed)
+        nf12.prepare_fp32_gate(packed)
+        rebuilt = nf12.linear_fp32_staged_b1(x, packed)
+        expected = torch.nn.functional.linear(x, -weight.float())
+        torch.cuda.current_stream().synchronize()
+        if not (bool(torch.all((fallback - expected[:1]).abs() < 1e-4))
+                and bool(torch.all((rebuilt - expected).abs() < 1e-4))):
+            raise AssertionError("concurrent NF12 gate cache used a replaced weight")
+        return True
+
+    def tensor_cache_revision() -> bool:
+        regular = torch.zeros(16, device="cuda")
+        before = (regular._version, regular.data_ptr(), regular.device,
+                  regular.dtype, tuple(regular.shape), regular.is_inference())
+        regular.copy_(torch.ones_like(regular))
+        after = (regular._version, regular.data_ptr(), regular.device,
+                 regular.dtype, tuple(regular.shape), regular.is_inference())
+        if after[0] != before[0] + 1 or after[1:] != before[1:]:
+            raise AssertionError("ordinary tensor cache revision did not track an in-place write")
+        with torch.inference_mode():
+            inferred = torch.zeros(16, device="cuda")
+            if not inferred.is_inference():
+                raise AssertionError("inference tensor was not marked as unversioned")
+            try:
+                inferred._version
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("inference tensor unexpectedly exposed a version")
+        return True
+
+    def embedding_row_gather() -> bool:
+        # Quantized embeddings decode a lookup with per-token gathers on the
+        # packed word row, the intra-word shift, and the scale/zero group. A
+        # golden result for one fixed token set is computed once on the main
+        # thread; every concurrent worker repeats the gathers and must match it
+        # exactly, so a torn or cross-thread read is detected.
+        vocab, dim, group_size = 4096, 128, 128
+        num_groups = vocab // group_size
+        state = {}
+
+        def decode(weight, zeros, scales, groups, ids, device):
+            tokens = torch.arange(vocab, device=device, dtype=torch.int32)
+            word_of_token = torch.div(tokens, 8, rounding_mode="floor")
+            shifts = tokens.remainder(8) * 4
+            codes = (weight.index_select(0, word_of_token.index_select(0, ids))
+                     >> shifts.index_select(0, ids).view(-1, 1)) & 0xF
+            selected = groups.index_select(0, ids)
+            return ((codes.to(torch.int16) - zeros.index_select(0, selected))
+                    * scales.index_select(0, selected))
+
+        if not hasattr(embedding_row_thread, "device"):
+            embedding_row_thread.device = embedding_row_next_device[0] % 2
+            embedding_row_next_device[0] += 1
+        device = embedding_row_thread.device
+        torch.cuda.set_device(device)
+
+        with embedding_row_lock:
+            if device not in state:
+                weight = torch.randint(
+                    0, 1 << 31, (vocab * 4 // 32, dim), dtype=torch.int32, device=device
+                )
+                zeros = torch.randint(0, 16, (num_groups, dim), dtype=torch.int16, device=device)
+                scales = torch.rand(num_groups, dim, device=device, dtype=torch.float16)
+                groups = torch.arange(vocab, device=device, dtype=torch.int32) // group_size
+                ids = torch.randint(
+                    0, vocab, (256,),
+                    generator=torch.Generator(device=device).manual_seed(20261112),
+                    device=device,
+                )
+                torch.cuda.synchronize()
+                state[device] = (
+                    weight, zeros, scales, groups, ids,
+                    decode(weight, zeros, scales, groups, ids, device),
+                )
+            weight, zeros, scales, groups, ids, golden = state[device]
+
+        got = decode(weight, zeros, scales, groups, ids, device)
+        torch.cuda.current_stream().synchronize()
+        if not bool(torch.equal(got, golden)):
+            raise AssertionError("concurrent embedding row gather changed values")
+        return True
+
+    embedding_row_thread = threading.local()
+    embedding_row_next_device = [0]
+    embedding_row_lock = threading.Lock()
+
+    awq_fp32_thread = threading.local()
+    awq_fp32_next_device = [0]
+    awq_fp32_lock = threading.Lock()
+    awq_fp32_state = {}
+
+    def awq_fp32_dequantize() -> bool:
+        """Exercise the shared AWQ FP32 dense fallback on two worker devices."""
+        from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+        with awq_fp32_lock:
+            if not hasattr(awq_fp32_thread, "device"):
+                awq_fp32_thread.device = awq_fp32_next_device[0] % 2
+                awq_fp32_next_device[0] += 1
+            device = awq_fp32_thread.device
+        torch.cuda.set_device(device)
+
+        with awq_fp32_lock:
+            if device not in awq_fp32_state:
+                # Eight one-codes per packed word; every decoded weight equals
+                # its FP32 scale. Both values would be lost through FP16.
+                qweight = torch.full((128, 16), 0x11111111, device="cuda", dtype=torch.int32)
+                qzeros = torch.zeros((1, 16), device="cuda", dtype=torch.int32)
+                scales = torch.empty((1, 128), device="cuda", dtype=torch.float32)
+                scales[:, ::2] = 1e-40
+                scales[:, 1::2] = 65536.0
+                awq_fp32_state[device] = (qweight, qzeros, scales)
+            qweight, qzeros, scales = awq_fp32_state[device]
+
+        with torch.inference_mode():
+            weight = dequantize_gemm(qweight, qzeros, scales, 4, 128)
+        torch.cuda.current_stream().synchronize()
+        if weight.dtype != torch.float32 or not torch.equal(weight, scales.expand(128, 128)):
+            raise AssertionError("concurrent AWQ FP32 dequantization changed checkpoint scales")
+        return True
+
+    gptq_scale_thread = threading.local()
+    gptq_scale_next_device = [0]
+    gptq_scale_lock = threading.Lock()
+
+    def gptq_scale_storage_guard() -> bool:
+        """Check FP16 scale cast decisions from concurrent pack workers."""
+        from gptqmodel.nn_modules.qlinear import _scales_for_storage
+
+        with gptq_scale_lock:
+            if not hasattr(gptq_scale_thread, "device"):
+                gptq_scale_thread.device = gptq_scale_next_device[0] % 2
+                gptq_scale_next_device[0] += 1
+            device = gptq_scale_thread.device
+        torch.cuda.set_device(device)
+
+        valid = torch.tensor([65504.0, 65505.0, 2.0**-24, 0.0], device="cuda")
+        stored = _scales_for_storage(valid, name="valid.scales")
+        expected = torch.tensor([65504.0, 65504.0, 2.0**-24, 0.0], device="cuda", dtype=torch.float16)
+        invalid = torch.tensor([float("nan"), 65520.0, 1e-40], device="cuda")
+        try:
+            _scales_for_storage(invalid, name="invalid.scales")
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("concurrent GPTQ scale guard accepted invalid scales")
+        torch.cuda.current_stream().synchronize()
+        if not torch.equal(stored, expected):
+            raise AssertionError("concurrent GPTQ scale guard changed valid scales")
+        if not all(part in message for part in (
+            "source nonfinite=1", "cast overflow=1", "cast underflow=1"
+        )):
+            raise AssertionError(f"concurrent GPTQ scale guard misclassified scales: {message}")
+        return True
+
+    nf12_prefill_ready = [False]
+    nf12_prefill_weights = {}
+
+    def nf12_prefill_gate() -> bool:
+        import gptqmodel_nf12 as nf12
+
+        with nf12_lock:
+            if not nf12_prefill_ready[0]:
+                nf12.load()
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        weight = torch.full((384, 5120), 0.015625,
+                                            dtype=torch.bfloat16, device="cuda")
+                        packed = nf12.encode(weight)
+                        x = torch.full((256, 5120), 0.125, device="cuda")
+                        nf12.linear_fp32(x, packed)
+                        nf12_prefill_weights[device] = packed
+                nf12_prefill_ready[0] = True
+            if not hasattr(nf12_thread, "device"):
+                nf12_thread.device = nf12_next_device[0] % 2
+                nf12_next_device[0] += 1
+        torch.cuda.set_device(nf12_thread.device)
+        x = torch.full((256, 5120), 0.125, device="cuda")
+        bias = torch.full((384,), 0.25, device="cuda")
+        output = nf12.linear_fp32(x, nf12_prefill_weights[nf12_thread.device], bias)
+        torch.cuda.current_stream().synchronize()
+        if not bool(torch.all(output == 10.25)):
+            raise AssertionError("concurrent NF12 prefill gate returned wrong values")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -294,6 +527,12 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.current_device": torch.cuda.current_device,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
+        "gptqmodel_nf12.gate": nf12_gate,
+        "Tensor cache revision metadata": tensor_cache_revision,
+        "Tensor.index_select row gather": embedding_row_gather,
+        "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
+        "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
+        "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
         "torch.cuda.stream (context manager)": lambda: str(torch.cuda.stream(torch.cuda.Stream())),
@@ -382,7 +621,8 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
-            or name.endswith("can_device_access_peer") or name == "gptqmodel_nf12.ops")
+            or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
+            or name in ("AWQ FP32 dequantize_gemm", "GPTQ FP16 scale storage guard"))
 
 
 def run_child(name: str) -> int:
@@ -393,7 +633,7 @@ def run_child(name: str) -> int:
     if _requires_two_gpus(name) and _gpu_count() < 2:
         print(json.dumps({"status": "SKIP", "detail": "needs >= 2 GPUs"}))
         return 0
-    if name == "gptqmodel_nf12.ops" and torch.version.hip is not None:
+    if name.startswith("gptqmodel_nf12.") and torch.version.hip is not None:
         print(json.dumps({"status": "SKIP", "detail": "native NF12 operator is NVIDIA-only"}))
         return 0
     try:

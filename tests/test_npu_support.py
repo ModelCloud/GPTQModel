@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
@@ -274,11 +275,7 @@ def _processor_common_kwargs(qcfg):
     return {
         "tokenizer": None,
         "qcfg": qcfg,
-        "calibration": None,
-        "prepare_dataset_func": None,
-        "calibration_concat_size": None,
-        "calibration_sort": None,
-        "batch_size": 1,
+        "calibration": CalibrationConfig(),
     }
 
 
@@ -424,7 +421,7 @@ def test_npu_gptq_processor_has_torch_runtime_kernel():
     processor = GPTQProcessor(**_processor_common_kwargs(qcfg))
 
     assert processor.name() == "gptq"
-    assert processor.execution_config.require_fwd is True
+    assert processor.forward.required is True
     assert _npu_select_quant_linear(qcfg, method=METHOD.GPTQ, fmt=FORMAT.GPTQ) is TorchLinear
 
 
@@ -438,7 +435,7 @@ def test_npu_awq_processor_selects_torch_runtime_kernel():
     )
 
     assert processor.name() == "awq"
-    assert processor.execution_config.enable_activation_capture is True
+    assert processor.forward.activation_capture is True
     assert processor.qlinear_kernel is AwqTorchLinear
     assert _npu_select_quant_linear(qcfg, method=METHOD.AWQ, fmt=FORMAT.GEMM) is AwqTorchLinear
 
@@ -460,7 +457,7 @@ def test_npu_paroquant_processor_has_torch_runtime_kernel():
     )
 
     assert processor.name() == "paroquant"
-    assert processor.execution_config.enable_activation_capture is True
+    assert processor.forward.activation_capture is True
     assert processor.qlinear_kernel is ParoLinear
     assert _npu_select_quant_linear(qcfg, method=METHOD.PARO, fmt=FORMAT.PAROQUANT) is ParoLinear
 
@@ -491,7 +488,7 @@ def test_npu_gguf_weight_only_processor_has_torch_runtime_kernel():
     processor = WeightOnlyProcessor(tokenizer=None, qcfg=qcfg)
 
     assert processor.name() == "weight_only_gguf"
-    assert processor.execution_config.require_fwd is False
+    assert processor.forward.required is False
     assert _npu_select_quant_linear(qcfg, method=METHOD.GGUF, fmt=FORMAT.GGUF) is GGUFTorchLinear
 
 

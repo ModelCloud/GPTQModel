@@ -128,12 +128,12 @@ def _build_dummy_zamba2_mixer(in_proj, out_proj=None):
 def test_zamba2_quantized_mixer_uses_torch_path(monkeypatch):
     from transformers.models.zamba2 import modeling_zamba2
 
-    monkeypatch.setattr(modeling_zamba2, "selective_state_update", object())
-    monkeypatch.setattr(modeling_zamba2, "mamba_chunk_scan_combined", object())
-    monkeypatch.setattr(modeling_zamba2, "mamba_split_conv1d_scan_combined", object())
-    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_fn", object())
-    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_update", object())
-    monkeypatch.setattr(modeling_zamba2, "is_torchdynamo_compiling", lambda: False)
+    monkeypatch.setattr(modeling_zamba2, "selective_state_update", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "mamba_chunk_scan_combined", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "mamba_split_conv1d_scan_combined", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_fn", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_update", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "is_torchdynamo_compiling", lambda: False, raising=False)
 
     mixer = _build_dummy_zamba2_mixer(in_proj=_QuantizedProjection())
     layer = SimpleNamespace(mamba=mixer)
@@ -160,12 +160,12 @@ def test_zamba2_quantized_mixer_uses_torch_path(monkeypatch):
 def test_zamba2_dense_cuda_mixer_keeps_fast_path(monkeypatch):
     from transformers.models.zamba2 import modeling_zamba2
 
-    monkeypatch.setattr(modeling_zamba2, "selective_state_update", object())
-    monkeypatch.setattr(modeling_zamba2, "mamba_chunk_scan_combined", object())
-    monkeypatch.setattr(modeling_zamba2, "mamba_split_conv1d_scan_combined", object())
-    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_fn", object())
-    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_update", object())
-    monkeypatch.setattr(modeling_zamba2, "is_torchdynamo_compiling", lambda: False)
+    monkeypatch.setattr(modeling_zamba2, "selective_state_update", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "mamba_chunk_scan_combined", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "mamba_split_conv1d_scan_combined", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_fn", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_update", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "is_torchdynamo_compiling", lambda: False, raising=False)
 
     mixer = _build_dummy_zamba2_mixer(in_proj=_DenseProjection())
     layer = SimpleNamespace(mamba_decoder=SimpleNamespace(mamba=mixer))
@@ -215,3 +215,69 @@ def test_zamba2_capture_and_replay_kwargs_preserve_original_hidden_states_and_la
     assert torch.equal(replay_kwargs["attention_mask"], attention_mask)
     assert torch.equal(replay_kwargs["causal_mask"], causal_mask)
     assert replay_kwargs["layer_idx"] == 7
+
+
+def test_zamba2_missing_fast_path_kernels_are_detected(monkeypatch):
+    from transformers.models.zamba2 import modeling_zamba2
+
+    for name in Zamba2QModel._fast_path_kernels:
+        monkeypatch.delattr(modeling_zamba2, name, raising=False)
+
+    assert set(Zamba2QModel._missing_fast_path_kernels()) == set(Zamba2QModel._fast_path_kernels)
+
+
+def test_zamba2_dense_mixer_falls_back_when_kernels_are_missing(monkeypatch):
+    from transformers.models.zamba2 import modeling_zamba2
+
+    for name in (
+        "selective_state_update",
+        "mamba_chunk_scan_combined",
+        "mamba_split_conv1d_scan_combined",
+    ):
+        monkeypatch.delattr(modeling_zamba2, name, raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_fn", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "causal_conv1d_update", object(), raising=False)
+    monkeypatch.setattr(modeling_zamba2, "is_torchdynamo_compiling", lambda: False, raising=False)
+
+    mixer = _build_dummy_zamba2_mixer(in_proj=_DenseProjection())
+    layer = SimpleNamespace(mamba=mixer)
+    qmodel = Zamba2QModel.__new__(Zamba2QModel)
+    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    qmodel.monkey_patch()
+
+    assert mixer.forward(object()) == "slow"
+    assert mixer.path == "slow"
+
+
+def test_zamba2_mixer_without_legacy_paths_keeps_upstream_forward():
+    def __init__(self):
+        self.in_proj = _DenseProjection()
+        self.out_proj = _DenseProjection()
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
+        return "upstream"
+
+    mixer_class = type("Zamba2MambaMixer", (), {"__init__": __init__, "forward": forward})
+    mixer = mixer_class()
+    layer = SimpleNamespace(mamba=mixer)
+    qmodel = Zamba2QModel.__new__(Zamba2QModel)
+    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    qmodel.monkey_patch()
+
+    assert mixer.forward(object()) == "upstream"
+
+
+def test_zamba2_real_model_monkey_patch_tolerates_missing_kernels(monkeypatch):
+    from transformers.models.zamba2 import modeling_zamba2
+
+    for name in Zamba2QModel._fast_path_kernels:
+        monkeypatch.delattr(modeling_zamba2, name, raising=False)
+    monkeypatch.delattr(modeling_zamba2, "is_torchdynamo_compiling", raising=False)
+
+    model = Zamba2ForCausalLM(_tiny_zamba2_config())
+    qmodel = Zamba2QModel.__new__(Zamba2QModel)
+    object.__setattr__(qmodel, "model", model)
+
+    qmodel.monkey_patch()

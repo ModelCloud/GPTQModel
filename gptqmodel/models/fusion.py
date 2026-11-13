@@ -445,9 +445,10 @@ class _FusionGroup:
             if suppress_restore:
                 for module in self.modules:
                     module._suspend_fused_train_restore = True
-            for clear in self.original_clears:
-                if clear is not None:
-                    clear()
+            if self.kernel.layout != "exllamav2":
+                for clear in self.original_clears:
+                    if clear is not None:
+                        clear()
             for module in self.modules:
                 self.kernel.rebind(module)
         finally:
@@ -606,9 +607,26 @@ class _FusionGroup:
         self.parent.forward = self.installed_forward
         self.active = True
         self.installed_clears = []
-        for module in self.modules:
-            def clear_weight_cache():
+        for module, original_clear in zip(self.modules, self.original_clears):
+            def clear_weight_cache(_module=module, _original_clear=original_clear):
                 self.invalidate()
+                if self.kernel.layout == "exllamav2":
+                    from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
+
+                    old = getattr(_module, "_q_handle_key", None)
+                    current = tuple(tensor_cache_key(getattr(_module, name))
+                                    for name in ("qweight", "qzeros", "scales"))
+                    # In-place writes retain the borrowed native layout; a
+                    # device/dtype/storage move needs a descriptor on the new
+                    # tensors before direct source execution can resume.
+                    if old is not None and any(
+                        old_key is None or any(old_key[i] != now[i] for i in (0, 2, 3, 4, 5))
+                        for old_key, now in zip(old, current)
+                    ):
+                        if _original_clear is not None:
+                            _original_clear()
+                        _module._fusion_native_view = False
+                    return
                 for sibling_clear in self.original_clears:
                     if sibling_clear is not None:
                         sibling_clear()
@@ -637,10 +655,17 @@ class _FusionGroup:
                     tensor = getattr(module, name)
                     if tensor is not None and tensor.numel():
                         _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+                # An export may have restored the checkpoint layout while the
+                # group was still installed. Rebuilding a CPU runtime descriptor
+                # from checkpoint-shaped operands would reinterpret GPTQ codes as
+                # int4pack storage; the next forward re-finalizes instead.
+                if self.kernel.cpu and not self.kernel.runtime_ready(module):
+                    continue
                 self.kernel.rebind(module)
-            for clear in self.original_clears:
-                if clear is not None:
-                    clear()
+            if self.kernel.layout != "exllamav2":
+                for clear in self.original_clears:
+                    if clear is not None:
+                        clear()
         self.invalidate()
 
 
