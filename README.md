@@ -980,7 +980,7 @@ BF16/FP32 routing, the 32-row native boundary, and packed-weight reconstruction.
 VPTQ learns vector codebooks from calibration data with GPTQ-style error
 compensation; Hessians are accumulated online, so no pre-generated Hessian
 files are needed. See the **[VPTQ guide](docs/vptq.md)** for the full
-configuration reference.
+configuration reference and [group layout validation flow](docs/vptq.md#group-layout-resolution).
 
 ```py
 from datasets import load_dataset

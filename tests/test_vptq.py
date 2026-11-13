@@ -887,6 +887,121 @@ def test_vptq_group_num_cannot_exceed_available_channels():
         vptq_group_setting(64, npercent=10.0, group_size=-1, group_num=58, enable_outlier=True)
 
 
+@pytest.mark.parametrize(
+    ("in_features", "requested_groups", "nonempty_groups", "group_size"),
+    [(4, 3, 2, 2), (12, 5, 4, 3), (64, 63, 32, 2), (64, 31, 22, 3), (65, 64, 33, 2)],
+)
+def test_vptq_group_num_rejects_empty_trailing_groups_without_outlier_codebook(
+    in_features, requested_groups, nonempty_groups, group_size
+):
+    """Both alternatives in the error must resolve to the same nonempty layout."""
+
+    with pytest.raises(ValueError, match="empty codebook groups") as error:
+        vptq_group_setting(
+            in_features, npercent=0.0, group_size=-1,
+            group_num=requested_groups, enable_outlier=False,
+        )
+    assert f"set `group_num={nonempty_groups}`" in str(error.value)
+    assert f"`group_size={group_size}` with `group_num=-1`" in str(error.value)
+    for settings in (
+        {"group_num": nonempty_groups, "group_size": -1},
+        {"group_num": -1, "group_size": group_size},
+    ):
+        assert vptq_group_setting(
+            in_features, npercent=0.0, enable_outlier=False, **settings
+        ) == (0, group_size, nonempty_groups)
+    # Valid group counts are not a contiguous range: one group per channel
+    # remains legal even when a smaller requested count would leave empty groups.
+    assert vptq_group_setting(
+        in_features, npercent=0.0, group_size=-1,
+        group_num=in_features, enable_outlier=False,
+    ) == (0, 1, in_features)
+    # An enabled outlier codebook absorbs the remainder for the original count.
+    outlier_size, width, count = vptq_group_setting(
+        in_features, npercent=1.0, group_size=-1,
+        group_num=requested_groups, enable_outlier=True,
+    )
+    assert width > 0 and count == requested_groups
+    assert outlier_size + width * count == in_features
+
+
+def test_vptq_group_layout_rejects_exactly_the_unoccupied_codebooks():
+    """Enumerate channel ownership independently for every small group layout."""
+
+    for in_features in range(1, 130):
+        for requested_groups in range(1, in_features + 1):
+            width, remainder = divmod(in_features, requested_groups)
+            width += bool(remainder)
+            owners = {column // width for column in range(in_features)}
+            if owners != set(range(requested_groups)):
+                with pytest.raises(ValueError, match="empty codebook groups"):
+                    vptq_group_setting(
+                        in_features, npercent=0.0, group_size=-1,
+                        group_num=requested_groups, enable_outlier=False,
+                    )
+            else:
+                assert vptq_group_setting(
+                    in_features, npercent=0.0, group_size=-1,
+                    group_num=requested_groups, enable_outlier=False,
+                ) == (0, width, requested_groups)
+
+
+@pytest.mark.parametrize("settings", [{"group_num": 22}, {"group_size": 3}], ids=["group-num", "group-size"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_vptq_suggested_group_layout_roundtrip(settings, dtype, device):
+    """Suggested layouts preserve padded weights and inference on each runtime."""
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("An accelerator is required")
+    weight, hessian = synthetic_problem(out_features=8, in_features=64, seed=26)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4], num_centroids=[-1, 4], num_res_centroids=[-1, 2],
+        kmeans_iters=2, enable_norm=True, enable_perm=True, **settings,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    quantizer.layer.to(device)
+    result, loss = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype,
+    )
+    assert math.isfinite(loss)
+    assert (result.outlier_size, result.group_size, result.group_num) == (0, 3, 22)
+    assert all(result.centroids[group] is not None for group in range(1, 23))
+
+    module = build_module(qcfg, 64, 8, dtype=dtype).to(device)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    oracle_weight = oracle_reconstruct(result, module)
+    assert torch.equal(module.dequantize(), result.quantized_weight)
+    assert torch.equal(module.dequantize().float(), oracle_weight)
+    activations = torch.linspace(-0.1, 0.1, 64, device=device, dtype=dtype).repeat(3, 1)
+    expected = (activations.double() @ oracle_weight.double().t()).to(dtype)
+    for _ in range(2):
+        actual = module(activations)
+        assert actual.dtype == dtype
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+def test_vptq_empty_group_layout_fails_before_packing():
+    """The quantizer and runtime module reject the layout before any packing."""
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 1],
+        num_centroids=[-1, 2],
+        num_res_centroids=[-1, -1],
+        npercent=0,
+        group_num=3,
+        kmeans_iters=2,
+        block_size=4,
+        percdamp=0.01,
+    )
+    weight, hessian = synthetic_problem(out_features=4, in_features=4, seed=25)
+    quantizer = build_quantizer(weight, qcfg)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        quantizer.quantize_weight(weight, hessian)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        build_module(qcfg, 4, 4)
+
+
 def test_vptq_group_num_equal_to_in_features_roundtrip():
     """`group_num == in_features` is legal and packs one codebook per channel."""
 
