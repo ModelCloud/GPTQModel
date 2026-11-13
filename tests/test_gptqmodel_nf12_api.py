@@ -16,15 +16,14 @@ import torch
 import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
+from tests.accelerator_gates import nf12_skip_reason
 
 
 def _cuda():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    device = torch.device("cuda:0")
-    if torch.cuda.get_device_capability(device)[0] < 8:
-        pytest.skip("NF12 needs SM80 or newer")
-    return device
+    reason = nf12_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    return torch.device("cuda:0")
 
 
 @pytest.mark.parametrize("shape", [

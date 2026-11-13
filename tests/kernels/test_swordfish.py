@@ -15,28 +15,19 @@ from parameterized import parameterized
 from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.swordfish import (
-    _validate_swordfish_device_support,
     prewarm_swordfish_extension,
     swordfish_runtime_available,
     swordfish_runtime_error,
 )
-
-
-def _supported_swordfish_device(device_index: int) -> bool:
-    try:
-        with torch.cuda.device(device_index):
-            return _validate_swordfish_device_support()
-    except (RuntimeError, AssertionError):
-        return False
+from tests.accelerator_gates import (
+    swordfish_skip_reason,
+    swordfish_supported_devices,
+    swordfish_test_device,
+)
 
 
 def _skip_reason() -> str | None:
-    if not torch.cuda.is_available():
-        return "CUDA not available"
-    if not _supported_swordfish_device(torch.cuda.current_device()):
-        major, minor = torch.cuda.get_device_capability()
-        return f"Swordfish does not support the current CUDA device (sm{major}{minor})"
-    return None
+    return swordfish_skip_reason()
 
 
 _SKIP_REASON = _skip_reason()
@@ -315,7 +306,7 @@ class TestSwordfishKernel(unittest.TestCase):
         rank,
         rows,
     ):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         torch_linear, sf = _make_pair(
             in_features=in_features,
             out_features=out_features,
@@ -367,7 +358,7 @@ class TestSwordfishKernel(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsInstance(error, NotImplementedError)
 
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         _, sf = _make_pair(
             in_features=64,
             out_features=64,
@@ -382,7 +373,7 @@ class TestSwordfishKernel(unittest.TestCase):
             sf.train()
 
     def test_swordfish_noncontiguous_activation(self):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         torch_linear, sf = _make_pair(
             in_features=192,
             out_features=320,
@@ -397,7 +388,7 @@ class TestSwordfishKernel(unittest.TestCase):
         _assert_pair(torch_linear, sf, x)
 
     def test_swordfish_empty_backward_is_supported(self):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         torch_linear, sf = _make_pair(
             in_features=64,
             out_features=64,
@@ -422,7 +413,7 @@ class TestSwordfishKernel(unittest.TestCase):
         reason="Swordfish torch.ops do not yet register fake/meta kernels for fullgraph capture",
     )
     def test_swordfish_compile_fullgraph_eager_contract(self):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         torch_linear, sf = _make_pair(
             in_features=64,
             out_features=64,
@@ -442,7 +433,7 @@ class TestSwordfishKernel(unittest.TestCase):
         torch.testing.assert_close(actual, eager, rtol=0, atol=0)
 
     def test_swordfish_cuda_graph_capture_and_replay(self):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = swordfish_test_device()
         _, sf = _make_pair(
             in_features=64,
             out_features=64,
@@ -469,11 +460,7 @@ class TestSwordfishKernel(unittest.TestCase):
                 torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
     def test_swordfish_uses_tensor_device_when_current_device_differs(self):
-        supported = [
-            index
-            for index in range(torch.cuda.device_count())
-            if _supported_swordfish_device(index)
-        ]
+        supported = swordfish_supported_devices()
         if len(supported) < 2:
             self.skipTest("requires at least two supported Blackwell GPUs")
 

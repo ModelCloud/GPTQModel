@@ -17,15 +17,11 @@ from gptqmodel.utils.swordfish import (
     swordfish_runtime_available,
     swordfish_runtime_error,
 )
+from tests.accelerator_gates import swordfish_skip_reason, swordfish_test_device
 
 
 def _skip_reason() -> str | None:
-    if not torch.cuda.is_available():
-        return "CUDA not available"
-    major, minor = torch.cuda.get_device_capability()
-    if major < 10:
-        return f"Swordfish requires Blackwell (sm100+); found sm{major}{minor}"
-    return None
+    return swordfish_skip_reason()
 
 
 _SKIP_REASON = _skip_reason()
@@ -129,7 +125,7 @@ class TestSwordfishSpeed(unittest.TestCase):
         bits = 4
         group_size = 128
         dtype = torch.bfloat16
-        device = torch.device("cuda:0")
+        device = swordfish_test_device()
 
         torch.manual_seed(42)
         weight = torch.randn((out_features, in_features), dtype=dtype, device="cpu") * 0.5
