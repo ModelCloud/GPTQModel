@@ -20,8 +20,7 @@
  * limitations under the License.
  */
 
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "../torch_stable_compat.h"
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1115,12 +1114,12 @@ void qqq_gemm(
   int workspace_required = ceildiv(prob_n, min_thread_n) * max_par;
   if (workspace.numel() < workspace_required)
     AT_ERROR("workspace must be of size at least ", workspace_required, ".");
-  if (s1.dtype() != torch::kFloat32)
-     AT_ERROR("s1 dtype must be float32, but got ", s1.dtype(), ".");
-  if (s2.dtype() != torch::kFloat32)
-     AT_ERROR("s2 dtype must be float32, but got ", s2.dtype(), ".");
-  if (s3.dtype() != torch::kFloat16)
-     AT_ERROR("s3 dtype must be float16, but got ", s3.dtype(), ".");
+  if (s1.scalar_type() != torch::kFloat32)
+     AT_ERROR("s1 dtype must be float32, but got ", s1.scalar_type(), ".");
+  if (s2.scalar_type() != torch::kFloat32)
+     AT_ERROR("s2 dtype must be float32, but got ", s2.scalar_type(), ".");
+  if (s3.scalar_type() != torch::kFloat16)
+     AT_ERROR("s3 dtype must be float16, but got ", s3.scalar_type(), ".");
   int dev = A.get_device();
   int err = qqq_cuda(
     A.data_ptr(),

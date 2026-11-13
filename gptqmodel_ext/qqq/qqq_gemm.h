@@ -20,7 +20,7 @@
  */
 #pragma once
 
-#include <torch/extension.h>
+#include "../torch_stable_compat.h"
 
 void qqq_gemm(
   const torch::Tensor& A,

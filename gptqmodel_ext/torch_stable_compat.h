@@ -272,6 +272,18 @@ using TensorOptions = at::TensorOptions;
 using ScalarType = torch::headeronly::ScalarType;
 using IntArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
 
+inline constexpr ScalarType kFloat32 = ScalarType::Float;
+inline constexpr ScalarType kFloat16 = ScalarType::Half;
+inline constexpr ScalarType kDouble = ScalarType::Double;
+inline constexpr ScalarType kFloat = ScalarType::Float;
+inline constexpr ScalarType kHalf = ScalarType::Half;
+inline constexpr ScalarType kInt = ScalarType::Int;
+inline constexpr ScalarType kLong = ScalarType::Long;
+inline constexpr ScalarType kShort = ScalarType::Short;
+inline constexpr ScalarType kByte = ScalarType::Byte;
+inline constexpr ScalarType kChar = ScalarType::Char;
+inline constexpr ScalarType kBool = ScalarType::Bool;
+
 using at::empty;
 using at::empty_like;
 using at::zeros;
