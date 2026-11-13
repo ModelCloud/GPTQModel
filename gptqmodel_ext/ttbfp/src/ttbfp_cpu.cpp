@@ -999,17 +999,17 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         {
             FtzGuard tguard(ftz == 0);
 #pragma omp for collapse(2) schedule(static)
-        for (int64_t mt = 0; mt < mtiles; ++mt) {
-            for (int64_t jp = 0; jp < jpanels; ++jp) {
-                const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
-                const int64_t j0 = jp * jm;
-                const int jc = (int)std::min<int64_t>(jm, nfull - j0);
-                const AT *Ap = A + mt * mrt * lda;
-                float *Cp = C + mt * mrt * ldc + j0 * TTBFP_BLOCK;
-                mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, exps, data, e_k, d_k,
-                            e_j, d_j, K, j0, jc, Cp, ldc, ftz, level);
+            for (int64_t mt = 0; mt < mtiles; ++mt) {
+                for (int64_t jp = 0; jp < jpanels; ++jp) {
+                    const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
+                    const int64_t j0 = jp * jm;
+                    const int jc = (int)std::min<int64_t>(jm, nfull - j0);
+                    const AT *Ap = A + mt * mrt * lda;
+                    float *Cp = C + mt * mrt * ldc + j0 * TTBFP_BLOCK;
+                    mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, exps, data, e_k, d_k,
+                                e_j, d_j, K, j0, jc, Cp, ldc, ftz, level);
+                }
             }
-        }
         }
     }
 
@@ -1023,17 +1023,17 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         {
             FtzGuard tguard(ftz == 0);
 #pragma omp for schedule(static)
-        for (int64_t mt = 0; mt < mtiles; ++mt) {
-            const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
-            float tmp[16 * TTBFP_BLOCK];
-            const AT *Ap = A + mt * mrt * lda;
-            mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0,
-                        K, 0, 1, tmp, TTBFP_BLOCK, ftz, level);
-            for (int r = 0; r < mr; ++r) {
-                std::memcpy(C + (mt * mrt + r) * ldc + j * TTBFP_BLOCK,
-                            tmp + r * TTBFP_BLOCK, (size_t)n * sizeof(float));
+            for (int64_t mt = 0; mt < mtiles; ++mt) {
+                const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
+                float tmp[16 * TTBFP_BLOCK];
+                const AT *Ap = A + mt * mrt * lda;
+                mm_run_rows<AT, Loader, Dec>(mr, fmt, Ap, lda, ep, dp, e_k, d_k, 0, 0,
+                            K, 0, 1, tmp, TTBFP_BLOCK, ftz, level);
+                for (int r = 0; r < mr; ++r) {
+                    std::memcpy(C + (mt * mrt + r) * ldc + j * TTBFP_BLOCK,
+                                tmp + r * TTBFP_BLOCK, (size_t)n * sizeof(float));
+                }
             }
-        }
         }
     }
 }
