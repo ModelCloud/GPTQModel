@@ -117,6 +117,26 @@ class _BlockfloatStorage(nn.Module):
             and tt_blockfloat_hip.supports_bits(self.bits)
         )
 
+    def cuda_dispatch(self, tensor: torch.Tensor) -> bool:
+        """Whether the CUDA kernels can serve ``tensor`` for this storage.
+
+        Like the HIP kernels, the CUDA kernels bind one exponent per 16 values.
+        Storage with a wider ``block`` therefore has no native geometry and must
+        stay on the Torch path even when the device, bits and dtype are
+        supported.
+        """
+
+        if tensor.device.type != "cuda" or self.codes.device != tensor.device:
+            return False
+        if self.block != BLOCKFLOAT_BLOCK:
+            return False
+        if self.bits not in (4, 8):
+            return False
+
+        from ...utils import tt_blockfloat_cuda
+
+        return tt_blockfloat_cuda.ready(tensor.device)
+
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Rebuild the exact grid weights as ``[out_features, in_features]``."""
 
@@ -221,17 +241,13 @@ class _BlockfloatStorage(nn.Module):
             # where there are none and F.linear returns [out_features].
             return out.reshape(*x.shape[:-1], out.shape[-1])
 
-        if x.device.type != "cuda" or self.codes.device != x.device:
-            return None
-        if self.bits not in (4, 8):
-            return None
         if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return None
 
-        from ...utils import tt_blockfloat_cuda as bf_cuda
-
-        if not bf_cuda.ready(x.device):
+        if not self.cuda_dispatch(x):
             return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
 
         shape = x.shape
         flat = x.reshape(-1, shape[-1])
@@ -432,17 +448,13 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
                 self.output_dtype,
             )
 
-        if input_ids.device.type != "cuda" or self.codes.device != input_ids.device:
-            return None
-        if self.bits not in (4, 8):
-            return None
         if self.output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return None
 
-        from ...utils import tt_blockfloat_cuda as bf_cuda
-
-        if not bf_cuda.ready(input_ids.device):
+        if not self.cuda_dispatch(input_ids):
             return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
 
         shape = input_ids.shape
         flat = input_ids.reshape(-1).to(torch.int64)

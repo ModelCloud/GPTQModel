@@ -288,6 +288,8 @@ the JIT-loaded [CUDA](gptqmodel_ext/tt_blockfloat_cuda/README.md) and
 the checkpoint's block-float values without re-quantizing the weights;
 GEMM arithmetic depends on the execution backend. For CPU format validation
 and fused GEMM, see [Tenstorrent block floats on CPU](#tenstorrent-block-floats-on-cpu).
+The [kernel dispatch contract](docs/tenstorrent.md#block-float-kernel-dispatch)
+records when the native block-float kernels are used.
 
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
