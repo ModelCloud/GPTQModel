@@ -368,6 +368,9 @@ def test_rocm_sdk_devel_paths_are_compiler_and_linker_flags(monkeypatch, tmp_pat
     (lib / "libamdhip64.so").touch()
     monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(core))
     monkeypatch.setattr(cpp_module, "IS_ROCM", True)
+    monkeypatch.setattr(cpp_module, "_ROCM_DEFAULT_ROOT", tmp_path / "opt-rocm")
+    for env_name in cpp_module._ROCM_TOOLKIT_ROOT_ENV_VARS:
+        monkeypatch.delenv(env_name, raising=False)
 
     loader = _make_loader(
         tmp_path, requires_cuda=True, extra_cflags=["-O2"], extra_ldflags=["-lm"]
@@ -375,6 +378,174 @@ def test_rocm_sdk_devel_paths_are_compiler_and_linker_flags(monkeypatch, tmp_pat
     assert loader._resolved_extra_cflags() == ["-O2", f"-I{include}"]
     assert loader._resolved_extra_ldflags() == ["-lm", f"-L{lib}"]
     assert str(include) not in loader._resolved_extra_include_paths()
+
+
+def _make_rocm_sdk_root(root: Path) -> None:
+    """Create the headers, unversioned library and device bitcode of a full SDK."""
+
+    include = root / "include"
+    lib = root / "lib"
+    bitcode = lib / "llvm" / "amdgcn" / "bitcode"
+    (include / "thrust").mkdir(parents=True)
+    bitcode.mkdir(parents=True)
+    (include / "thrust" / "complex.h").touch()
+    (include / "hipsparse").mkdir()
+    (include / "hipsparse" / "hipsparse.h").touch()
+    (lib / "libamdhip64.so").touch()
+    (bitcode / "hip.bc").touch()
+
+
+def _isolate_rocm_roots(monkeypatch, tmp_path: Path, rocm_home: Path) -> Path:
+    """Point the resolver at a disposable /opt/rocm tree and a fake ROCM_HOME."""
+
+    from torch.utils import cpp_extension
+
+    opt_rocm = tmp_path / "opt-rocm"
+    opt_rocm.mkdir()
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(rocm_home))
+    monkeypatch.setattr(cpp_module, "_ROCM_DEFAULT_ROOT", opt_rocm)
+    monkeypatch.setattr(cpp_module, "IS_ROCM", True)
+    for env_name in cpp_module._ROCM_TOOLKIT_ROOT_ENV_VARS:
+        monkeypatch.delenv(env_name, raising=False)
+    return opt_rocm
+
+
+def test_versioned_rocm_core_sdk_supplies_include_lib_and_device_bitcode(monkeypatch, tmp_path):
+    """Guard the /opt/rocm/core-* fallback for a sparse pip ROCM_HOME."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    (sparse_core / "lib").mkdir(parents=True)
+    (sparse_core / "lib" / "libamdhip64.so.7").touch()
+
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    core = opt_rocm / "core-10.1"
+    _make_rocm_sdk_root(core)
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    assert cpp_module.detected_rocm_include_paths() == [str(core / "include")]
+    assert cpp_module.rocm_supplemental_include_cflags() == [f"-I{core / 'include'}"]
+    assert cpp_module.rocm_supplemental_ldflags() == [f"-L{core / 'lib'}"]
+    assert cpp_module.rocm_supplemental_device_lib_flags() == [
+        f"--rocm-device-lib-path={core / 'lib' / 'llvm' / 'amdgcn' / 'bitcode'}"
+    ]
+
+    loader = _make_loader(tmp_path, requires_cuda=True, extra_cuda_cflags=["-O2"])
+    assert loader._resolved_extra_cuda_cflags() == [
+        "-O2",
+        f"--rocm-device-lib-path={core / 'lib' / 'llvm' / 'amdgcn' / 'bitcode'}",
+    ]
+    assert _make_loader(tmp_path, requires_cuda=False)._resolved_extra_cuda_cflags() == []
+
+
+def test_versioned_rocm_core_sdk_prefers_the_torch_matched_version(monkeypatch, tmp_path):
+    """Guard version selection so two installed core SDKs cannot be mixed."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    older = opt_rocm / "core-10.1"
+    newer = opt_rocm / "core-10.3"
+    _make_rocm_sdk_root(older)
+    _make_rocm_sdk_root(newer)
+
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+    assert cpp_module.detected_rocm_include_paths() == [str(older / "include")]
+
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.3.0")
+    assert cpp_module.detected_rocm_include_paths() == [str(newer / "include")]
+
+
+def test_rocm_device_lib_flag_prefers_the_runtime_bitcode(monkeypatch, tmp_path):
+    """Guard version matching: ROCM_HOME bitcode wins over another SDK tree."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    _make_rocm_sdk_root(sparse_core)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    other = opt_rocm / "core-10.3"
+    _make_rocm_sdk_root(other)
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.3.0")
+
+    expected = sparse_core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    assert cpp_module.rocm_supplemental_device_lib_flags() == [
+        f"--rocm-device-lib-path={expected}"
+    ]
+
+
+def test_rocm_device_lib_flag_is_absent_without_bitcode(monkeypatch, tmp_path):
+    """A root without device bitcode must not emit a broken compiler flag."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+
+    assert cpp_module.rocm_supplemental_device_lib_flags() == []
+
+
+def test_complete_env_root_is_honored_for_include_and_link(monkeypatch, tmp_path):
+    """An explicit complete ROCM_PATH/HIP_PATH pair wins over another core version."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    older = opt_rocm / "core-10.1"
+    env_root = opt_rocm / "core-10.3"
+    _make_rocm_sdk_root(older)
+    _make_rocm_sdk_root(env_root)
+    monkeypatch.setenv("ROCM_PATH", str(env_root))
+    monkeypatch.setenv("HIP_PATH", str(env_root))
+    from torch.utils import cpp_extension
+
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(env_root))
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    assert cpp_module.detected_rocm_include_paths() == [str(env_root / "include")]
+    assert cpp_module.rocm_supplemental_ldflags() == [f"-L{env_root / 'lib'}"]
+    assert cpp_module.rocm_supplemental_device_lib_flags() == [
+        f"--rocm-device-lib-path={env_root / 'lib' / 'llvm' / 'amdgcn' / 'bitcode'}"
+    ]
+
+
+def test_sparse_env_root_falls_back_to_a_complete_core(monkeypatch, tmp_path):
+    """A pip-core ROCM_PATH/HIP_PATH must not suppress the versioned SDK fallback."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    (sparse_core / "lib" / "llvm" / "amdgcn" / "bitcode").mkdir(parents=True)
+    (sparse_core / "lib" / "libamdhip64.so.7").touch()
+    (sparse_core / "lib" / "llvm" / "amdgcn" / "bitcode" / "hip.bc").touch()
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    core = opt_rocm / "core-10.1"
+    _make_rocm_sdk_root(core)
+    monkeypatch.setenv("ROCM_PATH", str(sparse_core))
+    monkeypatch.setenv("HIP_PATH", str(sparse_core))
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    assert cpp_module.detected_rocm_include_paths() == [str(core / "include")]
+    assert cpp_module.rocm_supplemental_ldflags() == [f"-L{core / 'lib'}"]
+    assert cpp_module.rocm_supplemental_device_lib_flags() == [
+        f"--rocm-device-lib-path={sparse_core / 'lib' / 'llvm' / 'amdgcn' / 'bitcode'}"
+    ]
+
+
+def test_legacy_env_root_does_not_mix_include_and_library(monkeypatch, tmp_path):
+    """A legacy /opt/rocm lib must not be paired with a newer core include tree."""
+
+    sparse_core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    sparse_core.mkdir(parents=True)
+    opt_rocm = _isolate_rocm_roots(monkeypatch, tmp_path, sparse_core)
+    legacy = opt_rocm
+    (legacy / "lib").mkdir()
+    (legacy / "lib" / "libamdhip64.so").touch()
+    core = opt_rocm / "core-10.1"
+    _make_rocm_sdk_root(core)
+    monkeypatch.setenv("ROCM_PATH", str(legacy))
+    monkeypatch.setenv("HIP_PATH", str(legacy))
+    from torch.utils import cpp_extension
+
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(legacy))
+    monkeypatch.setattr(cpp_module.torch.version, "rocm", "10.1.0")
+
+    assert cpp_module.detected_rocm_include_paths() == [str(core / "include")]
+    assert cpp_module.rocm_supplemental_ldflags() == [f"-L{core / 'lib'}"]
 
 
 def test_detected_cuda_wheel_include_paths_discovers_merged_and_split_layouts(monkeypatch, tmp_path):
