@@ -1,4 +1,4 @@
-#include <torch/types.h>
+#include "../torch_stable_compat.h"
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,

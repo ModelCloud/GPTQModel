@@ -14,6 +14,7 @@ from __future__ import annotations
 from gptqmodel.utils import cpp
 from gptqmodel.utils import awq
 from gptqmodel.utils import hadamard
+from gptqmodel.utils import marlin
 from gptqmodel.utils import paroquant
 from gptqmodel.utils import qqq
 
@@ -62,3 +63,11 @@ def test_awq_uses_stable_abi():
 
 def test_paroquant_uses_stable_abi():
     _assert_stable(paroquant._PAROQUANT_ROTATION_EXTENSION)
+
+
+def test_marlin_fp16_uses_stable_abi():
+    _assert_stable(marlin._MARLIN_FP16_TORCH_OPS_EXTENSION)
+
+
+def test_marlin_bf16_uses_stable_abi():
+    _assert_stable(marlin._MARLIN_BF16_TORCH_OPS_EXTENSION)
