@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from gptqmodel import ShardConfig, reshard
 from gptqmodel.models import writer
 from gptqmodel.utils import model as model_utils
 
@@ -166,6 +168,128 @@ def test_exl3_checkpoint_passthrough_preserves_native_source_identity(tmp_path, 
             "original.hc_attn_base",
         }
         assert torch.equal(checkpoint.get_tensor("original.hc_attn_base"), native)
+
+
+def test_exl3_checkpoint_passthrough_accepts_reshard_per_layer_shards(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    native_norm = torch.tensor([1.25, -2.5], dtype=torch.float32)
+    save_file(
+        {
+            "model.layers.0.proj.weight": torch.ones((2, 2), dtype=torch.bfloat16),
+            "model.layers.0.norm.weight": native_norm,
+            "model.embed_tokens.weight": torch.ones((4, 2), dtype=torch.float32),
+        },
+        source / "model.safetensors",
+    )
+    resharded = tmp_path / "resharded"
+    reshard(source, resharded, ShardConfig(layer_prefixes=["model.layers"]))
+    weight_map = json.loads(
+        (resharded / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )["weight_map"]
+    # The public reshard() per-layer layout nests shards in subdirectories.
+    assert weight_map["model.layers.0.norm.weight"] == (
+        "model.layers.0/layer.safetensors"
+    )
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    model.model.layers[0].proj = _FakeEXL3()
+    model.model.layers[0].proj.register_buffer(
+        "trellis", torch.ones((1,), dtype=torch.int16)
+    )
+    owner = SimpleNamespace(
+        model=model,
+        turtle_model=SimpleNamespace(
+            model_local_path=str(resharded),
+            _weight_map=weight_map,
+        ),
+    )
+    storage = {
+        "model.layers.0.proj": {
+            "stored_tensors": {"model.layers.0.proj.trellis": {}},
+        }
+    }
+
+    plan = writer._exllamav3_checkpoint_passthrough_plan(owner, storage)
+    assert plan is not None
+    state = writer._build_exllamav3_checkpoint_passthrough_state_dict(owner, plan)
+    assert set(state) == {
+        "model.layers.0.proj.trellis",
+        "model.layers.0.norm.weight",
+        "model.embed_tokens.weight",
+    }
+
+    published = tmp_path / "published"
+    published.mkdir()
+    writer.streaming_state_dict_to_shards(
+        state,
+        save_dir=str(published),
+        model_base_name="published",
+        single_file_name="published.safetensors",
+        metadata={"format": "pt"},
+        max_shard_size=None,
+    )
+    with safe_open(
+        published / "published.safetensors", framework="pt", device="cpu"
+    ) as checkpoint:
+        assert set(checkpoint.keys()) == {
+            "model.layers.0.proj.trellis",
+            "model.layers.0.norm.weight",
+            "model.embed_tokens.weight",
+        }
+        assert torch.equal(
+            checkpoint.get_tensor("model.layers.0.norm.weight"), native_norm
+        )
+        assert torch.equal(
+            checkpoint.get_tensor("model.embed_tokens.weight"),
+            torch.ones((4, 2), dtype=torch.float32),
+        )
+
+
+@pytest.mark.parametrize(
+    "shard_name",
+    [
+        "/absolute/layer.safetensors",
+        "../escape/layer.safetensors",
+        "nested/../escape.safetensors",
+        "./layer.safetensors",
+        "nested//layer.safetensors",
+        "nested\\layer.safetensors",
+    ],
+)
+def test_exl3_checkpoint_passthrough_rejects_unsafe_shard_paths(
+    tmp_path, shard_name
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    save_file(
+        {
+            "expert.weight": torch.ones((2, 2)),
+            "native.norm.weight": torch.ones((2,)),
+        },
+        snapshot / "source.safetensors",
+    )
+    model = torch.nn.Module()
+    model.expert = _FakeEXL3()
+    model.expert.register_buffer("trellis", torch.ones((1,), dtype=torch.int16))
+    owner = SimpleNamespace(
+        model=model,
+        turtle_model=SimpleNamespace(
+            model_local_path=str(snapshot),
+            _weight_map={
+                "expert.weight": shard_name,
+                "native.norm.weight": shard_name,
+            },
+        ),
+    )
+    storage = {"expert": {"stored_tensors": {"expert.trellis": {}}}}
+
+    plan = writer._exllamav3_checkpoint_passthrough_plan(owner, storage)
+    assert plan is not None
+    with pytest.raises(RuntimeError, match="Checkpoint shard name is unsafe"):
+        writer._build_exllamav3_checkpoint_passthrough_state_dict(owner, plan)
 
 
 def test_exl3_checkpoint_passthrough_requires_source_weight_identity(tmp_path):

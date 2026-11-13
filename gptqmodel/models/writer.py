@@ -1033,6 +1033,25 @@ def _torch_dtype_from_safetensors_name(name: str) -> torch.dtype:
     return dtype
 
 
+def _is_safe_relative_checkpoint_shard(shard_name: str) -> bool:
+    """Return whether an index shard entry is a safe relative path.
+
+    Safetensors indexes may reference shards in nested subdirectories, as the
+    public ``reshard()`` per-layer layout does (``model.layers.0/layer.safetensors``).
+    Accept those, but reject absolute or drive-qualified paths, backslashes,
+    NUL bytes, and empty, ``.`` or ``..`` components so a shard cannot escape
+    the checkpoint root.
+    """
+
+    if not isinstance(shard_name, str) or not shard_name:
+        return False
+    if "\x00" in shard_name or "\\" in shard_name:
+        return False
+    if os.path.isabs(shard_name) or os.path.splitdrive(shard_name)[0]:
+        return False
+    return all(part not in ("", ".", "..") for part in shard_name.split("/"))
+
+
 def _build_exllamav3_checkpoint_passthrough_state_dict(
     owner,
     plan,
@@ -1078,11 +1097,13 @@ def _build_exllamav3_checkpoint_passthrough_state_dict(
 
     native_sources: Dict[str, TensorSource] = {}
     for shard_name in sorted(by_shard):
-        # Hugging Face snapshots intentionally store basename-only symlinks to
-        # the repository's shared ``blobs`` directory, which is outside the
-        # snapshot root after realpath resolution. Reject path components and
-        # traversal, but permit that canonical snapshot-link layout.
-        if os.path.basename(shard_name) != shard_name or shard_name in {".", ".."}:
+        # Require a safe relative path: nested per-layer shards are valid, but
+        # absolute paths, traversal, and backslashes are not. Hugging Face
+        # snapshots intentionally store basename-only symlinks to the
+        # repository's shared ``blobs`` directory, which is outside the
+        # snapshot root after realpath resolution, so resolved paths are not
+        # required to remain under the source root.
+        if not _is_safe_relative_checkpoint_shard(shard_name):
             raise RuntimeError(f"Checkpoint shard name is unsafe: {shard_name}")
         shard_path = os.path.realpath(os.path.join(source_root, shard_name))
         if not os.path.isfile(shard_path):
