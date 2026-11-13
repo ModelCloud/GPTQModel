@@ -3,7 +3,8 @@ torch>=2.14.1
 safetensors>=0.8.0
 filelock>=4.1.0; python_version < "3.11"
 filelock>=4.2.4; python_version >= "3.11"
-transformers>=5.20.2
+transformers>=5.20.2; python_version < "3.11"
+transformers>=5.22.2; python_version >= "3.11"
 threadpoolctl>=3.8.0
 packaging>=26.3
 device-smi>=0.5.7
