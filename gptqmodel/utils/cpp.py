@@ -822,22 +822,6 @@ def _rocm_library_roots() -> list[Path]:
     ]
 
 
-def _rocm_sdk_devel_lib_paths() -> list[str]:
-    """Return ROCm development library trees that provide ``-lamdhip64``.
-
-    The pip runtime ``_rocm_sdk_core`` ships versioned sonames only
-    (``libamdhip64.so.7``). A version-matched pip devel tree or a versioned
-    ``/opt/rocm/core-*`` SDK carries the unversioned development symlink. The
-    first tree that also provides the template headers wins, so the include and
-    link flags stay on one ROCm version.
-    """
-
-    root = _rocm_toolkit_root()
-    if root is not None:
-        return [str(root / "lib")]
-    return [str(candidate / "lib") for candidate in _rocm_library_roots()]
-
-
 def rocm_supplemental_ldflags() -> list[str]:
     """Return ``-L`` flags for ROCm development libraries missing from ``ROCM_HOME``.
 
@@ -850,10 +834,10 @@ def rocm_supplemental_ldflags() -> list[str]:
 
     if not IS_ROCM:
         return []
-    lib_paths = _rocm_sdk_devel_lib_paths()
-    if not lib_paths:
+    root = _rocm_toolkit_root()
+    if root is None:
         return []
-    return [f"-L{lib_paths[0]}"]
+    return [f"-L{root / 'lib'}"]
 
 
 def rocm_supplemental_device_lib_flags() -> list[str]:
@@ -863,8 +847,9 @@ def rocm_supplemental_device_lib_flags() -> list[str]:
     into ``--rocm-path``, so clang++ falls back to its compiled-in install root
     and reports ``cannot find ROCm device library``. Pass the device bitcode
     directory explicitly. ``ROCM_HOME`` is preferred because its bitcode is
-    guaranteed to match the runtime torch loaded; a version-matched devel tree
-    is the fallback.
+    guaranteed to match the runtime torch loaded; the toolkit root selected
+    for both headers and libraries is the only fallback. An unrelated
+    bitcode-only SDK must not be paired with that toolkit.
     """
 
     if not IS_ROCM:
@@ -878,9 +863,9 @@ def rocm_supplemental_device_lib_flags() -> list[str]:
     rocm_home = getattr(_cpp_extension, "ROCM_HOME", None) if _cpp_extension else None
     if rocm_home:
         candidate_roots.append(Path(rocm_home).expanduser())
-    candidate_roots.extend(
-        root for root in _rocm_development_roots() if root not in candidate_roots
-    )
+    toolkit_root = _rocm_toolkit_root()
+    if toolkit_root is not None and toolkit_root not in candidate_roots:
+        candidate_roots.append(toolkit_root)
 
     for root in candidate_roots:
         bitcode = root / _ROCM_DEVICE_BITCODE

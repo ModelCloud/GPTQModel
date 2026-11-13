@@ -281,7 +281,48 @@ def test_qqq_optional_group_scales_schema():
         out_features=128,
     )
     del module.s_group
-    assert_schema_roundtrip(module, config)
+    restored = assert_schema_roundtrip(module, config)
+    # The packed buffers are meta until checkpoint tensors load, but these
+    # fixed permutation tables must already contain data for later unpacking.
+    assert restored._perm.device.type == "cpu"
+    assert restored._perm_i.device.type == "cpu"
+    assert torch.equal(
+        restored._perm[restored._perm_i],
+        torch.arange(restored._perm.numel()),
+    )
+
+
+def test_qqq_torch_checkpoint_restore_runs_with_real_permutations():
+    """Meta restore must retain usable permutation data for CPU inference."""
+
+    from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
+
+    config = QQQConfig(bits=4, group_size=128)
+    module = QQQTorchLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=256,
+        out_features=128,
+        bias=False,
+    )
+    module.B.zero_()
+    module.s_channel.fill_(1)
+    module.s_group.fill_(1)
+    module.eval()
+    spec = ContinuationCodec.loads(
+        ContinuationCodec.dumps(packed_module_config(module, config))
+    )
+    restored = restore_packed_module(
+        spec, name="proj", config=config, kernel=QQQTorchLinear, lm_head_name="lm_head"
+    )
+    restored.to_empty(device="cpu")
+    restored.load_state_dict(module.state_dict())
+    restored.eval()
+
+    activation = torch.ones((2, 256), dtype=torch.float16)
+    torch.testing.assert_close(restored(activation), module(activation), rtol=0, atol=0)
 
 
 def test_paro_runtime_options_schema():

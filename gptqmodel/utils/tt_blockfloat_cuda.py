@@ -119,21 +119,23 @@ def prewarm() -> bool:
 _READY: Optional[bool] = None
 
 
-def ready() -> bool:
-    """Whether the kernels are usable *and* already built, cached after the first probe.
+def ready(device: torch.device | str | None = None) -> bool:
+    """Whether the kernels can run on ``device``, building once when needed.
 
-    A missing compiler or an unsupported device must degrade to the dense
-    reference path rather than fail a forward pass, so callers use this instead
-    of letting :func:`_ops` raise.
+    Capability belongs to the target GPU, not to the process-wide extension.
+    An unsupported GPU must not poison the build result for another device,
+    and a successful build must not dispatch a kernel to an unsupported GPU.
     """
 
     global _READY
+    if not supported(device):
+        return False
     if _READY is None:
-        _READY = supported() and prewarm()
+        _READY = prewarm()
         if not _READY:
             log.warning(
                 "Tenstorrent block-float CUDA kernels are unavailable, falling back to the dense reference path: %s",
-                _EXTENSION.last_error_message() or "no sm_80+ CUDA device",
+                _EXTENSION.last_error_message() or "extension build failed",
             )
     return _READY
 

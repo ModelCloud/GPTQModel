@@ -748,6 +748,31 @@ automatically when a block-float module is on a CUDA device of sm_80 or newer;
 the torch path remains the fallback everywhere else, and a failed extension build
 logs once and falls back rather than failing a forward pass.
 
+CUDA capability is checked against the module's actual tensor device. The
+extension build result is shared across devices, but a device below sm_80 never
+uses that result and never marks the extension unavailable for another GPU.
+
+```mermaid
+flowchart TD
+    A["TTBlockfloatLinear._kernel_linear(x)<br/>or TTBlockfloatEmbedding._kernel_embedding(input_ids)"] --> B["tt_blockfloat_cuda.ready(tensor.device)"]
+    B --> C{"supported(device)<br/>NVIDIA sm_80 or newer?"}
+    C -- no --> D["return None; module uses Torch dense fallback"]
+    C -- yes --> E{"_READY known?"}
+    E -- no --> F["prewarm() builds extension once"]
+    F --> G{"build succeeded?"}
+    G -- no --> D
+    G -- yes --> H["CUDA packed-code kernel"]
+    E -- yes --> I{"cached build succeeded?"}
+    I -- no --> D
+    I -- yes --> H
+    style D fill:#ffe0e0,stroke:#b00020
+```
+
+| Dispatch point | Before | Current |
+| --- | --- | --- |
+| Linear and embedding calls | `tt_blockfloat.py:233,438` called `ready()` without the tensor device | Both call `ready(tensor.device)`, preserving the CUDA ordinal |
+| Build cache | `tt_blockfloat_cuda.py:122` cached the combined current-device capability and build result | `ready(device)` checks the target on every call and caches only `prewarm()` |
+
 That path exists to exercise the dtype, not to serve CUDA inference: the
 Tenstorrent backends above are what this repository supports on the cards. See
 `gptqmodel_ext/tt_blockfloat_cuda/README.md` for the measured numbers and the two

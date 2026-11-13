@@ -230,7 +230,7 @@ class _BlockfloatStorage(nn.Module):
 
         from ...utils import tt_blockfloat_cuda as bf_cuda
 
-        if not bf_cuda.ready():
+        if not bf_cuda.ready(x.device):
             return None
 
         shape = x.shape
@@ -435,7 +435,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
 
         from ...utils import tt_blockfloat_cuda as bf_cuda
 
-        if not bf_cuda.ready():
+        if not bf_cuda.ready(input_ids.device):
             return None
 
         shape = input_ids.shape

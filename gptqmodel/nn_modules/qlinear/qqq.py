@@ -67,7 +67,9 @@ def _invert_permutation(values) -> torch.Tensor:
     inverse = [0] * len(values)
     for index, value in enumerate(values):
         inverse[int(value)] = index
-    return torch.tensor(inverse, dtype=torch.long)
+    # These fixed permutation tables are used after a meta-device checkpoint
+    # restore, so they must contain real data even inside torch.device("meta").
+    return torch.tensor(inverse, dtype=torch.long, device="cpu")
 
 
 def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
@@ -256,8 +258,11 @@ class QQQLinear(GroupedQuantLinear):
             for row in range(len(perm) // 8)
             for column in interleave
         ]
-        perm = torch.tensor(perm, dtype=torch.long)
-        perm_i = _invert_permutation(perm.tolist())
+        # Checkpoint restore constructs this module under torch.device("meta").
+        # Invert the Python layout before materializing it: meta tensors cannot
+        # be copied back to a list.
+        perm_i = _invert_permutation(perm)
+        perm = torch.tensor(perm, dtype=torch.long, device="cpu")
         scale_perm = []
         for i in range(8):
             scale_perm.extend([i + 8 * j for j in range(8)])
