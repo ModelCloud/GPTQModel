@@ -31,7 +31,8 @@ class GraniteMoeSWAQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            # Exclude the direct sink parameter, while quantizing the linears.
+            "self_attn:!": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe:moe:?": {
                 "router": ("router:!",),

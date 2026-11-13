@@ -1097,6 +1097,7 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
+        ["self_attn:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
@@ -1108,6 +1109,7 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
+        ["self_attn:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],

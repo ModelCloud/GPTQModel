@@ -3,128 +3,145 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # AWQ GEMM dequantization tiling
 
-`AwqTorchLinear` is the portable dense AWQ kernel: it dequantizes the packed
-weight and multiplies, and it is the arithmetic oracle the other AWQ kernels are
-checked against. That shape is deliberate, so the weight is *not* cached between
-calls — the dequantized tensor lives for exactly one forward.
+`AwqTorchLinear` reconstructs a dense weight for the current matrix multiplication.
+`dequantize_gemm` bounds the reconstruction by input-row tiles and broadcasts one
+scale/zero row per quantization group. Complete groups share a three-dimensional
+broadcast when they fit; larger groups, per-channel weights, and ragged tails use
+partial-group slices. The dense result remains local to the consuming forward.
 
-The cost of that choice is decided by how the reconstruction is written, not by
-the fact that it happens. `dequantize_gemm` used to expand the group scales and
-zero points to the full `[in_features, out_features]` shape and keep several
-full-size intermediate copies alive at once. For a 4096x4096 four-bit layer that
-was 448 MiB of transient memory to produce a 32 MiB FP16 weight, and the
-expansion dominated decode latency. The reconstruction is now tiled over input
-rows and broadcasts one scale/zero row per group, so the temporary storage is
-proportional to one tile instead of a multiple of the whole weight.
+The INT32 code budget is 8 MiB, with a minimum of one row if a row itself exceeds
+the budget. Group alignment can reduce a tile, never enlarge it. The budget
+excludes the returned dense weight, unpacked zero-point metadata, and the generic
+bit-stream unpacker's tile-local INT64 intermediates. Tile references are released
+before the next unpack. Training may retain integer differences for backward;
+inference retains only the original quantized weights and their metadata.
 
-## New flow
+## Reconstruction flow
 
 ```mermaid
 flowchart TD
-    A["AwqTorchLinear.forward (torch_awq.py:309)"] --> B["dequantize_gemm (packing_utils.py:212)"]
-    B --> C["unpack zero rows once, INT32 (packing_utils.py:247)"]
-    C --> D["rows_per_tile from _AWQ_DEQUANT_TILE_BYTES, aligned to group (packing_utils.py:252)"]
-    D --> E["unpack one tile of codes, INT32, masked in place (packing_utils.py:262)"]
-    E --> F{"whole groups and inside the last group"}
-    F -- "yes" --> G["view tile as (tiles, group, out) and broadcast one scale/zero row per group (packing_utils.py:269)"]
-    F -- "no, ragged tail" --> H["per-group broadcast for the remaining rows (packing_utils.py:286)"]
-    G --> I["write the FP16 tile into weight rows"]
+    A["AwqTorchLinear.forward"] --> B["dequantize_gemm"]
+    B --> C{"qzeros present and num_groups positive?"}
+    C -- "no" --> X["ValueError: missing zero points or scale groups"]
+    C -- "yes" --> D["_unpack_columnwise: INT32 zero rows"]
+    D --> E["rows_per_tile from _AWQ_DEQUANT_TILE_BYTES; at least one row"]
+    E --> F{"rows_per_tile at least group?"}
+    F -- "yes" --> G["round rows_per_tile down to whole groups"]
+    F -- "no" --> H["keep row budget; split large groups"]
+    G --> I["_unpack_columnwise: next INT32 codes tile"]
     H --> I
-    I --> J{"rows left"}
-    J -- "yes" --> E
-    J -- "no" --> K["return weight; call-local, never cached"]
+    I --> J{"start and stop cover complete declared groups?"}
+    J -- "yes" --> K["reshape codes; subtract group zeros once; broadcast scales"]
+    J -- "no" --> L["slice each intersecting group; clamp tail to last group"]
+    L --> M{"fused_write: scale gradients inactive?"}
+    M -- "yes" --> N["block.sub_; torch.mul with out=weight slice"]
+    M -- "no" --> O["block = block - zero; multiply and copy for backward"]
+    K --> P["del block, codes before next tile"]
+    N --> P
+    O --> P
+    P --> Q{"rows remaining?"}
+    Q -- "yes" --> I
+    Q -- "no" --> R["return weight to current matmul; no inference cache"]
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
-    class H failure
+    classDef ambiguity fill:#fff4ce,stroke:#986800,color:#111
+    class X failure
+    class L ambiguity
 ```
 
-The only branch that is not a straight tile loop is the ragged tail: rows past
-the last whole group, or a tile that does not start on a group boundary, fall
-back to one group row at a time. It is highlighted because it is the path that
-keeps `in_features` values correct when `in_features` is not a multiple of
-`group_size`.
+`fused_write` is false only when autograd is enabled and `scales.requires_grad`.
+Complete-group broadcasts likewise use `torch.mul(..., out=target)` during
+inference and `target.copy_(block * scales)` when scale gradients are active.
+Partial-group gradients use separate integer differences: mutating another view
+of the same `codes` storage would invalidate tensors already saved for backward.
 
-For four-bit weights the AWQ interleave is folded into the extraction offsets
-(`AWQ_REVERSE_ORDER`), so codes and zero points come out in natural column order
-and the separate `reverse_awq_order` gather is not needed. The four-bit and
-generic bit-stream unpackers share `_unpack_columnwise`, which now takes an
-integer width: `dequantize_gemm` asks for INT32 because a code is at most eight
-bits wide, while the packing paths keep INT64 for their widened arithmetic.
+For four-bit weights, extraction offsets derived from `AWQ_REVERSE_ORDER` emit
+codes and zero points in natural column order. Other widths use the continuous
+little-endian bit stream. `_unpack_columnwise` keeps INT64 as its default so
+packing and repacking consumers retain their existing arithmetic.
 
 ## Before and after
 
-| Mechanism | Before (`origin/main`) | After |
+Paths below are relative to `gptqmodel/quantization/awq/utils/`. The original
+full-matrix implementation is pinned to `8ea76c395`; the first tiled
+implementation is pinned to `c435ffe40` from #3819.
+
+| Mechanism | Previous evidence | Current behavior |
 | --- | --- | --- |
-| Reconstruction entry | `dequantize_gemm`, `packing_utils.py:180` | `dequantize_gemm`, `packing_utils.py:212` |
-| Code width | INT64 from `torch.arange` shifts, `packing_utils.py:90-92` | INT32 per tile, `packing_utils.py:80` |
-| Column order | full-size `reverse_awq_order` gather, `packing_utils.py:184` | folded into extraction offsets, `packing_utils.py:240` |
-| Scale expansion | `scales.repeat_interleave(group_size)`, `packing_utils.py:191` | contiguous group-row slice broadcast, `packing_utils.py:269` |
-| Zero-point expansion | `izeros.repeat_interleave(group_size)`, `packing_utils.py:192` | same slice broadcast, no expansion |
-| Arithmetic | full-size `(iweight - izeros) * scales`, `packing_utils.py:193` | in-place `sub_` then `torch.mul(..., out=weight[rows])`, `packing_utils.py:273` |
-| Peak scratch | several full-size copies plus the weight | one tile plus the weight |
+| Full-matrix INT64 codes and column gather | `8ea76c395:packing_utils.py:182-187` | natural-order INT32 code tiles |
+| Full-matrix scale/zero expansion | `8ea76c395:packing_utils.py:191-193` | group-row broadcasts |
+| Tile rounded up to at least one whole group | `c435ffe40:packing_utils.py:252-253` | round down only if the group fits; otherwise split it (`packing_utils.py:252-254`) |
+| Previous tile survives while the next unpack allocates | `c435ffe40:packing_utils.py:262-282` | release `block` and `codes` before either loop continuation (`packing_utils.py:283,312`) |
+| Partial-group scale gradients share in-place-mutated codes | `c435ffe40:packing_utils.py:300-305` | separate differences for each autograd slice (`packing_utils.py:302-311`) |
 
 ## Failure and ambiguity contract
 
-| Situation | Before | After |
+| Situation | Behavior |
+| --- | --- |
+| `qzeros is None` | explicit `ValueError` |
+| no scale groups | explicit `ValueError` |
+| per-channel `group_size` (`None` or nonpositive) | one scale/zero group spans all input rows and may occupy multiple tiles |
+| tile budget smaller than a group | split the group; use the same scale/zero row for every slice |
+| tile budget smaller than one row | process one row |
+| ragged tail | return exactly `in_features` rows; clamp rows beyond the declared full groups to the last group |
+| trainable scales and a partial-group tile | preserve the independent integer differences needed for backward |
+| repeated inference | rebuild the current weight; retain no dense or expanded inference weight |
+
+## Measured storage and latency
+
+The table compares the initial #3819 implementation (`c435ffe40`) with the
+boundary/lifetime fixes. Both backends produced the same allocation deltas.
+FP16 dense weights occupy 32 MiB for 4096x4096 and 320 MiB for 4096x40960.
+
+| Shape | Group size | Initial tiled peak | Current peak |
+| --- | --- | --- | --- |
+| 4096x4096 | 128 | 48.501 MiB | 40.501 MiB |
+| 4096x4096 | 1024 | 64.063 MiB | 40.063 MiB |
+| 4096x4096 | 4096 | 96.017 MiB | 40.017 MiB |
+| 4096x4096 | -1 | 96.017 MiB | 40.017 MiB |
+| 4096x40960 | 128 | 365.001 MiB | 332.970 MiB |
+
+Peaks are synchronized `torch.cuda.max_memory_allocated` deltas over resident
+packed inputs, excluding allocator reservations. Every measured result matched
+an independent hand-decoded weight exactly. The pre-tiling implementation used
+448 MiB and 4480 MiB respectively for the group-128 shapes, as measured in #3819.
+
+Dequantization latency below uses synchronized device events, three warmups,
+and the median of three runs of 30 calls. These measure reconstruction only.
+
+| Shape / group | CUDA initial / current | ROCm initial / current |
 | --- | --- | --- |
-| `in_features` not a multiple of `group_size` | expanded to `groups * group_size` rows, more rows than the weight has | returns exactly `in_features` rows; the tail keeps the last group's scale |
-| `group_size <= 0` (per-channel) | `repeat_interleave(-1)` raised | one group spans every row |
-| `qzeros is None` | `AttributeError` inside the unpacker | `ValueError: dequantize_gemm requires packed AWQ zero points` |
-| tile smaller than one group | not expressible | per-group fallback produces the same values |
-| `bits` 2, 3, 8 | full-size INT64 | same arithmetic, tiled, INT32 codes |
-| forward repeated | weight rebuilt per call | weight rebuilt per call; nothing retained |
+| 4096x4096 / 128 | 0.262 / 0.258 ms | 0.737 / 0.710 ms |
+| 4096x4096 / 1024 | 0.216 / 0.278 ms | 0.591 / 0.665 ms |
+| 4096x4096 / 4096 | 0.315 / 0.249 ms | 0.574 / 0.660 ms |
+| 4096x4096 / -1 | 0.314 / 0.249 ms | 0.571 / 0.871 ms |
+| 4096x40960 / 128 | 2.152 / 2.590 ms | 5.530 / 6.790 ms |
 
-## Measured
+Splitting large groups or very wide layers adds launches and can increase
+latency; it enforces the same code-storage budget for those layouts. Ordinary
+group-128 layers keep the complete-group broadcast. Checkpoint tensors are
+unchanged and no additional persistent inference weight storage is introduced.
 
-4096x4096, four bits, group size 128, FP16 activations, one layer.
-
-| Metric | Before | After |
-| --- | --- | --- |
-| `dequantize_gemm` peak | 448.0 MiB | 48.5 MiB |
-| Forward peak, CUDA path | 448.0 MiB | 48.5 MiB |
-| Forward peak, ROCm path | 448.0 MiB | 112.0 MiB (48.5 dequantization + the matmul workspace) |
-| M=1, CUDA path | 1.961 ms | 0.326 ms |
-| M=1, ROCm path | 3.129 ms | 0.764 ms |
-| M=1024, CUDA path | 2.106 ms | 0.497 ms |
-| M=1024, ROCm path | 5.865 ms | 3.520 ms |
-
-4096x40960 (the wide-layer case that drives the OOM risk): the dequantization
-peak drops from 4480 MiB to 365 MiB, where the reconstructed FP16 weight itself
-is 320 MiB.
-
-Tile sizing was measured rather than guessed. On the 4096x4096 shape, an 8 MiB
-tile peaks at 48.5 MiB and 0.76 ms, 16 MiB at 64.5 MiB and 0.68 ms, and 32 MiB
-at 96.5 MiB and 0.65 ms; the constant keeps the 8 MiB point because the
-temporary storage is the property this change is defending.
-
-## Not in scope
-
-`AwqTorchLinear` still materializes the dense weight; it is not a fused kernel.
-The fused AWQ Triton GEMM/GEMV kernels (`AwqGEMMTritonLinear`,
-`AwqGEMVTritonLinear`) already exist and AUTO selects them for four-bit GPU
-loads, so a fused path here would duplicate a kernel that is already dispatched.
-The remaining gap between this kernel and a fused decode is therefore expected:
-decode is about 9x a dense matmul on the CUDA path and about 20x on the ROCm
-path after this change, versus about 45x and 80x before.
-
-## Validation
-
-`tests/kernels/test_awq_dequantize_tiling.py` pins:
+## Validation contracts
 
 | Test | Invariant |
 | --- | --- |
-| `test_matches_previous_repeat_interleave_formulation` | bitwise equality with the removed formulation for bits 2, 3, 4, 8 and group sizes 16, 32, 128 |
-| `test_matches_hand_decoded_oracle` | equality with an oracle that packs and decodes the words itself |
-| `test_endpoint_codes_zeros_and_scales` | clamp endpoints, zero and negative scales, group-boundary rows |
-| `test_per_channel_group_spans_all_rows` | `group_size` -1 and `in_features` both mean one group |
-| `test_uneven_tail_uses_the_last_group` | `in_features % group_size != 0` returns `in_features` rows |
-| `test_tile_size_does_not_change_the_result` | a tile bound below one group is clamped to a group and matches |
-| `test_narrow_out_features_slices_the_packed_row` | a packed row holding more codes than `out_features` keeps column order |
-| `test_missing_zero_points_is_rejected` | a missing zero-point tensor fails closed |
-| `test_forward_keeps_weights_quantized_between_calls` | no dequantized weight survives a forward |
-| `test_temporary_storage_is_bounded_by_the_weight_size` | peak scratch stays under 2.5x the FP16 weight |
+| `test_matches_previous_repeat_interleave_formulation` | exact agreement for bits 2/3/4/8, groups 16/32/128, FP16/BF16/FP32 scales |
+| `test_matches_hand_decoded_oracle` | bits 2 through 8 match independently packed/decoded words and FP64 arithmetic |
+| `test_endpoint_codes_zeros_and_scales` | code/zero endpoints and zero, negative, and small scales |
+| `test_per_channel_group_spans_all_rows` | `None`, -1, 0, and explicit full-row groups |
+| `test_uneven_tail_uses_the_last_group` | exact row count and final-group broadcast |
+| `test_tile_size_does_not_change_the_result` | groups split across one-row, non-divisor, and larger tiles |
+| `test_trainable_scales_backward_across_group_slices` | exact FP16/BF16/FP32 scale gradients and no-grad output, including multi-group ragged tails |
+| `test_narrow_out_features_slices_the_packed_row` | padded packed rows preserve column order |
+| `test_missing_zero_points_is_rejected` | explicit failure for missing zero points |
+| `test_forward_keeps_weights_quantized_between_calls` | FP16/BF16 forward output matches an independent oracle; checkpoint buffers stay exact and no dense weight persists |
+| `test_temporary_storage_is_bounded_by_the_weight_size` | 4096x4096 group 128/1024/4096/-1 stays below 2.5x the FP16 dense weight |
 
-The suite runs on both the CUDA and the ROCm path; the storage test runs on a
-GPU and the numerical tests also run on CPU.
+Numerical tests run on CPU and the available CUDA or ROCm runtime. The
+`AWQ tiled dequantize_gemm` GIL=0 probe checks independent FP64 expected weights
+for FP16/BF16/FP32 scales, complete and partial groups, per-channel layouts,
+signed packed words, and FP32 scale extremes. It passed three independent
+subprocesses per backend, each using 8 threads x 4 iterations and per-thread
+streams; see `pytorch_gil_0_compat.md`.
 
-This flow was introduced by the fix for the AWQ Torch per-forward dequantization
-report.
+This mechanism was introduced in [#3819](https://github.com/ModelCloud/GPTQModel/pull/3819).

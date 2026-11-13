@@ -485,6 +485,59 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent AWQ FP32 dequantization changed checkpoint scales")
         return True
 
+    awq_tiled_thread = threading.local()
+    awq_tiled_next_device = [0]
+    awq_tiled_lock = threading.Lock()
+    awq_tiled_state = {}
+
+    def awq_tiled_dequantize() -> bool:
+        """Check bounded tiles and partial groups against independent weights."""
+        from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+        with awq_tiled_lock:
+            if not hasattr(awq_tiled_thread, "device"):
+                awq_tiled_thread.device = awq_tiled_next_device[0] % 2
+                awq_tiled_next_device[0] += 1
+                awq_tiled_thread.stream = torch.cuda.Stream(device=awq_tiled_thread.device)
+            device = awq_tiled_thread.device
+        torch.cuda.set_device(device)
+
+        with awq_tiled_lock:
+            if device not in awq_tiled_state:
+                rows, columns = 1100, 2048
+                # Packed lanes 8,9,A,B,C,D,E,F decode in AWQ natural order.
+                differences = torch.tensor([-2, 2, -1, 3, 0, 4, 1, 5], dtype=torch.float64)
+                differences = differences.repeat(columns // 8)
+                cases = []
+                for group_size in (128, -1):
+                    group = rows if group_size == -1 else group_size
+                    groups = (rows + group - 1) // group
+                    row_ids = torch.arange(rows) // group
+                    qweight = torch.full(
+                        (rows, columns // 8), 0xFEDCBA98 - 2**32, dtype=torch.int32, device="cuda"
+                    )
+                    qzeros = torch.full(
+                        (groups, columns // 8), 0xAAAAAAAA - 2**32, dtype=torch.int32, device="cuda"
+                    )
+                    for dtype in (torch.float16, torch.bfloat16, torch.float32):
+                        scales = ((torch.arange(groups)[:, None] + 1).expand(groups, columns) / 8).to(dtype)
+                        if dtype == torch.float32:
+                            scales[:, 0] = 1e-40
+                            scales[:, 1] = 65536.0
+                        golden = (differences * scales.double()[row_ids]).to(dtype).to("cuda")
+                        cases.append((qweight, qzeros, scales.to("cuda"), group_size, golden))
+                torch.cuda.current_stream().synchronize()
+                awq_tiled_state[device] = cases
+            cases = awq_tiled_state[device]
+
+        with torch.cuda.stream(awq_tiled_thread.stream), torch.inference_mode():
+            for qweight, qzeros, scales, group_size, golden in cases:
+                weight = dequantize_gemm(qweight, qzeros, scales, 4, group_size)
+                awq_tiled_thread.stream.synchronize()
+                if weight.dtype != scales.dtype or not torch.equal(weight, golden):
+                    raise AssertionError("concurrent AWQ tiled dequantization changed decoded weights")
+        return True
+
     gptq_scale_thread = threading.local()
     gptq_scale_next_device = [0]
     gptq_scale_lock = threading.Lock()
@@ -599,6 +652,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
         "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
+        "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
@@ -691,7 +745,12 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
-            or name in ("AWQ FP32 dequantize_gemm", "GPTQ FP16 scale storage guard", "GPTQ weight scale floor"))
+            or name in (
+                "AWQ FP32 dequantize_gemm",
+                "AWQ tiled dequantize_gemm",
+                "GPTQ FP16 scale storage guard",
+                "GPTQ weight scale floor",
+            ))
 
 
 def run_child(name: str) -> int:

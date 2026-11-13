@@ -14,17 +14,12 @@ import pytest
 import torch
 
 import gptqmodel.quantization.awq.utils.packing_utils as packing_utils
-from gptqmodel.quantization.awq.utils.packing_utils import (
-    AWQ_ORDER,
-    AWQ_REVERSE_ORDER,
-    dequantize_gemm,
-    pack_awq,
-    reverse_awq_order,
-    unpack_awq,
-)
 
 
-_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+@pytest.fixture(params=["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def device(request):
+    # AwqTorchLinear is portable; the cuda runtime covers both CUDA and ROCm.
+    return torch.device(request.param)
 
 
 def _pack_hand(codes: torch.Tensor, bits: int) -> torch.Tensor:
@@ -38,7 +33,7 @@ def _pack_hand(codes: torch.Tensor, bits: int) -> torch.Tensor:
     values = codes.to(torch.int64) & ((1 << bits) - 1)
     if bits == 4:
         words = columns // 8
-        grouped = values.view(rows, words, 8)[:, :, list(AWQ_ORDER)]
+        grouped = values.view(rows, words, 8)[:, :, [0, 2, 4, 6, 1, 3, 5, 7]]
         packed = torch.zeros((rows, words), dtype=torch.int64)
         for lane in range(8):
             packed |= grouped[:, :, lane] << (bits * lane)
@@ -67,7 +62,7 @@ def _unpack_hand(packed: torch.Tensor, bits: int, count: int) -> torch.Tensor:
             for lane in range(lanes):
                 codes[:, word * lanes + lane] = (raw[:, word] >> (bits * lane)) & 15
         # Packed lane `i` holds natural column `AWQ_ORDER[i]`.
-        reordered = codes.view(rows, words, lanes)[:, :, list(AWQ_REVERSE_ORDER)]
+        reordered = codes.view(rows, words, lanes)[:, :, [0, 4, 1, 5, 2, 6, 3, 7]]
         return reordered.reshape(rows, words * lanes)[:, :count]
 
     codes = torch.empty((rows, count), dtype=torch.int64)
@@ -85,8 +80,8 @@ def _unpack_hand(packed: torch.Tensor, bits: int, count: int) -> torch.Tensor:
 def _previous_dequantize(qweight, qzeros, scales, bits, group_size):
     """The removed formulation: expand both operands, then combine."""
 
-    iweight, izeros = unpack_awq(qweight, qzeros, bits, scales.shape[-1])
-    iweight, izeros = reverse_awq_order(iweight, izeros, bits)
+    iweight, izeros = packing_utils.unpack_awq(qweight, qzeros, bits, scales.shape[-1])
+    iweight, izeros = packing_utils.reverse_awq_order(iweight, izeros, bits)
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
     izeros = torch.bitwise_and(izeros, (2**bits) - 1)
     scales = scales.repeat_interleave(group_size, dim=0)
@@ -98,7 +93,7 @@ def _reference_weight(codes, zeros, scales, group_size, dtype):
     """FP64 oracle: integer difference times the group scale, rounded once."""
 
     in_features = codes.shape[0]
-    group = in_features if group_size <= 0 else group_size
+    group = in_features if group_size is None or group_size <= 0 else group_size
     groups = torch.clamp(torch.arange(in_features) // group, max=scales.shape[0] - 1)
     exact = (codes.to(torch.float64) - zeros.to(torch.float64)[groups]) * scales.to(
         torch.float64
@@ -109,26 +104,28 @@ def _reference_weight(codes, zeros, scales, group_size, dtype):
 @pytest.mark.parametrize("bits", [2, 3, 4, 8])
 @pytest.mark.parametrize("group_size", [16, 32, 128])
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_matches_previous_repeat_interleave_formulation(bits, group_size, scale_dtype):
+def test_matches_previous_repeat_interleave_formulation(bits, group_size, scale_dtype, device):
     torch.manual_seed(0)
     in_features, out_features = 256, 64
     groups = in_features // group_size
     int_weight = torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32)
     zero_points = torch.randint(0, 1 << bits, (groups, out_features), dtype=torch.int32)
-    qweight, qzeros = pack_awq(int_weight, zero_points, bits)
+    qweight, qzeros = packing_utils.pack_awq(int_weight, zero_points, bits)
     scales = ((torch.rand(groups, out_features) * 0.5) + 0.75).to(scale_dtype)
 
     expected = _previous_dequantize(qweight, qzeros, scales, bits, group_size)
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
 
     assert actual.dtype is scale_dtype
     assert actual.shape == (in_features, out_features)
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
 
 
-@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_matches_hand_decoded_oracle(bits, scale_dtype):
+def test_matches_hand_decoded_oracle(bits, scale_dtype, device):
     """The oracle packs and decodes the words itself, in natural column order."""
 
     torch.manual_seed(1)
@@ -139,15 +136,19 @@ def test_matches_hand_decoded_oracle(bits, scale_dtype):
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
     scales = ((torch.rand(groups, out_features) * 0.5) + 0.75).to(scale_dtype)
 
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
     expected = _reference_weight(codes, zeros, scales, group_size, scale_dtype)
 
-    assert torch.equal(actual, expected)
+    assert actual.dtype == scale_dtype
+    assert torch.equal(actual.cpu(), expected)
     assert torch.equal(_unpack_hand(qweight, bits, out_features), codes.to(torch.int64))
     assert torch.equal(_unpack_hand(qzeros, bits, out_features), zeros.to(torch.int64))
 
 
-def test_endpoint_codes_zeros_and_scales():
+@pytest.mark.parametrize("scale_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_endpoint_codes_zeros_and_scales(scale_dtype, device):
     """Clamp endpoints, zero/negative scales, and group-boundary rows."""
 
     bits, in_features, out_features, group_size = 4, 64, 32, 16
@@ -157,26 +158,28 @@ def test_endpoint_codes_zeros_and_scales():
     codes[:, 1] = (1 << bits) - 1
     zeros = torch.zeros((groups, out_features), dtype=torch.int32)
     zeros[:, ::2] = (1 << bits) - 1
-    scales = torch.zeros((groups, out_features), dtype=torch.float16)
+    scales = torch.zeros((groups, out_features), dtype=scale_dtype)
     scales[:, 0] = 1.0
     scales[:, 1] = -1.0
     scales[:, 2] = 1e-4
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
 
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
-    expected = _reference_weight(codes, zeros, scales, group_size, torch.float16)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
+    expected = _reference_weight(codes, zeros, scales, group_size, scale_dtype)
 
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
     assert torch.isfinite(actual).all()
     for group in range(groups):
         start = group * group_size
         assert torch.equal(
-            actual[start : start + group_size], expected[start : start + group_size]
+            actual[start : start + group_size].cpu(), expected[start : start + group_size]
         )
 
 
-@pytest.mark.parametrize("group_size", [-1, 64])
-def test_per_channel_group_spans_all_rows(group_size):
+@pytest.mark.parametrize("group_size", [None, -1, 0, 64])
+def test_per_channel_group_spans_all_rows(group_size, device):
     torch.manual_seed(2)
     bits, in_features, out_features = 4, 64, 32
     codes = torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32)
@@ -184,56 +187,63 @@ def test_per_channel_group_spans_all_rows(group_size):
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
     scales = torch.rand((1, out_features), dtype=torch.float16) + 0.5
 
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
     expected = _reference_weight(codes, zeros, scales, group_size, torch.float16)
 
     assert actual.shape == (in_features, out_features)
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
 
 
-def test_uneven_tail_uses_the_last_group():
+@pytest.mark.parametrize("groups", [2, 3])
+def test_uneven_tail_uses_the_last_group(groups, device):
     """``in_features`` is not a multiple of ``group_size``.
 
     The removed formulation expanded the scale rows to ``groups * group_size``
-    and therefore returned more rows than the weight has. The replacement
+    and could not combine them with the shorter weight. The replacement
     returns exactly ``in_features`` rows and keeps the last group's scale on the
     rows past the final full group.
     """
 
     torch.manual_seed(3)
     bits, in_features, out_features, group_size = 4, 40, 32, 16
-    groups = 3
     codes = torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32)
     zeros = torch.randint(0, 1 << bits, (groups, out_features), dtype=torch.int32)
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
     scales = torch.rand((groups, out_features), dtype=torch.float16) + 0.5
 
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
     expected = _reference_weight(codes, zeros, scales, group_size, torch.float16)
 
     assert actual.shape == (in_features, out_features)
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
 
 
-@pytest.mark.parametrize("tile_bytes", [1024, 4096, 64 * 1024])
-def test_tile_size_does_not_change_the_result(monkeypatch, tile_bytes):
-    """A tile bound below one group is clamped to a group, without changing values."""
+@pytest.mark.parametrize("tile_bytes", [1, 384, 512, 1024, 4096, 64 * 1024])
+@pytest.mark.parametrize("in_features,group_size", [(128, 16), (136, 16), (128, -1), (136, 64)])
+def test_tile_size_does_not_change_the_result(monkeypatch, tile_bytes, in_features, group_size, device):
+    """Splitting groups and ragged tails across tiles must preserve every value."""
 
     torch.manual_seed(4)
-    bits, in_features, out_features, group_size = 4, 128, 32, 16
-    groups = in_features // group_size
+    bits, out_features = 4, 32
+    groups = 1 if group_size <= 0 else (in_features + group_size - 1) // group_size
     codes = torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32)
     zeros = torch.randint(0, 1 << bits, (groups, out_features), dtype=torch.int32)
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
     scales = torch.rand((groups, out_features), dtype=torch.float16) + 0.5
 
-    expected = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    expected = packing_utils.dequantize_gemm(qweight, qzeros, scales, bits, group_size)
     monkeypatch.setattr(packing_utils, "_AWQ_DEQUANT_TILE_BYTES", tile_bytes)
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
 
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
     assert torch.equal(
-        actual, _reference_weight(codes, zeros, scales, group_size, torch.float16)
+        actual.cpu(), _reference_weight(codes, zeros, scales, group_size, torch.float16)
     )
 
 
@@ -242,10 +252,11 @@ def test_missing_zero_points_is_rejected():
     qweight = _pack_hand(torch.zeros((64, 32), dtype=torch.int32), 4)
 
     with pytest.raises(ValueError, match="zero points"):
-        dequantize_gemm(qweight, None, scales, 4, 64)
+        packing_utils.dequantize_gemm(qweight, None, scales, 4, 64)
 
 
-def test_forward_keeps_weights_quantized_between_calls():
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_forward_keeps_weights_quantized_between_calls(activation_dtype, device):
     """Two forwards must not leave a dequantized weight on the module."""
 
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -256,7 +267,7 @@ def test_forward_keeps_weights_quantized_between_calls():
     codes = torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32)
     zeros = torch.randint(0, 1 << bits, (groups, out_features), dtype=torch.int32)
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
-    scales = torch.rand((groups, out_features), dtype=torch.float16) + 0.5
+    scales = (torch.randint(1, 5, (groups, out_features)).float() / 4).to(activation_dtype)
 
     module = AwqTorchLinear(
         bits=bits,
@@ -266,21 +277,25 @@ def test_forward_keeps_weights_quantized_between_calls():
         in_features=in_features,
         out_features=out_features,
         bias=False,
-        dtype=torch.float16,
+        dtype=activation_dtype,
     )
-    module.register_buffer("qweight", qweight.to(_DEVICE))
-    module.register_buffer("qzeros", qzeros.to(_DEVICE))
-    module.register_buffer("scales", scales.to(_DEVICE))
+    module.register_buffer("qweight", qweight.to(device))
+    module.register_buffer("qzeros", qzeros.to(device))
+    module.register_buffer("scales", scales.to(device))
     module.bias = None
-    module = module.to(_DEVICE).eval()
+    module = module.to(device).eval()
     module.post_init()
     stored = {name: tensor.clone() for name, tensor in module.state_dict().items()}
 
-    x = torch.randn(2, in_features, dtype=torch.float16, device=_DEVICE)
+    x = torch.randint(-2, 3, (2, in_features), device=device).to(activation_dtype)
     with torch.inference_mode():
         first = module(x)
         second = module(x)
 
+    expected_weight = _reference_weight(codes, zeros, scales, group_size, activation_dtype)
+    expected = (x.cpu().double() @ expected_weight.double()).to(activation_dtype)
+    assert first.dtype == activation_dtype
+    assert torch.equal(first.cpu(), expected)
     assert torch.equal(first, second)
     for name, tensor in module.state_dict().items():
         assert torch.equal(tensor, stored[name]), f"{name} was rewritten by forward"
@@ -292,7 +307,8 @@ def test_forward_keeps_weights_quantized_between_calls():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA/ROCm device")
-def test_temporary_storage_is_bounded_by_the_weight_size():
+@pytest.mark.parametrize("group_size", [128, 1024, 4096, -1])
+def test_temporary_storage_is_bounded_by_the_weight_size(group_size):
     """One call must not allocate several copies of the whole weight.
 
     The removed formulation peaked at 448 MiB for this shape, fourteen times the
@@ -302,9 +318,9 @@ def test_temporary_storage_is_bounded_by_the_weight_size():
 
     torch.manual_seed(6)
     device = torch.device("cuda:0")
-    bits, in_features, out_features, group_size = 4, 4096, 4096, 128
-    groups = in_features // group_size
-    qweight, qzeros = pack_awq(
+    bits, in_features, out_features = 4, 4096, 4096
+    groups = 1 if group_size <= 0 else in_features // group_size
+    qweight, qzeros = packing_utils.pack_awq(
         torch.randint(0, 1 << bits, (in_features, out_features), dtype=torch.int32, device=device),
         torch.randint(0, 1 << bits, (groups, out_features), dtype=torch.int32, device=device),
         bits,
@@ -313,11 +329,11 @@ def test_temporary_storage_is_bounded_by_the_weight_size():
     weight_bytes = in_features * out_features * scales.element_size()
 
     with torch.inference_mode():
-        dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+        packing_utils.dequantize_gemm(qweight, qzeros, scales, bits, group_size)
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
         baseline = torch.cuda.memory_allocated(device)
-        weight = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+        weight = packing_utils.dequantize_gemm(qweight, qzeros, scales, bits, group_size)
         torch.cuda.synchronize(device)
         peak = torch.cuda.max_memory_allocated(device)
 
@@ -333,7 +349,7 @@ def test_temporary_storage_is_bounded_by_the_weight_size():
 @pytest.mark.parametrize(
     ("bits", "out_features"), [(2, 8), (2, 24), (3, 8), (3, 40), (8, 8)]
 )
-def test_narrow_out_features_slices_the_packed_row(bits, out_features):
+def test_narrow_out_features_slices_the_packed_row(bits, out_features, device):
     """A packed row can hold more codes than ``out_features`` asks for."""
 
     torch.manual_seed(7)
@@ -344,8 +360,45 @@ def test_narrow_out_features_slices_the_packed_row(bits, out_features):
     qweight, qzeros = _pack_hand(codes, bits), _pack_hand(zeros, bits)
     scales = torch.rand((groups, out_features), dtype=torch.float16) + 0.5
 
-    actual = dequantize_gemm(qweight, qzeros, scales, bits, group_size)
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), bits, group_size
+    )
     expected = _reference_weight(codes, zeros, scales, group_size, torch.float16)
 
     assert actual.shape == (in_features, out_features)
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual.cpu(), expected)
+
+
+@pytest.mark.parametrize("tile_bytes", [384, 1024, 64 * 1024])
+@pytest.mark.parametrize("in_features", [40, 64])
+@pytest.mark.parametrize("scale_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_trainable_scales_backward_across_group_slices(
+    monkeypatch, tile_bytes, in_features, scale_dtype, device
+):
+    """Ragged group slices must not invalidate tensors saved for backward."""
+
+    torch.manual_seed(8)
+    group_size, out_features = 16, 32
+    groups = (in_features + group_size - 1) // group_size
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand(groups, out_features, dtype=scale_dtype).requires_grad_()
+    qweight, qzeros = _pack_hand(codes, 4), _pack_hand(zeros, 4)
+    monkeypatch.setattr(packing_utils, "_AWQ_DEQUANT_TILE_BYTES", tile_bytes)
+
+    actual = packing_utils.dequantize_gemm(
+        qweight.to(device), qzeros.to(device), scales.to(device), 4, group_size
+    )
+    expected = _reference_weight(codes, zeros, scales.detach(), group_size, scale_dtype)
+    assert torch.equal(actual.cpu(), expected)
+    with torch.no_grad():
+        inference_weight = packing_utils.dequantize_gemm(
+            qweight.to(device), qzeros.to(device), scales.to(device), 4, group_size
+        )
+    assert not inference_weight.requires_grad
+    assert torch.equal(inference_weight.cpu(), expected)
+    actual.sum().backward()
+    group_ids = torch.arange(in_features) // group_size
+    expected_grad = torch.zeros(groups, out_features, dtype=torch.float64)
+    expected_grad.index_add_(0, group_ids, codes.double() - zeros.double()[group_ids])
+    assert torch.equal(scales.grad, expected_grad.to(scale_dtype))
