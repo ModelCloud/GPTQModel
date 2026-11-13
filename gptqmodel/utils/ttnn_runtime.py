@@ -302,6 +302,27 @@ def _reject_pjrt_owner() -> None:
         )
 
 
+def to_host_replica(ttnn, tensor, mesh):
+    """Copy a mesh tensor to host memory, keeping one replica.
+
+    A tensor produced on a multi-chip mesh is sharded across devices, so the
+    conversion needs a composer: the pinned runtime rejects a multi-shard
+    tensor without one. After an ``all_gather`` the shards are identical, so
+    the concatenation is trimmed back to a single replica.
+
+    Shared by the ordinary host forward and by ``TTDeviceTensor.readback`` so
+    the two cannot disagree about multi-chip conversion.
+    """
+
+    count = int(getattr(mesh, "num_devices", 1) or 1)
+    if count <= 1:
+        return ttnn.to_torch(tensor)
+    composed = ttnn.to_torch(
+        tensor, mesh_composer=ttnn.ConcatMeshToTensor(mesh.device, dim=0)
+    )
+    return composed[: composed.shape[0] // count]
+
+
 __all__ = [
     "TTNNMesh",
     "TTNNUnavailable",
@@ -310,5 +331,6 @@ __all__ = [
     "import_ttnn",
     "is_ttnn_available",
     "open_mesh",
+    "to_host_replica",
     "ttnn_device_count",
 ]

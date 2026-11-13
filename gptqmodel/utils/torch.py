@@ -637,11 +637,21 @@ def auto_select_torch_device_unprobed(index: int = 0):
     count use :func:`is_xla_available` and :func:`torch_devices` at that point.
     """
     if HAS_CUDA:
-        return torch.device(f"cuda:{index}")
+        # Clamp against the visible count: a caller asking for index 1 on a
+        # single-GPU host would otherwise get ``cuda:1``, which fails later with
+        # "invalid device ordinal" instead of falling back to the device that
+        # exists. CUDA is safe to probe here; XLA is not.
+        count = torch.cuda.device_count()
+        if count > 0:
+            return torch.device(f"cuda:{index if index < count else 0}")
     if HAS_XPU:
-        return torch.device(f"xpu:{index}")
+        count = torch.xpu.device_count()
+        if count > 0:
+            return torch.device(f"xpu:{index if index < count else 0}")
     if HAS_NPU:
-        return torch.device(f"npu:{index}")
+        count = torch.npu.device_count()
+        if count > 0:
+            return torch.device(f"npu:{index if index < count else 0}")
     if HAS_XLA:
         return torch.device(f"xla:{index}")
     if HAS_MPS:

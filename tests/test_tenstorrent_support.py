@@ -1205,6 +1205,63 @@ def test_gptq_blockfloat_rejects_mismatched_hessian():
         bq.gptq_solve_blockfloat(w, torch.eye(16), bits=4)
 
 
+def test_gptq_blockfloat_matches_a_canonical_reference():
+    """Pin the solve against an independent, textbook GPTQ implementation.
+
+    The grid is deliberately shared, so this isolates the error-feedback
+    update: any difference is in the inverse update, not in the quantizer.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    def reference(weight, hessian, bits, damp=0.01, block=16):
+        w = weight.clone().float()
+        h = hessian.clone().float()
+        dead = torch.diag(h) == 0
+        h[dead, dead] = 1.0
+        w[:, dead] = 0.0
+        h += torch.eye(h.shape[0]) * damp * torch.mean(torch.diag(h))
+        hinv = torch.linalg.inv(h)
+        exps = bq._block_exponents(weight, block)
+        levels = float(1 << bq.stored_mantissa_bits(bits))
+        out = torch.zeros_like(w)
+        n = w.shape[1]
+        for i in range(n):
+            col = w[:, i]
+            scale = torch.pow(2.0, exps[:, i // block])
+            unit = torch.round(col / scale * levels) / levels
+            unit = unit.clamp(-(2.0 - 1.0 / levels), 2.0 - 1.0 / levels)
+            q = unit * scale
+            out[:, i] = q
+            if i + 1 < n:
+                w[:, i + 1:] -= torch.outer((col - q) / hinv[i, i], hinv[i, i + 1:])
+        return out
+
+    torch.manual_seed(3)
+    for _ in range(3):
+        weight = torch.randn(4, 32)
+        a = torch.randn(32, 32)
+        hessian = a.T @ a + 0.1 * torch.eye(32)
+        for bits in (4, 8):
+            got = bq.gptq_solve_blockfloat(weight, hessian, bits=bits)
+            want = reference(weight, hessian, bits)
+            assert torch.equal(got, want), (
+                f"bits={bits}: solver and canonical GPTQ disagree by "
+                f"{float((got - want).abs().max()):.6g}"
+            )
+
+    # A value already on the grid produces zero error, so error feedback is
+    # identically zero and the answer must equal plain rounding. 1.25 is code 5
+    # of the 15-level ttbf4 grid, so a reference that returns 1.0 is using a
+    # coarser grid, not a better update.
+    weight = torch.tensor([[1.25, 1.25, 1.25]])
+    hessian = torch.tensor([[1.0, 0.9, 0.9], [0.9, 1.0, 0.9], [0.9, 0.9, 1.0]])
+    assert torch.equal(bq.quantize_blockfloat(weight, 4)[0], weight)
+    assert torch.equal(bq.gptq_solve_blockfloat(weight, hessian, bits=4), weight)
+
+
 def test_blockfloat_mantissa_widths():
     import importlib
 
@@ -1333,6 +1390,225 @@ def test_resolve_layer_widths_rejects_corrupt_storage():
         bq._resolve_layer_widths(
             state((2, 4), 4), {"bits": 4, "bits_per_layer": ["a", 4]}
         )
+
+
+def _tiny_llama(config_kwargs=None):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    kwargs = {
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "tie_word_embeddings": True,
+    }
+    kwargs.update(config_kwargs or {})
+    return LlamaForCausalLM(LlamaConfig(**kwargs))
+
+
+def test_resave_of_a_loaded_checkpoint_keeps_its_packed_weights(tmp_path):
+    """A second save must copy the packed buffers, not look for ``.weight``.
+
+    A loaded model stores codes and exponents as buffers on ``TTBlockfloat*``
+    modules, which are neither ``nn.Linear`` nor ``nn.Embedding``. Enumerating
+    those types found nothing to write and produced a checkpoint with only the
+    norm tensors, while still reporting success.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(23)
+    model = _tiny_llama()
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            weight = getattr(module, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
+                continue
+            bits = 8 if name.endswith("embed_tokens") else 4
+            weight.copy_(bq.quantize_blockfloat(weight.detach(), bits)[0])
+
+    first_dir = str(tmp_path / "first")
+    second_dir = str(tmp_path / "second")
+    first = bq.save_blockfloat_model(model, first_dir, bits=4, embed_bits=8)
+    loaded, restored = bq.load_blockfloat_model(first_dir)
+
+    second = bq.save_blockfloat_model(loaded, second_dir, bits=4, embed_bits=8)
+    assert second["layers"] == first["layers"] > 0
+    assert second["payload_bytes"] == first["payload_bytes"]
+    assert second["bits_per_layer"] == first["bits_per_layer"]
+
+    again, restored_again = bq.load_blockfloat_model(second_dir)
+    assert set(restored_again) == set(restored)
+    before, after = loaded.state_dict(), again.state_dict()
+    assert set(before) == set(after)
+    for name in before:
+        assert torch.equal(before[name], after[name]), name
+
+
+def test_save_blockfloat_model_rejects_a_model_with_nothing_packed(tmp_path):
+    """A dense model must be rejected before anything is written."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    model = _tiny_llama()
+    out = tmp_path / "dense"
+    with pytest.raises(ValueError, match="no quantized modules"):
+        bq.save_blockfloat_model(model, str(out), bits=4)
+    assert not (out / "config.json").exists()
+
+
+def test_quantize_config_from_checkpoint_preserves_pack_dtype(tmp_path):
+    """The loader's config must carry the ``uint8`` the kernel actually uses."""
+
+    import json
+
+    from gptqmodel.models.tt_blockfloat_loader import quantize_config_from_checkpoint
+
+    out = tmp_path / "cfg"
+    out.mkdir()
+    (out / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "quantization_config": {
+                    "quant_method": "tt-blockfloat",
+                    "bits": 4,
+                    "block": 16,
+                    "embed_bits": 8,
+                    "bits_per_layer": {"model.layers.0.self_attn.q_proj": 8},
+                },
+            }
+        )
+    )
+    qcfg = quantize_config_from_checkpoint(str(out))
+    assert qcfg.method == METHOD.TT_BLOCKFLOAT
+    assert qcfg.pack_dtype == torch.uint8
+    assert qcfg.bits == 4 and qcfg.embed_bits == 8
+
+
+def test_embed_bits_quantizes_the_embedding(tmp_path, monkeypatch):
+    """``--embed-bits`` has to quantize the table, not just label it.
+
+    The writer stores a dense ``.weight`` when it finds an off-grid table, so
+    requesting a width without quantizing first silently shipped float16.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    monkeypatch.setattr(bq, "collect_layer_hessians", lambda *a, **k: {})
+
+    model = _tiny_llama()
+    report = bq.quantize_model_blockfloat(
+        model, None, bits=4, text=TT_CALIBRATION_TEXT, embed_bits=8
+    )
+    embedding = model.get_input_embeddings()
+    assert torch.equal(
+        embedding.weight.detach(),
+        bq.quantize_blockfloat(embedding.weight.detach(), 8)[0],
+    )
+    assert report["model.embed_tokens"]["bits"] == 8
+    assert report["model.embed_tokens"]["on_grid"] is True
+
+    out = tmp_path / "embed"
+    info = bq.save_blockfloat_model(model, str(out), bits=4, embed_bits=8)
+    assert info["embed_bits"] == 8
+    index = json.loads((out / "model.safetensors.index.json").read_text())
+    assert "model.embed_tokens.codes" in index["weight_map"]
+    assert "model.embed_tokens.weight" not in index["weight_map"]
+
+
+def test_validate_restored_geometry_rejects_a_swapped_shape():
+    """A shape with the right element count but the wrong orientation is corrupt."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    good = {
+        "a.code_shape": torch.tensor([64, 16]),
+        "a.exponents": torch.zeros(64, 1, dtype=torch.int8),
+    }
+    bq._validate_restored_geometry({"a": [64, 16]}, good, block=16)
+
+    swapped = {"a.code_shape": torch.tensor([16, 64]), "a.exponents": torch.zeros(64, 1, dtype=torch.int8)}
+    with pytest.raises(ValueError, match="declares code_shape"):
+        bq._validate_restored_geometry({"a": [64, 16]}, swapped, block=16)
+
+    bad_exponents = {
+        "a.code_shape": torch.tensor([64, 16]),
+        "a.exponents": torch.zeros(64, 3, dtype=torch.int8),
+    }
+    with pytest.raises(ValueError, match="exponents"):
+        bq._validate_restored_geometry({"a": [64, 16]}, bad_exponents, block=16)
+
+
+def test_to_host_replica_uses_a_composer_for_multi_device():
+    """Multi-chip readback needs the composer; single-chip must not pass one."""
+
+    from gptqmodel.utils import ttnn_runtime as rt
+
+    seen = {}
+
+    class FakeTtnn:
+        @staticmethod
+        def to_torch(tensor, mesh_composer=None):
+            seen["composer"] = mesh_composer
+            return torch.zeros(8, 4)
+
+        @staticmethod
+        def ConcatMeshToTensor(device, dim=0):
+            return ("concat", device, dim)
+
+    class Mesh:
+        def __init__(self, count):
+            self.num_devices = count
+            self.device = "dev"
+
+    out = rt.to_host_replica(FakeTtnn, "t", Mesh(2))
+    assert seen["composer"] == ("concat", "dev", 0)
+    assert out.shape == (4, 4)
+
+    single = rt.to_host_replica(FakeTtnn, "t", Mesh(1))
+    assert seen["composer"] is None
+    assert single.shape == (8, 4)
+
+
+def test_tensor_cache_key_tolerates_none_and_inference_tensors():
+    """The TTNN layout key must not read ``._version`` unguarded."""
+
+    from gptqmodel.nn_modules.qlinear._runtime_cache import tensor_cache_key
+
+    assert tensor_cache_key(None) is None
+    with torch.inference_mode():
+        inference = torch.zeros(4)
+    key = tensor_cache_key(inference)
+    assert key is not None
+    assert key[1] is None
+    assert tensor_cache_key(torch.zeros(4))[1] == 0
+
+
+def test_auto_select_device_clamps_to_the_visible_count(monkeypatch):
+    """Asking for index 1 on a single-GPU host must not return ``cuda:1``."""
+
+    import gptqmodel.utils.torch as ttmod
+
+    monkeypatch.setattr(ttmod, "HAS_CUDA", True)
+    monkeypatch.setattr(ttmod, "HAS_XPU", False)
+    monkeypatch.setattr(ttmod, "HAS_NPU", False)
+    monkeypatch.setattr(ttmod, "HAS_XLA", False)
+    monkeypatch.setattr(ttmod, "HAS_MPS", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+    assert ttmod.auto_select_torch_device_unprobed(0) == torch.device("cuda:0")
+    assert ttmod.auto_select_torch_device_unprobed(1) == torch.device("cuda:0")
 
 
 def test_blockfloat_beats_uniform_int4_for_heavy_tails():

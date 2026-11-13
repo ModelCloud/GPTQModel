@@ -39,6 +39,7 @@ from ..quantization.config import (
     META_FIELD_URI,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
+    METHOD,
     MIN_VERSION_WITH_V2,
     resolve_quant_format,
 )
@@ -1585,6 +1586,31 @@ def ModelWriter(cls):
         """save quantized model and configs to local disk"""
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        if getattr(self.quantize_config, "method", None) == METHOD.TT_BLOCKFLOAT:
+            # Block float is a pre-quantized storage format: the modules already
+            # hold packed codes on the hardware grid, so the generic writer has
+            # nothing to pack and would rebuild a dense model it cannot
+            # represent. Export the packed state verbatim instead.
+            from ..utils.tt_blockfloat_quant import save_blockfloat_model
+
+            tokenizer = getattr(self, "tokenizer", None)
+            tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+            if not hasattr(tokenizer, "save_pretrained"):
+                tokenizer = None
+            info = save_blockfloat_model(
+                self.model,
+                save_dir,
+                bits=self.quantize_config.bits,
+                embed_bits=int(getattr(self.quantize_config, "embed_bits", 8) or 8),
+                tokenizer=tokenizer,
+            )
+            log.info(
+                f"Saved tt-blockfloat checkpoint to {save_dir}: "
+                f"{info['layers']} packed modules, {info['payload_bytes'] / (1 << 20):.2f} MiB "
+                f"in {info['shards']} shard(s)"
+            )
+            return info
 
         (
             copy_tensor_files,

@@ -152,9 +152,10 @@ def main(argv: list) -> int:
         bits=bits,
         nsamples=args.nsamples,
         text=calibration,
+        embed_bits=args.embed_bits,
     )
     print(
-        f"[Q] quantized {len(report)} layers in {time.time() - started:.0f}s",
+        f"[Q] quantized {len(report)} modules in {time.time() - started:.0f}s",
         flush=True,
     )
     errors = [v["norm_l1"] for v in report.values()]
@@ -184,7 +185,7 @@ def main(argv: list) -> int:
         f"[Q] saved {info['layers']} layers, "
         f"{info['payload_bytes'] / 1024 / 1024:.1f} MiB "
         f"({'+'.join(str(w) for w in info['bits_per_layer'])}-bit linears, "
-        f"{args.embed_bits}-bit embed) -> {args.out}",
+        f"{info['embed_bits']}-bit embed) -> {args.out}",
         flush=True,
     )
 

@@ -58,15 +58,27 @@ def build_tt_blockfloat_model(
 def quantize_config_from_checkpoint(model_local_path: str) -> QuantizeConfig:
     """Build the ``QuantizeConfig`` a loaded block-float model reports."""
 
+    import torch
+
     qcfg = read_quantization_config(model_local_path)
-    return QuantizeConfig(
+    config = QuantizeConfig(
         method=METHOD.TT_BLOCKFLOAT,
         bits=int(qcfg.get("bits", 4)),
         block=int(qcfg.get("block", 16)),
         embed_bits=int(qcfg.get("embed_bits", 8)),
         sym=True,
         desc_act=False,
+        # The kernel stores codes as ``uint8``. Leaving the generic default
+        # (``int32``) makes any consumer that validates ``pack_dtype`` -- the
+        # writer included -- reject a checkpoint that loads perfectly.
+        pack_dtype=torch.uint8,
     )
+    widths = qcfg.get("bits_per_layer")
+    if isinstance(widths, dict) and widths:
+        # Per-module widths are what make a mixed checkpoint re-exportable; the
+        # flat ``bits`` field is only the fallback for an undeclared module.
+        config.meta_set(key="bits_per_layer", value=dict(widths))
+    return config
 
 
 __all__ = [

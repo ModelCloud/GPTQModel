@@ -224,9 +224,15 @@ class TTNNLinear(GPTQQuantLinear):
     # -- packed layout ----------------------------------------------------
 
     def _layout_key(self):
+        from ._runtime_cache import tensor_cache_key
+
         tensors = (self.qweight, self.qzeros, self.scales, self.g_idx, self.bias)
         return (
-            tuple((t.data_ptr(), t._version, tuple(t.shape), str(t.dtype)) for t in tensors),
+            # ``tensor_cache_key`` tolerates a missing bias and inference tensors,
+            # which do not expose a version counter. Reading ``._version``
+            # directly crashed for both: an absent bias is ``None``, and a
+            # checkpoint packed under ``InferenceMode`` raises ``RuntimeError``.
+            tuple(tensor_cache_key(t) for t in tensors),
             self.qzero_format(),
             self._requested_device_count(),
         )

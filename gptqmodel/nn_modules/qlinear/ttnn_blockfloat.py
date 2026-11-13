@@ -61,6 +61,7 @@ from ...utils.ttnn_runtime import (
     current_mesh,
     import_ttnn,
     open_mesh,
+    to_host_replica,
 )
 from ._g_idx import validate_g_idx_bounds
 
@@ -286,11 +287,7 @@ class _TTNNBlockFloatMixin:
         )
         output = self._compute(ttnn, mesh, activation)
         try:
-            if count == 1:
-                host = ttnn.to_torch(output)
-            else:
-                composed = ttnn.to_torch(output, mesh_composer=ttnn.ConcatMeshToTensor(dev, dim=0))
-                host = composed[: composed.shape[0] // count]
+            host = to_host_replica(ttnn, output, mesh)
         finally:
             ttnn.deallocate(activation)
             ttnn.deallocate(output)

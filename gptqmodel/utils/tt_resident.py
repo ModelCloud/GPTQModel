@@ -95,11 +95,14 @@ class TTDeviceTensor:
     def readback(self) -> torch.Tensor:
         """Copy the activation to host memory and release the device copy."""
 
-        from .ttnn_runtime import import_ttnn
+        from .ttnn_runtime import import_ttnn, to_host_replica
 
         ttnn = import_ttnn()
         try:
-            host = ttnn.to_torch(self.tensor)
+            # A resident chain on a multi-chip mesh ends with a sharded tensor,
+            # so the conversion needs the same composer the ordinary forward
+            # uses; without it the runtime rejects the multi-shard tensor.
+            host = to_host_replica(ttnn, self.tensor, self.mesh)
         finally:
             self.release()
         _charge("readbacks", host.numel())

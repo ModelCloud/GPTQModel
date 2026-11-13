@@ -3334,15 +3334,20 @@ def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
 
 
 def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torch.dtype:
+    # ``uint8`` is the natural container for the Tenstorrent block-float code
+    # buffers, so it has to survive a config round-trip even though the packed
+    # GPTQ layouts use signed widths. Kernels still validate their own
+    # supported set, so a method that cannot use it fails with a kernel message.
+    supported = (torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8)
     if pack_dtype is None:
         return torch.int32
     if isinstance(pack_dtype, str):
         pack_dtype = pack_dtype.lower()
-        if pack_dtype not in ["int64", "int32", "int16", "int8"]:
+        if pack_dtype not in ["int64", "int32", "int16", "int8", "uint8"]:
             raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
         return getattr(torch, pack_dtype)
     if isinstance(pack_dtype, torch.dtype):
-        if pack_dtype not in [torch.int64, torch.int32, torch.int16, torch.int8]:
+        if pack_dtype not in supported:
             raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
         return pack_dtype
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")

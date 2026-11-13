@@ -45,6 +45,7 @@ that report.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Optional, Sequence, Tuple, Union
 
 import torch
@@ -512,6 +513,7 @@ def quantize_model_blockfloat(
     damp: float = 0.01,
     nsamples: int = 32,
     text: Union[str, Sequence[str]],
+    embed_bits: Optional[int] = None,
     verbose: bool = False,
 ) -> dict:
     """Quantize every decoder linear onto the TT block-float grid, in place.
@@ -524,6 +526,12 @@ def quantize_model_blockfloat(
     :func:`_layer_bits`). Widths are chosen per layer, so a checkpoint can keep
     ``ttbf4`` on the projections that tolerate it and spend ``ttbf8`` on
     the ones that carry the most output error.
+
+    ``embed_bits`` also snaps the input embedding onto the grid. An embedding is
+    a lookup table with no Hessian, so it is rounded rather than solved; without
+    this the writer finds an off-grid table and stores it dense, silently
+    ignoring the requested width. The tied head follows automatically because it
+    shares the embedding's storage.
     """
 
     from .logger import setup_logger
@@ -566,6 +574,41 @@ def quantize_model_blockfloat(
             }
             if verbose:
                 log.info(f"TTBlockFloat: {key} norm_l1={norm_l1:.4f} on_grid={on_grid}")
+
+    if embed_bits is not None:
+        report.update(_quantize_embedding_on_grid(model, int(embed_bits), verbose=verbose))
+    return report
+
+
+def _quantize_embedding_on_grid(model, bits: int, *, verbose: bool = False) -> dict:
+    """Round the input embedding onto the grid, in place.
+
+    GPTQ error feedback needs ``X^T X`` over calibration text, and a lookup table
+    never multiplies its weight, so there is no Hessian to solve against. Plain
+    grid rounding is the correct operation here: it is exact, and it is what
+    makes the table storable at the requested width.
+    """
+
+    import torch.nn as nn
+
+    from .logger import setup_logger
+
+    log = setup_logger()
+    report = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Embedding) or not name.endswith("embed_tokens"):
+            continue
+        weight = module.weight.detach().clone()
+        quantized = quantize_blockfloat(weight, bits)[0]
+        with torch.no_grad():
+            module.weight.copy_(quantized.to(module.weight.dtype))
+        norm_l1 = relative_error(weight, quantized)
+        on_grid = torch.allclose(
+            quantized, quantize_blockfloat(quantized, bits)[0], atol=1e-6
+        )
+        report[name] = {"norm_l1": norm_l1, "on_grid": bool(on_grid), "bits": bits}
+        if verbose:
+            log.info(f"TTBlockFloat: {name} norm_l1={norm_l1:.4f} on_grid={on_grid}")
     return report
 
 
@@ -1064,17 +1107,58 @@ def _quantized_prefixes(model) -> list:
     Decoder linears plus the input embedding. The embedding is included because
     a vocabulary table is the single largest tensor in a small model: as codes at
     ``ttbf8`` it is 279 MiB against 501 MiB of dense float16.
+
+    A model returned by :func:`build_blockfloat_model` has already been swapped,
+    so its quantized modules are ``TTBlockfloat*`` instances rather than
+    ``nn.Linear``/``nn.Embedding``. They are recognised by the packed buffers
+    they own, which keeps a re-save from silently finding nothing to write.
     """
 
     import torch.nn as nn
 
     prefixes = []
     for name, module in model.named_modules():
-        if isinstance(module, nn.Embedding) and name.endswith("embed_tokens"):
+        if not name:
+            continue
+        if isinstance(getattr(module, "codes", None), torch.Tensor):
+            prefixes.append(name)
+        elif isinstance(module, nn.Embedding) and name.endswith("embed_tokens"):
             prefixes.append(name)
         elif isinstance(module, nn.Linear) and ".layers." in name:
             prefixes.append(name)
     return prefixes
+
+
+def _packed_state(module):
+    """Return ``(codes, exponents, code_shape, bits)`` for an already-packed module.
+
+    ``None`` means the module is still dense and has to be quantized on the way
+    out. Copying the buffers verbatim is what makes a re-save lossless: the
+    weights are already on the hardware grid, so decomposing them again would
+    only re-round values the checkpoint already fixed.
+    """
+
+    codes = getattr(module, "codes", None)
+    exponents = getattr(module, "exponents", None)
+    code_shape = getattr(module, "code_shape", None)
+    if not (
+        isinstance(codes, torch.Tensor)
+        and isinstance(exponents, torch.Tensor)
+        and isinstance(code_shape, torch.Tensor)
+    ):
+        return None
+    width = int(getattr(module, "bits", 0) or 0)
+    if width not in (4, 8):
+        raise ValueError(
+            f"{getattr(module, 'name', type(module).__name__)}: a packed module "
+            f"reports {width!r} bits, but a Tenstorrent block float stores 4 or 8."
+        )
+    return (
+        codes.detach().to(torch.uint8).contiguous(),
+        exponents.detach().to(torch.int8).contiguous(),
+        code_shape.detach().to(torch.int64).contiguous(),
+        width,
+    )
 
 
 #: Modeling file shipped with the checkpoint so plain ``transformers`` can load
@@ -1160,7 +1244,21 @@ def save_blockfloat_model(
 
     for prefix in _quantized_prefixes(model):
         module = model.get_submodule(prefix)
-        is_embedding = not hasattr(module, "in_features")
+        # A table exposes ``num_embeddings``; a projection does not. Using the
+        # presence of ``in_features`` instead would misclassify a block-float
+        # embedding, which sets it so the storage helpers can share code.
+        is_embedding = hasattr(module, "num_embeddings")
+        packed = _packed_state(module)
+        if packed is not None:
+            codes, exponents, code_shape, layer_width = packed
+            tensors[f"{prefix}.codes"] = codes
+            tensors[f"{prefix}.code_shape"] = code_shape
+            tensors[f"{prefix}.exponents"] = exponents
+            bits_per_layer[prefix] = layer_width
+            bias = getattr(module, "bias", None)
+            if not is_embedding and isinstance(bias, torch.Tensor):
+                tensors[f"{prefix}.bias"] = bias.detach().to(torch.float16).contiguous()
+            continue
         layer_width = embed_bits if is_embedding else _layer_bits(bits, prefix)
         weight = module.weight.detach().to(torch.float32)
         try:
@@ -1195,6 +1293,28 @@ def save_blockfloat_model(
             continue
         tensors[name] = param.detach().to(torch.float16).contiguous()
 
+    if not bits_per_layer:
+        # Writing here would produce a dense checkpoint that still declares
+        # ``tt-blockfloat``: the loader then rejects it as "no block-float
+        # tensors", long after the caller was told the save succeeded.
+        raise ValueError(
+            "save_blockfloat_model found no quantized modules. Pass a model that "
+            "was quantized onto the grid (or loaded from a block-float "
+            "checkpoint); a dense model has to go through "
+            "scripts/tt_quantize_blockfloat.py first."
+        )
+
+    # The stored widths are authoritative. A re-save of a loaded checkpoint is
+    # asked for with the defaults, so reporting the request rather than the
+    # payload would mislabel the file.
+    widths = sorted(set(bits_per_layer.values()))
+    if default_bits not in widths:
+        default_bits = Counter(bits_per_layer.values()).most_common(1)[0][0]
+    embed_prefix = next(
+        (prefix for prefix in bits_per_layer if prefix.endswith("embed_tokens")), None
+    )
+    stored_embed_bits = bits_per_layer[embed_prefix] if embed_prefix else embed_bits
+
     written = _write_shards(tensors, output_dir, max_shard_bytes)
 
     config = model.config.to_dict()
@@ -1209,13 +1329,12 @@ def save_blockfloat_model(
         "sym": True,
         "desc_act": False,
         "lm_head": True,
-        "lm_head_quant_bits": embed_bits if tied else 0,
+        "lm_head_quant_bits": stored_embed_bits if tied else 0,
         "lm_head_tied_to_embedding": tied,
-        "embed_bits": embed_bits,
+        "embed_bits": stored_embed_bits,
         "bits_per_layer": bits_per_layer,
         "meta": dict(metadata or {}),
     }
-    widths = sorted(set(bits_per_layer.values()))
     if len(widths) > 1:
         quantization_config["mixed_bits"] = True
     config["quantization_config"] = quantization_config
@@ -1239,7 +1358,7 @@ def save_blockfloat_model(
         "shards": written["shards"],
         "bits": default_bits,
         "bits_per_layer": widths,
-        "embed_bits": embed_bits,
+        "embed_bits": stored_embed_bits,
         "tied": tied,
         "dense_tensors": len(tensors) - 3 * len(bits_per_layer),
     }
@@ -1321,6 +1440,45 @@ def _resolve_layer_widths(state: dict, quantization_config: dict) -> dict:
     return widths
 
 
+def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None:
+    """Check every packed buffer against the module it was installed in.
+
+    ``_resolve_layer_widths`` can only see the checkpoint, so a ``code_shape``
+    with the right element count but the wrong orientation passes there. The
+    module knows its own ``[out_features, in_features]``, so comparing against
+    it catches a swapped or resized shape at load time instead of leaving a
+    module whose first forward fails with a bare tensor-size error.
+    """
+
+    for prefix, geometry in sorted(restored.items()):
+        out_features, in_features = (int(geometry[0]), int(geometry[1]))
+        if in_features % block:
+            raise ValueError(
+                f"{prefix}: in_features={in_features} is not a multiple of the "
+                f"block size {block}, so one exponent per block cannot cover it."
+            )
+        shape = state.get(f"{prefix}.code_shape")
+        if shape is not None:
+            actual = [int(v) for v in shape.tolist()]
+            if actual != [out_features, in_features]:
+                raise ValueError(
+                    f"{prefix}: the checkpoint declares code_shape {actual}, but "
+                    f"the module is [{out_features}, {in_features}]. A swapped "
+                    "or resized shape decodes the codes in the wrong order, so "
+                    "the checkpoint is corrupt."
+                )
+        exponents = state.get(f"{prefix}.exponents")
+        if exponents is not None:
+            expected = (out_features, in_features // block)
+            if tuple(int(v) for v in exponents.shape) != expected:
+                raise ValueError(
+                    f"{prefix}: `.exponents` has shape "
+                    f"{list(exponents.shape)}, but one exponent per {block} "
+                    f"inputs over [{out_features}, {in_features}] is "
+                    f"{list(expected)}."
+                )
+
+
 def build_blockfloat_model(
     checkpoint_dir: str, *, dtype: torch.dtype = torch.float32
 ) -> "tuple":
@@ -1389,6 +1547,10 @@ def build_blockfloat_model(
             f"{checkpoint_dir} does not supply {len(required)} required tensors, "
             f"e.g. {sorted(required)[:5]}"
         )
+
+    _validate_restored_geometry(
+        restored, state, block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK))
+    )
 
     model.eval()
     return model, restored, {
