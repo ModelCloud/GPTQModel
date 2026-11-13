@@ -34,7 +34,7 @@ requests==2.34.2
 safetensors==0.8.0
 threadpoolctl==3.8.0
 tokenicer==0.0.14
-torch==2.11.0+cpu
+torch==2.13.0
 torchao==0.18.0
 torch-xla==2.9.0+gited8a445
 transformers==5.22.2
