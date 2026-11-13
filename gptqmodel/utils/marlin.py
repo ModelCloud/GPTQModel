@@ -12,7 +12,6 @@ from pathlib import Path
 from shutil import which
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import numpy
 import torch
 
 from ..utils.logger import setup_logger
@@ -1035,6 +1034,11 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
+def _argsort(values):
+    """Return the indices that sort ``values`` (NumPy ``argsort`` equivalent)."""
+    return sorted(range(len(values)), key=values.__getitem__)
+
+
 def pack_cols(
         q_w: torch.Tensor,
         num_bits: int,
@@ -1048,17 +1052,15 @@ def pack_cols(
 
     orig_device = q_w.device
 
-    q_w = q_w.cpu().numpy().astype(numpy.uint32)
+    # Pack on CPU in int32 words. A left shift of a signed int32 wraps exactly
+    # like NumPy's uint32 shift, and the fields are disjoint, so summing the
+    # shifted views equals OR-ing them. One reshape replaces the per-field loop.
+    q_w = q_w.detach().to(device="cpu", dtype=torch.int32).contiguous()
+    fields = q_w.view(size_k, size_n // pack_factor, pack_factor)
+    shifts = torch.arange(pack_factor, dtype=torch.int32) * num_bits
+    q_res = (fields << shifts).sum(dim=2, dtype=torch.int32)
 
-    q_res = numpy.zeros((size_k, size_n // pack_factor), dtype=numpy.uint32)
-
-    for i in range(pack_factor):
-        q_res |= q_w[:, i::pack_factor] << num_bits * i
-
-    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
+    return q_res.to(orig_device).contiguous()
 
 
 def unpack_cols(
@@ -1076,19 +1078,16 @@ def unpack_cols(
 
     orig_device = packed_q_w.device
 
-    packed_q_w_cpu = packed_q_w.cpu().numpy().astype(numpy.uint32)
-    q_res = numpy.zeros((size_k, size_n), dtype=numpy.uint32)
-
+    # Decode every field of every word at once. An arithmetic int32 shift can
+    # sign-extend for the topmost field, but ``& mask`` discards those bits, so
+    # the result matches the old uint32 loop exactly.
+    packed_q_w_cpu = packed_q_w.detach().to(device="cpu", dtype=torch.int32).contiguous()
     mask = (1 << num_bits) - 1
-    for i in range(pack_factor):
-        vals = packed_q_w_cpu & mask
-        packed_q_w_cpu >>= num_bits
-        q_res[:, i::pack_factor] = vals
+    shifts = torch.arange(pack_factor, dtype=torch.int32) * num_bits
+    words = packed_q_w_cpu.view(size_k, size_n // pack_factor, 1)
+    q_res = ((words >> shifts) & mask).view(size_k, size_n)
 
-    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
+    return q_res.to(orig_device).contiguous()
 
 
 def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
@@ -1100,9 +1099,9 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
 
     # Interleave column dim (for the dequantize code) and pack it to int32
     if num_bits == 4:
-        interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
+        interleave = [0, 2, 4, 6, 1, 3, 5, 7]
     elif num_bits == 8:
-        interleave = numpy.array([0, 2, 1, 3])
+        interleave = [0, 2, 1, 3]
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 
@@ -1123,9 +1122,9 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
     # Undo interleaving (use argsort(..) to get inverse perm)
     if num_bits == 4:
-        undo_interleave = numpy.argsort(numpy.array([0, 2, 4, 6, 1, 3, 5, 7]))
+        undo_interleave = _argsort([0, 2, 4, 6, 1, 3, 5, 7])
     elif num_bits == 8:
-        undo_interleave = numpy.argsort(numpy.array([0, 2, 1, 3]))
+        undo_interleave = _argsort([0, 2, 1, 3])
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 

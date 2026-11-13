@@ -5,13 +5,11 @@
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 import copy
 import math
-import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
@@ -21,7 +19,6 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import (
     PLANAR_BITS,
@@ -130,6 +127,101 @@ def _torch_left_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
     # missing-kernel or CPU-fallback paths in torch-npu.
     shifted = values.to(t.int64) * _torch_shift_factor(shifts, values.device)
     return shifted.to(values.dtype)
+
+
+def _pack_shifts(bits: int, pack_factor: int) -> t.Tensor:
+    """Broadcastable bit offsets for the 2/4/8-bit packing views."""
+    return (t.arange(pack_factor, dtype=t.int32) * bits).view(1, pack_factor, 1)
+
+
+@t.inference_mode()
+def _pack_codes_to_words(
+        codes: t.Tensor,
+        pack_factor: int,
+        word_bits: int,
+        shifts: t.Tensor,
+) -> t.Tensor:
+    """Pack ``pack_factor`` codes per ``word_bits``-wide word along dim 0.
+
+    ``codes`` is ``[rows * pack_factor, N]`` and the result is ``[rows, N]``.
+    Output row ``r`` holds codes ``r*pack_factor + j`` at shift ``bits * j``.
+    The fields are disjoint, so the shifted sum equals OR-ing them one at a
+    time. Arithmetic stays at 32 bits (matching the old ``uint32`` path) and is
+    masked to ``word_bits`` only for narrower storage dtypes.
+    """
+    rows = codes.shape[0] // pack_factor
+    # int32 arithmetic is exact here: a signed left shift and an int32 sum both
+    # wrap at 32 bits, which is precisely the uint32 behaviour this replaces.
+    # Keeping the intermediate at 32 bits avoids an int64 copy of the weights.
+    viewed = codes.reshape(rows, pack_factor, -1).to(t.int32)
+    packed = (viewed << shifts).sum(dim=1, dtype=t.int32)
+    if word_bits < 32:
+        packed = packed & ((1 << word_bits) - 1)
+    return packed
+
+
+@t.inference_mode()
+def _pack_block_rows_2_4_8(
+        block_32xN: t.Tensor,
+        dst: t.Tensor,
+        dst_rows_base: int,
+        bits: int,
+        pack_factor: int,
+        shifts: t.Tensor,
+):
+    """Pack one 32-input block into ``bits`` rows of ``dst`` (32-bit words)."""
+    dst[dst_rows_base:dst_rows_base + bits] = _pack_codes_to_words(
+        block_32xN, pack_factor, 32, shifts
+    )
+
+
+@t.inference_mode()
+def _pack_block_rows_3(block_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+    """Pack one 32-input block into 3 rows using the 10 | 1 | 10 | 1 | 10 scheme.
+
+    int32 arithmetic wraps exactly like the old uint32 path, so the shifts and
+    sums below need no explicit 32-bit mask.
+    """
+    x = block_32xN.to(t.int32)  # [32, N]
+    offsets = t.arange(10, dtype=t.int32).view(-1, 1) * 3
+    # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th at bit 30
+    A = (x[0:10] << offsets).sum(dim=0, dtype=t.int32)
+    A = A | (x[10] << 30)
+    # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from the 22nd
+    B = (x[10] >> 2) & 1
+    B = B | (x[11:21] << (offsets + 1)).sum(dim=0, dtype=t.int32)
+    B = B | (x[21] << 31)
+    # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
+    C = (x[21] >> 1) & 0x3
+    C = C | (x[22:32] << (offsets + 2)).sum(dim=0, dtype=t.int32)
+    dst[dst_rows_base + 0] = A
+    dst[dst_rows_base + 1] = B
+    dst[dst_rows_base + 2] = C
+
+
+@t.inference_mode()
+def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Tensor:
+    """Pack codes stored along the last dimension into 2/4/8-bit words.
+
+    ``values`` is ``[rows, count]`` with one code per entry; the result is
+    ``[rows, count // pack_factor]``. The packed fields are disjoint, so summing
+    the shifted views equals OR-ing them one field at a time.
+    """
+    rows, count = values.shape
+    viewed = values.reshape(rows, count // pack_factor, pack_factor).to(t.int32)
+    shifts = t.arange(pack_factor, dtype=t.int32) * bits
+    return (viewed << shifts).sum(dim=2, dtype=t.int32)
+
+
+@t.inference_mode()
+def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
+    """Pack 3-bit codes stored along the last dimension (10 | 1 | 10 | 1 | 10)."""
+    rows, count = values.shape
+    transposed = values.T.contiguous()  # [count, rows]: codes become the 32-row axis
+    packed = t.zeros((count // 32 * 3, rows), dtype=t.int32)
+    for block in range(count // 32):
+        _pack_block_rows_3(transposed[block * 32:(block + 1) * 32], packed, block * 3)
+    return packed.T.contiguous()
 
 
 class BaseQuantLinear(nn.Module):
@@ -897,20 +989,12 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
-            self.pack_np_dtype = np.int8
-            self.pack_np_math_dtype = np.uint8
         elif self.pack_dtype == t.int16:
             self.pack_dtype_bits = 16
-            self.pack_np_dtype = np.int16
-            self.pack_np_math_dtype = np.uint16
         elif self.pack_dtype == t.int32:
             self.pack_dtype_bits = 32
-            self.pack_np_dtype = np.int32
-            self.pack_np_math_dtype = np.uint32
         elif self.pack_dtype == t.int64:
             self.pack_dtype_bits = 64
-            self.pack_np_dtype = np.int64
-            self.pack_np_math_dtype = np.uint64
         else:
             raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
 
@@ -1351,7 +1435,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             zeros: t.Tensor,
             g_idx: t.Tensor,
             block_in: int = 8192,
-            workers: int = 8,
+            workers: int = 1,
     ):
         self.pack_block(linear, scales, zeros, g_idx, block_in, workers)
 
@@ -1366,19 +1450,18 @@ class PackableQuantLinear(GPTQQuantLinear):
             workers: int = 1,
     ):
         """
-        Parallel qweight pack on CPU (threaded over input blocks). qzeros path = original logic.
+        Parallel qweight pack on CPU (threaded over input blocks).
 
         - qweight: streamed in 32-aligned blocks; each block packed by a worker into
           non-overlapping rows of the preallocated output tensor (no locks).
-        - qzeros: EXACT original numpy-based packing to preserve layout/shape.
-        - math done on CPU; no .numpy() round trips for qweight.
+        - qzeros: same bit layout as the original NumPy packer, computed with Torch
+          int64 words and narrowed once, so no NumPy is required.
+        - math done on CPU; no .numpy() round trips.
 
         Args:
           block_in: number of input channels per task (must be multiple of 32).
-          workers:  number of worker threads (None -> auto; 1 -> single-thread).
+          workers:  number of worker threads (1 -> single-thread).
         """
-
-        MASK32 = (1 << 32) - 1  # for safe masking when packing via int64
 
         # ---------- normalize weight to [out, in] (same as your code) ----------
         W = linear.weight.detach()
@@ -1421,44 +1504,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                 "pack_block extension requires out_features to be divisible by 32"
             )
 
-        disable_ext = env_flag("GPTQMODEL_DISABLE_PACK_EXT")
-        force_ext = env_flag("GPTQMODEL_FORCE_PACK_EXT")
-        pack_block_threads = workers if workers and workers > 0 else 1
-        env_threads = os.getenv("GPTQMODEL_PACK_THREADS")
-        if env_threads:
-            try:
-                pack_block_threads = max(int(env_threads), 1)
-            except ValueError:
-                log.warning(
-                    "pack_block: invalid GPTQMODEL_PACK_THREADS `%s`; defaulting to %d.",
-                    env_threads,
-                    pack_block_threads,
-                )
-
         planar = self.planar
-
-        if not disable_ext and bits in (2, 4, 8):
-            try:
-                from .pack_block_ext import pack_block_cpu as pack_block_cpu_ext
-
-                qweight_ext, qzeros_ext = pack_block_cpu_ext(
-                    W,
-                    scales,
-                    zeros,
-                    g_idx.to(dtype=t.int32),
-                    bits,
-                    word_bits,
-                    block_in,
-                    pack_block_threads,
-                )
-
-                self.register_buffer("qweight", qweight_ext.to(dtype=self.pack_dtype))
-                self.register_buffer("qzeros", qzeros_ext.to(dtype=self.pack_dtype))
-                return
-            except Exception as exc:
-                if force_ext:
-                    raise
-                log.debug("pack_block: native extension unavailable, falling back to Python path (%s)", exc)
 
         # NOTE: pack_factor is only meaningful for {2,4,8}. There is NO integer pack_factor for 3-bit.
         if bits in (2, 4, 8):
@@ -1483,37 +1529,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         # ---------- precompute shifts for 2/4/8-bit vectorized packing ----------
         if bits in (2, 4, 8):
-            shifts_pf64 = (t.arange(pack_factor, dtype=t.int64) * bits).view(1, pack_factor, 1)  # [1,pf,1]
-
-        # ---------- pack helpers (int64 shifts -> mask -> int32) ----------
-        @t.inference_mode()
-        def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            # int32_blk_32xN: [32, N]
-            r64 = int32_blk_32xN.to(t.int64)  # [32,N]
-            # interpret the 32 input rows as [bits, pack_factor, N] in row-major order
-            R = r64.view(bits, pack_factor, -1)  # [bits,pf,N]
-            packed64 = (R << shifts_pf64).sum(dim=1, dtype=t.int64)  # [bits,N]
-            dst[dst_rows_base:dst_rows_base + bits] = ((packed64 & MASK32).to(t.int32))
-
-        @t.inference_mode()
-        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            # Layout: 32 inputs -> 3 output rows with pattern 10 | 1 | 10 | 1 | 10 (=> 32 scalars * 3 bits = 96 bits)
-            x = int32_blk_32xN.to(t.int64)  # [32,N]
-            # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th value at bit 30
-            A = ((x[0:10] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3)).sum(dim=0, dtype=t.int64)) & MASK32
-            A = (A | ((x[10] << 30) & MASK32)) & MASK32
-            # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from 22nd
-            B = (((x[10] >> 2) & 1) & MASK32)
-            B = (B | (
-                (x[11:21] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 1)).sum(dim=0, dtype=t.int64))) & MASK32
-            B = (B | ((x[21] << 31) & MASK32)) & MASK32
-            # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
-            C = (((x[21] >> 1) & 0x3) & MASK32)
-            C = (C | (
-                (x[22:32] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 2)).sum(dim=0, dtype=t.int64))) & MASK32
-            dst[dst_rows_base + 0] = A.to(t.int32)
-            dst[dst_rows_base + 1] = B.to(t.int32)
-            dst[dst_rows_base + 2] = C.to(t.int32)
+            shifts_pf64 = _pack_shifts(bits, pack_factor)
 
         # ---------- thread task: process a single [i0,i1) block ----------
         block_in = max(word_bits, (block_in // word_bits) * word_bits)
@@ -1544,7 +1560,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            int_block = t.round((Wblk.to(t.float32) + sz_blk_T) / s_blk_T)  # [out, blk]
+            # The add allocates the one temporary we need; divide/round/clamp
+            # then run in place instead of materializing two more full copies.
+            int_block = Wblk.to(t.float32) + sz_blk_T  # [out, blk]
+            int_block.div_(s_blk_T)
+            int_block.round_()
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
@@ -1557,9 +1577,9 @@ class PackableQuantLinear(GPTQQuantLinear):
                 sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
                 dst_rows = (base_group + g) * rows_per_group
                 if bits in (2, 4, 8):
-                    _pack_rows_2_4_8(sub, qweight, dst_rows)
+                    _pack_block_rows_2_4_8(sub, qweight, dst_rows, bits, pack_factor, shifts_pf64)
                 elif bits == 3 and not planar:
-                    _pack_rows_3(sub, qweight, dst_rows)
+                    _pack_block_rows_3(sub, qweight, dst_rows)
                 elif planar:
                     qweight[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits)
                 else:
@@ -1571,25 +1591,13 @@ class PackableQuantLinear(GPTQQuantLinear):
         # ---------- schedule blocks across a thread pool ----------
         starts = list(range(0, in_features, block_in))
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
-        len(ranges)
 
         total_blocks = len(ranges)
         # Each block writes a disjoint row range of the preallocated qweight and
         # only reads the shared W/scales/zeros tensors, so blocks can run on a
-        # thread pool. Threads only help on free-threaded (GIL=0) Python builds;
-        # keep the sequential default and enable the pool only through the
-        # dedicated GPTQMODEL_PACK_PY_THREADS opt-in (GPTQMODEL_PACK_THREADS
-        # keeps its existing meaning of sizing the native extension only).
-        py_threads_env = os.getenv("GPTQMODEL_PACK_PY_THREADS")
-        workers_eff = 1
-        if py_threads_env:
-            try:
-                workers_eff = max(1, min(int(py_threads_env), total_blocks))
-            except ValueError:
-                log.warning(
-                    "pack_block: invalid GPTQMODEL_PACK_PY_THREADS `%s`; using sequential packing.",
-                    py_threads_env,
-                )
+        # thread pool. The pool size is the caller's ``workers`` argument (from
+        # the packing config), never an environment variable.
+        workers_eff = max(1, min(int(workers or 1), total_blocks))
         if workers_eff == 1:
             for i0, i1 in ranges:
                 _process_block(i0, i1)
@@ -1599,53 +1607,62 @@ class PackableQuantLinear(GPTQQuantLinear):
                 for f in futs:
                     f.result()
 
-        # ---------- qzeros: EXACT original numpy path (unchanged) ----------
-        zeros_np = zeros.detach().cpu().numpy().astype(self.pack_np_math_dtype, copy=False)  # [G, out]
-        qzeros_np = np.zeros(
-            (zeros_np.shape[0], (zeros_np.shape[1] // self.pack_dtype_bits) * bits),
-            dtype=self.pack_np_math_dtype
-        )
+        # ---------- qzeros ----------
+        # Pack directly in int32 words. A left shift of a signed int32 wraps
+        # exactly like the NumPy uint32 path this replaces, so no wider
+        # intermediate (and no extra copy) is needed.
+        zeros_cpu = zeros.detach().to(device="cpu", dtype=t.int32)  # [G, out]
 
         if bits in [2, 4, 8]:
             pf = (32 // bits)  # compute locally to avoid relying on attribute
-            for col in range(qzeros_np.shape[1]):
-                base = col * pf
-                for j in range(pf):
-                    qzeros_np[:, col] |= zeros_np[:, base + j] << (bits * j)
+            if zeros_cpu.shape[1] % pf == 0:
+                qzeros = _pack_code_cols_2_4_8(zeros_cpu, bits, pf)
+            else:
+                qzeros = t.zeros(
+                    (zeros_cpu.shape[0], (zeros_cpu.shape[1] // self.pack_dtype_bits) * bits),
+                    dtype=t.int32,
+                )
+                for col in range(qzeros.shape[1]):
+                    base = col * pf
+                    for j in range(pf):
+                        qzeros[:, col] |= zeros_cpu[:, base + j] << (bits * j)
         elif bits == 3 and not planar:
-            i = 0
-            col = 0
-            while col < qzeros_np.shape[1]:
-                for j in range(i, i + 10):
-                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i))
-                i += 10
-                qzeros_np[:, col] |= zeros_np[:, i] << 30
-                col += 1
-                qzeros_np[:, col] |= (zeros_np[:, i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i) + 1)
-                i += 10
-                qzeros_np[:, col] |= zeros_np[:, i] << 31
-                col += 1
-                qzeros_np[:, col] |= (zeros_np[:, i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i) + 2)
-                i += 10
-                col += 1
+            if zeros_cpu.shape[1] % 32 == 0:
+                qzeros = _pack_code_cols_3(zeros_cpu)
+            else:
+                qzeros = t.zeros(
+                    (zeros_cpu.shape[0], (zeros_cpu.shape[1] // self.pack_dtype_bits) * bits),
+                    dtype=t.int32,
+                )
+                i = 0
+                col = 0
+                while col < qzeros.shape[1]:
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros_cpu[:, j] << (3 * (j - i))
+                    i += 10
+                    qzeros[:, col] |= zeros_cpu[:, i] << 30
+                    col += 1
+                    qzeros[:, col] |= (zeros_cpu[:, i] >> 2) & 1
+                    i += 1
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros_cpu[:, j] << (3 * (j - i) + 1)
+                    i += 10
+                    qzeros[:, col] |= zeros_cpu[:, i] << 31
+                    col += 1
+                    qzeros[:, col] |= (zeros_cpu[:, i] >> 1) & 0x3
+                    i += 1
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros_cpu[:, j] << (3 * (j - i) + 2)
+                    i += 10
+                    col += 1
         elif planar:
-            qzeros_np = (
-                planar_pack_cols(zeros.to(t.int64), bits)
-                .numpy()
-                .astype(self.pack_np_math_dtype, copy=False)
-            )
+            qzeros = planar_pack_cols(zeros_cpu, bits)
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
         # ---------- register buffers ----------
         self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
-        self.register_buffer("qzeros", t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)))
+        self.register_buffer("qzeros", qzeros.to(dtype=self.pack_dtype))
 
     @t.inference_mode()
     def pack_gpu(
@@ -1871,104 +1888,143 @@ class PackableQuantLinear(GPTQQuantLinear):
             if is_embedding:
                 # Embedding weights already use [token, feature] orientation;
                 # the GPTQ embedding result is transposed only for quantizing.
-                int_weight = t.round((W + scale_zeros[self.g_idx]) / scales[self.g_idx])
+                int_weight = W + scale_zeros[self.g_idx]
+                int_weight.div_(scales[self.g_idx])
             else:
-                int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
+                int_weight = W + scale_zeros[self.g_idx].T
+                int_weight.div_(scales[self.g_idx].T)
+            int_weight.round_()
             int_weight.clamp_(0, self.maxq)
             int_weight = int_weight.to(t.int32)
             if not is_embedding:
                 int_weight = int_weight.T.contiguous()
             else:
                 int_weight = int_weight.contiguous()
-            int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
+            # int32 words: signed left shifts wrap exactly like the NumPy
+            # uint32 packing this replaces, so the bit pattern is identical and
+            # the intermediate stays half the size of an int64 buffer.
+            int_weight = int_weight.to(device="cpu", dtype=t.int32)
 
-            qweight = np.zeros((math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),
-                               dtype=self.pack_np_math_dtype)
+            qweight = t.empty(
+                (math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),
+                dtype=t.int32,
+            )
             if self.bits in [2, 4, 8]:
-                for row in range(qweight.shape[0]):
-                    for j in range(min(self.pack_factor, int_weight.shape[0] - row * self.pack_factor)):
-                        qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
+                pf = self.pack_factor
+                if pf == 1:
+                    # One code per word: packing is the identity.
+                    qweight = int_weight.contiguous()
+                elif int_weight.shape[0] % pf == 0:
+                    # Pack a chunk of rows per step instead of one row at a time:
+                    # same layout, orders of magnitude fewer Torch dispatches.
+                    # The chunk bounds the temporary int64 copy.
+                    shifts = _pack_shifts(self.bits, pf)
+                    rows = int_weight.shape[0] // pf
+                    chunk = max(1, 4_000_000 // max(1, int_weight.shape[1] * pf))
+                    for start in range(0, rows, chunk):
+                        stop = min(start + chunk, rows)
+                        qweight[start:stop] = _pack_codes_to_words(
+                            int_weight[start * pf:stop * pf],
+                            pf,
+                            self.pack_dtype_bits,
+                            shifts,
+                        )
+                else:
+                    qweight = t.zeros_like(qweight)
+                    for row in range(qweight.shape[0]):
+                        for j in range(min(self.pack_factor, int_weight.shape[0] - row * self.pack_factor)):
+                            qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
-                i = 0
-                row = 0
-                while row < qweight.shape[0]:
-                    for j in range(i, i + 10):
-                        qweight[row] |= int_weight[j] << (3 * (j - i))
-                    i += 10
-                    qweight[row] |= int_weight[i] << 30
-                    row += 1
-                    qweight[row] |= (int_weight[i] >> 2) & 1
-                    i += 1
-                    for j in range(i, i + 10):
-                        qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
-                    i += 10
-                    qweight[row] |= int_weight[i] << 31
-                    row += 1
-                    qweight[row] |= (int_weight[i] >> 1) & 0x3
-                    i += 1
-                    for j in range(i, i + 10):
-                        qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
-                    i += 10
-                    row += 1
+                if self.pack_dtype_bits == 32 and int_weight.shape[0] % 32 == 0:
+                    for blk in range(int_weight.shape[0] // 32):
+                        _pack_block_rows_3(
+                            int_weight[blk * 32:(blk + 1) * 32], qweight, blk * 3
+                        )
+                else:
+                    qweight = t.zeros_like(qweight)
+                    i = 0
+                    row = 0
+                    while row < qweight.shape[0]:
+                        for j in range(i, i + 10):
+                            qweight[row] |= int_weight[j] << (3 * (j - i))
+                        i += 10
+                        qweight[row] |= int_weight[i] << 30
+                        row += 1
+                        qweight[row] |= (int_weight[i] >> 2) & 1
+                        i += 1
+                        for j in range(i, i + 10):
+                            qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
+                        i += 10
+                        qweight[row] |= int_weight[i] << 31
+                        row += 1
+                        qweight[row] |= (int_weight[i] >> 1) & 0x3
+                        i += 1
+                        for j in range(i, i + 10):
+                            qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
+                        i += 10
+                        row += 1
             elif self.planar:
-                qweight = (
-                    planar_pack_rows(
-                        t.from_numpy(int_weight.astype(np.int64)),
-                        self.bits,
-                        pack_dtype=self.pack_dtype,
-                    )
-                    .numpy()
-                    .astype(self.pack_np_math_dtype, copy=False)
+                qweight = planar_pack_rows(
+                    int_weight,
+                    self.bits,
+                    pack_dtype=self.pack_dtype,
                 )
             else:
                 raise NotImplementedError(f"Unsupported bits={self.bits}")
 
-            # self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
-            self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
+            self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
 
-            zeros = zeros.numpy().astype(self.pack_np_math_dtype)
-            qzeros = np.zeros((zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / self.pack_dtype_bits)), dtype=self.pack_np_math_dtype)
+            zeros = zeros.to(device="cpu", dtype=t.int32)
             if self.bits in [2, 4, 8]:
-                for col in range(qzeros.shape[1]):
-                    for j in range(min(self.pack_factor, zeros.shape[1] - col * self.pack_factor)):
-                        qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
-            elif self.bits == 3 and not self.planar:
-                i = 0
-                col = 0
-                while col < qzeros.shape[1]:
-                    for j in range(i, i + 10):
-                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
-                    i += 10
-                    qzeros[:, col] |= zeros[:, i] << 30
-                    col += 1
-                    qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-                    i += 1
-                    for j in range(i, i + 10):
-                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-                    i += 10
-                    qzeros[:, col] |= zeros[:, i] << 31
-                    col += 1
-                    qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-                    i += 1
-                    for j in range(i, i + 10):
-                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
-                    i += 10
-                    col += 1
-            elif self.planar:
-                qzeros = (
-                    planar_pack_cols(
-                        t.from_numpy(zeros.astype(np.int64)),
-                        self.bits,
-                        pack_dtype=self.pack_dtype,
+                if zeros.shape[1] % self.pack_factor == 0:
+                    qzeros = _pack_code_cols_2_4_8(zeros, self.bits, self.pack_factor)
+                else:
+                    qzeros = t.zeros(
+                        (zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / self.pack_dtype_bits)),
+                        dtype=t.int32,
                     )
-                    .numpy()
-                    .astype(self.pack_np_math_dtype, copy=False)
+                    for col in range(qzeros.shape[1]):
+                        for j in range(min(self.pack_factor, zeros.shape[1] - col * self.pack_factor)):
+                            qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
+            elif self.bits == 3 and not self.planar:
+                if self.pack_dtype_bits == 32 and zeros.shape[1] % 32 == 0:
+                    qzeros = _pack_code_cols_3(zeros)
+                else:
+                    qzeros = t.zeros(
+                        (zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / self.pack_dtype_bits)),
+                        dtype=t.int32,
+                    )
+                    i = 0
+                    col = 0
+                    while col < qzeros.shape[1]:
+                        for j in range(i, i + 10):
+                            qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
+                        i += 10
+                        qzeros[:, col] |= zeros[:, i] << 30
+                        col += 1
+                        qzeros[:, col] |= (zeros[:, i] >> 2) & 1
+                        i += 1
+                        for j in range(i, i + 10):
+                            qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
+                        i += 10
+                        qzeros[:, col] |= zeros[:, i] << 31
+                        col += 1
+                        qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
+                        i += 1
+                        for j in range(i, i + 10):
+                            qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
+                        i += 10
+                        col += 1
+            elif self.planar:
+                qzeros = planar_pack_cols(
+                    zeros,
+                    self.bits,
+                    pack_dtype=self.pack_dtype,
                 )
             else:
                 raise NotImplementedError(f"Unsupported bits={self.bits}")
 
-            # self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
-            self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
+            self.register_buffer("qzeros", qzeros.to(dtype=self.pack_dtype))
 
             # assert
             # assert isinstance(self, TorchLinear), f"type: {self.__class_}"

@@ -1,7 +1,4 @@
 accelerate>=1.15.0
-numpy>=2.2.6; python_version < "3.11"
-numpy>=2.4.6; python_version >= "3.11" and python_version < "3.12"
-numpy>=2.5.4; python_version >= "3.12"
 torch>=2.14.1
 safetensors>=0.8.0
 filelock>=4.1.0; python_version < "3.11"
@@ -19,11 +16,7 @@ tokenicer>=0.0.14
 logbar>=0.4.15
 jinja2>=3.1.6
 ninja>=1.13.2
-maturin>=1.15.0
 datasets>=5.1.0
-pyarrow>=25.0.1; python_version < "3.11"
-pyarrow>=26.0.0; python_version >= "3.11"
-dill>=0.4.1
 torchao>=0.18.0
 defuser>=0.0.29
 xxhash>=4.0.2

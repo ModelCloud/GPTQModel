@@ -100,7 +100,7 @@ class TestPackingSpeed(unittest.TestCase):
     s = s.to("cpu").contiguous()
     print("gen_quant: start...end")
 
-    def pack(self, qlinearCls, backend, impl: str = "cpu"):
+    def pack(self, qlinearCls, backend, impl: str = "cpu", workers: int = 1):
         """
         Instantiate a QuantLinear and pack with:
           - linear: nn.Linear [n,k] weight
@@ -145,24 +145,27 @@ class TestPackingSpeed(unittest.TestCase):
                 scales_T,
                 zeros_T,
                 g_idx=g_idx_i32,
+                workers=workers,
             )
         # Keep pack-only timing; omit post_init() to avoid extra work in speed test
         return qlinear
 
-    def _time_pack_impl(self, qlinearCls, backend, impl: str, repeats: int, threads: int = 1) -> float:
+    def _time_pack_impl(
+        self, qlinearCls, backend, impl: str, repeats: int, threads: int = 1, workers: int = 1
+    ) -> float:
         impl_lower = impl.lower()
         warmup_repeats = 2 if impl_lower == "gpu" and torch.cuda.is_available() else 1
 
         with threadpoolctl.threadpool_limits(limits=threads):
             for _ in range(warmup_repeats):
-                self.pack(qlinearCls, backend, impl=impl)
+                self.pack(qlinearCls, backend, impl=impl, workers=workers)
 
             if impl_lower == "gpu" and torch.cuda.is_available():
                 torch.cuda.synchronize()
 
             start = time.perf_counter()
             for _ in range(repeats):
-                self.pack(qlinearCls, backend, impl=impl)
+                self.pack(qlinearCls, backend, impl=impl, workers=workers)
             if impl_lower == "gpu" and torch.cuda.is_available():
                 torch.cuda.synchronize()
 
@@ -208,74 +211,25 @@ class TestPackingSpeed(unittest.TestCase):
         qlinearCls = TorchLinear
         backend = BACKEND.TORCH
         repeats = 10
-        thread_options = [1, 2, 4]
+        worker_options = [1, 2, 4]
         rows = []
         reference_time = None
 
-        for threads in thread_options:
-            os.environ["GPTQMODEL_PACK_THREADS"] = str(threads)
-            try:
-                elapsed = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
-            finally:
-                os.environ.pop("GPTQMODEL_PACK_THREADS", None)
+        for workers in worker_options:
+            elapsed = self._time_pack_impl(
+                qlinearCls, backend, impl="cpu", repeats=repeats, threads=1, workers=workers
+            )
 
             if reference_time is None:
                 reference_time = elapsed
             speedup = reference_time / elapsed if elapsed else float("inf")
-            rows.append((threads, elapsed, speedup))
+            rows.append((workers, elapsed, speedup))
 
-        print(render_table(rows, headers=["threads", "time (s)", "speedup vs 1"], tablefmt="simple"))
+        print(render_table(rows, headers=["workers", "time (s)", "speedup vs 1"], tablefmt="simple"))
 
-        # Expect at least non-regression: best timing must be <= 1-thread timing.
+        # Expect at least non-regression: best timing must be <= 1-worker timing.
         best_time = min(r[1] for r in rows)
-        self.assertLessEqual(best_time, reference_time, "Multi-threaded pack_block did not improve over single-thread baseline")
-
-    def test_pack_block_extension_speedup(self):
-        qlinearCls = TorchLinear
-        backend = BACKEND.TORCH
-        repeats = 5
-
-        os.environ["GPTQMODEL_DISABLE_PACK_EXT"] = "1"
-        os.environ["GPTQMODEL_PACK_THREADS"] = "2"
-        try:
-            baseline = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
-        finally:
-            os.environ.pop("GPTQMODEL_DISABLE_PACK_EXT", None)
-            os.environ.pop("GPTQMODEL_PACK_THREADS", None)
-
-        try:
-            from gptqmodel.nn_modules.qlinear import pack_block_ext as ext_mod
-            ext = ext_mod.pack_block_cpu  # type: ignore[attr-defined]
-            _ = ext
-        except (ImportError, AttributeError):
-            self.skipTest("C++ pack_block extension not available")
-
-        # Warm up compilation/load
-        with threadpoolctl.threadpool_limits(limits=1):
-            self.pack(qlinearCls, backend)
-
-        os.environ["GPTQMODEL_FORCE_PACK_EXT"] = "1"
-        os.environ["GPTQMODEL_PACK_THREADS"] = "2"
-        try:
-            cpp_time = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
-        finally:
-            os.environ.pop("GPTQMODEL_FORCE_PACK_EXT", None)
-            os.environ.pop("GPTQMODEL_PACK_THREADS", None)
-
-        print(
-            "pack_block extension speedup",
-            {
-                "python_time": baseline,
-                "cpp_time": cpp_time,
-                "speedup": baseline / cpp_time if cpp_time else float("inf"),
-            },
-        )
-
-        self.assertLess(
-            cpp_time,
-            baseline,
-            "C++ pack_block extension did not improve over Python baseline",
-        )
+        self.assertLessEqual(best_time, reference_time, "Threaded pack_block did not improve over single-worker baseline")
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing speed test")
     def test_pack_speed_gpu_vs_cpu(self):

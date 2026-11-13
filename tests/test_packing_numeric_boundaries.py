@@ -128,7 +128,6 @@ def test_gptq_packed_bytes_at_thresholds(monkeypatch, bits, dtype, method):
     device = "cuda" if method == "gpu" else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm device required")
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "1")
     linear, scales, zeros, expected = _inputs(dtype, bits, device, "thresholds")
     module = TorchLinear(bits=bits, group_size=128, sym=False, desc_act=False,
                          in_features=128, out_features=64, bias=False)
@@ -145,8 +144,6 @@ def test_gptq_finite_affine_overflow(monkeypatch, bits, method):
     device = "cuda" if method == "gpu" else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm device required")
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "0" if method == "native" else "1")
-    monkeypatch.setenv("GPTQMODEL_FORCE_PACK_EXT", "1" if method == "native" else "0")
     linear, scales, zeros, expected = _inputs(torch.float16, bits, device, "affine_overflow")
     module = TorchLinear(bits=bits, group_size=128, sym=False, desc_act=False,
                          in_features=128, out_features=64, bias=False)

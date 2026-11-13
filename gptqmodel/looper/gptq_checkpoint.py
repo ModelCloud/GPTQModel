@@ -7,6 +7,7 @@ import json
 import math
 import random
 import signal
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -15,7 +16,6 @@ from dataclasses import fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 
-import numpy as np
 import torch
 import transformers
 from safetensors import safe_open
@@ -25,6 +25,7 @@ from ..adapter.adapter import Lora
 from ..quantization.config import METHOD
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
+from ..utils.tensor import tensor_bytes
 from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_modules import (
     is_packed_module,
@@ -42,6 +43,38 @@ _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "_offload_temp_dir",
     "telemetry",
 }
+
+
+def _loaded_numpy():
+    """Return NumPy only if the process already imported it.
+
+    Importing NumPy here would make GPT-QModel pull it in. A process only has a
+    global NumPy RNG worth checkpointing if it already uses NumPy, so consult
+    ``sys.modules`` instead of importing.
+    """
+    return sys.modules.get("numpy")
+
+
+def _capture_numpy_rng():
+    """Snapshot the already-loaded NumPy global RNG, if there is one."""
+    np = _loaded_numpy()
+    if np is None:
+        return None
+    algorithm, keys, *rest = np.random.get_state()
+    return (algorithm, keys.tolist(), *rest)
+
+
+def _restore_numpy_rng(saved) -> bool:
+    """Restore and verify a snapshot from :func:`_capture_numpy_rng`."""
+    if saved is None:
+        return True
+    np = _loaded_numpy()
+    if np is None:
+        return False
+    algorithm, keys, *rest = saved
+    np.random.set_state((algorithm, np.asarray(keys, dtype=np.uint32), *rest))
+    actual = np.random.get_state()
+    return (actual[0], actual[1].tolist(), *actual[2:]) == saved
 
 
 def _checkpoint_identity_value(value, *, preserve_mapping_order=False):
@@ -70,7 +103,7 @@ def _checkpoint_identity_value(value, *, preserve_mapping_order=False):
         }
     if isinstance(value, torch.Tensor):
         tensor = value.detach().to(device="cpu").contiguous()
-        raw = tensor.view(torch.uint8).numpy().tobytes()
+        raw = tensor_bytes(tensor)
         return {
             "dtype": str(tensor.dtype),
             "shape": list(tensor.shape),
@@ -376,7 +409,7 @@ class QuantizationCheckpointAdapter:
             raise CheckpointError(
                 "quantization configuration changed during checkpoint capture"
             )
-        np_state = np.random.get_state()
+        numpy_rng = _capture_numpy_rng()
         processor_states = [
             processor.continuation_state_dict() for processor in self.processors
         ]
@@ -421,7 +454,7 @@ class QuantizationCheckpointAdapter:
                 if torch.cuda.is_initialized()
                 else [],
                 "python_rng": random.getstate(),
-                "numpy_rng": (np_state[0], np_state[1].tolist(), *np_state[2:]),
+                "numpy_rng": numpy_rng,
             }
             # The caller serializes immediately while the boundary is quiescent;
             # preserve source device tags until the codec makes CPU-owned copies.
@@ -589,9 +622,7 @@ class QuantizationCheckpointAdapter:
         if state["cuda_rng"]:
             torch.cuda.set_rng_state_all(state["cuda_rng"])
         random.setstate(state["python_rng"])
-        algorithm, keys, *rest = state["numpy_rng"]
-        np.random.set_state((algorithm, np.asarray(keys, dtype=np.uint32), *rest))
-        actual_numpy = np.random.get_state()
+        numpy_rng_matched = _restore_numpy_rng(state["numpy_rng"])
         actual_cuda = torch.cuda.get_rng_state_all() if state["cuda_rng"] else []
         rng_matched = (
             torch.equal(torch.random.get_rng_state(), state["rng"])
@@ -601,8 +632,7 @@ class QuantizationCheckpointAdapter:
                 for actual, expected in zip(actual_cuda, state["cuda_rng"])
             )
             and random.getstate() == state["python_rng"]
-            and (actual_numpy[0], actual_numpy[1].tolist(), *actual_numpy[2:])
-            == state["numpy_rng"]
+            and numpy_rng_matched
         )
         emit_device_telemetry(
             "checkpoint_rng_restored",

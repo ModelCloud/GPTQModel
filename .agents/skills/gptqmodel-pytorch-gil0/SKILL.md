@@ -34,6 +34,12 @@ cover, and never upgrade a row to SAFE based on a single-threaded run.
 
 ## Rules
 
+- Thread counts and "run threaded or not" decisions come from an explicit
+  argument or the config object, never from an environment variable. An env
+  switch makes the shipped default untested and lets a production run silently
+  take a path no test covers. See *No environment-variable behaviour switches*
+  in `AGENTS.md`; the retired `GPTQMODEL_PACK_PY_THREADS` /
+  `GPTQMODEL_PACK_THREADS` pair is the cautionary example.
 - Never call `torch.cuda.comm.*` from worker threads. Use
   `gptqmodel.utils.p2p.peer_copy_batch`, which drives
   `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` (the GIL is

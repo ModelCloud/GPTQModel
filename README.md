@@ -537,6 +537,9 @@ uv pip install -v gptqmodel
 ```
 
 The package depends on `ninja` for first-use JIT kernel compilation.
+NumPy is not a base dependency: the quantization core is NumPy-free, and the
+`gguf`, `bitblas`, and `mlx` extras declare it for the paths that need it. See
+[NumPy-free core](docs/numpy-free-core.md).
 
 AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
 Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
