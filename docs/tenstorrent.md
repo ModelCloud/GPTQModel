@@ -19,6 +19,11 @@ execution backend silently; the native kernel must be requested explicitly.
 Standard CPU PyTorch is used in both cases; no special PyTorch hardware build is
 required.
 
+Every dtype used here — including the native `bf4_b`/`bf8_b` block-float grid — is
+defined at the bit level, for both weights and arithmetic, in
+[`hw/dtypes.md`](../hw/dtypes.md). Hardware measurements for this box are in
+[`hw/tenstorrent.md`](../hw/tenstorrent.md).
+
 The two backends are mutually exclusive within one process. TT-Metal allows a
 single runtime owner per chip, and initializing the PJRT plugin is irreversible,
 so a process that has used `XLALinear` cannot then open a `ttnn.MeshDevice`.
@@ -471,7 +476,7 @@ nibbles into a dense BF16 tile that is then thrown away**. That, not transfer
 volume, is the optimisation target. The fix is *not* to cache the dense tile —
 that is an 8x memory regression — but to expand per tile inside the kernel,
 which needs a custom TT-Metalium op. Measured alternatives (block-float storage,
-including why `ttbf4` is too coarse at 9.8 % error) and the intended data
+including why `bf4_b` is too coarse at 9.8 % error) and the intended data
 flow are in
 [the architecture page](../hw/tenstorrent.md#9-design-fused-int4-gemm-not-a-dense-cache)
 and [what it implies](../hw/tenstorrent.md#8-what-this-implies-for-gptq-alignment).

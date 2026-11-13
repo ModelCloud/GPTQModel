@@ -5,15 +5,20 @@
 
 """Quantize weights onto a Tenstorrent block-float grid.
 
-The two formats are called ``ttbf8`` and ``ttbf4`` here. They are **not** an
-industry format: the nearest standard is OCP microscaling (MX), which shares an
-``E8M0`` scale per 32 values, and NVIDIA's ``NVFP4``, which shares a per-16
-``FP8`` scale. Tenstorrent instead shares a plain power-of-two exponent per 16
-values with a fixed mantissa width per element, so nothing can be exchanged with
-an MX or NVFP4 checkpoint. ``ttnn`` spells them ``bfloat8_b`` / ``bfloat4_b``;
-that spelling is used only at the vendor call site, because outside it
-``bfloat8_b`` reads like an 8-bit bfloat (there is no such type) and is easily
-mistaken for OCP FP8 E4M3, which it is not.
+The two formats are called ``bf8_b`` and ``bf4_b`` here: one shared power-of-two
+exponent per 16 values plus a fixed mantissa width per element (6 stored bits
+for ``bf8_b``, 2 for ``bf4_b``). They are **not** an industry format -- the nearest
+standard is OCP microscaling (MX, an ``E8M0`` scale per 32 values) and NVIDIA's
+``NVFP4`` (a per-16 ``FP8`` scale) -- so a checkpoint cannot be exchanged with
+either. ``hw/dtypes.md`` records the exact bit layout. The names are the vendor
+spelling with ``bfloat`` shortened to ``bf``; the ``_b`` is kept because it is
+load-bearing -- upstream ``DataFormat::Bfp4`` without it is the 5-bit-exponent
+family, while ``Bfp4_b`` is the 8-bit one this quantizer implements.
+
+``ttnn`` spells them ``bfloat8_b`` / ``bfloat4_b``; that spelling is used only
+at the vendor call site, because outside it ``bfloat8_b`` reads like an 8-bit
+bfloat (there is no such type) and is easily mistaken for OCP FP8 E4M3, which
+it is not.
 
 They are *storage* formats the unpack stage expands in the data path, so a weight
 stored that way reaches the FPU with no dequant op in the graph. Converting an
@@ -35,8 +40,8 @@ mantissa bit implicit:
 ===========  =====  ===========  ===================
 format       bits   stored mant  representable levels
 ===========  =====  ===========  ===================
-``ttbf8``       8        6        ~127 per exponent
-``ttbf4``       4        2        7 per exponent
+``bf8_b``       8        6        ~127 per exponent
+``bf4_b``       4        2        7 per exponent
 ===========  =====  ===========  ===================
 
 Rounding is round-to-nearest-even, matching the hardware behaviour described in
@@ -54,7 +59,7 @@ from .calibration import iter_calibration_windows
 
 
 #: Canonical name per width. Use these outside the ttnn call site.
-TT_BLOCKFLOAT_DTYPES = {4: "ttbf4", 8: "ttbf8"}
+TT_BLOCKFLOAT_DTYPES = {4: "bf4_b", 8: "bf8_b"}
 #: The attribute ``ttnn`` exposes for the same storage format. Only the code
 #: that actually calls ttnn should use these spellings.
 TT_BLOCKFLOAT_VENDOR_ATTRS = {4: "bfloat4_b", 8: "bfloat8_b"}
@@ -63,7 +68,7 @@ BLOCKFLOAT_BITS = {name: bits for bits, name in TT_BLOCKFLOAT_DTYPES.items()}
 
 
 def tt_blockfloat_dtype(bits: int) -> str:
-    """Return the canonical name (``ttbf4`` / ``ttbf8``) for a storage width."""
+    """Return the canonical name (``bf4_b`` / ``bf8_b``) for a storage width."""
 
     try:
         return TT_BLOCKFLOAT_DTYPES[int(bits)]
@@ -78,7 +83,7 @@ def ttnn_blockfloat_attr(bits: int) -> str:
     """Return the ``ttnn`` attribute name for the same storage format.
 
     Only call sites that talk to ttnn should use this spelling; everything else
-    reports the canonical ``ttbf*`` name.
+    reports the canonical ``bf*`` name.
     """
 
     try:
@@ -169,23 +174,23 @@ def quantize_blockfloat(
     return out.contiguous(), exponent.squeeze(-1)
 
 
-def quantize_ttbf8(weight: torch.Tensor) -> torch.Tensor:
-    """Round ``weight`` the way ``ttbf8`` storage would round it."""
+def quantize_bf8(weight: torch.Tensor) -> torch.Tensor:
+    """Round ``weight`` the way ``bf8_b`` storage would round it."""
 
     return quantize_blockfloat(weight, 8)[0]
 
 
-def quantize_ttbf4(weight: torch.Tensor) -> torch.Tensor:
-    """Round ``weight`` the way ``ttbf4`` storage would round it."""
+def quantize_bf4(weight: torch.Tensor) -> torch.Tensor:
+    """Round ``weight`` the way ``bf4_b`` storage would round it."""
 
     return quantize_blockfloat(weight, 4)[0]
 
 
-# Compatibility aliases using the vendor spelling. Prefer the ``ttbf*`` names:
+# Compatibility aliases using the vendor spelling. Prefer the ``bf*`` names:
 # they keep the origin of the format explicit and cannot be mistaken for an
 # industry format such as OCP FP8 or MX.
-quantize_bfloat8_b = quantize_ttbf8
-quantize_bfloat4_b = quantize_ttbf4
+quantize_bfloat8_b = quantize_bf8
+quantize_bfloat4_b = quantize_bf4
 
 
 def quantize_uniform_int4(weight: torch.Tensor, *, group_size: int = 128) -> torch.Tensor:
@@ -227,8 +232,8 @@ __all__ = [
     "quantize_bfloat4_b",
     "quantize_bfloat8_b",
     "quantize_blockfloat",
-    "quantize_ttbf4",
-    "quantize_ttbf8",
+    "quantize_bf4",
+    "quantize_bf8",
     "quantize_uniform_int4",
     "relative_error",
     "stored_mantissa_bits",
@@ -290,7 +295,7 @@ def gptq_solve_blockfloat(
     conventionally use because it packs cleanly into nibbles.
 
     Substituting a Tenstorrent block-float grid therefore produces weights that are
-    **natively `ttbf4`/`ttbf8` as stored**, so inference needs no dequant
+    **natively `bf4_b`/`bf8_b` as stored**, so inference needs no dequant
     step at all: the unpack stage expands the checkpoint in the data path.
 
     `hessian` is `[in_features, in_features]` (``X^T X`` over calibration data).
@@ -298,7 +303,7 @@ def gptq_solve_blockfloat(
     (`[out_features, in_features]`), using GPTQ'"'s usual ordering: the reduction
     dimension is the *last* axis and `hessian` indexes it.
 
-    This is the honest form of "GPTQ for bf4". Re-encoding an int4 checkpoint onto
+    This is the honest form of "GPTQ for bf4_b". Re-encoding an int4 checkpoint onto
     this grid is not the same thing and measures far worse.
     """
 
@@ -394,7 +399,7 @@ __all__ += [
 # --- end-to-end: quantize a dense model onto the TT block-float grid ---------
 #
 # The grid quantizer above is per-layer. This is the pipeline that turns a dense
-# checkpoint into one whose weights are natively ttbf4/ttbf8, by
+# checkpoint into one whose weights are natively bf4_b/bf8_b, by
 # collecting per-layer Hessians over calibration text and running the GPTQ solve
 # against the grid. The result needs no inference-time dequant: the unpack stage
 # expands it in the data path.
@@ -535,11 +540,11 @@ def quantize_model_blockfloat(
 
     Returns a report of ``{layer_name: {"norm_l1": ..., "on_grid": bool}}``. The
     weights are replaced with grid-quantized values, so saving the model yields a
-    checkpoint that loads as native ``ttbf4``/``ttbf8`` with no dequant.
+    checkpoint that loads as native ``bf4_b``/``bf8_b`` with no dequant.
 
     ``bits`` may be a single width or a pattern -> width mapping (see
     :func:`_layer_bits`). Widths are chosen per layer, so a checkpoint can keep
-    ``ttbf4`` on the projections that tolerate it and spend ``ttbf8`` on
+    ``bf4_b`` on the projections that tolerate it and spend ``bf8_b`` on
     the ones that carry the most output error.
 
     ``embed_bits`` also snaps the input embedding onto the grid. An embedding is
@@ -630,10 +635,10 @@ def _quantize_embedding_on_grid(model, bits: int, *, verbose: bool = False) -> d
 # --- packed checkpoint format ----------------------------------------------
 #
 # A grid-quantized weight is fully described by one small integer per element plus
-# one exponent per 16-value block, so it can be stored at bf4 density WITHOUT
+# one exponent per 16-value block, so it can be stored at bf4_b density WITHOUT
 # re-quantising at load time:
 #
-#   codes:      uint8 per element, value in [0, 2*mantissa_bits] -- 0..8 for bf4
+#   codes:      uint8 per element, value in [0, 2*mantissa_bits] -- 0..8 for bf4_b
 #   exponents:  int8 per 16-value block
 #   dequant:    value = code / levels * 2**exponent
 #
@@ -757,17 +762,17 @@ def save_blockfloat_checkpoint(
     bits=4,
     metadata: "Optional[dict]" = None,
 ) -> dict:
-    """Write grid-quantized decoder linears as a bf4/bf8-native checkpoint.
+    """Write grid-quantized decoder linears as a bf4_b/bf8_b-native checkpoint.
 
     Weights become ``<layer>.blockfloat_codes`` (uint8) plus
     ``<layer>.blockfloat_exponents`` (int8), so the stored payload is 1 byte per
-    element for bf4 -- the same order as int4 packing without a second quantisation
+    element for bf4_b -- the same order as int4 packing without a second quantisation
     step at load. Returns a summary of what was written.
 
     ``bits`` may be a single width, or a mapping of layer-name pattern to width
     with an optional ``"*"`` default. Mixed widths are what a real checkpoint
-    wants: ``ttbf8`` costs one byte per weight and is close to lossless,
-    while ``ttbf4`` is roughly a 2.8-bit format, so spending the extra byte
+    wants: ``bf8_b`` costs one byte per weight and is close to lossless,
+    while ``bf4_b`` is roughly a 2.8-bit format, so spending the extra byte
     on the layers that carry the most output error is far cheaper than spending
     it everywhere.
     """
@@ -1136,7 +1141,7 @@ def _quantized_prefixes(model) -> list:
 
     Decoder linears plus the input embedding. The embedding is included because
     a vocabulary table is the single largest tensor in a small model: as codes at
-    ``ttbf8`` it is 279 MiB against 501 MiB of dense float16.
+    ``bf8_b`` it is 279 MiB against 501 MiB of dense float16.
 
     A model returned by :func:`build_blockfloat_model` has already been swapped,
     so its quantized modules are ``TTBlockfloat*`` instances rather than

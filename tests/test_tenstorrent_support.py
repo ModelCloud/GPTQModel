@@ -1004,7 +1004,7 @@ def test_blockfloat_grid_values_are_exactly_hardware_representable():
     This is what makes a block-float checkpoint need no inference-time dequant:
     the storage format is a fixed point of the quantizer, so the unpack stage
     yields exactly what the grid predicted. Verified on device as
-    max_drift=0.000000 for both ttbf8 and ttbf4.
+    max_drift=0.000000 for both bf8_b and bf4_b.
     """
 
     import importlib
@@ -1051,7 +1051,7 @@ def test_gptq_blockfloat_solve_uses_error_feedback():
     def out_err(wq):
         return bq.relative_error(reference, x @ wq.T)
 
-    for bits, enc in ((4, bq.quantize_ttbf4), (8, bq.quantize_ttbf8)):
+    for bits, enc in ((4, bq.quantize_bf4), (8, bq.quantize_bf8)):
         plain = enc(w)
         solved = bq.gptq_solve_blockfloat(w, h, bits=bits)
         # The whole point of GPTQ: error feedback beats rounding.
@@ -1085,9 +1085,9 @@ def test_gptq_blockfloat_is_competitive_with_uniform():
     def out_err(q):
         return bq.relative_error(reference, x @ q.T)
 
-    bf4 = out_err(bq.gptq_solve_blockfloat(w, h, bits=4, grid="blockfloat"))
+    bf4_b = out_err(bq.gptq_solve_blockfloat(w, h, bits=4, grid="blockfloat"))
     u4 = out_err(bq.gptq_solve_blockfloat(w, h, bits=4, grid="uniform"))
-    assert bf4 < u4 * 1.25, f"4-bit block-float regressed: {bf4} vs uniform {u4}"
+    assert bf4_b < u4 * 1.25, f"4-bit block-float regressed: {bf4_b} vs uniform {u4}"
 
 
 def test_hessian_accumulation_stays_float32():
@@ -1287,31 +1287,39 @@ def test_blockfloat_mantissa_widths():
     import importlib
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
-    assert bq.BLOCKFLOAT_BITS == {"ttbf4": 4, "ttbf8": 8}
+    assert bq.BLOCKFLOAT_BITS == {"bf4_b": 4, "bf8_b": 8}
     # One sign bit and one implicit mantissa bit are not stored.
     assert bq.stored_mantissa_bits(8) == 6
     assert bq.stored_mantissa_bits(4) == 2
 
 
-def test_blockfloat_dtype_names_are_tt_prefixed():
-    """Block float is Tenstorrent-specific, so the canonical name is ``ttbf*``.
+def test_blockfloat_dtype_names_are_canonical():
+    """The two block-float dtypes are named ``bf4_b`` and ``bf8_b``.
 
-    The nearest industry formats are OCP microscaling (a per-32 ``E8M0``
-    scale) and NVFP4 (a per-16 ``FP8`` scale); neither is bit-compatible with
-    Tenstorrent's per-16 power-of-two exponent. The vendor spelling
-    (``bfloat8_b`` / ``bfloat4_b``) is kept only for the ``getattr(ttnn, ...)``
-    call site, because it reads like an 8-bit bfloat and is easily mistaken for
-    OCP FP8 E4M3.
+    The names are Tenstorrent formats, not industry ones: OCP microscaling uses
+    a per-32 ``E8M0`` scale and NVFP4 a per-16 ``FP8`` scale, and neither is
+    bit-compatible with a per-16 power-of-two exponent. They carry no vendor
+    prefix because no other provider claims ``bf4_b``/``bf8_b``, but the ``_b``
+    is kept: upstream ``DataFormat::Bfp4`` without it is the 5-bit-exponent
+    family, while ``Bfp4_b`` is the 8-bit one this quantizer implements. The
+    exact bit layout and that reasoning are recorded in ``hw/dtypes.md``. The
+    full vendor spelling (``bfloat4_b`` / ``bfloat8_b``) is kept only for the
+    ``getattr(ttnn, ...)`` call site.
     """
 
     import importlib
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
-    assert bq.TT_BLOCKFLOAT_DTYPES == {4: "ttbf4", 8: "ttbf8"}
-    assert all(name.startswith("ttbf") for name in bq.TT_BLOCKFLOAT_DTYPES.values())
-    assert bq.tt_blockfloat_dtype(4) == "ttbf4"
-    assert bq.tt_blockfloat_dtype(8) == "ttbf8"
+    assert bq.TT_BLOCKFLOAT_DTYPES == {4: "bf4_b", 8: "bf8_b"}
+    # No vendor prefix: the shortening is deliberate, not an oversight.
+    assert not any(name.startswith("tt") for name in bq.TT_BLOCKFLOAT_DTYPES.values())
+    # The canonical name only shortens "bfloat"; every other part of the vendor
+    # spelling, including the meaningful ``_b``, is preserved.
+    for bits, vendor in bq.TT_BLOCKFLOAT_VENDOR_ATTRS.items():
+        assert bq.TT_BLOCKFLOAT_DTYPES[bits] == vendor.replace("bfloat", "bf")
+    assert bq.tt_blockfloat_dtype(4) == "bf4_b"
+    assert bq.tt_blockfloat_dtype(8) == "bf8_b"
     with pytest.raises(ValueError, match="no Tenstorrent block-float format"):
         bq.tt_blockfloat_dtype(16)
 
@@ -1325,11 +1333,16 @@ def test_blockfloat_dtype_names_are_tt_prefixed():
     # must stay the vendor spelling and must agree with the canonical map.
     kern = importlib.import_module("gptqmodel.nn_modules.qlinear.ttnn_blockfloat")
     assert kern.TTNNBlockFloat8Linear.WEIGHT_FORMAT == bq.ttnn_blockfloat_attr(8)
-    assert kern.BLOCK_FLOAT_FORMATS == ("ttbf8",)
+    assert kern.BLOCK_FLOAT_FORMATS == ("bf8_b",)
 
 
 def test_blockfloat_vendor_attrs_exist_on_ttnn():
-    """Every vendor spelling we emit must exist on the installed ttnn build."""
+    """Every vendor spelling we emit must exist on the installed ttnn build.
+
+    The un-suffixed names must not: ``ttnn`` exposes only the B family (8-bit
+    shared exponent), so ``bf4``/``bf8`` without the suffix would name a format
+    this build cannot produce. There is no ``_a``/``_c`` variant of either.
+    """
 
     import importlib
 
@@ -1337,6 +1350,16 @@ def test_blockfloat_vendor_attrs_exist_on_ttnn():
     ttnn = pytest.importorskip("ttnn")
     for bits, attr in bq.TT_BLOCKFLOAT_VENDOR_ATTRS.items():
         assert hasattr(ttnn, attr), f"ttnn has no {attr} dtype for {bits} bits"
+    for absent in (
+        "bfloat4",
+        "bfloat8",
+        "bfloat4_a",
+        "bfloat8_a",
+        "bfloat4_c",
+        "bfloat8_c",
+        "bfloat2_b",  # BFP2 exists in C++ but is not exposed by this build
+    ):
+        assert not hasattr(ttnn, absent), f"ttnn unexpectedly exposes {absent}"
 
 
 def test_packed_code_bytes_rounds_up_and_rejects_other_widths():
@@ -1825,7 +1848,7 @@ def test_blockfloat_beats_uniform_int4_for_heavy_tails():
     weight[:, ::128] = 8.0
 
     int4_err = bq.relative_error(weight, bq.quantize_uniform_int4(weight))
-    bf4_err = bq.relative_error(weight, bq.quantize_ttbf4(weight))
+    bf4_err = bq.relative_error(weight, bq.quantize_bf4(weight))
     assert bf4_err < int4_err
 
 
@@ -1952,12 +1975,12 @@ def test_fused_matmul_matches_torch_on_device():
 
 
 def test_blockfloat_grid_matches_hardware_levels():
-    """The quantizer's grid must match what ttbf4/ttbf8 can store.
+    """The quantizer's grid must match what bf4_b/bf8_b can store.
 
-    Measured on a p300c by encoding and reading back: bf4 holds 4 levels per
-    16-value block inside one binade, bf8 holds up to 64. That is 2 and 6 stored
+    Measured on a p300c by encoding and reading back: bf4_b holds 4 levels per
+    16-value block inside one binade, bf8_b holds up to 64. That is 2 and 6 stored
     mantissa bits, matching ``stored_mantissa_bits``. The step is ``2^exp/levels``:
-    hardware showed 0.125 = 0.5/4 for bf4.
+    hardware showed 0.125 = 0.5/4 for bf4_b.
 
     Blocks each carry their own exponent -- verified by placing a 16x weaker
     segment beside a strong one in the same row: both keep their own 4 levels
@@ -1968,7 +1991,7 @@ def test_blockfloat_grid_matches_hardware_levels():
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
-    # bf4 exercises the full grid inside one binade: exactly 4 levels.
+    # bf4_b exercises the full grid inside one binade: exactly 4 levels.
     vals = torch.linspace(0.5, 0.99, 16).reshape(1, 16)
     out4, exp4 = bq.quantize_blockfloat(vals, 4)
     levels4 = torch.unique(out4.reshape(-1))
@@ -1977,7 +2000,7 @@ def test_blockfloat_grid_matches_hardware_levels():
     span = float(torch.pow(2.0, exp4.reshape(-1)[0]))
     assert abs(float(levels4[1] - levels4[0]) - span / 4) < 1e-6
 
-    # bf8 must be strictly finer than bf4 on the same input.
+    # bf8_b must be strictly finer than bf4_b on the same input.
     out8, _ = bq.quantize_blockfloat(vals, 8)
     assert torch.unique(out8.reshape(-1)).numel() > levels4.numel()
 
@@ -2131,7 +2154,7 @@ def test_self_contained_checkpoint_roundtrip(tmp_path):
         for block in model.model.layers:
             for _, module in block.named_modules():
                 if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
-                    module.weight.copy_(bq.quantize_ttbf4(module.weight.detach().float()))
+                    module.weight.copy_(bq.quantize_bf4(module.weight.detach().float()))
         embed = model.model.embed_tokens
         embed.weight.copy_(
             bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0]
@@ -2176,7 +2199,7 @@ def test_self_contained_loader_refuses_a_decoder_only_directory(tmp_path):
     block = torch.nn.Module()
     block.proj = torch.nn.Linear(64, 32, bias=False)
     with torch.no_grad():
-        block.proj.weight.copy_(bq.quantize_ttbf4(torch.randn(32, 64) * 0.02))
+        block.proj.weight.copy_(bq.quantize_bf4(torch.randn(32, 64) * 0.02))
 
     model = torch.nn.Module()
     model.model = torch.nn.Module()
@@ -2199,7 +2222,7 @@ def test_native_checkpoint_roundtrip_via_codes(tmp_path):
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
     torch.manual_seed(5)
-    w = bq.quantize_ttbf4(torch.randn(32, 64) * 0.02)
+    w = bq.quantize_bf4(torch.randn(32, 64) * 0.02)
 
     # Build a throwaway model with one decoder-style block.
     block = torch.nn.Module()
@@ -2242,7 +2265,7 @@ def test_native_checkpoint_records_its_source_model(tmp_path):
     block = torch.nn.Module()
     block.proj = torch.nn.Linear(64, 32, bias=False)
     with torch.no_grad():
-        block.proj.weight.copy_(bq.quantize_ttbf4(torch.randn(32, 64) * 0.02))
+        block.proj.weight.copy_(bq.quantize_bf4(torch.randn(32, 64) * 0.02))
     model = torch.nn.Module()
     model.model = torch.nn.Module()
     model.model.decoder = torch.nn.Module()
@@ -2332,7 +2355,7 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         for block in model.model.layers:
             for _, module in block.named_modules():
                 if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
-                    module.weight.copy_(bq.quantize_ttbf4(module.weight.detach().float()))
+                    module.weight.copy_(bq.quantize_bf4(module.weight.detach().float()))
 
     out = str(tmp_path / "ckpt")
     bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
@@ -2401,10 +2424,10 @@ def test_blockfloat_exponent_search_beats_floor_log2():
 
 
 def test_mixed_width_checkpoint_roundtrip(tmp_path):
-    """A checkpoint may store some layers at bf8 and the rest at bf4.
+    """A checkpoint may store some layers at bf8_b and the rest at bf4_b.
 
-    ttbf8 costs one byte per weight and is close to lossless, while
-    ttbf4 is roughly a 2.8-bit format. A real checkpoint wants the extra
+    bf8_b costs one byte per weight and is close to lossless, while
+    bf4_b is roughly a 2.8-bit format. A real checkpoint wants the extra
     byte only where it buys quality, so the format has to carry a width per
     layer rather than one global value.
     """
@@ -2435,7 +2458,7 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
                 module.weight.copy_(
                     bq.quantize_blockfloat(module.weight.detach().float(), bits)[0]
                 )
-        # The embedding is stored as bf8 codes too, so put it on the grid.
+        # The embedding is stored as bf8_b codes too, so put it on the grid.
         embed = model.model.embed_tokens
         embed.weight.copy_(
             bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0]
@@ -2464,7 +2487,7 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
     assert weight_map["model.layers.0.self_attn.q_proj.codes"] in shards
     assert weight_map["model.layers.0.mlp.gate_proj.codes"] in shards
     assert weight_map["model.norm.weight"] in shards
-    # The embedding is codes at bf8, not a dense table: 64 x 32 codes at 8 bits
+    # The embedding is codes at bf8_b, not a dense table: 64 x 32 codes at 8 bits
     # is 2048 bytes against 4096 for float16.
     assert weight_map["model.embed_tokens.codes"] in shards
     assert "model.embed_tokens.weight" not in weight_map
@@ -2535,7 +2558,7 @@ def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
         for block in model.model.layers:
             for _, module in block.named_modules():
                 if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
-                    module.weight.copy_(bq.quantize_ttbf4(module.weight.detach().float()))
+                    module.weight.copy_(bq.quantize_bf4(module.weight.detach().float()))
         embed = model.model.embed_tokens
         embed.weight.copy_(bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0])
 
@@ -2577,7 +2600,7 @@ def test_native_checkpoint_resave_is_bit_identical(tmp_path):
     block = torch.nn.Module()
     block.proj = torch.nn.Linear(64, 32, bias=True)
     with torch.no_grad():
-        block.proj.weight.copy_(bq.quantize_ttbf4(torch.randn(32, 64) * 0.02))
+        block.proj.weight.copy_(bq.quantize_bf4(torch.randn(32, 64) * 0.02))
         block.proj.bias.zero_()
 
     def _model():
@@ -2617,7 +2640,7 @@ def test_checkpoint_payload_is_safetensors(tmp_path):
     block = torch.nn.Module()
     block.proj = torch.nn.Linear(64, 32, bias=False)
     with torch.no_grad():
-        block.proj.weight.copy_(bq.quantize_ttbf4(torch.randn(32, 64) * 0.02))
+        block.proj.weight.copy_(bq.quantize_bf4(torch.randn(32, 64) * 0.02))
 
     model = torch.nn.Module()
     model.model = torch.nn.Module()
@@ -2643,7 +2666,7 @@ def test_legacy_pickle_payload_still_loads(tmp_path):
     block = torch.nn.Module()
     block.proj = torch.nn.Linear(64, 32, bias=False)
     with torch.no_grad():
-        block.proj.weight.copy_(bq.quantize_ttbf4(torch.randn(32, 64) * 0.02))
+        block.proj.weight.copy_(bq.quantize_bf4(torch.randn(32, 64) * 0.02))
 
     model = torch.nn.Module()
     model.model = torch.nn.Module()
@@ -2673,7 +2696,7 @@ def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
     torch.manual_seed(6)
-    w = bq.quantize_ttbf4(torch.randn(32, 64) * 0.02)
+    w = bq.quantize_bf4(torch.randn(32, 64) * 0.02)
 
     def make_model():
         block = torch.nn.Module()
@@ -2708,7 +2731,7 @@ def test_blockfloat_pack_roundtrips_exactly():
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
     torch.manual_seed(4)
-    w = bq.quantize_ttbf4(torch.randn(64, 128) * 0.02)
+    w = bq.quantize_bf4(torch.randn(64, 128) * 0.02)
     codes, exponents = bq.decompose_blockfloat(w, bits=4)
     assert codes.dtype == torch.uint8
     assert bq.recompose_blockfloat(codes, exponents, bits=4).equal(w)
@@ -2739,18 +2762,18 @@ def test_blockfloat_decompose_allows_the_full_code_range():
     w = torch.zeros(1, 16)
     w[0, :8] = 0.9
     w[0, 8:] = -0.9
-    quantized = bq.quantize_ttbf4(w)
+    quantized = bq.quantize_bf4(w)
     codes, exponents = bq.decompose_blockfloat(quantized, bits=4)
     assert int(codes.max()) > 4, "test data should exercise codes above levels"
     assert bq.recompose_blockfloat(codes, exponents, bits=4).equal(quantized)
 
 
 def test_gptq_blockfloat_is_native_not_an_int4_cast():
-    """The solve must land on the bf4 grid itself, not pass through int4.
+    """The solve must land on the bf4_b grid itself, not pass through int4.
 
     Three assertions: the result is a fixed point of the grid, it differs from an
     int4 quantisation of the same weights, and the error is far below what a
-    double rounding (bf4 -> int4) would produce.
+    double rounding (bf4_b -> int4) would produce.
     """
 
     import importlib
@@ -2766,7 +2789,7 @@ def test_gptq_blockfloat_is_native_not_an_int4_cast():
     solved = bq.gptq_solve_blockfloat(w, h, bits=4, grid="blockfloat")
 
     # 1. Already on the grid: re-quantising is a no-op.
-    assert torch.allclose(solved, bq.quantize_ttbf4(solved), atol=1e-6)
+    assert torch.allclose(solved, bq.quantize_bf4(solved), atol=1e-6)
     # 2. Not the int4 answer for the same weights.
     assert not torch.allclose(solved, bq.quantize_uniform_int4(solved), atol=1e-9)
     # 3. Direct-to-grid beats a double rounding through int4 -- measured on the
@@ -2775,9 +2798,9 @@ def test_gptq_blockfloat_is_native_not_an_int4_cast():
     reference = x @ w.T
     direct = bq.relative_error(reference, x @ solved.T)
     via_int4 = bq.relative_error(
-        reference, x @ bq.quantize_ttbf4(bq.quantize_uniform_int4(w)).T
+        reference, x @ bq.quantize_bf4(bq.quantize_uniform_int4(w)).T
     )
-    assert direct < via_int4, f"direct {direct} should beat int4-then-bf4 {via_int4}"
+    assert direct < via_int4, f"direct {direct} should beat int4-then-bf4_b {via_int4}"
 
 
 def test_quantize_model_blockfloat_reports_true_weight_error():
@@ -3064,7 +3087,7 @@ def test_actual_ttnn_linear_matches_torch_oracle(device_count):
         close_mesh()
 
 
-# --- end-to-end: dense -> native bf4 -> post-quant inference ----------------
+# --- end-to-end: dense -> native bf4_b -> post-quant inference ----------------
 #
 # Two levels. The CPU contract below runs always, using a synthetic decoder so it
 # exercises the real save/load/serve code paths without a download. The hardware
@@ -3166,7 +3189,7 @@ def test_native_bf4_payload_is_denser_than_float16(tmp_path):
     torch.manual_seed(3)
     with torch.no_grad():
         for param in model.parameters():
-            param.copy_(bq.quantize_ttbf4(torch.randn_like(param) * 0.02))
+            param.copy_(bq.quantize_bf4(torch.randn_like(param) * 0.02))
 
     info = bq.save_blockfloat_checkpoint(model, str(tmp_path / "p2"), bits=4)
     elements = 256 * 256 * 2                     # q_proj + fc1
@@ -3182,10 +3205,10 @@ def test_native_bf4_payload_is_denser_than_float16(tmp_path):
     reason="explicit end-to-end model gate (downloads OPT-125M, runs on device)",
 )
 def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
-    """Quantize real OPT-125M to native bf4, then run post-quant inference.
+    """Quantize real OPT-125M to native bf4_b, then run post-quant inference.
 
     Checks the property the whole path exists for: the solver's output survives
-    ttbf4 storage unchanged, so inference needs no dequant at load.
+    bf4_b storage unchanged, so inference needs no dequant at load.
     """
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -3246,7 +3269,7 @@ def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
     assert cosine > 0.99, f"logits cosine {cosine} is too low"
     assert int(dense_logits.argmax()) == int(reloaded_logits.argmax())
 
-    # On device, a restored layer must store as ttbf4 with no drift.
+    # On device, a restored layer must store as bf4_b with no drift.
     from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, import_ttnn, open_mesh
 
     ttnn = import_ttnn()
@@ -3259,7 +3282,7 @@ def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
         )
         round_tripped = ttnn.to_torch(device_tensor).float()
         drift = float((round_tripped - weights.float()).abs().max())
-        assert drift == 0.0, f"ttbf4 storage moved the grid values by {drift}"
+        assert drift == 0.0, f"bf4_b storage moved the grid values by {drift}"
         ttnn.deallocate(device_tensor)
     finally:
         close_mesh()
@@ -3270,7 +3293,7 @@ def test_opt125m_native_bf4_quantize_and_infer(tmp_path):
     reason="explicit end-to-end model gate",
 )
 def test_opt125m_native_bf4_matches_int4_quantized_checkpoint():
-    """Native bf4 should be in the same accuracy class as a shipped GPTQ int4 model.
+    """Native bf4_b should be in the same accuracy class as a shipped GPTQ int4 model.
 
     Compares post-quantization quality on the same prompt, using the published
     OPT-125M GPTQ int4 checkpoint as the reference point rather than the dense
@@ -3292,10 +3315,10 @@ def test_opt125m_native_bf4_matches_int4_quantized_checkpoint():
         model, tok, bits=4, nsamples=4, text=TT_CALIBRATION_TEXT
     )
     with torch.no_grad():
-        bf4 = model(ids).logits[0, -1].float().clone()
+        bf4_b = model(ids).logits[0, -1].float().clone()
 
-    bf4_cos = float(torch.nn.functional.cosine_similarity(dense, bf4, dim=0))
-    assert bf4_cos > 0.99, f"native bf4 cosine {bf4_cos} below the int4 class"
+    bf4_cos = float(torch.nn.functional.cosine_similarity(dense, bf4_b, dim=0))
+    assert bf4_cos > 0.99, f"native bf4_b cosine {bf4_cos} below the int4 class"
 
 
 # --- GSM8K evaluation harness ----------------------------------------------
