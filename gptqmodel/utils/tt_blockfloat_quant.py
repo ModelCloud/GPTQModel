@@ -955,10 +955,18 @@ def read_hf_weight_map(checkpoint_dir: str) -> dict:
 
 
 def load_hf_state_dict(checkpoint_dir: str) -> dict:
-    """Load every tensor named by the checkpoint's index."""
+    """Load every tensor named by the checkpoint's index.
+
+    A checkpoint is a set of files, so a partial download is the ordinary
+    failure. Each error names the directory, the shard and the reason instead of
+    surfacing a bare ``No such file or directory`` from inside the safetensors
+    reader, and a shard that is readable but incomplete is caught here rather
+    than later as a vague "does not supply N required tensors".
+    """
 
     import os
 
+    from safetensors import SafetensorError
     from safetensors.torch import load_file
 
     weight_map = read_hf_weight_map(checkpoint_dir)
@@ -968,18 +976,37 @@ def load_hf_state_dict(checkpoint_dir: str) -> dict:
 
     state = {}
     for shard, names in by_shard.items():
-        tensors = load_file(os.path.join(checkpoint_dir, shard))
+        path = os.path.join(checkpoint_dir, shard)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"{checkpoint_dir}: the index references {shard!r}, but that file "
+                "is missing, so the checkpoint is incomplete. Re-download it "
+                "rather than loading a partial directory."
+            )
+        try:
+            tensors = load_file(path)
+        except SafetensorError as exc:
+            raise ValueError(
+                f"{checkpoint_dir}: {shard!r} is not a readable safetensors file "
+                f"({exc}). A truncated download is the usual cause."
+            ) from exc
+        absent = [name for name in names if name not in tensors]
+        if absent:
+            raise ValueError(
+                f"{checkpoint_dir}: {shard!r} does not contain {len(absent)} "
+                f"tensor(s) the index assigns to it, e.g. {absent[:3]}"
+            )
         for name in names:
-            if name in tensors:
-                state[name] = tensors[name]
+            state[name] = tensors[name]
     return state
+
 
 def _quantized_prefixes(model) -> list:
     """Module paths this checkpoint stores as block-float codes.
 
     Decoder linears plus the input embedding. The embedding is included because
     a vocabulary table is the single largest tensor in a small model: as codes at
-    ``bfloat8_b`` it is 279 MiB against 501 MiB of dense float16.
+    ``ttbf8`` it is 279 MiB against 501 MiB of dense float16.
     """
 
     import torch.nn as nn
