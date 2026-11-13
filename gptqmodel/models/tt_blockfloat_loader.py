@@ -16,11 +16,7 @@ import json
 import os
 
 from ..quantization import METHOD, QuantizeConfig
-from ..utils.logger import setup_logger
 from ..utils.tt_blockfloat_quant import build_blockfloat_model
-
-
-log = setup_logger()
 
 
 def read_quantization_config(model_local_path: str) -> dict:

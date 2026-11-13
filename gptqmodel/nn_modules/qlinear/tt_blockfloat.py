@@ -33,11 +33,8 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.logger import setup_logger
 from . import BaseQuantLinear
 
-
-log = setup_logger()
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
 #: whose block size differs cannot be fed to a device kernel unchanged.
