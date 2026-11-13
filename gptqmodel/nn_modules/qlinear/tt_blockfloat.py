@@ -191,6 +191,51 @@ class _BlockfloatStorage(nn.Module):
 
         return self.dequantize()
 
+    def _kernel_linear(self, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+        """Run the block-float GEMM on this device, or return ``None``.
+
+        The kernel reads the packed codes and exponents directly, so no dense
+        weight is built.  That is the whole point of the emulation: on a CUDA
+        part a ``bfloat4_b`` layer then costs what it will cost on Tensix,
+        rather than what a dequantise-then-matmul costs.
+
+        Returning ``None`` keeps every other device on the dense path.
+        """
+
+        from ...utils import tt_blockfloat_hip
+
+        if self.hip_dispatch(x):
+            # Fused unpack + GEMM: the packed weight is read once and expanded
+            # only into shared memory, so no dense weight is created here.
+            # The binding takes a 2-D activation, so flatten the leading
+            # dimensions and restore them afterwards; transformers pass
+            # [batch, sequence, hidden] and F.linear accepted that.
+            out = tt_blockfloat_hip.linear(
+                x.reshape(-1, x.shape[-1]),
+                self.codes,
+                self.exponents,
+                self.bits,
+                bias,
+            )
+            # Restore the caller's leading dimensions, including the 1-D case
+            # where there are none and F.linear returns [out_features].
+            return out.reshape(*x.shape[:-1], out.shape[-1])
+
+        if x.device.type != "cuda" or self.codes.device != x.device:
+            return None
+        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
+
+        if not bf_cuda.ready():
+            return None
+
+        shape = x.shape
+        flat = x.reshape(-1, shape[-1])
+        out = bf_cuda.linear(flat, self.codes, self.exponents, self.bits, bias)
+        return out.reshape(*shape[:-1], out.shape[-1])
+
 
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     """Linear over Tenstorrent block-float weights."""
@@ -285,26 +330,8 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
 
         out_dtype = x.dtype
         bias = None if self.bias is None else self.bias.to(x.dtype)
-
-        from ...utils import tt_blockfloat_hip
-
-        if self.hip_dispatch(x):
-            # Fused unpack + GEMM: the packed weight is read once and expanded
-            # only into shared memory, so no dense weight is created here.
-            # The binding takes a 2-D activation, so flatten the leading
-            # dimensions and restore them afterwards; transformers pass
-            # [batch, sequence, hidden] and F.linear accepted that.
-            out = tt_blockfloat_hip.linear(
-                x.reshape(-1, x.shape[-1]),
-                self.codes,
-                self.exponents,
-                self.bits,
-                bias,
-            )
-            # Restore the caller's leading dimensions, including the 1-D case
-            # where there are none and F.linear returns [out_features].
-            out = out.reshape(*x.shape[:-1], out.shape[-1])
-        else:
+        out = self._kernel_linear(x, bias)
+        if out is None:
             weight = self.dequantize(dtype=x.dtype)
             out = F.linear(x, weight, bias)
             # Release the temporary before the activation leaves this scope.
@@ -366,7 +393,9 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
 
         return self._output_dtype_anchor.dtype
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _kernel_embedding(self, input_ids: torch.Tensor):
+        """Gather-and-dequantise on the block-float kernels, or return ``None``."""
+
         from ...utils import tt_blockfloat_hip
 
         if self.hip_dispatch(input_ids):
@@ -394,6 +423,34 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
                 self.in_features,
                 self.output_dtype,
             )
+
+        if input_ids.device.type != "cuda" or self.codes.device != input_ids.device:
+            return None
+        if self.output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return None
+
+        from ...utils import tt_blockfloat_cuda as bf_cuda
+
+        if not bf_cuda.ready():
+            return None
+
+        shape = input_ids.shape
+        flat = input_ids.reshape(-1).to(torch.int64)
+        out = bf_cuda.embedding(
+            flat,
+            self.codes,
+            self.exponents,
+            self.bits,
+            self.out_features,
+            self.in_features,
+            self.output_dtype,
+        )
+        return out.reshape(*shape, self.in_features)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        kernel = self._kernel_embedding(input_ids)
+        if kernel is not None:
+            return kernel
         weight = self.dequantize(dtype=self.output_dtype)
         return F.embedding(input_ids, weight)
 
@@ -420,24 +477,17 @@ class TTBlockfloatTiedHead(nn.Module):
         return self._embedding[0]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        from ...utils import tt_blockfloat_hip
-
-        embedding = self.embedding
-        # The width, block size and device support all belong to the embedding:
-        # this class only holds a reference to it and has no ``bits`` of its own.
-        if embedding.hip_dispatch(hidden_states):
-            if hidden_states.numel() == 0:
-                from . import empty_linear_output
-
-                return empty_linear_output(hidden_states, embedding.out_features)
-            out = tt_blockfloat_hip.linear(
-                hidden_states.reshape(-1, hidden_states.shape[-1]),
-                embedding.codes,
-                embedding.exponents,
-                embedding.bits,
-                None,
+        if hidden_states.numel() == 0:
+            return torch.empty(
+                *hidden_states.shape[:-1],
+                self.embedding.out_features,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
             )
-            return out.reshape(*hidden_states.shape[:-1], out.shape[-1])
+        embedding = self.embedding
+        kernel = embedding._kernel_linear(hidden_states)
+        if kernel is not None:
+            return kernel
         weight = embedding.dequantize(dtype=hidden_states.dtype)
         return F.linear(hidden_states, weight)
 

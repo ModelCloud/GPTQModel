@@ -270,6 +270,12 @@ firmware, and hardware measurements. Tenstorrent runtime packages are installed
 from the pinned `requirements/tenstorrent-py312.txt` manifest because the PJRT
 plugin is not available from the default PyPI index.
 
+Block-float checkpoints (`bf4_b` / `bf8_b`) can also be validated and
+benchmarked without the cards: the CUDA kernels in
+`gptqmodel_ext/tt_blockfloat_cuda` reproduce the storage exactly, so a
+checkpoint produces the same numbers there as it will on Tensix. See the
+[block-float CUDA emulation notes](gptqmodel_ext/tt_blockfloat_cuda/README.md).
+
 FP8 source weights must be finite before quantization; see the
 [FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
 
