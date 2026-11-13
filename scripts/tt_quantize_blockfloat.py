@@ -4,7 +4,7 @@
 
 GPTQ error feedback is solved per column directly on the hardware grid, so the
 saved checkpoint holds codes plus one exponent per 16-value block -- the weights
-load as native ``bfloat4_b``/``bfloat8_b`` with no host-side re-quantisation.
+load as native ``ttbf4``/``ttbf8`` with no host-side re-quantisation.
 
 Usage::
 
@@ -45,8 +45,8 @@ def main(argv: list) -> int:
         help=(
             "per-layer storage widths, e.g. "
             "'q_proj=8,k_proj=8,v_proj=8,o_proj=8,down_proj=8'. Layers that do "
-            "not match keep --bits. bfloat8_b costs one byte per weight and is "
-            "close to lossless; bfloat4_b is roughly a 2.8-bit format, so the "
+            "not match keep --bits. ttbf8 costs one byte per weight and is "
+            "close to lossless; ttbf4 is roughly a 2.8-bit format, so the "
             "extra byte is best spent on the layers that carry the most output "
             "error rather than on all of them."
         ),

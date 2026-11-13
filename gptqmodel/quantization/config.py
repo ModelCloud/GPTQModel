@@ -157,7 +157,7 @@ class METHOD(str, Enum):
     VPTQ = "vptq"
     # Public name is `nf12`; see the FORMAT note above.
     NF12_AD = "nf12"
-    # Tenstorrent native block-float weights (`bfloat4_b` / `bfloat8_b`).
+    # Tenstorrent native block-float weights (`ttbf4` / `ttbf8`).
     TT_BLOCKFLOAT = "tt-blockfloat"
 
 
@@ -189,8 +189,8 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # NF12-AD is a lossless 12-bit encoding of BF16. The width is fixed by the
     # format, so 12 is the only valid request.
     METHOD.NF12_AD: (12,),
-    # TT block-float stores a fixed mantissa width per element: `bfloat4_b`
-    # keeps 2 mantissa bits, `bfloat8_b` keeps 6. Those are the only two
+    # TT block-float stores a fixed mantissa width per element: `ttbf4`
+    # keeps 2 mantissa bits, `ttbf8` keeps 6. Those are the only two
     # widths the hardware has a storage format for.
     METHOD.TT_BLOCKFLOAT: (4, 8),
 }
@@ -5873,7 +5873,7 @@ class TTBlockfloatConfig(PreProcessorConfig):
 
     The Tenstorrent accelerator stores weights as blocks of 16 values that
     share one exponent, with a fixed number of mantissa bits per value:
-    ``bfloat4_b`` keeps 2 and ``bfloat8_b`` keeps 6. A checkpoint in this
+    ``ttbf4`` keeps 2 and ``ttbf8`` keeps 6. A checkpoint in this
     format is already in the layout the hardware unpacks, so inference reads
     the stored codes directly instead of unpacking an INT4 GPTQ layout.
 

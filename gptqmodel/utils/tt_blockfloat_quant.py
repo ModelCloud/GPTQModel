@@ -5,12 +5,21 @@
 
 """Quantize weights onto a Tenstorrent block-float grid.
 
-Tenstorrent's ``bfloat8_b`` / ``bfloat4_b`` are *storage* formats the unpack
-stage expands in the data path, so a weight stored that way reaches the FPU with
-no dequant op in the graph. Converting an existing int4 GPTQ checkpoint into
-them is not viable (measured ~9.8 % normalized error for 4-bit, because GPTQ is
-uniform int4 with a zero point and block-float is symmetric with one shared
-exponent per 16 values).
+The two formats are called ``ttbf8`` and ``ttbf4`` here. They are **not** an
+industry format: the nearest standard is OCP microscaling (MX), which shares an
+``E8M0`` scale per 32 values, and NVIDIA's ``NVFP4``, which shares a per-16
+``FP8`` scale. Tenstorrent instead shares a plain power-of-two exponent per 16
+values with a fixed mantissa width per element, so nothing can be exchanged with
+an MX or NVFP4 checkpoint. ``ttnn`` spells them ``bfloat8_b`` / ``bfloat4_b``;
+that spelling is used only at the vendor call site, because outside it
+``bfloat8_b`` reads like an 8-bit bfloat (there is no such type) and is easily
+mistaken for OCP FP8 E4M3, which it is not.
+
+They are *storage* formats the unpack stage expands in the data path, so a weight
+stored that way reaches the FPU with no dequant op in the graph. Converting an
+existing int4 GPTQ checkpoint into them is not viable (measured ~9.8 %
+normalized error for 4-bit, because GPTQ is uniform int4 with a zero point and
+block-float is symmetric with one shared exponent per 16 values).
 
 What *is* viable is quantizing onto that grid in the first place: GPTQ's solve is
 grid-agnostic -- it needs a quantizer ``Q`` and its error, then minimises
@@ -26,8 +35,8 @@ mantissa bit implicit:
 ===========  =====  ===========  ===================
 format       bits   stored mant  representable levels
 ===========  =====  ===========  ===================
-``bfloat8_b``   8        6        ~127 per exponent
-``bfloat4_b``   4        2        7 per exponent
+``ttbf8``       8        6        ~127 per exponent
+``ttbf4``       4        2        7 per exponent
 ===========  =====  ===========  ===================
 
 Rounding is round-to-nearest-even, matching the hardware behaviour described in
@@ -43,8 +52,43 @@ import torch
 from .calibration import iter_calibration_windows
 
 
-#: Bits per element for each supported block-float format.
-BLOCKFLOAT_BITS = {"bfloat8_b": 8, "bfloat4_b": 4}
+#: Canonical name per width. Use these outside the ttnn call site.
+TT_BLOCKFLOAT_DTYPES = {4: "ttbf4", 8: "ttbf8"}
+#: The attribute ``ttnn`` exposes for the same storage format. Only the code
+#: that actually calls ttnn should use these spellings.
+TT_BLOCKFLOAT_VENDOR_ATTRS = {4: "bfloat4_b", 8: "bfloat8_b"}
+#: Bits per element, keyed by the canonical name.
+BLOCKFLOAT_BITS = {name: bits for bits, name in TT_BLOCKFLOAT_DTYPES.items()}
+
+
+def tt_blockfloat_dtype(bits: int) -> str:
+    """Return the canonical name (``ttbf4`` / ``ttbf8``) for a storage width."""
+
+    try:
+        return TT_BLOCKFLOAT_DTYPES[int(bits)]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"no Tenstorrent block-float format at {bits!r} bits; "
+            f"supported widths are {sorted(TT_BLOCKFLOAT_DTYPES)}"
+        ) from None
+
+
+def ttnn_blockfloat_attr(bits: int) -> str:
+    """Return the ``ttnn`` attribute name for the same storage format.
+
+    Only call sites that talk to ttnn should use this spelling; everything else
+    reports the canonical ``ttbf*`` name.
+    """
+
+    try:
+        return TT_BLOCKFLOAT_VENDOR_ATTRS[int(bits)]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"ttnn has no block-float dtype at {bits!r} bits; "
+            f"supported widths are {sorted(TT_BLOCKFLOAT_VENDOR_ATTRS)}"
+        ) from None
+
+
 #: Values per shared exponent.
 BLOCKFLOAT_BLOCK = 16
 
@@ -124,16 +168,23 @@ def quantize_blockfloat(
     return out.contiguous(), exponent.squeeze(-1)
 
 
-def quantize_bfloat8_b(weight: torch.Tensor) -> torch.Tensor:
-    """Round ``weight`` the way ``bfloat8_b`` storage would round it."""
+def quantize_ttbf8(weight: torch.Tensor) -> torch.Tensor:
+    """Round ``weight`` the way ``ttbf8`` storage would round it."""
 
     return quantize_blockfloat(weight, 8)[0]
 
 
-def quantize_bfloat4_b(weight: torch.Tensor) -> torch.Tensor:
-    """Round ``weight`` the way ``bfloat4_b`` storage would round it."""
+def quantize_ttbf4(weight: torch.Tensor) -> torch.Tensor:
+    """Round ``weight`` the way ``ttbf4`` storage would round it."""
 
     return quantize_blockfloat(weight, 4)[0]
+
+
+# Compatibility aliases using the vendor spelling. Prefer the ``ttbf*`` names:
+# they keep the origin of the format explicit and cannot be mistaken for an
+# industry format such as OCP FP8 or MX.
+quantize_bfloat8_b = quantize_ttbf8
+quantize_bfloat4_b = quantize_ttbf4
 
 
 def quantize_uniform_int4(weight: torch.Tensor, *, group_size: int = 128) -> torch.Tensor:
@@ -170,12 +221,18 @@ def _entropy_bits(weight: torch.Tensor, *, group_size: int = 128) -> float:
 __all__ = [
     "BLOCKFLOAT_BITS",
     "BLOCKFLOAT_BLOCK",
+    "TT_BLOCKFLOAT_DTYPES",
+    "TT_BLOCKFLOAT_VENDOR_ATTRS",
     "quantize_bfloat4_b",
     "quantize_bfloat8_b",
     "quantize_blockfloat",
+    "quantize_ttbf4",
+    "quantize_ttbf8",
     "quantize_uniform_int4",
     "relative_error",
     "stored_mantissa_bits",
+    "tt_blockfloat_dtype",
+    "ttnn_blockfloat_attr",
 ]
 
 
@@ -232,7 +289,7 @@ def gptq_solve_blockfloat(
     conventionally use because it packs cleanly into nibbles.
 
     Substituting a Tenstorrent block-float grid therefore produces weights that are
-    **natively `bfloat4_b`/`bfloat8_b` as stored**, so inference needs no dequant
+    **natively `ttbf4`/`ttbf8` as stored**, so inference needs no dequant
     step at all: the unpack stage expands the checkpoint in the data path.
 
     `hessian` is `[in_features, in_features]` (``X^T X`` over calibration data).
@@ -321,7 +378,7 @@ __all__ += [
 # --- end-to-end: quantize a dense model onto the TT block-float grid ---------
 #
 # The grid quantizer above is per-layer. This is the pipeline that turns a dense
-# checkpoint into one whose weights are natively bfloat4_b/bfloat8_b, by
+# checkpoint into one whose weights are natively ttbf4/ttbf8, by
 # collecting per-layer Hessians over calibration text and running the GPTQ solve
 # against the grid. The result needs no inference-time dequant: the unpack stage
 # expands it in the data path.
@@ -461,11 +518,11 @@ def quantize_model_blockfloat(
 
     Returns a report of ``{layer_name: {"norm_l1": ..., "on_grid": bool}}``. The
     weights are replaced with grid-quantized values, so saving the model yields a
-    checkpoint that loads as native ``bfloat4_b``/``bfloat8_b`` with no dequant.
+    checkpoint that loads as native ``ttbf4``/``ttbf8`` with no dequant.
 
     ``bits`` may be a single width or a pattern -> width mapping (see
     :func:`_layer_bits`). Widths are chosen per layer, so a checkpoint can keep
-    ``bfloat4_b`` on the projections that tolerate it and spend ``bfloat8_b`` on
+    ``ttbf4`` on the projections that tolerate it and spend ``ttbf8`` on
     the ones that carry the most output error.
     """
 
@@ -651,8 +708,8 @@ def save_blockfloat_checkpoint(
 
     ``bits`` may be a single width, or a mapping of layer-name pattern to width
     with an optional ``"*"`` default. Mixed widths are what a real checkpoint
-    wants: ``bfloat8_b`` costs one byte per weight and is close to lossless,
-    while ``bfloat4_b`` is roughly a 2.8-bit format, so spending the extra byte
+    wants: ``ttbf8`` costs one byte per weight and is close to lossless,
+    while ``ttbf4`` is roughly a 2.8-bit format, so spending the extra byte
     on the layers that carry the most output error is far cheaper than spending
     it everywhere.
     """

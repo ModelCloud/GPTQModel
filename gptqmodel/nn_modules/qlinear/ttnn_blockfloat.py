@@ -9,8 +9,8 @@ A packed int4 checkpoint has to be expanded before the matrix engine can use it,
 and the TTNN op chain that does so costs about 85 % of a layer's forward. The
 Blackhole unpack stage can expand a **storage** format for free in the data path
 (``L1 -> unpack -> source registers -> FPU``), so re-encoding the dequantized
-weights once into ``bfloat8_b`` or ``bfloat4_b`` moves that expansion into
-hardware and leaves the hot path as a single ``ttnn.linear``.
+weights once into ``ttbf8`` or ``ttbf4`` moves that expansion into hardware and
+leaves the hot path as a single ``ttnn.linear``.
 
 Measured on real OPT-125M ``q_proj`` weights (``768x768``, batch 8):
 
@@ -18,18 +18,18 @@ Measured on real OPT-125M ``q_proj`` weights (``768x768``, batch 8):
 storage      latency    max abs err   norm L1     bytes/el
 ===========  =========  ============  ==========  =========
 bfloat16     0.101 ms   reference     -           2
-bfloat8_b    0.071 ms   0.125         1.0 %       ~1.06
-bfloat4_b    0.072 ms   0.914         9.8 %       ~0.56
+ttbf8        0.071 ms   0.125         1.0 %       ~1.06
+ttbf4        0.072 ms   0.914         9.8 %       ~0.56
 ===========  =========  ============  ==========  =========
 
 Scope, stated precisely: this is a **storage re-encoding of an existing int4
 checkpoint**, not "GPTQ for block float". GPTQ is uniform int4 with a per-group
-scale and a zero point; ``bfloat8_b`` is symmetric with one shared exponent per
-16 values, so the zero point cannot be represented and is folded into the stored
+scale and a zero point; ``ttbf8`` is symmetric with one shared exponent per 16
+values, so the zero point cannot be represented and is folded into the stored
 value. At 8 bits the resulting loss is small (~1 %), which is why this mode
 exists at all. It costs ~2x the memory of the packed checkpoint, so it is opt-in.
 
-``bfloat4_b`` is deliberately **not** offered here. Re-encoding an already 4-bit
+``ttbf4`` is deliberately **not** offered here. Re-encoding an already 4-bit
 weight into a 3-bit-mantissa block-float grid measured **9.8 %** normalized error
 on a real layer -- that is degradation, not optimization. Making 4-bit
 block-float viable would mean *re-quantizing the source model with GPTQ onto a
@@ -64,15 +64,20 @@ from ...utils.ttnn_runtime import (
 from ._g_idx import validate_g_idx_bounds
 
 
-#: Block-float storage formats this kernel can materialise.
-BLOCK_FLOAT_FORMATS = ("bfloat8_b",)
+#: Canonical block-float storage formats this kernel can materialise.
+BLOCK_FLOAT_FORMATS = ("ttbf8",)
 
 
 class _TTNNBlockFloatMixin:
     """Shared implementation; concrete kernels differ only in stored format."""
 
-    #: ``bfloat8_b`` or ``bfloat4_b``; set by each concrete kernel.
+    #: ``ttnn`` attribute name for the storage format, set by each concrete
+    #: kernel. This is the vendor spelling because it is passed straight to
+    #: ``getattr(ttnn, ...)``; the canonical name for this format is ``ttbf8``
+    #: (``ttbf4`` for the 4-bit one).
     WEIGHT_FORMAT = "bfloat8_b"
+    #: Bits per stored element, used for the memory argument.
+    WEIGHT_BITS = 8
 
     # -- placement --------------------------------------------------------
 
@@ -292,14 +297,14 @@ class _TTNNBlockFloatMixin:
     def storage_bytes(self) -> int:
         """Device bytes retained for the weights, for the memory argument."""
 
-        bits = 8 if self.WEIGHT_FORMAT == "bfloat8_b" else 4
-        return (self.in_features * self.out_features * bits + 7) // 8
+        return (self.in_features * self.out_features * self.WEIGHT_BITS + 7) // 8
 
 
 class TTNNBlockFloat8Linear(_TTNNBlockFloatMixin, GPTQQuantLinear):
-    """GPTQ linear stored as TT ``bfloat8_b`` (hardware-unpacked, ~1 % error)."""
+    """GPTQ linear stored as ``ttbf8`` (hardware-unpacked, ~1 % error)."""
 
     WEIGHT_FORMAT = "bfloat8_b"
+    WEIGHT_BITS = 8
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TT_BF8]
     SUPPORTS_METHODS = [METHOD.GPTQ]

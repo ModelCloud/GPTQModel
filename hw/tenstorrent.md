@@ -87,13 +87,37 @@ Only the FPU formats are multiply-accelerated. Measured on this card
 | dtype | tile alloc | matrix engine (`ttnn.linear`) | elementwise mul |
 | --- | --- | --- | --- |
 | `bfloat16` | ok | **yes** (0.085 ms) | yes |
-| `bfloat8_b` | ok | **yes** (0.111 ms) | yes |
-| `bfloat4_b` | ok | **yes** (0.095 ms) | yes |
+| `ttbf8` | ok | **yes** (0.111 ms) | yes |
+| `ttbf4` | ok | **yes** (0.095 ms) | yes |
 | `float32` | ok | **yes** (0.086 ms) | yes |
 | `int32` | ok | **no** | yes |
 | `uint32` | ok | **no** | yes |
 | `uint16` | ok | **no** | yes |
 | `uint8` | ok | **no** | **no** |
+
+### Naming: `ttbf4` / `ttbf8` are Tenstorrent-only
+
+`ttbf4` and `ttbf8` are this repository's canonical names for the two
+Tenstorrent block-float storage formats. They are **not** industry formats:
+
+- Both share **one plain power-of-two exponent per 16 values** with a fixed
+  mantissa width per element (`ttbf8`: 6 stored mantissa bits, up to ~64 levels
+  per binade; `ttbf4`: 2 stored mantissa bits, 4 levels per binade).
+- The nearest standards are **OCP microscaling (MX)**, which uses an `E8M0`
+  scale per 32 values, and **NVIDIA NVFP4**, which uses an `FP8` scale per 16.
+  Neither is bit-compatible with a Tenstorrent block float, so an MX or NVFP4
+  checkpoint cannot be loaded as `ttbf4`/`ttbf8`, and a `ttbf4`/`ttbf8`
+  checkpoint cannot be consumed by an MX or NVFP4 runtime.
+- `ttnn` spells them `bfloat8_b` and `bfloat4_b`. Those spellings are used only
+  at the `getattr(ttnn, ...)` call site. Outside it they are avoided:
+  `bfloat8_b` reads like an 8-bit bfloat (there is no such type) and is easily
+  mistaken for OCP FP8 E4M3, which it is not.
+- `bfloat2_b` appears in Tenstorrent documentation (BFP2 on Grayskull/Wormhole)
+  but is not exposed by the `ttnn` build on this host, so it is not listed.
+
+`fp8_e4m3` (OCP FP8 E4M3), `bfloat16`, `float32` and the integer widths are
+industry-standard names and are not prefixed. `fp8_e4m3` is exposed by this
+`ttnn` build but was not part of the matrix-engine sweep above.
 
 What that means, and where the trap is:
 
@@ -101,7 +125,7 @@ What that means, and where the trap is:
   `tech_reports/matrix_engine`). `float32` accumulation is opt-in via
   `fp32_dest_acc_en` and halves destination-register capacity, so it costs tile
   throughput.
-- **`bfloat8_b` / `bfloat4_b` are storage formats, not compute formats.** The
+- **`ttbf8` / `ttbf4` are storage formats, not compute formats.** The
   matrix engine does not multiply them natively; they are unpacked to BF16 by
   TRISC0 before math (**documented**, `tech_reports/data_formats`). `ttnn.linear`
   accepting them means the conversion happens for you, not that the multiply is
@@ -269,20 +293,20 @@ Measured on real OPT-125M `q_proj` weights (`768x768`, batch 8):
 | Weight storage | Latency | max abs err | normalized L1 | cosine | bytes/element |
 | --- | --- | --- | --- | --- | --- |
 | `bfloat16` (dequant then GEMM) | 0.101 ms | reference | — | — | 2 (transient) |
-| `bfloat8_b` (hardware unpack) | **0.071 ms** | 0.125 | 1.0 % | 0.99995 | ~1.06 |
-| `bfloat4_b` (hardware unpack) | 0.072 ms | 0.914 | **9.8 %** | 0.99519 | ~0.56 |
+| `ttbf8` (hardware unpack) | **0.071 ms** | 0.125 | 1.0 % | 0.99995 | ~1.06 |
+| `ttbf4` (hardware unpack) | 0.072 ms | 0.914 | **9.8 %** | 0.99519 | ~0.56 |
 
 Both block floats beat BF16 on time, confirming the unpack stage is doing the
 expansion. But neither is a drop-in replacement for GPTQ:
 
-- **`bfloat4_b` is not accurate enough.** 9.8 % normalized error is a
+- **`ttbf4` is not accurate enough.** 9.8 % normalized error is a
   re-quantization on top of an already 4-bit weight; it discards GPTQ's
   asymmetric zero point and per-group scale in favour of one shared exponent
   per 16 values, and GPTQ's levels are uniform while block-float levels are
   logarithmic.
-- **`bfloat8_b` is accurate (1.0 %) but costs 2x the memory of int4.** Viable as
+- **`ttbf8` is accurate (1.0 %) but costs 2x the memory of int4.** Viable as
   a convenience mode, not as the default for a memory-bound quantizer.
-- **`bfloat4_b` / `bfloat8_b` also cannot express the zero point at all**, which
+- **`ttbf4` / `ttbf8` also cannot express the zero point at all**, which
   is not a tuning detail: it is half of what GPTQ computes.
 
 ### The chosen design: expand nibbles inside the kernel
@@ -321,18 +345,18 @@ Why this shape and not a generic op chain:
   and is the unavoidable cost of 4-bit; the design minimises how often it runs
   and how much it moves, rather than pretending it is free.
 
-### What "optimising GPTQ for bfloat4_b" would actually mean
+### What "optimising GPTQ for ttbf4" would actually mean
 
 Two different things get conflated here, and only one of them is an
 optimisation.
 
-1. **Re-encoding an existing int4 checkpoint as `bfloat4_b` is not an
+1. **Re-encoding an existing int4 checkpoint as `ttbf4` is not an
    optimisation.** It is a requantisation: GPTQ is uniform int4 with a per-group
    scale *and a zero point*, while block-float is symmetric with one shared
    exponent per 16 values on a logarithmic grid. The zero point has nowhere to
    go, and the measurement above shows the cost (~9.8 % normalized error on a
    real layer). This repository therefore does **not** offer a
-   `bfloat4_b` target for GPTQ checkpoints.
+   `ttbf4` target for GPTQ checkpoints.
 ### Path 2 measured: correctness works, accuracy is a wash, speed is the open part
 
 A GPTQ solve with a pluggable grid now exists
@@ -340,7 +364,7 @@ A GPTQ solve with a pluggable grid now exists
 quantizers can be compared under identical error feedback.
 
 **The premise holds on device.** Weights placed on the block-float grid are
-*exactly* hardware-representable: round-tripping through `bfloat8_b`/`bfloat4_b`
+*exactly* hardware-representable: round-tripping through `ttbf8`/`ttbf4`
 storage moved values by `max_drift = 0.000000`, and re-quantizing through hardware
 is a fixed point. So a checkpoint quantized on this grid needs no inference-time
 dequant -- the unpack stage produces exactly what the quantizer chose. That was
@@ -368,8 +392,8 @@ expansion step, so the comparison is storage format against storage format
 | storage | 128x128x128 | 512x512x512 |
 | --- | --- | --- |
 | `bfloat16` | 0.0659 ms | 0.0588 ms |
-| `bfloat8_b` | 0.0538 ms | -- |
-| `bfloat4_b` | **0.0467 ms** (-29%) | 0.0571 ms |
+| `ttbf8` | 0.0538 ms | -- |
+| `ttbf4` | **0.0467 ms** (-29%) | 0.0571 ms |
 
 So at small sizes block-float storage is meaningfully faster than BF16, and at
 `512^3` the three converge to within a few percent -- the GEMM becomes
@@ -396,9 +420,9 @@ checking the output was on-grid.
    `Q(w)` and its error, then solves column-by-column minimising
    Hessian-weighted error. Nothing requires `Q` to be uniform. Running the same
    solve with a block-float grid (shared exponent per 16 + 3-bit mantissa)
-   produces a checkpoint whose weights *are* native `bfloat4_b` — so the unpack
+   produces a checkpoint whose weights *are* native `ttbf4` — so the unpack
    stage expands them for free and there is **no dequant in the hot path at
-   all**. That is genuinely "GPTQ for bfloat4_b", and it is a quantization-time
+   all**. That is genuinely "GPTQ for ttbf4", and it is a quantization-time
    feature producing a new checkpoint format, not an inference trick.
 
 Both paths are worth having, and they are independent:
@@ -407,7 +431,7 @@ Both paths are worth having, and they are independent:
 | --- | --- | --- | --- |
 | Fused int4 kernel (existing checkpoints) | yes | custom TT-Metalium op | design only |
 | GPTQ onto block-float grid (new checkpoints) | no, by construction | quantiser work + native bf4 inference | not started |
-| `bfloat8_b` storage re-encode (interim) | ~1 % loss, 2x memory | TTNN only | implemented, opt-in |
+| `ttbf8` storage re-encode (interim) | ~1 % loss, 2x memory | TTNN only | implemented, opt-in |
 
 ### Status: dequant stage implemented and bit-exact, GEMM fusion outstanding
 
@@ -776,7 +800,7 @@ Given that, the honest position on this path: correct, in the library, cached, a
 ~6x off `ttnn.linear` at K=768 after removing every host-side cost. Closing that
 needs the staging/multicast redesign, not more call-overhead work.
 
-## End-to-end: quantizing a dense model to native bfloat4_b
+## End-to-end: quantizing a dense model to native ttbf4
 
 `quantize_model_blockfloat` runs the whole pipeline: hooks on every decoder
 `nn.Linear` accumulate `X^T X` over calibration text, then each weight is solved
@@ -793,7 +817,7 @@ Measured on **facebook/opt-125m**, 72 layers, 4 bits, 8 calibration samples:
 | logits cosine | **0.99815** |
 | argmax | 16 -> 16, **matches** |
 
-And on device, with those grid-quantized weights stored as `bfloat4_b`:
+And on device, with those grid-quantized weights stored as `ttbf4`:
 
 | | |
 | --- | --- |
@@ -827,7 +851,7 @@ on the CPU path:
 | solved weights differ from an int4 quantisation of the same values | **True** |
 | hardware storage drift of solved weights | **0.000000** |
 
-The third is the decisive one: values the solver produced survive `bfloat4_b`
+The third is the decisive one: values the solver produced survive `ttbf4`
 storage unchanged, which cannot happen if they were int4 codes cast to float.
 
 ### What the hardware grid actually is (measured)
@@ -836,8 +860,8 @@ Encoding values and reading them back, rather than trusting documentation:
 
 | format | levels per 16-value block, one binade | stored mantissa bits | step |
 | --- | --- | --- | --- |
-| `bfloat4_b` | **4** (`0.5, 0.625, 0.75, 0.875`) | 2 | `2^exp / 4` |
-| `bfloat8_b` | up to **64** | 6 | `2^exp / 64` |
+| `ttbf4` | **4** (`0.5, 0.625, 0.75, 0.875`) | 2 | `2^exp / 4` |
+| `ttbf8` | up to **64** | 6 | `2^exp / 64` |
 
 Both match `stored_mantissa_bits()`, so the quantizer and the hardware agree on the
 grid -- no wasted precision, and no values the hardware would silently re-round.
@@ -894,7 +918,7 @@ Measured on the saved OPT-125M:
 | layers restored from codes | **72 in 0.1 s** |
 | next token | `5` (" the"), **matches the dense model** |
 | logits cosine vs dense | **0.99897** |
-| one layer stored as `bfloat4_b` on device | drift **0.000000**, `norm_l1` 0.00656 |
+| one layer stored as `ttbf4` on device | drift **0.000000**, `norm_l1` 0.00656 |
 
 So the whole chain works end to end: dense model -> GPTQ onto the bf4 grid ->
 packed codes on disk -> restored weights -> device storage with zero drift.

@@ -4,9 +4,11 @@
 
 The weights of a Tenstorrent accelerator are stored as blocks of 16 values that
 share one exponent, with a fixed number of mantissa bits per value:
-``bfloat4_b`` keeps 2 and ``bfloat8_b`` keeps 6. That is a storage format the
-hardware unpacks natively, so a checkpoint written this way is already in the
-layout the device wants and does not need a host-side requantisation step.
+``ttbf4`` keeps 2 and ``ttbf8`` keeps 6. That is a storage format the hardware
+unpacks natively, so a checkpoint written this way is already in the layout the
+device wants and does not need a host-side requantisation step. ``ttnn`` spells
+these ``bfloat4_b`` / ``bfloat8_b``; those names are Tenstorrent-specific and
+are not industry formats such as OCP MX or FP8.
 
 Every module here keeps that representation: packed mantissa codes plus int8
 exponents are the module's state, and a dense weight only exists for the
@@ -227,7 +229,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
     """Embedding lookup over block-float weights.
 
     An embedding is a lookup table, so its cost is bytes rather than arithmetic.
-    Storing it as codes keeps it at ``bfloat8_b`` density instead of a dense
+    Storing it as codes keeps it at ``ttbf8`` density instead of a dense
     float16 table, which is 501 MiB against 279 MiB for Llama-3.2-1B.
     """
 
