@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._fused_train_state import capture_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
 
@@ -28,12 +29,17 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_CPU_AVX512]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 120}
+
+    # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
+    # be restored before a checkpoint load or save.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128, 256, 512]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    # Training mode uses the dequantized matmul fallback in forward().
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [2]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
@@ -113,12 +119,12 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         return x.dtype == torch.bfloat16
 
     def train(self, mode: bool = True):
-        if mode:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} is an inference-only CPU kernel. "
-                "Use BACKEND.AWQ_TORCH_ATEN for trainable AWQ layers."
-            )
-        return super().train(False)
+        # forward() caches the fused-vs-dequantized dispatch decision. Reset it
+        # on mode changes so an eval forward cannot pin later training forwards
+        # to the no-grad fused kernel.
+        if mode != self.training:
+            self.linear_mode = None
+        return super().train(mode=mode)
 
     def transform_cpu(self):
         if self._cpu_transformed:
@@ -143,6 +149,60 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             self.in_features,
         )
         self._cpu_transformed = True
+
+    def _apply(self, fn, recurse: bool = True):
+        """Keep the FP32 affine operands exact across dtype/device moves.
+
+        ``transform_cpu`` packs the weight once and promotes ``scales``/``bias``
+        to FP32 because the shared AVX512 kernel requires an FP32 ``absmax`` and
+        accumulates in FP32. ``nn.Module._apply`` applies ``fn`` to every
+        registered floating buffer, so ``model.to(torch.bfloat16)``/``.float()``/
+        ``.half()`` used to round those operands through BF16 before restoring
+        the dtype. BF16 keeps 8 explicit mantissa bits against the checkpoint's
+        10, so the round trip lost scale precision permanently and the next
+        forward raised ``absmax must be float32`` once the dtype was restored.
+
+        Hold the exact tensors across ``super()._apply`` and reinstall them at
+        the resulting device. Scales and zero points are quantization metadata,
+        not expanded weights, so retaining them is allowed; the packed integer
+        codes are untouched by a move and are never repacked here.
+        """
+
+        if not getattr(self, "_cpu_transformed", False):
+            return super()._apply(fn, recurse=recurse)
+
+        kept = {
+            name: getattr(self, name)
+            for name in ("scales", "bias")
+            if isinstance(getattr(self, name, None), torch.Tensor)
+        }
+        result = super()._apply(fn, recurse=recurse)
+        for name, value in kept.items():
+            current = getattr(self, name, None)
+            device = current.device if isinstance(current, torch.Tensor) else value.device
+            restored = value.to(device=device, dtype=torch.float32).contiguous()
+            if name in self._parameters:
+                restored = torch.nn.Parameter(restored, requires_grad=False)
+            setattr(self, name, restored)
+        return result
+
+    def clear_weight_cache(self) -> None:
+        """Restore the FP32 kernel ABI after a load or explicit cache clear.
+
+        ``_apply`` above preserves the operands exactly, but a checkpoint load
+        or an external caller may still install a narrower ``scales``/``bias``.
+        The packed codes are already in the kernel layout, so only the affine
+        dtype needs re-establishing. The checkpoint snapshot is not restored
+        here; only an explicit checkpoint load, export, or training resume does
+        that.
+        """
+
+        if not getattr(self, "_cpu_transformed", False):
+            return
+        if self.scales.dtype != torch.float32:
+            self.scales = self.scales.to(torch.float32).contiguous()
+        if self.bias is not None and self.bias.dtype != torch.float32:
+            self.bias = self.bias.to(torch.float32).contiguous()
 
     def transform(self, device):
         if device == "cpu":
@@ -192,11 +252,13 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             raise RuntimeError(
                 f"{self.__class__.__name__} requires bfloat16 activations, got {x.dtype}."
             )
+        zeros = self.qzeros if self.qzeros.is_contiguous() else self.qzeros.contiguous()
+        scales = self.scales if self.scales.is_contiguous() else self.scales.contiguous()
         out = self.gemm_int4_qzero_group_scaled_cpu_kernel(
             x,
             self.qweight,
-            self.qzeros,
-            self.scales,
+            zeros,
+            scales,
             self.group_size,
             self.bias,
         )
@@ -213,6 +275,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             and x_flat.device.type == "cpu"
             and self._fused_input_dtype(x_flat)
         ):
+            capture_fused_train_state(self)
             self.transform("cpu")
             self.linear_mode = "inference"
         elif self.linear_mode is None:
@@ -229,7 +292,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             weight = self.dequantize_weight().to(x_flat.dtype)
             out = torch.matmul(x_flat, weight).reshape(out_shape)
             if self.bias is not None:
-                out = out + self.bias
+                # transform_cpu() keeps the fused kernel's bias in FP32. Add it
+                # in place so PyTorch computes the sum in FP32 and rounds once
+                # to the output dtype, matching the ATen path.
+                out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

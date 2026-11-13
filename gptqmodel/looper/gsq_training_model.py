@@ -7,9 +7,19 @@ import hashlib
 import os
 import time
 from pathlib import Path
+
 import torch
+
+from ..quantization.gsq_training import LLAMA_STAGED_PROJECTIONS as STAGED_PROJECTIONS
 from ..quantization.gsq_training_config import GSQTrainingConfig
+from ..utils.tensor import tensor_buffer
 from .gsq_training_capture import advance_llama_gsq_inputs, capture_llama_gsq_inputs, quantize_llama_gsq_capture
+
+
+def _update_tensor_digest(digest, tensor) -> None:
+    """Feed a tensor's payload to a hasher without materializing a copy."""
+    _owner, buffer = tensor_buffer(tensor)
+    digest.update(buffer)
 
 
 def _checkpoint_documents_digest(documents):
@@ -24,7 +34,7 @@ def _checkpoint_documents_digest(documents):
             raise ValueError("GSQ checkpointing requires rank-1 integer input_ids")
         ids = ids.to(torch.int64).contiguous()
         digest.update(ids.numel().to_bytes(8, "little"))
-        digest.update(ids.numpy().tobytes())
+        _update_tensor_digest(digest, ids)
         for name in ("attention_mask", "position_ids"):
             digest.update(name.encode("ascii"))
             if name not in document:
@@ -34,7 +44,7 @@ def _checkpoint_documents_digest(documents):
             value = torch.as_tensor(document[name], device="cpu").detach().contiguous()
             digest.update(str(value.dtype).encode("ascii"))
             digest.update(repr(tuple(value.shape)).encode("ascii"))
-            digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+            _update_tensor_digest(digest, value)
     return digest.hexdigest()
 
 
@@ -52,7 +62,7 @@ def _checkpoint_state_digest(state):
         digest.update(name.encode('utf-8'))
         digest.update(str(value.dtype).encode('ascii'))
         digest.update(repr(tuple(value.shape)).encode('ascii'))
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+        _update_tensor_digest(digest, value)
     return digest.hexdigest()
 
 
@@ -101,16 +111,17 @@ def _restore_packed_layer(layer, state_dict, *, names, bits, group_size, device)
     import copy
 
     from ..nn_modules.qlinear.torch import TorchLinear
+    from ..quantization.gsq_training import resolve_projection_bits
     from ..utils.backend import BACKEND
 
+    widths = resolve_projection_bits(bits, projections=names)
     packed = copy.deepcopy(layer).cpu()
     for name in names:
         source = packed.get_submodule(name)
-        linear = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
+        linear = TorchLinear(bits=widths[name], group_size=group_size, sym=True, desc_act=False,
                              in_features=source.in_features, out_features=source.out_features,
                              bias=source.bias is not None, backend=BACKEND.TORCH)
-        parent, leaf = name.rsplit('.', 1)
-        setattr(packed.get_submodule(parent), leaf, linear)
+        packed.set_submodule(name, linear)
     packed.load_state_dict(state_dict, strict=True)
     for name in names:
         packed.get_submodule(name).post_init()
@@ -151,8 +162,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                              initialization_documents=None, validation_documents=None,
                              checkpoint_directory=None, distributed=None,
                              target_cache='none', activation_checkpointing=False,
-                             resume_prefix_directory=None, reuse_capture=False):
-    """Quantize selected Llama blocks in place and replay the packed prefix.
+                             resume_prefix_directory=None, reuse_capture=False, projections=None):
+    """Quantize selected dense decoder blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
     a complete checkpoint or replace GPTQModel.quantize dispatch. The caller
@@ -164,10 +175,10 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     run configuration. Checkpoints contain tensor state and use weights-only
     loading.
     """
-    from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
-    if not isinstance(model, LlamaForCausalLM) or model.training:
-        raise ValueError('Staged model quantization requires an eval-mode LlamaForCausalLM')
+    if getattr(getattr(model, "config", None), "model_type", None) not in ("llama", "qwen3"):
+        raise ValueError('Staged model quantization requires an eval-mode Llama or Qwen3 causal LM')
+    if model.training:
+        raise ValueError('Staged model quantization requires an eval-mode dense decoder causal LM')
     if gsq is None:
         gsq = GSQTrainingConfig()
     elif isinstance(gsq, dict):
@@ -224,6 +235,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         raise ValueError('Staged model quantization requires nonempty validation documents')
     if validation_documents is not None and not gsq.enabled:
         raise ValueError('Validation documents require enabled staged GSQ')
+    names = tuple(projections or STAGED_PROJECTIONS)
     layers = model.model.layers
     indices = list(range(len(layers))) if layer_indices is None else list(layer_indices)
     if (not indices or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(layers) for i in indices)
@@ -233,8 +245,6 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     if len(devices) != 1 or next(iter(devices)).type == 'meta':
         raise ValueError('Staged model quantization currently requires one materialized model device')
     device = next(iter(devices))
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     for index in indices:
         for name in names:
             module = layers[index].get_submodule(name)
@@ -242,18 +252,18 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 raise ValueError(f'Layer {index} {name} is already quantized or unsupported')
             if module.in_features % group_size:
                 raise ValueError('Staged model quantization requires complete contiguous groups')
-    run = dict(state='running', gsq_training=effective,
-               bits=bits if not isinstance(bits, dict) else dict(bits),
-               layer_bits=({index: bits if not isinstance(bits, dict) else bits[index] for index in indices}
-                           if isinstance(bits, dict) else {index: bits for index in indices}),
-               group_size=group_size,
-               layer_indices=indices, device=str(device), blocks=[],
-               training_documents=len(documents),
-               initialization_documents=len(initialization_documents) if initialization_documents is not None else len(documents),
-               validation_documents=len(validation_documents) if validation_documents is not None else 0,
-               offload_capture=offload_capture,
-               capture_storage='disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
-               deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
+    run = {"state": 'running', "gsq_training": effective,
+               "bits": bits if not isinstance(bits, dict) else dict(bits),
+               "layer_bits": ({index: bits if not isinstance(bits, dict) else bits[index] for index in indices}
+                           if isinstance(bits, dict) else dict.fromkeys(indices, bits)),
+               "group_size": group_size,
+               "layer_indices": indices, "device": str(device), "blocks": [],
+               "training_documents": len(documents),
+               "initialization_documents": len(initialization_documents) if initialization_documents is not None else len(documents),
+               "validation_documents": len(validation_documents) if validation_documents is not None else 0,
+               "offload_capture": offload_capture,
+               "capture_storage": 'disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
+               "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
     run.update(world_size=1 if distributed is None else distributed.world_size,
                target_cache=target_cache, activation_checkpointing=activation_checkpointing,
                reuse_capture=reuse_capture,
@@ -264,17 +274,17 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     signature = None
     source_prefixes = None
     if checkpoint_directory is not None:
-        signature = dict(bits=bits, group_size=group_size, gsq_training=effective,
-                         layer_indices=indices, model_config=model.config.to_dict(),
-                         training_documents=_checkpoint_documents_digest(documents),
-                         initialization_documents=_checkpoint_documents_digest(
+        signature = {"bits": bits, "group_size": group_size, "gsq_training": effective,
+                         "layer_indices": indices, "model_config": model.config.to_dict(),
+                         "training_documents": _checkpoint_documents_digest(documents),
+                         "initialization_documents": _checkpoint_documents_digest(
                              documents if initialization_documents is None else initialization_documents),
-                         validation_documents=(None if validation_documents is None else
+                         "validation_documents": (None if validation_documents is None else
                                                _checkpoint_documents_digest(validation_documents)),
-                         capture_batch_size=capture_batch_size,
-                         attention_implementation=getattr(model.config, '_attn_implementation', None),
-                         device=str(device),
-                         deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
+                         "capture_batch_size": capture_batch_size,
+                         "attention_implementation": getattr(model.config, '_attn_implementation', None),
+                         "device": str(device),
+                         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
         if distributed is not None:
             signature.update(device=device.type, distributed_world_size=distributed.world_size)
         if target_cache != 'none' or activation_checkpointing:
@@ -438,16 +448,17 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                                                            initialization_cache=initialization_cache,
                                                            validation_cache=validation_cache,
                                                            distributed=distributed, target_cache=target_cache,
-                                                           activation_checkpointing=activation_checkpointing)
+                                                           activation_checkpointing=activation_checkpointing,
+                                                           projections=names)
             finally:
                 if not reuse_capture:
                     for captured in (cache, initialization_cache, validation_cache):
                         if captured is not None and hasattr(captured, 'cleanup'):
                             captured.cleanup()
-            record = dict(layer_index=index, stages={
+            record = {"layer_index": index, "stages": {
                 name: {key: value for key, value in stage.items() if key not in ('weights', 'scales')}
                 for name, stage in result['stages'].items()},
-                initializer_metadata=result['initializer_metadata'])
+                "initializer_metadata": result['initializer_metadata']}
             record['block_seconds'] = time.monotonic()-block_started
             if checkpoint is not None:
                 def write_checkpoint(checkpoint=checkpoint, layer_signature=layer_signature,
@@ -455,8 +466,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                     temporary = checkpoint.with_suffix('.pt.tmp')
                     try:
                         state = {name: value.detach().cpu().clone() for name, value in packed.state_dict().items()}
-                        torch.save(dict(signature=layer_signature, layer_index=index,
-                                        state_dict=state, record=record), temporary)
+                        torch.save({"signature": layer_signature, "layer_index": index,
+                                        "state_dict": state, "record": record}, temporary)
                         os.replace(temporary, checkpoint)
                         return _checkpoint_packed_prefix(packed_prefix, index, state)
                     finally:
@@ -537,7 +548,7 @@ def dynamic_layer_bits(quantize_config):
     return resolved or None
 
 
-def prepare_llama_gsq_export(model, run):
+def prepare_llama_gsq_export(model, run, *, blocks=None):
     """Finalize a complete staged model without creating a wrapper or writing files.
 
     Returns its matching quantization configuration. A public lifecycle caller
@@ -547,14 +558,18 @@ def prepare_llama_gsq_export(model, run):
     from ..nn_modules.qlinear.torch import TorchLinear
     from ..quantization.config import FORMAT, GPTQConfig
 
-    if (run['state'] != 'complete' or run['layer_indices'] != list(range(len(model.model.layers)))
+    if blocks is None:
+        from ..models.auto import MODEL_MAP_CASEFOLD
+        from ..quantization.rco import discover_blocks
+
+        model_type = str(getattr(model.config, "model_type", "")).lower()
+        blocks = discover_blocks(model, model_definition=MODEL_MAP_CASEFOLD.get(model_type))
+    if (run['state'] != 'complete' or run['layer_indices'] != [block.index for block in blocks]
             or not any(record is run for record in getattr(model, 'gsq_training_runs', []))):
         raise ValueError('Uniform staged export requires this model’s completed all-layer run')
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    if any(not isinstance(layer.get_submodule(name), TorchLinear)
-           for layer in model.model.layers for name in names):
-        raise ValueError('Uniform staged export requires all seven packed projections in every layer')
+    if any(not isinstance(model.get_submodule(name), TorchLinear)
+           for block in blocks for name in block.names):
+        raise ValueError('Staged export requires every declared projection to be packed')
     layer_bits = dict(run.get('layer_bits') or {})
     widths = set(layer_bits.values())
     uniform = None if not layer_bits else (next(iter(widths)) if len(widths) == 1 else None)
@@ -572,24 +587,34 @@ def prepare_llama_gsq_export(model, run):
         base = run['bits'] if not isinstance(run['bits'], dict) else min(widths)
         qcfg.bits = base
         qcfg.dynamic = {
-            f'model.layers.{index}.{name}': {'bits': int(width)}
-            for index, width in sorted(layer_bits.items())
-            for name in ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-                         'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-            if int(width) != base
+            name: {'bits': int(layer_bits[block.index])}
+            for block in blocks for name in block.names
+            if int(layer_bits[block.index]) != base
         } or None
         qcfg.meta['gsq_layer_bits'] = {str(k): int(v) for k, v in sorted(layer_bits.items())}
+    projection_bits = run.get('projection_bits')
+    if projection_bits is not None:
+        expected = {name for block in blocks for name in block.names}
+        if set(projection_bits) != expected:
+            raise ValueError('Projection export requires an exact all-layer projection assignment')
+        if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
+               for width in projection_bits.values()):
+            raise ValueError('Projection export requires W2/W3/W4 widths')
+        if any(model.get_submodule(name).bits != width for name, width in projection_bits.items()):
+            raise ValueError('Packed projection widths differ from the export assignment')
+        qcfg.bits = min(projection_bits.values())
+        qcfg.dynamic = {name: {'bits': width} for name, width in sorted(projection_bits.items())
+                        if width != qcfg.bits} or None
+        qcfg.meta['gsq_projection_bits'] = dict(sorted(projection_bits.items()))
     qcfg.meta['gsq_training'] = run['gsq_training']
     qcfg.meta['gsq_training_recipe'] = 'experimental_staged_llama_v1'
     model.half()
     # RoPE inverse frequencies are nonpersistent. Casting their FP32 values to
     # FP16 would change the live runtime while reload reconstructs them from
     # config in FP32. Rebuild the same canonical rotary state as a fresh load.
-    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
-
     # The public loader constructs these frequencies on CPU before transfer;
     # constructing directly on CUDA can differ by FP32 ulps in pow/division.
-    model.model.rotary_emb = LlamaRotaryEmbedding(model.config).to(
+    model.model.rotary_emb = type(model.model.rotary_emb)(model.config).to(
         model.model.embed_tokens.weight.device).eval()
     return qcfg
 
@@ -603,10 +628,11 @@ def finalize_llama_gsq_wrapper(wrapper, run):
     import copy
 
     from ..nn_modules.qlinear.torch import TorchLinear
+    from ..quantization.rco import discover_blocks
 
     requested = wrapper.quantize_config.to_dict()
     caller_meta = copy.deepcopy(wrapper.quantize_config.meta)
-    config = prepare_llama_gsq_export(wrapper.model, run)
+    config = prepare_llama_gsq_export(wrapper.model, run, blocks=discover_blocks(wrapper))
     caller_meta.update(config.meta)
     caller_meta['gsq_requested_quantization'] = requested
     config.meta = caller_meta

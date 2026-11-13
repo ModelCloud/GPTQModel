@@ -19,6 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import generate_node_for_awq_scaling
 from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
@@ -117,18 +118,12 @@ class _TestAWQProcessor(AWQProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            batch_size=1,
+            calibration=CalibrationConfig(),
             gptq_model=types.SimpleNamespace(
                 rotary_embedding=None,
             ),
             model=None,
-            require_fwd=True,
             calculate_w_wq_diff=False,
-            calibration_concat_separator=None,
         )
 
     def _module_forward(self, x: torch.Tensor, module: torch.nn.Module, module_kwargs):
@@ -342,7 +337,7 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         (MixtralQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3MoeQModel, "mlp", "mlp.experts.0.gate_proj"),
         (Qwen3NextGPTQ, "mlp", "mlp.shared_expert.down_proj"),
-        (MiniMaxM2GPTQ, "block_sparse_moe", "block_sparse_moe.experts.0.w1"),
+        (MiniMaxM2GPTQ, "mlp", "mlp.experts.0.gate_proj"),
     ]
 
     for model_cls, root_name, child_name in cases:
@@ -1164,16 +1159,10 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=16),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
-        calibration_concat_separator=None,
     )
     processor._quant_batch_size = 1
 
@@ -1199,12 +1188,15 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
+        group_sizes=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
         captured["fp16_output_shapes"] = [tuple(chunk.shape) for chunk in fp16_output]
         captured["replay_batch_size"] = replay_batch_size
         captured["prepared_forward"] = prepared_forward
+        captured["group_sizes"] = group_sizes
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
@@ -1228,6 +1220,7 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     assert captured["fp16_output_shapes"] == [(4, 8, 16)]
     assert captured["replay_batch_size"] == 0
     assert captured["prepared_forward"] is not None
+    assert captured["group_sizes"] == [16]
     assert len(prepare_calls) == 1
 
 
@@ -1238,16 +1231,10 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=AWQConfig(format=FORMAT.GEMM, group_size=16, scale_search_chunked_activations=False),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=types.SimpleNamespace(rotary_embedding=None),
         model=None,
-        require_fwd=True,
         calculate_w_wq_diff=False,
-        calibration_concat_separator=None,
     )
     processor._quant_batch_size = 1
 
@@ -1267,11 +1254,14 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
+        group_sizes=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
         captured["fp16_output_device"] = fp16_output.device.type
         captured["fp16_output_shape"] = tuple(fp16_output.shape)
+        captured["group_sizes"] = group_sizes
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
@@ -1293,6 +1283,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     assert captured["fp16_output_type"] == "Tensor"
     assert captured["fp16_output_device"] == "cuda"
     assert captured["fp16_output_shape"] == (4, 8, 16)
+    assert captured["group_sizes"] == [16]
 
 
 def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
@@ -1300,7 +1291,8 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     w = torch.ones(64, 16, dtype=torch.float16)
     input_feat = torch.ones(4, 16, dtype=torch.float16)
 
-    def nan_quantize(src, dst, abs_max=None):
+    def nan_quantize(src, dst, abs_max=None, bits=None, group_size=None):
+        assert group_size == processor.qcfg.group_size
         dst.fill_(float("nan"))
 
     processor._pseudo_quantize_tensor_into = nan_quantize
@@ -1625,7 +1617,10 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         module_kwargs,
         replay_batch_size=None,
         prepared_forward=None,
+        bits=None,
+        group_sizes=None,
     ):
+        assert group_sizes == [self.qcfg.group_size] * len(layers_arg)
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
             _compute_legacy_w_mean(layers_arg, self.qcfg.group_size).detach().to(torch.float32).cpu()

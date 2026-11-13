@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from typing import Optional, Tuple
+
 import torch
-from torch.nn import functional as F
 
 from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.rocm import IS_ROCM
+from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 from .vptq_torch import VPTQLinear
 
 
@@ -40,6 +43,26 @@ class VPTQCudaLinear(VPTQLinear):
     SUPPORTS_PLATFORM = VPTQLinear.SUPPORTS_PLATFORM
     SUPPORTS_DTYPES = VPTQLinear.SUPPORTS_DTYPES
     QUANT_TYPE = "vptq_cuda"
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        """Reject ROCm with an actionable message so AUTO falls back to VPTQ_TORCH.
+
+        The VPTQ extension is built from CUDA sources (``vptq_kernel.cu``) and
+        relies on CUDA-only intrinsics, so it cannot be compiled by hipcc.  ROCm
+        exposes the CUDA device namespace through HIP, which makes
+        ``torch.cuda.is_available()`` true there; an explicit architecture check
+        is therefore required instead of relying on the torch device type.
+        """
+        if IS_ROCM:
+            return False, NotImplementedError(
+                "VPTQ_CUDA is not available on ROCm: its extension is built from CUDA sources "
+                "and CUDA-only intrinsics. Use BACKEND.VPTQ_TORCH (the portable Torch kernel), "
+                "which is selected automatically for AUTO on AMD GPUs."
+            )
+        if not torch.cuda.is_available():
+            return False, RuntimeError("VPTQ_CUDA requires an available CUDA device.")
+        return True, None
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.VPTQ_CUDA)
@@ -94,7 +117,14 @@ class VPTQCudaLinear(VPTQLinear):
             raise RuntimeError("VPTQ_CUDA requires VPTQ buffers and activations on the same CUDA device.")
 
         fused_max_rows = _vptq_cuda_fused_max_rows(self)
-        if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows:
+        # A stored bias that FP16/BF16 cannot represent exactly keeps the FP32
+        # epilogue. An exactly representable one may still take the fused kernel:
+        # it adds the bias after its own FP32 (BF16: FP64) accumulation, so only
+        # the storage dtype changes, never the arithmetic.
+        wide_bias = linear_needs_wide_bias(x, bias) and not bias_narrows_losslessly(
+            bias, x.dtype
+        )
+        if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows and not wide_bias:
             from ...utils.vptq_cuda import vptq_cuda_linear
 
             out = vptq_cuda_linear(
@@ -107,7 +137,7 @@ class VPTQCudaLinear(VPTQLinear):
                 self.inverse_perm if self.enable_perm else None,
                 self.weight_scale if self.enable_norm else None,
                 self.weight_bias if self.enable_norm else None,
-                bias,
+                None if bias is None else bias.to(dtype=x.dtype),
                 group_size=self.group_size,
                 in_features=self.in_features,
                 out_features=self.out_features,
@@ -124,9 +154,7 @@ class VPTQCudaLinear(VPTQLinear):
             # The fused GEMV repeats weight reconstruction across activation
             # rows. For larger M, reconstruct once and let cuBLAS reuse weight.
             weight = self._dequantize_cuda().to(dtype=x.dtype)
-            if bias is not None and bias.dtype != x.dtype:
-                bias = bias.to(dtype=x.dtype)
-            out = F.linear(x, weight, bias)
+            out = linear_fp32_reduce(x, weight, self._promote_stored_bias(x, bias))
 
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)

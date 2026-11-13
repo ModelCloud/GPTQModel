@@ -35,6 +35,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import VPTQConfig
 from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from ..utils.vptq import (
     vptq_group_for_column,
     vptq_group_setting,
@@ -301,7 +302,13 @@ class VPTQ:
             if partial.device == target_device and partial.dtype == _HESSIAN_DTYPE:
                 merged.add_(partial)
             else:
-                merged.add_(partial.to(device=target_device, dtype=_HESSIAN_DTYPE))
+                # Partials are keyed by the device that captured them, so this
+                # is a cross-device move. On an asymmetric ROCm peer topology a
+                # direct copy segfaults, so route it through the helper; it is
+                # an ordinary dtype cast when the devices already match.
+                merged.add_(
+                    safe_move_to(partial, target_device, dtype=_HESSIAN_DTYPE)
+                )
             del partial
 
         merged.div_(float(total_samples))
@@ -520,11 +527,11 @@ class VPTQ:
         if qcfg.enable_norm:
             norm_dim = int(qcfg.norm_dim)
             # Mirror the runtime kernel: codebooks and scales are stored in the
-            # model dtype, so apply the affine transform in that dtype too.
-            scale = weight_scale.to(dtype=target_dtype)
-            bias = weight_bias.to(dtype=target_dtype)
+            # model dtype, but residual and affine arithmetic stay in FP32.
+            scale = weight_scale.to(dtype=target_dtype).float()
+            bias = weight_bias.to(dtype=target_dtype).float()
             quantized = (
-                quantized.to(dtype=target_dtype) * scale.unsqueeze(norm_dim) + bias.unsqueeze(norm_dim)
+                quantized.float() * scale.unsqueeze(norm_dim) + bias.unsqueeze(norm_dim)
             ).to(dtype=torch.float32)
 
         loss = self.hessian_weighted_error(

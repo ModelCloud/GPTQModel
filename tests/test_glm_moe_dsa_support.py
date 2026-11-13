@@ -7,10 +7,14 @@ import torch
 from defuser import convert_model
 from safetensors.torch import save_file
 from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
-from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    GlmMoeDsaForCausalLM,
+)
 
 from gptqmodel.models import auto
+from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4MTPQuantizationModel
 from gptqmodel.models.definitions.glm_moe_dsa import GlmMoeDsaQModel
+from gptqmodel.utils.exl3_router_candidates import learned_router_ranked_choices
 from gptqmodel.utils.structure import LazyTurtle, alias_from_turtle_for_submodule
 
 
@@ -149,6 +153,37 @@ def test_glm_moe_dsa_module_tree_expands_dense_and_sparse_paths():
     assert "mlp.shared_experts.down_proj" in flat_modules
 
 
+def test_glm_moe_dsa_preserves_checkpoint_only_mtp_and_delegates_recovery(
+    monkeypatch,
+):
+    assert GlmMoeDsaQModel.out_of_model_tensors == {
+        "prefixes": ["model.layers.78"]
+    }
+    sentinel = object()
+    observed = {}
+
+    def fake_recovery(self, **kwargs):
+        observed["self"] = self
+        observed.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        DeepSeekV4MTPQuantizationModel,
+        "zero_route_recovery_context",
+        fake_recovery,
+    )
+    model_def = GlmMoeDsaQModel.__new__(GlmMoeDsaQModel)
+    kwargs = {
+        "looper": object(),
+        "processor": object(),
+        "layer_module": torch.nn.Module(),
+        "subset": {},
+        "task_names": (),
+    }
+    assert model_def.zero_route_recovery_context(**kwargs) is sentinel
+    assert observed == {"self": model_def, **kwargs}
+
+
 def test_glm_moe_dsa_tiny_model_matches_definition():
     model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
     convert_model(model, cleanup_original=False)
@@ -176,6 +211,31 @@ def test_glm_moe_dsa_tiny_model_matches_definition():
     assert hasattr(expert0, "down_proj")
 
 
+def test_glm_moe_dsa_binds_exact_router_recovery_ranking():
+    config = _tiny_glm_moe_dsa_config()
+    model = GlmMoeDsaForCausalLM(config).eval()
+    model_def = GlmMoeDsaQModel.__new__(GlmMoeDsaQModel)
+    assert model_def.after_model_load(model) is model
+
+    router = model.model.layers[3].mlp.gate
+    hidden = torch.randn(11, config.hidden_size)
+    with torch.no_grad():
+        logits, _weights, indices = router(hidden)
+        ranked_scores, ranked_indices = learned_router_ranked_choices(
+            router,
+            logits,
+            rank_max=config.n_routed_experts,
+            selected_indices=indices,
+        )
+
+    assert ranked_scores.shape == (11, config.n_routed_experts)
+    assert ranked_indices.shape == (11, config.n_routed_experts)
+    assert torch.equal(
+        torch.sort(ranked_indices[:, : config.num_experts_per_tok], dim=-1).values,
+        torch.sort(indices, dim=-1).values,
+    )
+
+
 def test_glm_moe_dsa_replay_propagates_topk_indices_to_shared_indexer_layer():
     config = _tiny_glm_moe_dsa_config()
     config.indexer_types = ["full", "full", "full", "shared"]
@@ -186,8 +246,10 @@ def test_glm_moe_dsa_replay_propagates_topk_indices_to_shared_indexer_layer():
     hidden_states = torch.randn(1, 8, config.hidden_size)
     position_ids = torch.arange(hidden_states.shape[1], dtype=torch.long).unsqueeze(0)
     position_embeddings = model.model.rotary_emb(hidden_states, position_ids=position_ids)
+    # Direct layer calls bypass the model's causal-mask preparation.
+    causal_mask = torch.ones(8, 8, dtype=torch.bool).tril().unsqueeze(0).unsqueeze(0)
     layer_kwargs = {
-        "attention_mask": None,
+        "attention_mask": causal_mask,
         "position_ids": position_ids,
         "position_embeddings": position_embeddings,
         "use_cache": False,

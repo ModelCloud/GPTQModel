@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import random
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 import torch
 
@@ -391,7 +391,7 @@ def prepare_calibration_dataset(
             if len(tensor.shape) == 1:
                 tensor = tensor.unsqueeze(0)
             tensor = tensor.long()
-            return tensor.cpu().numpy().tolist()
+            return tensor.cpu().tolist()
         return [tensor]
 
     new_calibration_dataset = []
@@ -665,4 +665,195 @@ def prepare_calibration_dataset(
     return new_calibration_dataset_batched
 
 
-__all__ = ["batched", "prepare_calibration_dataset"]
+#: A window shorter than this carries no usable activation statistics.
+MIN_WINDOW_TOKENS = 8
+
+
+def _record_text(record: Any) -> Optional[str]:
+    """Pull the text out of one calibration record."""
+
+    if isinstance(record, str):
+        return record
+    if isinstance(record, dict):
+        for key in ("text", "content", "prompt", "question"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        joined = " ".join(str(v) for v in record.values() if isinstance(v, str))
+        return joined or None
+    return None
+
+
+def load_calibration_records(
+    source: Optional[str] = None, *, rows: int = 0
+) -> List[str]:
+    """Load calibration texts from the source the GPTQ test harness uses.
+
+    Resolution order mirrors ``tests/models/model_test.py`` so the TT path and the
+    GPTQ path calibrate on the same records: an explicit ``source``, then
+    ``$GPTQMODEL_CALIBRATION_PARQUET``, then the local ``nm-calibration`` parquet,
+    then the ``nm-calibration`` dataset repo. Parquet needs ``pyarrow``; the JSON
+    and JSONL forms do not.
+    """
+
+    source = (
+        source
+        or os.environ.get("GPTQMODEL_CALIBRATION_PARQUET")
+        or "/monster/data/model/dataset/nm-calibration/llm.parquet"
+    )
+
+    records: Any
+    if os.path.isfile(source):
+        if source.endswith(".gz"):
+            import gzip
+            import json
+
+            with gzip.open(source, "rt") as handle:
+                records = json.load(handle)
+        elif source.endswith(".jsonl"):
+            import json
+
+            with open(source) as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+        elif source.endswith(".json"):
+            import json
+
+            with open(source) as handle:
+                records = json.load(handle)
+        elif source.endswith(".parquet"):
+            try:
+                import pyarrow.parquet as pq
+            except ImportError as exc:  # pragma: no cover - depends on environment
+                raise ImportError(
+                    f"reading {source} needs pyarrow; install a numpy-compatible "
+                    "build or export the records as JSONL"
+                ) from exc
+            records = pq.read_table(source).to_pylist()
+        else:
+            raise ValueError(f"unsupported calibration file type: {source}")
+    else:
+        if source.startswith(("/", "./", "../", "~")):
+            raise FileNotFoundError(
+                f"calibration file not found: {os.path.expanduser(source)}; pass a "
+                "local file or a Hub dataset repo id instead"
+            )
+        # Treat it as a Hub dataset repo and fetch the JSON payload it ships.
+        from huggingface_hub import hf_hub_download, list_repo_files
+
+        files = list(list_repo_files(source, repo_type="dataset"))
+        preferred = [
+            name for name in files
+            if name.endswith((".json.gz", ".json", ".jsonl", ".parquet"))
+        ]
+        if not preferred:
+            raise ValueError(f"{source} ships no JSON or parquet calibration file")
+        local = hf_hub_download(
+            source, preferred[0], repo_type="dataset"
+        )
+        return load_calibration_records(local, rows=rows)
+
+    if isinstance(records, dict):
+        records = list(records.values())
+    texts = [text for text in (_record_text(r) for r in records) if text]
+    if not texts:
+        raise ValueError(f"no calibration text found in {source}")
+    return texts[:rows] if rows else texts
+
+
+def iter_calibration_windows(
+    tokenizer,
+    text: Union[str, Sequence[str]],
+    *,
+    seqlen: int = 256,
+    nsamples: int = 32,
+    min_tokens: int = MIN_WINDOW_TOKENS,
+) -> Iterator[torch.Tensor]:
+    """Yield ``nsamples`` distinct ``[1, seqlen]`` windows of ``text``.
+
+    ``text`` may be one string or a sequence of calibration records. Records are
+    tokenized individually -- as the GPTQ calibration loader does -- and the ids
+    are concatenated before windowing, so a dataset-based run covers the same
+    records the quantizer would see.
+
+    GPTQ's error feedback pushes each layer's rounding error into directions where
+    the calibration input has little curvature, so the Hessian decides *where* the
+    error lands. If every sample is the same passage, "low curvature" means
+    "rarely active in that passage" and the error is steered into directions that
+    are ordinary for every other text.
+
+    That happened here: the Tenstorrent block-float path collected its Hessian with
+    ``ids[:, :seqlen]`` on every iteration, so ``nsamples`` multiplied a single
+    passage. The resulting Llama-3.2-1B checkpoint measured perplexity 354 on
+    held-out questions against 9.03 dense, while plain per-layer rounding of the
+    same weights gave 10.21 -- and every per-layer metric looked correct. Keeping
+    the windowing in one place stops a quantizer from reintroducing that shape, and
+    reports a short calibration string instead of silently degrading into a single
+    passage.
+
+    Windows are spread across the whole stream, so the sample budget covers the
+    corpus instead of only its beginning: the first window starts at the top, the
+    last ends at the bottom, and the rest are evenly spaced between. When the text
+    is shorter than ``nsamples * seqlen`` the windows necessarily overlap, and the
+    warning says so.
+    """
+
+    if seqlen < min_tokens:
+        raise ValueError(f"seqlen must be >= {min_tokens}, got {seqlen}")
+    if nsamples < 1:
+        raise ValueError(f"nsamples must be positive, got {nsamples}")
+
+    log = setup_logger()
+    if isinstance(text, str):
+        ids = tokenizer(text, return_tensors="pt").input_ids
+    else:
+        rows = [row for row in text if isinstance(row, str) and row.strip()]
+        if not rows:
+            raise ValueError("calibration records are empty")
+        ids = torch.cat(
+            [tokenizer(row, return_tensors="pt").input_ids for row in rows], dim=1
+        )
+    if ids.dim() != 2:
+        ids = ids.unsqueeze(0)
+    total = int(ids.shape[1])
+    if total < min_tokens:
+        raise ValueError(
+            f"calibration text tokenized to {total} tokens, need at least "
+            f"{min_tokens}; a Hessian built from this would be meaningless"
+        )
+
+    if total <= seqlen:
+        log.warning(
+            f"calibration text is {total} tokens but seqlen={seqlen}: all "
+            f"{nsamples} samples are the same window, so the Hessian describes one "
+            "passage. Pass longer calibration text."
+        )
+        for _ in range(nsamples):
+            yield ids
+        return
+
+    span = total - seqlen + 1
+    budget = nsamples * seqlen
+    if total < budget:
+        log.warning(
+            f"calibration text has {total} distinct tokens but {nsamples} windows "
+            f"of {seqlen} need {budget}: the windows overlap, so the Hessian "
+            f"describes only {total} tokens. Pass longer calibration text."
+        )
+    for index in range(nsamples):
+        # Spread the windows over the whole stream rather than packing them at
+        # ``index * seqlen``. Packing only ever reaches ``nsamples * seqlen``
+        # tokens, so a 32 x 256 budget read the first ~8k tokens of a
+        # 100k-token corpus and silently ignored the other 92 %. Every sample
+        # still lands on a distinct offset, and the last window ends at the end
+        # of the stream.
+        start = (index * span) // nsamples
+        yield ids[:, start : start + seqlen]
+
+
+__all__ = [
+    "MIN_WINDOW_TOKENS",
+    "batched",
+    "iter_calibration_windows",
+    "load_calibration_records",
+    "prepare_calibration_dataset",
+]

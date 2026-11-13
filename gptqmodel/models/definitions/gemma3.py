@@ -17,14 +17,43 @@ from ...utils.offload import offload_to_disk
 from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
 
 
 class Gemma3QModel(LlamaQModel):
+    fusable = FusableConfig("gemma3_text").merge(LlamaFusableConfig())
+
     shared_input_verified_model_types = frozenset({"gemma3_text"})
+
+    # Gemma 3 keeps Gemma 2's MLP norms and adds per-head Q/K RMSNorm inside
+    # attention. All four own checkpoint weights and stay unquantized, so they
+    # are declared as excluded leaves of the tree.
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!:norm",),
+            "self_attn": (
+                "q_proj:0:q:in=x",
+                "k_proj:0:k:in=x",
+                "v_proj:0:v:in=x",
+                "q_norm:!",
+                "k_norm:!",
+                "o_proj:1:o",
+            ),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
+            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+        },
+    ]
 
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
+    fusable = FusableConfig("gemma3").merge(Gemma3QModel.fusable)
+
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
 
@@ -78,11 +107,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             operations=[],
         ),
         SimpleNamespace(
-            source_patterns=[r"^model\.language_model\.(model\..+)$"],
-            target_patterns=[r"^language_model\.(model\..+)$"],
-            operations=[],
-        ),
-        SimpleNamespace(
             source_patterns=[r"model\.language_model"],
             target_patterns=[r"^language_model.model"],
             operations=[],
@@ -111,9 +135,18 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": (
+                "q_proj:0:q",
+                "k_proj:0:k",
+                "v_proj:0:v",
+                "q_norm:!",
+                "k_norm:!",
+                "o_proj:1:o",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         }
     ]
 

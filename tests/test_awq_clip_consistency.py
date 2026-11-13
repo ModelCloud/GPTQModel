@@ -4,6 +4,7 @@ from parameterized import parameterized
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
@@ -116,16 +117,10 @@ class _ClipTestAWQProcessor(AWQProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            batch_size=1,
+            calibration=CalibrationConfig(),
             gptq_model=None,
             model=None,
-            require_fwd=True,
             calculate_w_wq_diff=False,
-            calibration_concat_separator=None,
         )
 
     def _module_forward(self, x, module, module_kwargs):

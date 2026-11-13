@@ -11,6 +11,7 @@ from collections.abc import Mapping
 import torch
 import torch.distributed as dist
 
+
 _REDUCE_CHUNK_ELEMENTS = 16 * 1024 * 1024
 
 

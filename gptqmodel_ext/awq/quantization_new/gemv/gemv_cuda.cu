@@ -56,7 +56,7 @@ static inline __device__ half to_half(half src)
 
 // Reduce sum within the warp using the tree reduction algorithm.
 template <int Num, int WarpSize>
-__device__ __forceinline__ static void warp_reduce(half* psum, float (*out_smem)[Num * 4])
+__device__ __forceinline__ static void warp_reduce(float* psum, float (*out_smem)[Num * 4])
 {
   // kInterleave = 4
       float fpsum[Num];
@@ -116,9 +116,9 @@ __global__ void gemv_kernel(
     half local_scale[NPerBlock];
     half local_scaled_zeros[NPerBlock];
 
-    half psum[Num];
+    float psum[Num];
     for (int i = 0; i < Num; ++i)
-        psum[i] = to_half(0.f);
+        psum[i] = 0.f;
     
     extern __shared__ uint8_t shmem[];
     float(*out_smem)[Num * kInterleave] = reinterpret_cast<float(*)[Num * kInterleave]>(shmem);
@@ -196,10 +196,12 @@ __global__ void gemv_kernel(
                 #pragma unroll
                 for (int y = 0; y < kElemsPerThread; ++y)
                 {
-                    *reinterpret_cast<half2*>(psum + batch_idx * NPerBlock + x * 2)
-                        = __hfma2(*reinterpret_cast<half2*>(dequantized_weight + y * NPerBlock + x * 2),
-                            __half2half2(local_inputs[y]),
-                            *reinterpret_cast<half2*>(psum + batch_idx * NPerBlock + x * 2));
+                    #pragma unroll
+                    for (int lane = 0; lane < 2; ++lane) {
+                        const int index = batch_idx * NPerBlock + x * 2 + lane;
+                        psum[index] = fmaf(__half2float(dequantized_weight[y * NPerBlock + x * 2 + lane]),
+                                           __half2float(local_inputs[y]), psum[index]);
+                    }
                 }
             }
         }

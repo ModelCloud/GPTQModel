@@ -15,6 +15,11 @@ changed path and a separate Torch reference. The oracle must perform its own
 arithmetic; do not call the changed kernel or reuse its intermediate outputs as
 expected results.
 
+Selecting a packer, thread count, or code path from an environment variable is
+not acceptable. Route the choice through the config object or an explicit
+argument, and test that argument directly. See *No environment-variable
+behaviour switches* in `AGENTS.md`.
+
 ## Persistent inference weight storage
 
 The repository-wide storage rule in `AGENTS.md` is an acceptance gate for all

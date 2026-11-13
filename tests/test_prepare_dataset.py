@@ -242,18 +242,20 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
 
     class _StubProcessor:
         def __init__(self, **kwargs):
-            self.calibration_dataset = kwargs["prepare_dataset_func"](
-                calibration_dataset=kwargs["calibration"],
-                calibration_dataset_concat_size=kwargs["calibration_concat_size"],
-                calibration_dataset_sort=kwargs["calibration_sort"],
-                batch_size=kwargs["batch_size"],
-                calibration_concat_separator=kwargs["calibration_concat_separator"],
+            calibration = kwargs["calibration"]
+            self.calibration_dataset = calibration.prepare_dataset(
+                calibration_dataset=calibration.dataset,
+                calibration_dataset_concat_size=calibration.concat_size,
+                calibration_dataset_sort=calibration.sort,
+                batch_size=calibration.batch_size,
+                calibration_concat_separator=calibration.concat_separator,
             )
             prepared_datasets.append(self.calibration_dataset)
 
     class _StubModuleLooper:
         def __init__(self, _model, *, processors, **_kwargs):
             self.processors = processors
+            self.layer_module_coverage = SimpleNamespace(report=lambda *_args: None)
 
         def loop(self, **_kwargs):
             return self.processors[0].calibration_dataset
@@ -277,6 +279,78 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
     assert len(result) == 1
     assert result[0]["input_ids"].tolist() == [[ord(char) for char in "short"]]
     assert qmodel.prepare_dataset(calibration_dataset=["short"]) == []
+
+
+def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatch):
+    from gptqmodel.looper import module_looper
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    qmodel = _make_qmodel()
+    qmodel.quantize_config = SimpleNamespace(
+        adapter=None,
+        method=METHOD.GPTQ,
+        preprocessors=[object()],
+        gc_mode=None,
+        activation_mode=None,
+        offload_to_disk=False,
+        fallback=None,
+    )
+    constructed = []
+
+    class _StubPreprocessor:
+        def __init__(self, **kwargs):
+            assert "calculate_w_wq_diff" not in kwargs
+            calibration = kwargs["calibration"]
+            assert calibration.dataset is None
+            assert calibration.prepare_dataset is None
+            constructed.append(self)
+
+    class _StubPrimary:
+        def __init__(self, **kwargs):
+            calibration = kwargs["calibration"]
+            self.calibration_dataset = calibration.prepare_dataset(
+                calibration_dataset=calibration.dataset,
+                calibration_dataset_concat_size=calibration.concat_size,
+                calibration_dataset_sort=calibration.sort,
+                batch_size=calibration.batch_size,
+                calibration_concat_separator=calibration.concat_separator,
+            )
+            constructed.append(self)
+
+    class _StubModuleLooper:
+        def __init__(self, _model, *, processors, **_kwargs):
+            self.processors = processors
+            self.layer_module_coverage = SimpleNamespace(report=lambda *_args: None)
+
+        def loop(self, **_kwargs):
+            return self.processors[-1].calibration_dataset
+
+    monkeypatch.setattr(
+        "gptqmodel.models.base.processor_class",
+        lambda step: _StubPreprocessor if step is ProcessorStep.PREPROCESSOR else _StubPrimary,
+    )
+    monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
+
+    result = qmodel._quantize_with_calibration(
+        calibration=["short"],
+        calibration_concat_size=None,
+        calibration_sort=None,
+        calibration_data_min_length=1,
+        batch_size=1,
+        backend=None,
+        adapter_calibration_dataset=None,
+        calibration_concat_separator=None,
+        embed_quant_config=None,
+        run_plan=SimpleNamespace(
+            weight_only=False,
+            processors=(ProcessorStep.PREPROCESSOR, ProcessorStep.GPTQ),
+            batch_size=1,
+            loop_backend=None,
+        ),
+    )
+
+    assert len(constructed) == 2
+    assert result[0]["input_ids"].tolist() == [[ord(char) for char in "short"]]
 
 
 def test_prepare_dataset_normalizes_rank_4_attention_mask():

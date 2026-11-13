@@ -25,6 +25,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 
 
@@ -43,7 +44,20 @@ class ParoQuantTritonLinear(ParoLinear):
     SUPPORTS_AUTO_PADDING = ParoLinear.SUPPORTS_AUTO_PADDING
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # The Triton kernels in ``quantization/paroquant/modules/triton/gemm.py``
+    # use only portable language features: ``tl.load/store``, integer shifts,
+    # ``tl.interleave`` (a ``tl.join`` + ``tl.reshape`` composition) and
+    # ``tl.dot``.  There is no CUDA-only intrinsic, inline PTX/asm or
+    # ``libdevice`` use, and the launch helper wraps a ``torch.cuda`` device
+    # context that HIP also provides.  The sibling STE kernels already select
+    # ``triton.language.extra.hip.libdevice`` on HIP, so ROCm is a supported
+    # device family here too.
+    #
+    # ``SUPPORTS_FORMATS`` keeps FORMAT.PAROQUANT at priority 0, so this kernel
+    # is never chosen automatically; listing DEVICE.ROCM only allows an explicit
+    # ``BACKEND.PAROQUANT_TRITON`` request and leaves AUTO on the portable
+    # ``ParoLinear`` torch path.
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = ParoLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = ParoLinear.SUPPORTS_ADAPTERS
@@ -57,20 +71,26 @@ class ParoQuantTritonLinear(ParoLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        """Validate the Triton and CUDA runtime prerequisites once per process."""
+        """Validate the Triton and GPU runtime prerequisites once per process."""
         from packaging import version
         from triton import __version__ as triton_version
 
         triton_v = version.parse(triton_version)
 
         if triton_v < version.parse("2.0.0"):
-            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+            return False, ImportError(
+                f"triton version must be >= 2.0.0: actual = {triton_version}"
+            )
 
         if has_gil_disabled() and triton_v < version.parse("3.4.0"):
-            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+            return False, Exception(
+                "GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0"
+            )
 
+        # HIP exposes the ROCm GPU through the ``cuda`` torch device namespace,
+        # so this check covers NVIDIA CUDA and AMD ROCm alike.
         if not torch.cuda.is_available():
-            raise RuntimeError("ParoQuant Triton requires CUDA.")
+            return False, RuntimeError("ParoQuant Triton requires a CUDA or ROCm GPU.")
 
         return True, None
 
@@ -114,27 +134,29 @@ class ParoQuantTritonLinear(ParoLinear):
         if weight.dtype != rotated.dtype or weight.device != rotated.device:
             weight = weight.to(device=rotated.device, dtype=rotated.dtype)
 
-        out = torch.matmul(rotated, weight)
-        if self.bias is not None:
-            out = out + self.bias.to(device=rotated.device, dtype=rotated.dtype)
-        return out
+        bias = self.bias
+        if bias is not None:
+            bias_dtype = bias.dtype if _wants_fp32_reduce(rotated) else rotated.dtype
+            bias = bias.to(device=rotated.device, dtype=bias_dtype)
+        return matmul_fp32_reduce(rotated, weight, bias)
 
     def _forward_triton_decode(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for small-row decode workloads."""
-        out = paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        return paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros, self.bias)
 
     def _forward_triton_prefill(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for larger prefill batches."""
-        out = paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        return paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros, self.bias)
+
+    def _needs_dense_autograd(self, rotated: torch.Tensor) -> bool:
+        return torch.is_grad_enabled() and (
+            rotated.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        )
 
     def _run_plan(self, plan: str, rotated: torch.Tensor) -> torch.Tensor:
         """Dispatch one named execution plan."""
+        if plan in {"decode_fused", "prefill_fused"} and self._needs_dense_autograd(rotated):
+            return self._forward_triton_dense(rotated)
         if plan == "dense":
             return self._forward_triton_dense(rotated)
         if plan == "decode_fused":
@@ -165,6 +187,8 @@ class ParoQuantTritonLinear(ParoLinear):
 
     def _select_plan(self, kind: str, rotated: torch.Tensor) -> str:
         """Pick the best plan, bounded by a bias toward the default fused path."""
+        if self._needs_dense_autograd(rotated):
+            return "dense"
         default_plan = "decode_fused" if kind == "decode" else "prefill_fused"
         if self.training or not self.paroquant_triton_autotune_enabled:
             return default_plan

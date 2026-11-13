@@ -34,10 +34,10 @@ def make_layer(method, dtype, k=256, n=128, *, act_order=False, bits=4,
         weight = torch.zeros(k // factor, n, dtype=torch.int32)
         for lane in range(factor):
             weight.bitwise_or_(codes[lane::factor] << (bits * lane))
-        cls, backend = MarlinLinear, BACKEND.GPTQ_MARLIN
+        cls, backend = MarlinLinear, BACKEND.MARLIN
     else:
         weight = pack_cols(codes, True)
-        cls, backend = AwqMarlinLinear, BACKEND.AWQ_MARLIN
+        cls, backend = AwqMarlinLinear, BACKEND.MARLIN
     layer = cls(bits=bits, group_size=group, desc_act=act_order,
                 sym=method == "gptq", in_features=k, out_features=n,
                 bias=bias, dtype=dtype, backend=backend,

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Execute the real shared C++ sizing helper without a CUDA device."""
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 import torch

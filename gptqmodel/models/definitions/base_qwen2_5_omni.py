@@ -13,10 +13,18 @@ from transformers import AutoModelForTextToWaveform, AutoProcessor, PreTrainedMo
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_model, thinker_text_prefix
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+
+
+_THINKER_LAYER_MODULES = {
+    "input_layernorm": ("input_layernorm:!",),
+    "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+    "post_attention_layernorm": ("post_attention_layernorm:!",),
+    "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+}
 
 
 def _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(talker_cls):
@@ -81,17 +89,10 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     require_pkgs = ["audioread>=3.1.0", "librosa>=0.11.0", "av>=16.0.1"]
 
+    # transformers >= 5.22 nests the thinker decoder under `language_model`.
     module_tree = [
-        "thinker",
-        "model",
-        "layers",
-        "#",
-        {
-            "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-        }
+        ["thinker", "model", "layers", "#", _THINKER_LAYER_MODULES],
+        ["thinker", "model", "language_model", "layers", "#", _THINKER_LAYER_MODULES],
     ]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
@@ -115,6 +116,14 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     def get_output_embeddings(self):
         return self.model.thinker.lm_head
 
+    def after_model_load(self, model, load_quantized_model=False):
+        # The thinker decoder lives under `thinker.model` before transformers
+        # 5.22 and under `thinker.model.language_model` after it.
+        text_prefix = thinker_text_prefix(model)
+        if text_prefix:
+            self.pre_lm_head_norm_module = f"{text_prefix}.norm"
+        return model
+
     def run_input_capture(self, example, use_cache, data_device):
         # Calibration only needs the thinker's forward pass. The speech
         # generation wrapper requires a talker even for text-only checkpoints.
@@ -135,43 +144,47 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
         self.model.load_speakers(spk_path)
 
-        self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
-        self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
-        self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
-        self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
-        self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
+        text_model = thinker_text_model(self.model)
+        mm_model = thinker_multimodal_model(self.model)
+        self.shell_module_materialize(text_model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(mm_model.visual, self.quantize_config.device)
+        self.shell_module_materialize(mm_model.audio_tower, self.quantize_config.device)
+        self.shell_module_materialize(mm_model.visual.rotary_pos_emb, self.quantize_config.device)
+        self.shell_module_materialize(text_model.rotary_emb, self.quantize_config.device)
         if hasattr(self.model, "talker"):
             self.shell_module_materialize(self.model.talker, self.quantize_config.device)
         if hasattr(self.model, "token2wav"):
             self.shell_module_materialize(self.model.token2wav, self.quantize_config.device)
-        for layer in self.model.thinker.model.layers:
+        for layer in text_model.layers:
             if hasattr(layer.self_attn, "rotary_emb"):
                 self.shell_module_materialize(layer.self_attn.rotary_emb, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        text_model = thinker_text_model(self.model)
+        mm_model = thinker_multimodal_model(self.model)
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model.thinker.model,
-                            module=self.model.thinker.model.embed_tokens,
+            offload_to_disk(model=text_model,
+                            module=text_model.embed_tokens,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
-            offload_to_disk(model=self.model.thinker,
-                            module=self.model.thinker.visual,
+            offload_to_disk(model=mm_model,
+                            module=mm_model.visual,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
-            offload_to_disk(model=self.model.thinker,
-                            module=self.model.thinker.audio_tower,
+            offload_to_disk(model=mm_model,
+                            module=mm_model.audio_tower,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
-            offload_to_disk(model=self.model.thinker.visual,
-                            module=self.model.thinker.visual.rotary_pos_emb,
+            offload_to_disk(model=mm_model,
+                            module=mm_model.visual.rotary_pos_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
-            offload_to_disk(model=self.model.thinker.model,
-                            module=self.model.thinker.model.rotary_emb,
+            offload_to_disk(model=text_model,
+                            module=text_model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
@@ -186,27 +199,27 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                                 disk_path=self.quantize_config.offload_to_disk_path,
                                 )
 
-            for layer in self.model.thinker.model.layers:
+            for layer in text_model.layers:
                 if hasattr(layer.self_attn, "rotary_emb"):
-                    offload_to_disk(model=self.model.thinker.model,
+                    offload_to_disk(model=text_model,
                                     module=layer.self_attn.rotary_emb,
                                     disk_path=self.quantize_config.offload_to_disk_path,
                                     )
 
             return
 
-        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
-        self.model.thinker.visual = self.model.thinker.visual.to(CPU)
-        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        text_model.embed_tokens = text_model.embed_tokens.to(CPU)
+        mm_model.visual = mm_model.visual.to(CPU)
+        mm_model.audio_tower = mm_model.audio_tower.to(CPU)
         if hasattr(self.model, "talker"):
             self.model.talker = self.model.talker.to(CPU)
         if hasattr(self.model, "token2wav"):
             self.model.token2wav = self.model.token2wav.to(CPU)
 
-        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
-        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
+        mm_model.visual.rotary_pos_emb = mm_model.visual.rotary_pos_emb.to(CPU)
+        text_model.rotary_emb = text_model.rotary_emb.to(CPU)
 
-        for layer in self.model.thinker.model.layers:
+        for layer in text_model.layers:
             if hasattr(layer.self_attn, "rotary_emb"):
                 layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
 

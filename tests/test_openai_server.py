@@ -7,11 +7,14 @@ import os
 import socket
 import unittest
 
-import openai
 import pytest
 
 from gptqmodel import GPTQModel
 
+
+# The OpenAI client is only used to exercise the served API; the module is an
+# optional dependency and must not turn collection into an error.
+openai = pytest.importorskip("openai")
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
@@ -52,6 +55,8 @@ class TestOpeniServer(unittest.TestCase):
             messages=messages,
             temperature=0,
         )
-        result_text = response.choices[0].text
+        # A chat completion must expose `choices[].message.content`, not `choices[].text`.
+        self.assertEqual(response.object, "chat.completion")
+        result_text = response.choices[0].message.content
         self.assertEqual(result_text.strip(), "1 + 1 = 2")
         self.model.serve_shutdown()

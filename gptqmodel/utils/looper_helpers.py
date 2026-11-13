@@ -8,6 +8,7 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
+from types import MethodType
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -18,19 +19,50 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
-from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
-from ..utils.model import get_layer_name, move_to, nested_move_to
+from ..utils.model import get_layer_name, nested_move_to
+from ..utils.p2p import (
+    P2P_NOT_APPLICABLE,
+    broadcast_module_to_device,
+    enable_for_devices,
+    get_p2p_config,
+    p2p_move_nested,
+    safe_module_to,
+    safe_move_to,
+)
+from ..utils.python import has_gil_disabled
 from ..utils.safe import ThreadSafe
-from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
-
-
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
+from ..utils.torch import CPU, HAS_NPU, all_torch_devices, torch_sync
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
 _DEEPCOPY_LOCK = threading.Lock()
+# Set once the torch/NCCL replication path fails. Repeating the attempt for
+# every layer only re-raises the same NCCL error; the deepcopy fallback below is
+# the correct path for the rest of the process.
+_REPLICATE_DISABLED = False
+
+
+def _rebind_copied_instance_methods(
+    source: torch.nn.Module,
+    replica: torch.nn.Module,
+) -> None:
+    """Rebind shallow-copied instance methods to the matching replica node."""
+
+    source_modules = dict(source.named_modules())
+    replica_modules = dict(replica.named_modules())
+    if source_modules.keys() != replica_modules.keys():
+        raise RuntimeError("replicated module topology changed while rebinding methods")
+    for path, source_module in source_modules.items():
+        replica_module = replica_modules[path]
+        for attribute, value in tuple(vars(replica_module).items()):
+            if isinstance(value, MethodType) and value.__self__ is source_module:
+                setattr(
+                    replica_module,
+                    attribute,
+                    MethodType(value.__func__, replica_module),
+                )
 
 def torch_replicate(
     module: torch.nn.Module,
@@ -56,11 +88,17 @@ def torch_replicate(
             if dev.type in {"cuda", "xpu", "mps", "npu"}:
                 try:
                     torch_sync(dev)
-                except BaseException:
-                    pass
+                except Exception:
+                    log.debug("torch_sync(%s) before replicate failed", dev, exc_info=True)
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
+
 log = setup_logger()
+
+# Tensors whose device-move failure has already been reported with a traceback.
+# See `rehome_module_to_device`: without this, per-batch callers repeat the same
+# failure for every batch of every layer.
+_REPORTED_MOVE_FAILURES: set = set()
 
 
 if TYPE_CHECKING:
@@ -75,10 +113,69 @@ __all__ = [
     "clear_non_picklable_state",
     "select_forward_devices",
     "normalize_device_like",
+    "move_module_to_device",
+    "move_nested_to_device",
     "clone_module_for_devices",
     "find_last_quantized_layer_index",
+    "plan_layer_count",
     "forward_batch_worker",
 ]
+
+
+def move_module_to_device(
+    module: torch.nn.Module,
+    device: torch.device | str,
+    *,
+    root_module: Optional[torch.nn.Module] = None,
+    status=None,
+) -> torch.nn.Module:
+    """Move a module, preferring runtime peer copies over per-tensor moves.
+
+    The regular ``move_to`` + ``rehome_module_to_device`` path issues one
+    PyTorch copy per parameter/buffer. When the source and destination are both
+    CUDA and P2P is enabled, the runtime peer-copy batch replaces those with
+    one GIL-released enqueue per leaf.
+
+    Throughput depends on leaf size. The peer path is used only for small
+    leaves, where it measures 3-15% faster than ``Tensor.to``; larger leaves
+    fall back to the regular move (see ``_PEER_COPY_MAX_AVG_LEAF_BYTES``). It is
+    also preferred on free-threaded builds because it does not route through
+    ``torch.nn.parallel.replicate``/``broadcast_coalesced``.
+    """
+
+    target = device if isinstance(device, torch.device) else torch.device(str(device))
+    moved = False
+    if isinstance(module, torch.nn.Module) and target.type == "cuda":
+        try:
+            moved = broadcast_module_to_device(module, target)
+        except Exception:
+            log.debug("P2P peer-copy module move failed; falling back", exc_info=True)
+            moved = False
+
+    if not moved:
+        # ``move_to`` routes through the direction-aware helper, which stages an
+        # unsupported/degraded direction through host memory instead of issuing
+        # a direct peer copy that can segfault on ROCm.
+        safe_module_to(module, target, status=status)
+
+    # Realign Accelerate hooks and catch any leaves the peer-copy path skipped.
+    rehome_module_to_device(
+        module,
+        target,
+        move_parameters=True,
+        move_buffers=True,
+        root_module=root_module,
+    )
+    return module
+
+
+def move_nested_to_device(value, device: torch.device | str):
+    """Move a nested input structure, using runtime peer copies when possible."""
+
+    moved = p2p_move_nested(value, device)
+    if moved is not P2P_NOT_APPLICABLE:
+        return moved
+    return nested_move_to(value, device=device)
 
 
 def find_last_quantized_layer_index(
@@ -114,12 +211,35 @@ def find_last_quantized_layer_index(
     return last_quantized_layer_index
 
 
+def plan_layer_count(
+    layer_count: int,
+    last_quantized_layer_index: Optional[int],
+    *,
+    replay_all_layers: bool = False,
+) -> int:
+    """Return how many decoder layers the execution plan must cover.
+
+    Trailing layers whose tracked modules are all dynamically excluded are
+    skipped, so they need no plan entry. Modes that replay the whole decoder
+    stack (for example input/output embedding requantization) still publish a
+    boundary for every layer, so the plan has to include them.
+    """
+
+    if last_quantized_layer_index is None or replay_all_layers:
+        return layer_count
+    return max(0, last_quantized_layer_index + 1)
+
+
 @contextmanager
-def device_ctx(dev: Optional[torch.device | "DEVICE"]):
+def device_ctx(dev: Optional[torch.device | "DEVICE" | str]):
     """Temporarily set the thread-local device for CUDA/XPU backends."""
     if dev is None:
         yield
         return
+
+    dev = normalize_device_like(dev)
+    if dev is None:
+        raise ValueError("device_ctx received an invalid device")
 
     if dev.type == "cuda":
         with torch.cuda.device(dev.index):
@@ -224,6 +344,30 @@ def rehome_module_to_device(
     Omit ``root_module`` when ancestry is unknown to preserve hook ownership.
     A standalone module may supply itself as the root.
     """
+    # Log amplification guard. This runs under `_rehome_lock`, once per module,
+    # and batch workers call it again for every batch, so a model whose tensors
+    # cannot reach the target device would otherwise emit one full traceback
+    # per tensor *per batch*. The failure traceback is emitted once per
+    # ``(device, exception type)`` for the life of the process; every call then
+    # reports only a count. Keying on the exception type (not the tensor) is
+    # what keeps a 30-tensor model from emitting 30 identical tracebacks.
+    failure_count = [0]
+
+    def _record_failure(kind: str, name: str, sub: torch.nn.Module, exc: BaseException) -> None:
+        failure_count[0] += 1
+        key = (str(device), type(exc).__name__)
+        if key in _REPORTED_MOVE_FAILURES:
+            return
+        _REPORTED_MOVE_FAILURES.add(key)
+        log.warning(
+            "failed to move %s %r of %s to %s",
+            kind,
+            name,
+            type(sub).__name__,
+            device,
+            exc_info=True,
+        )
+
     with _rehome_lock:
         for sub in module.modules():
             if move_buffers:
@@ -236,12 +380,14 @@ def rehome_module_to_device(
                     if only_mismatched and buf.device == device:
                         continue
                     try:
-                        sub._buffers[name] = buf.to(device, non_blocking=True)
+                        sub._buffers[name] = safe_move_to(buf, device, non_blocking=True)
                     except Exception:
                         try:
-                            sub._buffers[name] = buf.to(device)
-                        except Exception:
-                            pass
+                            sub._buffers[name] = safe_move_to(buf, device)
+                        except Exception as exc:
+                            # The buffer stays on its original device; that is a
+                            # correctness problem, not a benign fallback.
+                            _record_failure("buffer", name, sub, exc)
 
             if move_parameters:
                 for pname, p in list(getattr(sub, "_parameters", {}).items()):
@@ -252,7 +398,7 @@ def rehome_module_to_device(
                     try:
                         with torch.no_grad():
                             new_p = torch.nn.Parameter(
-                                p.data.to(device, non_blocking=True),
+                                safe_move_to(p.data, device, non_blocking=True),
                                 requires_grad=p.requires_grad,
                             )
                         sub._parameters[pname] = new_p
@@ -260,12 +406,20 @@ def rehome_module_to_device(
                         try:
                             with torch.no_grad():
                                 new_p = torch.nn.Parameter(
-                                    p.data.to(device),
+                                    safe_move_to(p.data, device),
                                     requires_grad=p.requires_grad,
                                 )
                             sub._parameters[pname] = new_p
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            _record_failure("parameter", pname, sub, exc)
+
+        if failure_count[0]:
+            log.warning(
+                "%d tensor(s) could not be moved to %s; only the first failure per "
+                "exception type is shown with its traceback.",
+                failure_count[0],
+                device,
+            )
 
         if move_parameters:
             _realign_materialized_hooks(module, device, root_module)
@@ -316,7 +470,7 @@ def select_forward_devices(base_device: Optional[torch.device]) -> List[torch.de
     _add(base_device)
     base_type = devices[0].type
     if base_type in {"cuda", "xpu", "mps", "npu"}:
-        for dev in ALL_DEVICES:
+        for dev in all_torch_devices():
             if dev.type == base_type:
                 _add(dev)
     return devices
@@ -385,6 +539,13 @@ def clone_module_for_devices(
     device_type = base_device.type
     homogeneous_type = all(dev.type == device_type for dev in devices)
 
+    peer_status = None
+    if device_type == "cuda" and len(devices) > 1:
+        # Best-effort peer enablement before any cross-device staging. The
+        # helper caches its result and never raises in best-effort mode, so a
+        # failed probe never blocks quantization.
+        peer_status = enable_for_devices(devices)
+
     def backend_available(dev_type: str) -> bool:
         if dev_type == "cuda":
             return torch.cuda.is_available()
@@ -396,21 +557,35 @@ def clone_module_for_devices(
 
     def _prepare_module(target_device: torch.device, step_name: str) -> None:
         start_ts = time.perf_counter()
-        module.to(target_device)
-        module.eval()
-        rehome_module_to_device(
-            module,
-            target_device,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=root_module,
+        # ``move_module_to_device`` is equivalent to ``module.to()`` plus
+        # ``rehome_module_to_device()``, but routes small cross-GPU copies
+        # through the runtime peer-copy path and stages unsupported directions
+        # through host memory instead of issuing a crashing direct peer copy.
+        move_module_to_device(
+            module, target_device, root_module=root_module, status=peer_status
         )
+        module.eval()
         clear_state_fn(module)
         setattr(module, "_gptqmodule_device_hint", target_device)
         _record(step_name, start_ts)
 
+    global _REPLICATE_DISABLED
+
+    asymmetric_topology = bool(peer_status is not None and peer_status.asymmetric_pairs())
+    if asymmetric_topology and get_p2p_config().use_torch_replicate and not _REPLICATE_DISABLED:
+        log.info(
+            "Clone: skipping NCCL/torch replicate because the P2P topology is "
+            "asymmetric; using deepcopy plus host-staged moves instead."
+        )
+
     use_replicate = (
-        USE_TORCH_REPLICATE
+        get_p2p_config().use_torch_replicate
+        # ``torch.nn.parallel.replicate`` funnels into
+        # ``torch.cuda.comm.broadcast_coalesced``, which is unsafe on
+        # free-threaded builds. Use the deepcopy + peer-copy path instead.
+        and not has_gil_disabled()
+        and not _REPLICATE_DISABLED
+        and not asymmetric_topology
         and homogeneous_type
         and backend_available(device_type)
         and device_type != "cpu"
@@ -428,8 +603,9 @@ def clone_module_for_devices(
             _record("replicate", replicate_start)
 
             for idx, (dev, replica) in enumerate(zip(devices, replicas), start=1):
+                _rebind_copied_instance_methods(module, replica)
                 replica.eval()
-                rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+                move_module_to_device(replica, dev, root_module=replica)
                 clear_state_fn(replica)
                 setattr(replica, "_gptqmodule_device_hint", dev)
                 clones[dev] = replica
@@ -439,6 +615,11 @@ def clone_module_for_devices(
             return clones
         except Exception as e:
             log.info(f"Clone: fast clone failed {e}")
+            # Do not keep the failed fast path armed: the fallback below must
+            # stage every replica deliberately instead of silently retrying a
+            # direct cross-device deep copy that can crash on ROCm.
+            _REPLICATE_DISABLED = True
+            use_replicate = False
             clone_timings.append(("replicate_failed", 0.0))
             if stage_device != base_device:
                 _prepare_module(stage_device, f"stage_{stage_device}")
@@ -459,14 +640,9 @@ def clone_module_for_devices(
         start_ts = time.perf_counter()
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
+        _rebind_copied_instance_methods(module, replica)
         replica.eval()
-        rehome_module_to_device(
-            replica,
-            dev,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=replica,
-        )
+        move_module_to_device(replica, dev, root_module=replica)
         clear_state_fn(replica)
         setattr(replica, "_gptqmodule_device_hint", dev)
         clones[dev] = replica
@@ -508,11 +684,11 @@ def forward_batch_worker(
 
     # Replica preparation may enqueue non-blocking parameter or buffer copies.
     torch_sync(device=module_device)
-    inputs = [move_to(inp, device=module_device) for inp in layer_input]
+    inputs = move_nested_to_device(layer_input, device=module_device)
 
     attn_tensor = None
     if attention_mask is not None:
-        attn_tensor = move_to(attention_mask, device=module_device)
+        attn_tensor = move_nested_to_device(attention_mask, device=module_device)
 
     additional_inputs: Dict[str, torch.Tensor] = {}
     accepts_var_kw, allowed_kwargs = get_supported_kwargs(module.forward)
@@ -523,22 +699,18 @@ def forward_batch_worker(
         additional_inputs["attention_mask"] = attn_tensor if support_batch_quantize else None
 
     if position_ids is not None:
-        additional_inputs["position_ids"] = move_to(position_ids, device=module_device)
+        additional_inputs["position_ids"] = move_nested_to_device(position_ids, device=module_device)
 
     for key, value in layer_input_kwargs.items():
-        additional_inputs[key] = nested_move_to(value, device=module_device)
+        additional_inputs[key] = move_nested_to_device(value, device=module_device)
 
     keep_mask = None
     if attn_tensor is not None:
         seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
         keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
 
-    mask_tls = getattr(processor, "_mask_tls", None)
-    if mask_tls is not None:
-        mask_tls.value = keep_mask
-
     if reuse_kv and prev_kv is not None:
-        additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device)
+        additional_inputs["kv_last_layer"] = move_nested_to_device(prev_kv, device=module_device)
 
     # TODO: some models does not honor generate config.use_cache property so we are forced to hack this to false
     additional_inputs["use_cache"] = False
@@ -549,6 +721,17 @@ def forward_batch_worker(
             additional_inputs=additional_inputs,
             target_device=module_device,
         )
+        keep_mask = gptq_model.prepare_layer_replay_keep_mask(
+            layer=module,
+            layer_input=inputs,
+            additional_inputs=additional_inputs,
+            keep_mask=keep_mask,
+            target_device=module_device,
+        )
+
+    mask_tls = getattr(processor, "_mask_tls", None)
+    if mask_tls is not None:
+        mask_tls.value = keep_mask
 
     module_output = None
     kv_next = None

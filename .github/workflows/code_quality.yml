@@ -22,6 +22,8 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      # Strict gate: never rewrites files, so a violation fails the job.
+      # Autofixing is local-only via format/format.sh.
       - name: Ruff Check
         run: |
-          format/format.sh
+          format/check.sh

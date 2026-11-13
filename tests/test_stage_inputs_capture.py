@@ -47,6 +47,7 @@ class TestStageInputsCapture(unittest.TestCase):
         gptq_model.get_input_embeddings.return_value = None
         gptq_model.get_input_embeddings_name.return_value = None
         gptq_model.shell_module_materialize.return_value = layer
+        gptq_model.prepare_input_capture_layer = None
         gptq_model.shell_direct_meta_materialize.return_value = None
         gptq_model._active_auto_module_decoder_config.return_value = None
         gptq_model.turtle_model = None

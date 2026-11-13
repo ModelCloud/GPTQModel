@@ -32,14 +32,13 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from model_test import ModelTest
 
 from gptqmodel import GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization import AWQConfig, FORMAT, GPTQConfig
+from gptqmodel.quantization import FORMAT, AWQConfig, GPTQConfig
 from gptqmodel.utils.backend import BACKEND
 from tests.eval import evaluate, get_eval_task_results
 
@@ -54,10 +53,10 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
     source = Path("/monster/data/model/Llama-3.2-1B-Instruct")
     assert source.is_dir(), f"Missing Llama 3.2 1B source at {source}"
     bits = int(os.environ.get("GPTQMODEL_GSQ_STAGED_BITS", "4"))
-    options = dict(enabled=True,
-                   epochs=int(os.environ.get("GPTQMODEL_GSQ_STAGED_EPOCHS", "10")),
-                   qk_steps=int(os.environ.get("GPTQMODEL_GSQ_STAGED_QK_STEPS", "10")),
-                   batch_size=1, microbatch_size=1)
+    options = {"enabled": True,
+                   "epochs": int(os.environ.get("GPTQMODEL_GSQ_STAGED_EPOCHS", "10")),
+                   "qk_steps": int(os.environ.get("GPTQMODEL_GSQ_STAGED_QK_STEPS", "10")),
+                   "batch_size": 1, "microbatch_size": 1}
     if method == "gptq":
         config = GPTQConfig(bits=bits, group_size=128, sym=True, desc_act=False,
                             act_group_aware=False, format=FORMAT.GPTQ_V2,

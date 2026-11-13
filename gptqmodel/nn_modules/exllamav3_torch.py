@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..models._const import DEVICE
 from ..utils.cpu_features import has_avx512_bf16
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
@@ -218,7 +219,8 @@ def _codebook_lut(
             dim=-1,
         ).contiguous()
         floats = halves.view(torch.float16).to(torch.float32)
-        return (floats[..., 0] + floats[..., 1]).contiguous()
+        # Native __hadd rounds to half before widening the decoded value.
+        return (floats[..., 0] + floats[..., 1]).half().float().contiguous()
 
     if codebook == "mcg":
         raw = (values * _EXL3_MCG_MULT) & 0xFFFFFFFF
@@ -231,7 +233,8 @@ def _codebook_lut(
             dim=-1,
         ).contiguous()
         floats = halves.view(torch.float16).to(torch.float32)
-        return (floats[..., 0] + floats[..., 1]).contiguous()
+        # Native __hadd rounds to half before widening the decoded value.
+        return (floats[..., 0] + floats[..., 1]).half().float().contiguous()
 
     if codebook == "mul1":
         raw = (values * _EXL3_MUL1_MULT) & 0xFFFFFFFF
@@ -243,28 +246,51 @@ def _codebook_lut(
         )
         accum = (byte_sum + _EXL3_MUL1_ACC).to(torch.uint16).contiguous()
         floats = accum.view(torch.float16).to(torch.float32)
-        return (floats * _EXL3_MUL1_INV + _EXL3_MUL1_BIAS).contiguous()
+        # These half operands are exact in FP32; native __hfma rounds once,
+        # after the add, not between the multiply and add.
+        return (floats * _EXL3_MUL1_INV + _EXL3_MUL1_BIAS).half().float().contiguous()
 
     raise ValueError(f"Unsupported EXL3 codebook: {codebook}")
+
+
+def _hadamard_for(x: torch.Tensor) -> torch.Tensor:
+    """Return the cached 128x128 Hadamard matrix in ``x``'s device and dtype.
+
+    ``_hadamard_128`` is cached in FP32, but ``x`` is FP16/BF16 on an
+    accelerator (``_forward_eager`` casts to FP16 off CPU). ``torch.matmul``
+    requires matching dtypes, so an FP32 matrix against FP16 activations raised
+    on ROCm. Cast to the activation dtype (cached per dtype) so the fused
+    EQUALITY backend executes instead of failing at the first forward.
+    """
+    had = _hadamard_128(x.device.type, x.device.index)
+    if had.dtype != x.dtype:
+        had = _hadamard_128_as(x.device.type, x.device.index, x.dtype)
+    return had
+
+
+@lru_cache(maxsize=None)
+def _hadamard_128_as(device_type: str, device_index: int | None, dtype: torch.dtype) -> torch.Tensor:
+    return _hadamard_128(device_type, device_index).to(dtype=dtype)
 
 
 def _apply_hadamard_left(x: torch.Tensor) -> torch.Tensor:
     if x.shape[0] % 128 != 0:
         raise ValueError(f"EXL3 expects in_features to be divisible by 128, got {x.shape[0]}.")
-    had = _hadamard_128(x.device.type, x.device.index)
+    had = _hadamard_for(x)
     return (had @ x.view(-1, 128, x.shape[1])).view_as(x)
 
 
 def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
     if x.shape[1] % 128 != 0:
         raise ValueError(f"EXL3 expects out_features to be divisible by 128, got {x.shape[1]}.")
-    had = _hadamard_128(x.device.type, x.device.index)
+    had = _hadamard_for(x)
     return (x.view(x.shape[0], -1, 128) @ had).view_as(x)
 
 
 class ExllamaV3TorchLinear(nn.Module):
     QUANT_TYPE = "exl3"
     SUPPORTS_SHARDS = True
+    SUPPORTS_DEVICES = [DEVICE.ALL]
 
     def __init__(
         self,
@@ -345,6 +371,32 @@ class ExllamaV3TorchLinear(nn.Module):
             return torch.float32
         return torch.float16
 
+    def _stored_features(self) -> tuple[int, int]:
+        """Validate full Hadamard storage against the logical linear shape."""
+        trellis = getattr(self, "trellis", None)
+        # Packing width is `bits` 16-bit words, so it is always a multiple of 16.
+        # The upper bound follows from the bit width, not a fixed 128: EXL3
+        # supports 2..16 bits (16 bits -> 256 words), and capping at 128/8 bits
+        # rejected every valid 10/12/16-bit checkpoint. ``_bits_per_weight()``
+        # derives the same value from this dimension.
+        if (trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16
+                or trellis.shape[-1] <= 0 or trellis.shape[-1] % 16 != 0):
+            raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry or dtype")
+        inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
+        padded_outputs = ((self.out_features + 127) // 128) * 128
+        if (self.in_features <= 0 or self.out_features <= 0
+                or inputs != self.in_features or inputs % 128 != 0
+                or outputs != padded_outputs):
+            raise ValueError(f"EXL3 module `{self.name}` storage differs from logical dimensions or 128-channel padding")
+        for suffix, expected in (("suh", inputs), ("svh", outputs)):
+            scale = getattr(self, suffix, None)
+            if scale is None or tuple(scale.shape) != (expected,):
+                raise ValueError(f"EXL3 module `{self.name}` has invalid {suffix} geometry")
+        bias = getattr(self, "bias", None)
+        if bias is not None and tuple(bias.shape) != (self.out_features,):
+            raise ValueError(f"EXL3 module `{self.name}` has invalid logical bias geometry")
+        return inputs, outputs
+
     def _unpack_indices(
         self,
         tile_n_start: int = 0,
@@ -356,6 +408,7 @@ class ExllamaV3TorchLinear(nn.Module):
         if trellis.device.type == "meta":
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
+        self._stored_features()
         if tile_n_end is None:
             tile_n_end = int(trellis.shape[1])
         if not 0 <= tile_n_start < tile_n_end <= int(trellis.shape[1]):
@@ -451,7 +504,7 @@ class ExllamaV3TorchLinear(nn.Module):
         inner *= getattr(self, "suh").to(dtype=torch.float32).unsqueeze(1)
         inner = _apply_hadamard_right(inner)
         inner *= getattr(self, "svh").to(dtype=torch.float32).unsqueeze(0)
-        return inner.contiguous()
+        return inner[:, :self.out_features].contiguous()
 
     def get_weight_tensor(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         weight = self._materialize_weight_fp32()
@@ -464,8 +517,7 @@ class ExllamaV3TorchLinear(nn.Module):
         return getattr(self, "bias", None)
 
     def _forward_chunked(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
-        if self.out_features % 128 != 0:
-            raise ValueError(f"EXL3 expects out_features to be divisible by 128, got {self.out_features}.")
+        _, stored_outputs = self._stored_features()
         if x_2d.shape[0] == 0:
             return x_2d.new_empty((0, self.out_features))
 
@@ -478,7 +530,7 @@ class ExllamaV3TorchLinear(nn.Module):
             device=x_2d.device,
         )
 
-        tiles_n = self.out_features // 16
+        tiles_n = stored_outputs // 16
         for tile_n_start in range(0, tiles_n, _EXL3_OUTPUT_TILES_PER_CHUNK):
             tile_n_end = min(tile_n_start + _EXL3_OUTPUT_TILES_PER_CHUNK, tiles_n)
             out_start = tile_n_start * 16
@@ -486,13 +538,14 @@ class ExllamaV3TorchLinear(nn.Module):
             chunk = self._decode_inner_weight(tile_n_start, tile_n_end).to(dtype=compute_dtype)
             y_chunk = _apply_hadamard_right(x_work @ chunk)
             y_chunk *= svh[out_start:out_end]
-            y[:, out_start:out_end] = y_chunk
+            logical_end = min(out_end, self.out_features)
+            y[:, out_start:logical_end] = y_chunk[:, :logical_end - out_start]
         return y
 
     def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
-        compute_dtype = torch.float32 if x.device.type == "cpu" else torch.float16
-        x_2d = x.view(-1, self.in_features).to(compute_dtype)
+        compute_dtype = torch.float32
+        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
         if x.device.type == "cpu" and _cpu_bf16x3_should_use(
             x_2d.shape[0],
             self.in_features,

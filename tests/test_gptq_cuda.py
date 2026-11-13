@@ -23,6 +23,7 @@ from gptqmodel.quantization.gptq import GPTQ
         ("none", True, 256, 1024, False, False),
         ("none", True, 256, -1, False, False),
         ("act_order", True, 256, 32, True, False),
+        ("group_aware", False, 256, 32, True, False),
         ("none", False, 256, 64, True, False),
         ("none", True, 256, 48, False, False),
         ("none", True, 256, 1, False, False),
@@ -43,6 +44,9 @@ def test_fused_gptq_matches_eager_exactly(
     torch.manual_seed(117)
     weight = torch.randn(13, columns, device=device)
     inputs = torch.randn(1, 192, columns, device=device)
+    if ordering == "group_aware" and static_groups:
+        inputs[..., :group_size] *= 0.25
+        inputs[..., group_size : 2 * group_size] *= 4
     factor = torch.triu(torch.randn(columns, columns, device=device) * 0.001)
     factor.diagonal().fill_(1.0)
 

@@ -137,12 +137,82 @@ def test_feasibility_accepts_supported_cpu_kernel():
 
 def test_feasibility_rejects_cuda_only_kernel_on_cpu():
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CPU
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CPU
     )
     # Marlin is a repack target, but not on CPU.
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CPU, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CPU, repack=True
     )
+
+
+def test_hf_public_apis_accept_legacy_method_qualified_backend_strings(monkeypatch):
+    """The stable ``hf_`` APIs keep accepting the pre-refactor kernel names."""
+    from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+    from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+    from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+    from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+    from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
+    from gptqmodel.utils.importer import hf_select_quant_linear_v2
+
+    for kernel_cls in (
+        MarlinLinear,
+        AwqMarlinLinear,
+        MacheteLinear,
+        AwqMacheteLinear,
+        SwordfishLinear,
+        AwqSwordfishLinear,
+    ):
+        monkeypatch.setattr(
+            kernel_cls,
+            "cached_validate_once",
+            classmethod(lambda cls: (True, None)),
+        )
+        monkeypatch.setattr(
+            kernel_cls,
+            "validate_device",
+            classmethod(lambda cls, _device: None),
+        )
+
+    cases = (
+        ("gptq_marlin", "awq_marlin", MarlinLinear, AwqMarlinLinear),
+        ("gptq_machete", "awq_machete", MacheteLinear, AwqMacheteLinear),
+        ("gptq_swordfish", "awq_swordfish", SwordfishLinear, AwqSwordfishLinear),
+    )
+    for gptq_legacy, awq_legacy, gptq_kernel, awq_kernel in cases:
+        gptq_cls = hf_select_quant_linear_v2(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            backend=gptq_legacy,
+            pack=False,
+        )
+        awq_cls = hf_select_quant_linear_v2(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            format=FORMAT.GEMM,
+            quant_method=METHOD.AWQ,
+            backend=awq_legacy,
+            pack=False,
+        )
+
+        assert gptq_cls is gptq_kernel
+        assert awq_cls is awq_kernel
+
+        # Feasibility probing resolves the same legacy strings to the shared
+        # backend instead of reporting an unknown backend.
+        assert hf_check_packing_feasibility(
+            4, 128, False, True, quant_method=METHOD.GPTQ,
+            backend=gptq_legacy, device=DEVICE.CPU, repack=True,
+        )
+        assert hf_check_packing_feasibility(
+            4, 128, False, False, format=FORMAT.GEMM, quant_method=METHOD.AWQ,
+            backend=awq_legacy, device=DEVICE.CPU, repack=True,
+        )
 
 
 def test_feasibility_repack_targets_include_plain_gptq_kernels():
@@ -263,7 +333,11 @@ def test_hf_pack_layer_matches_pack_original(bits):
     expected.pack_original(linear, scales, zeros, g_idx)
 
     actual = _make_gptq_module(bits=bits)
-    returned = hf_pack_layer(actual, linear, scales, zeros, g_idx)
+    # The v2 flavor keeps the raw packer's words; the default gptq flavor
+    # additionally converts to the v1 (stored zero point minus one) layout.
+    returned = hf_pack_layer(
+        actual, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2
+    )
 
     assert returned is actual
     _assert_packed_equal(expected, actual)
@@ -276,7 +350,9 @@ def test_hf_pack_layer_synthesizes_symmetric_zeros():
     explicit.pack_original(linear, scales, torch.full_like(zeros, 1 << 3), g_idx)
 
     module = _make_gptq_module(sym=True)
-    hf_pack_layer(module, linear, scales, None, g_idx)
+    hf_pack_layer(
+        module, linear, scales, None, g_idx, checkpoint_format=FORMAT.GPTQ_V2
+    )
 
     _assert_packed_equal(explicit, module)
 
@@ -372,6 +448,45 @@ def test_hf_pack_method_matches_module_level_api():
     _assert_packed_equal(method_module, function_module)
 
 
+def test_hf_pack_layer_dispatches_allspark_awq():
+    """A declared AWQ kernel must not be rejected for lacking `pack_original`.
+
+    AllSpark labels its backend `QUANT_TYPE="allspark"` while declaring
+    `METHOD.AWQ`; the common helper must route it to its AWQ `pack()`.
+    """
+    from unittest.mock import patch
+
+    allspark = pytest.importorskip("gptqmodel.nn_modules.qlinear.allspark_awq")
+    AllSparkAwqLinear = allspark.AllSparkAwqLinear
+
+    def _make_allspark():
+        with patch.object(AllSparkAwqLinear, "cached_validate_once", return_value=(True, None)):
+            return AllSparkAwqLinear(
+                bits=8,
+                group_size=-1,
+                desc_act=False,
+                sym=False,
+                in_features=128,
+                out_features=128,
+                bias=False,
+                register_buffers=True,
+            )
+
+    linear = nn.Linear(128, 128, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+    scales = torch.ones(128, 1)
+    zeros = torch.full((128, 1), 128, dtype=torch.int32)
+
+    module = _make_allspark()
+    hf_pack_layer(module, linear, scales, zeros, post_init=False)
+
+    reference = _make_allspark()
+    reference.pack(linear, scales, zeros)
+
+    _assert_packed_equal(module, reference)
+
+
 def test_hf_post_init_initializes_single_layer(monkeypatch):
     module = _make_gptq_module()
     calls = []
@@ -440,6 +555,95 @@ def test_hf_repack_layer_between_compatible_kernels():
         torch.testing.assert_close(target(x), reference(x))
 
 
+def test_hf_repack_layer_preserves_awq_bfloat16_checkpoint_buffers():
+    """`dtype` selects the activation dtype, not checkpoint storage width.
+
+    A finite BF16 bias outside the FP16 range must survive the repack; copying
+    it into an FP16 allocation turns it into infinity.
+    """
+    if not _torch_aten_available():
+        pytest.skip("torch aten int4 CPU ops are unavailable in this build")
+
+    linear = nn.Linear(128, 64, bias=True, dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.zero_()
+        linear.bias.fill_(65536.0)
+
+    source = AwqTorchLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=True,
+        backend=BACKEND.AWQ_TORCH,
+        register_buffers=True,
+    )
+    hf_pack_layer(
+        source,
+        linear,
+        torch.ones(64, 4, dtype=torch.bfloat16),
+        torch.full((64, 4), 8, dtype=torch.int32),
+        post_init=True,
+    )
+
+    target = hf_repack_layer(
+        source, BACKEND.AWQ_TORCH_ATEN, device="cpu", dtype=torch.bfloat16
+    )
+
+    assert target.bias.dtype == torch.bfloat16
+    assert target.scales.dtype == torch.bfloat16
+    assert torch.equal(target.bias, source.bias)
+    x = torch.ones(1, 128, dtype=torch.bfloat16)
+    with torch.no_grad():
+        target_out = target(x)
+        source_out = source(x)
+    assert torch.isfinite(target_out).all()
+    # Zero weights, so the projection returns the bias exactly.
+    assert torch.equal(target_out, torch.full_like(target_out, 65536.0))
+    assert torch.equal(target_out, source_out)
+
+
+def test_hf_repack_layer_preserves_awq_fp32_checkpoint_scales():
+    """A tiny FP32 scale must not be narrowed to zero during a repack."""
+    if not _torch_aten_available():
+        pytest.skip("torch aten int4 CPU ops are unavailable in this build")
+
+    torch.manual_seed(0)
+    linear = nn.Linear(128, 64, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.normal_(0.0, 0.1)
+
+    scales = torch.full((64, 4), 2.0 ** -30, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+    source = AwqTorchLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        backend=BACKEND.AWQ_TORCH,
+        register_buffers=True,
+    )
+    hf_pack_layer(source, linear, scales, zeros, post_init=True)
+    assert source.scales.dtype == torch.float32
+
+    target = hf_repack_layer(source, BACKEND.AWQ_TORCH_ATEN, device="cpu")
+    assert target.scales.dtype == torch.float32
+    assert torch.equal(target.scales, source.scales)
+    # FP16 cannot represent 2 ** -30; the copy must not underflow it to zero.
+    assert source.scales.abs().max() < torch.finfo(torch.float16).tiny
+    assert (target.scales != 0).all()
+
+    x = torch.randn(2, 128)
+    with torch.no_grad():
+        target_out = target(x)
+    assert (target_out != 0).any()
+
+
 def test_hf_repack_layer_rejects_unsupported_target():
     linear, scales, zeros, g_idx = _make_inputs(4)
     module = _make_gptq_module()
@@ -447,7 +651,7 @@ def test_hf_repack_layer_rejects_unsupported_target():
 
     # Marlin requires CUDA, so the CPU-only target must be rejected.
     with pytest.raises(ValueError):
-        hf_repack_layer(module, BACKEND.GPTQ_MARLIN, device=DEVICE.CPU)
+        hf_repack_layer(module, BACKEND.MARLIN, device=DEVICE.CPU)
 
 
 def test_hf_repack_layer_rejects_non_quant_linear():
@@ -518,7 +722,10 @@ def test_hf_repack_layer_aligns_v1_v2_qzero_flavor(monkeypatch):
     monkeypatch.setattr(TorchAtenLinear, "REQUIRES_FORMAT_V2", False)
     target = hf_repack_layer(source, BACKEND.GPTQ_TORCH_ATEN)
 
-    expected = source.qzeros - 0b00010001000100010001000100010001
+    from gptqmodel.utils.model_dequant import pack_cols, unpack_cols
+
+    v1_fields = (unpack_cols(source.qzeros, 4) - 1) & 15
+    expected = pack_cols(v1_fields, 4, pack_dtype=torch.int32)
     assert torch.equal(target.qzeros, expected)
     assert target.qzero_format() == 1
 
@@ -546,17 +753,111 @@ def test_hf_pack_layer_resets_qzero_format_when_reusing_module():
     hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
     assert reused.qzero_format() == 2
 
-    # A second raw pack starts from v1 words again and must not inherit the
-    # previous call's v2 metadata.
+    # Simulate a module previously converted to the v1 (stored zero point minus
+    # one) layout. A second raw pack writes fresh v2-layout words and must not
+    # inherit the stale metadata, or the words would decode one high.
+    convert_gptq_v2_to_v1_format_module(
+        module=reused,
+        quantize_config=QuantizeConfig(bits=reused.bits),
+    )
+    assert reused.qzero_format() == 1
+
     hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ)
 
     shifts = torch.arange(8, dtype=torch.int64).mul(4).view(1, 1, 8)
+    v1_fields = (zeros.to(torch.int64) - 1) & 15
     expected_qzeros = (
-        zeros.T.contiguous().view(zeros.shape[1], zeros.shape[0] // 8, 8).to(torch.int64)
+        v1_fields.T.contiguous().view(v1_fields.shape[1], v1_fields.shape[0] // 8, 8)
         << shifts
     ).sum(dim=-1).to(torch.int32)
+    # The fresh words are converted to the v1 layout (zp-1 per field) because
+    # the module requires the v2 runtime layout; a stale format=1 mark would
+    # have skipped this conversion and left v2 words labeled v1.
     assert reused.qzero_format() == 1
     assert torch.equal(reused.qzeros, expected_qzeros)
+
+
+def test_hf_pack_layer_post_init_restores_v2_runtime_layout():
+    """A `gptq` request leaves zp-1 words for export, but `post_init=True`
+    means the caller wants a usable module: flag-blind torch decoding must see
+    the restored v2 layout, or every weight decodes one scale too high."""
+    module = _make_gptq_module(bits=4, sym=True)
+    linear = nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+
+    g_idx = torch.arange(128, dtype=torch.int32) // 32
+    scales = torch.ones(64, 4, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+
+    hf_pack_layer(module, linear, scales, zeros, g_idx, post_init=True)
+    assert module.qzero_format() == 2
+
+    x = torch.randn(2, 128)
+    # Zero weights: codes equal the zero point, so output must be exactly 0;
+    # decoding zp-1 words raw would return +scale instead.
+    assert torch.equal(module(x), torch.zeros(2, 64))
+
+
+@pytest.mark.parametrize("container", [False, True])
+def test_hf_post_init_restores_gptq_v2_runtime_layout(container):
+    """The split pack/initialize lifecycle must match `post_init=True`.
+
+    `hf_pack_layer(..., post_init=False)` leaves the v1 export layout.  The
+    standalone `hf_post_init` helper must restore the v2 runtime zero points
+    before calling `post_init()`, otherwise every weight decodes one scale high.
+    """
+    module = _make_gptq_module(bits=4, sym=True)
+    linear = nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+
+    g_idx = torch.arange(128, dtype=torch.int32) // 32
+    scales = torch.ones(64, 4, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+
+    hf_pack_layer(
+        module,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ,
+        post_init=False,
+    )
+    assert module.qzero_format() == 1
+
+    hf_post_init(nn.Sequential(module) if container else module)
+    assert module.qzero_format() == 2
+
+    x = torch.randn(2, 128)
+    assert torch.equal(module(x), torch.zeros(2, 64))
+
+
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_gptq_format_module_conversion_shifts_fields_without_borrow(bits):
+    """v1 stores (zero point - 1) per packed field: a packed-word `-= 1`
+    borrows into the next field when a zero point is 0, and `+= 1` carries
+    when a stored field is maxed."""
+    from gptqmodel.utils.model_dequant import pack_cols, unpack_cols
+
+    pack_factor = 32 // bits
+    # A 0 field next to nonzero neighbors: the case that borrows/carries.
+    fields = torch.full((1, pack_factor), 1 << (bits - 1), dtype=torch.int32)
+    fields[0, 0] = 0
+
+    module = _make_gptq_module(bits=bits)
+    module.qzeros.data = pack_cols(fields, bits, pack_dtype=torch.int32).clone()
+    module.qzero_format(format=2)
+
+    convert_gptq_v2_to_v1_format_module(module, QuantizeConfig(bits=bits))
+    assert module.qzero_format() == 1
+    expected_v1 = (fields - 1) & ((1 << bits) - 1)
+    assert torch.equal(unpack_cols(module.qzeros, bits), expected_v1)
+
+    convert_gptq_v1_to_v2_format_module(module, bits=bits, pack_dtype=torch.int32)
+    assert module.qzero_format() == 2
+    assert torch.equal(unpack_cols(module.qzeros, bits), fields)
 
 
 def test_hf_pack_layer_reports_missing_scales():
@@ -583,13 +884,13 @@ def test_gpu_feasibility_and_best_format():
     # Marlin has no raw-weight packer; it is a repack target that consumes
     # GPTQ-packed tensors.
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=device
+        4, 32, False, True, backend=BACKEND.MARLIN, device=device
     )
     assert hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=device, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=device, repack=True
     )
     assert not hf_check_packing_feasibility(
-        4, 32, False, False, backend=BACKEND.GPTQ_MARLIN, device=device, repack=True
+        4, 32, False, False, backend=BACKEND.MARLIN, device=device, repack=True
     )
 
     best = hf_check_best_packing_format(4, 32, False, True, device=device)
@@ -633,17 +934,19 @@ def test_hf_repack_layer_to_marlin_matches_source():
 
     # Marlin supports symmetric 4-bit weights only.
     source = _make_gptq_module(group_size=128, sym=True)
-    hf_pack_layer(source, linear, scales, None, g_idx)
+    # Torch forward consumes logical (v2) zeros, while the repack API aligns
+    # the copied buffers to Marlin's convention itself.
+    hf_pack_layer(source, linear, scales, None, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
     source.to(device)
 
-    target = hf_repack_layer(source, BACKEND.GPTQ_MARLIN, device=device)
+    target = hf_repack_layer(source, BACKEND.MARLIN, device=device)
 
     assert isinstance(target, MarlinLinear)
     assert target.qweight.device.type == "cuda"
 
     x = torch.randn(4, 128, dtype=torch.float16, device=device)
     with torch.no_grad():
-        torch.testing.assert_close(target(x), source(x), atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(target(x), source(x), atol=2e-3, rtol=2e-3)
 
 
 @pytest.mark.cuda
@@ -718,7 +1021,7 @@ def test_hf_packing_api_accepts_device_enum_and_ordinal():
 
     # DEVICE.CUDA covers every visible ordinal.
     assert hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CUDA, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CUDA, repack=True
     )
 
     linear, scales, _, g_idx = _make_inputs(4, group_size=32)
@@ -726,7 +1029,7 @@ def test_hf_packing_api_accepts_device_enum_and_ordinal():
     hf_pack_layer(source, linear, scales, None, g_idx)
 
     # Public integer device values are accelerator ordinals.
-    target = hf_repack_layer(source, BACKEND.GPTQ_MARLIN, device=2)
+    target = hf_repack_layer(source, BACKEND.MARLIN, device=2)
 
     assert isinstance(target, MarlinLinear)
     assert target.qweight.device == torch.device("cuda:2")

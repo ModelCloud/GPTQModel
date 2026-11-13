@@ -23,9 +23,9 @@ from ..nn_modules.qlinear import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from ..quantization import FORMAT, METHOD, QuantizeConfig
 from .backend import BACKEND, normalize_backend
 from .importer import (
-    AUTO_BACKEND_KERNEL_MAPPING,
-    BACKEND_TO_METHOD_FORMAT_MAPPING,
     _as_selector_device,
+    get_auto_backend_kernel_mapping,
+    get_backend_to_method_format_mapping,
     select_quant_linear,
     validate_quant_linear,
 )
@@ -245,6 +245,36 @@ def _module_checkpoint_format(module: BaseQuantLinear, method: METHOD) -> FORMAT
     return FORMAT.GEMM if method == METHOD.AWQ else FORMAT.GPTQ
 
 
+def _restore_gptq_runtime_qzeros(module: BaseQuantLinear) -> None:
+    """Restore the v2 runtime zero-point layout before a GPTQ layer is used.
+
+    A ``gptq`` checkpoint request leaves the v1 (stored zero point minus one)
+    layout for export.  Kernels that declare ``REQUIRES_FORMAT_V2`` decode the
+    stored fields directly, so the words must be converted back before
+    ``post_init()`` makes the layer usable.  The inline ``post_init=True`` path
+    in :func:`hf_pack_layer` and the standalone :func:`hf_post_init` helper both
+    need this correction; a layer loaded from a v1 checkpoint carries the same
+    v1 marker.
+    """
+    if (
+        not isinstance(module, GPTQQuantLinear)
+        or not getattr(module, "REQUIRES_FORMAT_V2", False)
+        or getattr(module, "qzeros", None) is None
+    ):
+        return
+    qzero_format = getattr(module, "qzero_format", None)
+    if not callable(qzero_format) or qzero_format() != 1:
+        return
+
+    from .model import convert_gptq_v1_to_v2_format_module
+
+    convert_gptq_v1_to_v2_format_module(
+        module=module,
+        bits=module.bits,
+        pack_dtype=getattr(module, "pack_dtype", torch.int32),
+    )
+
+
 def _select_kernel_class(
     *,
     bits: int,
@@ -461,7 +491,7 @@ def hf_check_best_packing_format(
     method = _normalize_method(quant_method)
 
     if formats is None:
-        candidates = list(BACKEND_TO_METHOD_FORMAT_MAPPING.get(method, {}).keys())
+        candidates = list(get_backend_to_method_format_mapping().get(method, {}).keys())
     else:
         candidates = [_normalize_format(candidate) for candidate in formats]
     if not candidates:
@@ -469,7 +499,7 @@ def hf_check_best_packing_format(
 
     ranked: List[tuple] = []
     for fmt in candidates:
-        kernels = AUTO_BACKEND_KERNEL_MAPPING.get(method, {}).get(fmt)
+        kernels = get_auto_backend_kernel_mapping().get(method, {}).get(fmt)
         if not kernels:
             continue
         best_priority = max(
@@ -571,10 +601,20 @@ def hf_pack_layer(
         )
 
     quant_type = getattr(type(module), "QUANT_TYPE", None)
+    # AWQ kernels share one N-axis packer regardless of the checkpoint
+    # backend.  `QUANT_TYPE` is a backend label, not the quantization method:
+    # AllSpark declares `QUANT_TYPE="allspark"` while still being a supported
+    # AWQ kernel, so also honour the declared method instead of relying on the
+    # older `awq_` name prefix alone.
+    declared_methods = getattr(type(module), "SUPPORTS_METHODS", None) or []
+    is_awq = (
+        quant_type is not None
+        and (quant_type.startswith("awq_") or quant_type == "llm-awq")
+    ) or METHOD.AWQ in declared_methods
 
     if quant_type == "qqq":
         module.pack(linear=linear, scales=scales, s_extra=scales_extra)
-    elif quant_type is not None and (quant_type.startswith("awq_") or quant_type == "llm-awq"):
+    elif is_awq:
         module.pack(
             linear=linear,
             scales=scales,
@@ -633,18 +673,27 @@ def hf_pack_layer(
             )
 
     if isinstance(module, GPTQQuantLinear):
-        # Every raw GPTQ packer writes the checkpoint/v1 qzero layout.  A
-        # caller may reuse a module that was previously converted to v2, so
-        # reset the metadata before deciding whether another conversion is
-        # needed.  Without this, a second pack can skip v1->v2 or apply
-        # v2->v1 to freshly-written v1 words.
-        module.qzero_format(format=1)
+        # Every raw GPTQ packer writes logical zero points (the internal/v2
+        # qzero layout).  A caller may reuse a module that was previously
+        # converted to v1, so reset the metadata before deciding whether a
+        # conversion is needed.  Without this, a second pack can skip v2->v1
+        # or apply v1->v2 to freshly-written v2 words.
+        module.qzero_format(format=2)
         requested_format = checkpoint_format
         if requested_format is None:
             requested_format = getattr(module, "format", None) or FORMAT.GPTQ
         requested_format = _normalize_format(requested_format)
         if requested_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
-            wanted_qzero_format = 1 if requested_format == FORMAT.GPTQ else 2
+            # The v1-checkpoint convention (stored zero point minus one) only
+            # applies to kernels that require the v2 runtime layout; other
+            # kernels keep the raw packer words for both checkpoint flavors,
+            # matching `pack_module`.
+            wanted_qzero_format = (
+                1
+                if requested_format == FORMAT.GPTQ
+                and getattr(module, "REQUIRES_FORMAT_V2", False)
+                else 2
+            )
             if module.qzero_format() != wanted_qzero_format:
                 from .model import (
                     convert_gptq_v1_to_v2_format_module,
@@ -663,6 +712,7 @@ def hf_pack_layer(
                     )
 
     if post_init:
+        _restore_gptq_runtime_qzeros(module)
         module.post_init(**(post_init_kwargs or {}))
 
     return module
@@ -679,6 +729,11 @@ def hf_post_init(module: nn.Module, **post_init_kwargs) -> nn.Module:
     :func:`gptqmodel.utils.model.hf_gptqmodel_post_init`, which also performs
     model-level work such as activation-order and scratch-buffer setup.
 
+    GPTQ layers that still carry the v1 checkpoint zero-point layout are
+    converted to the v2 runtime layout first, matching the inline
+    ``hf_pack_layer(..., post_init=True)`` path.  Without that correction a
+    split pack/initialize lifecycle decodes every zero point one scale high.
+
     Args:
         module: A quantized layer or a container holding quantized layers.
         **post_init_kwargs: Keyword arguments forwarded to each layer's
@@ -694,11 +749,13 @@ def hf_post_init(module: nn.Module, **post_init_kwargs) -> nn.Module:
         raise TypeError(f"hf_post_init: `module` must be an nn.Module, got `{type(module).__name__}`.")
 
     if isinstance(module, BaseQuantLinear):
+        _restore_gptq_runtime_qzeros(module)
         module.post_init(**post_init_kwargs)
         return module
 
     for submodule in module.modules():
         if isinstance(submodule, BaseQuantLinear):
+            _restore_gptq_runtime_qzeros(submodule)
             submodule.post_init(**post_init_kwargs)
     return module
 
@@ -759,12 +816,43 @@ def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None
         )
 
     shared = {key: value for key, value in source_state.items() if key in target_state}
+    _preserve_checkpoint_buffer_dtypes(target, shared)
     target.load_state_dict(shared, strict=False)
 
     source_qzero_format = getattr(source, "qzero_format", None)
     target_qzero_format = getattr(target, "qzero_format", None)
     if callable(source_qzero_format) and callable(target_qzero_format):
         target_qzero_format(format=source_qzero_format())
+
+
+def _preserve_checkpoint_buffer_dtypes(
+    target: BaseQuantLinear, shared: Dict[str, torch.Tensor]
+) -> None:
+    """Keep floating checkpoint buffers at the source storage width.
+
+    ``hf_repack_layer``'s ``dtype`` argument selects the target kernel's
+    activation/output dtype; it does not permit narrowing checkpoint storage.
+    Targets allocate their buffers at construction (AWQ often in FP16), so
+    widen or narrow each shared floating buffer to the source dtype before
+    ``load_state_dict`` copies the values.  Otherwise a finite BF16 bias or
+    scale outside the FP16 range becomes infinity or zero on the copy.
+    """
+    target_tensors: Dict[str, torch.Tensor] = {}
+    target_tensors.update(dict(target.named_parameters()))
+    target_tensors.update(dict(target.named_buffers()))
+
+    for key, value in shared.items():
+        if not torch.is_tensor(value) or not value.is_floating_point():
+            continue
+        current = target_tensors.get(key)
+        if (
+            current is None
+            or not current.is_floating_point()
+            or current.dtype == value.dtype
+        ):
+            continue
+        with torch.no_grad():
+            current.data = current.data.to(dtype=value.dtype)
 
 
 def _resolve_single_torch_device(device) -> Optional[torch.device]:

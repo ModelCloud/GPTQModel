@@ -16,22 +16,22 @@ from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
 
 def _tiny_smolvlm():
     config = SmolVLMConfig(
-        text_config=dict(
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            vocab_size=128,
-        ),
-        vision_config=dict(
-            hidden_size=16,
-            intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            image_size=32,
-            patch_size=8,
-        ),
+        text_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "vocab_size": 128,
+        },
+        vision_config={
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "image_size": 32,
+            "patch_size": 8,
+        },
     )
     return config, SmolVLMForConditionalGeneration(config)
 

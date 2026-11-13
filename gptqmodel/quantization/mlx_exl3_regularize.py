@@ -9,6 +9,7 @@ from functools import lru_cache
 
 from .mlx_exl3_rms import exl3_block_rms_mlx
 
+
 _EXL3_ZERO_THRESHOLD = 1e-30
 _EXL3_OUTPUT_SKEW_THRESHOLD = 0.15
 

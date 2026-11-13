@@ -25,6 +25,7 @@ from ...utils.machete import (
 )
 from ...utils.marlin import replace_parameter, replace_tensor, unpack_cols
 from ...utils.marlin_scalar_type import scalar_types
+from ...utils.packing_math import scaled_zero_offset
 from ...utils.rocm import IS_ROCM
 
 
@@ -74,7 +75,10 @@ def _replace_registered_tensor(
 
 
 class AwqMacheteLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_MACHETE]
+    # AWQ sub-kernel of the shared Machete backend. ``BACKEND.MACHETE`` plus
+    # the checkpoint method/format selects this class; no separate AWQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
     SUPPORTS_BITS = [4, 8]
@@ -128,7 +132,7 @@ class AwqMacheteLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.AWQ_MACHETE),
+            backend=kwargs.pop("backend", BACKEND.MACHETE),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
@@ -162,6 +166,13 @@ class AwqMacheteLinear(AWQuantLinear):
     def post_init(self):
         device = self.qweight.device
 
+        effective_group_size = self.in_features if self.group_size == -1 else self.group_size
+        num_groups = self.in_features // effective_group_size
+        qzeros_unpacked = unpack_cols(self.qzeros, self.bits, num_groups, self.out_features).to(device=device)
+        qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
+        # Validate before overwriting the checkpoint's weight layout.
+        qzeros_fp = scaled_zero_offset(self.scales, qzeros_unpacked)
+
         # Reconstruct integer weights from packed AWQ representation
         qweight_int = unpack_cols(
             self.qweight,
@@ -188,20 +199,6 @@ class AwqMacheteLinear(AWQuantLinear):
         # Ensure scales are contiguous and resident on the correct device.
         _replace_registered_tensor(self, "scales", self.scales.contiguous())
 
-        # Convert zero-points: unpack columns, then pre-apply scales as expected by machete_mm
-        effective_group_size = self.in_features if self.group_size == -1 else self.group_size
-        num_groups = self.in_features // effective_group_size
-
-        qzeros_unpacked = unpack_cols(
-            self.qzeros,
-            self.bits,
-            num_groups,
-            self.out_features,
-        ).to(device=device)
-        qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
-
-        scales = self.scales
-        qzeros_fp = (-1.0 * scales.to(dtype=scales.dtype) * qzeros_unpacked.to(scales.dtype)).contiguous()
         _replace_registered_tensor(self, "qzeros", qzeros_fp)
 
         if self.bias is not None:

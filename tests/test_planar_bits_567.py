@@ -28,6 +28,7 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.planar_packing import (
     PLANAR_BITS,
+    planar_decode_rows,
     planar_pack_cols,
     planar_pack_rows,
     planar_unpack_cols,
@@ -54,6 +55,25 @@ def test_planar_rows_roundtrip(bits: int):
     assert packed.dtype == torch.int32
     assert packed.shape == (160 * bits // 32, 48)
     assert torch.equal(planar_unpack_rows(packed, bits), codes)
+
+
+@pytest.mark.parametrize("bits", PLANAR_BITS)
+def test_planar_row_decode_matches_index_select(bits: int):
+    torch.manual_seed(bits + 100)
+    codes = _rand_codes(160, 48, bits)
+    packed = planar_pack_rows(codes, bits)
+    expected = planar_unpack_rows(packed, bits)
+
+    # Every row, a shuffled subset, repeated rows, and the endpoints.
+    for row_ids in (
+        torch.arange(160),
+        torch.randperm(160)[:37],
+        torch.tensor([0, 0, 31, 32, 63, 96, 159]),
+        torch.empty(0, dtype=torch.long),
+    ):
+        got = planar_decode_rows(packed, row_ids, bits)
+        assert got.shape == (row_ids.numel(), 48)
+        assert torch.equal(got, expected.index_select(0, row_ids))
 
 
 @pytest.mark.parametrize("bits", PLANAR_BITS)
@@ -109,12 +129,7 @@ def test_packer_parity_and_threaded_pack(bits: int):
     m_orig.pack_original(linear, scales.clone(), zeros.clone(), g_idx.clone())
 
     m_threaded = _new_module(bits)
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        monkeypatch.setenv("GPTQMODEL_PACK_PY_THREADS", "4")
-        m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
-    finally:
-        monkeypatch.undo()
+    m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
 
     assert torch.equal(m_block.qweight, m_orig.qweight)
     assert torch.equal(m_block.qzeros, m_orig.qzeros)
@@ -171,11 +186,11 @@ def test_dequantize_weight_matches_reference(bits: int):
 
 @pytest.mark.parametrize("bits", PLANAR_BITS)
 def test_qzeros_v1_v2_conversion_roundtrip(bits: int):
+    from gptqmodel.quantization.config import QuantizeConfig
     from gptqmodel.utils.model import (
         convert_gptq_v1_to_v2_format_module,
         convert_gptq_v2_to_v1_format_module,
     )
-    from gptqmodel.quantization.config import QuantizeConfig
 
     linear, scales, zeros, g_idx = _make_quant_inputs(bits)
     module = _new_module(bits)

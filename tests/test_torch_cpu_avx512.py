@@ -675,11 +675,8 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     )
 
     x = torch.randn(tokens, in_features, dtype=dtype)
-    # ATen int4pack requires scales/zero-points to share the activation dtype.
-    # The FP16 checkpoint scales are therefore rounded to BF16 for a BF16
-    # activation. Use that same representation in the arithmetic oracle so
-    # this test isolates kernel error from the intentional input conversion.
-    arithmetic_scales = scales.to(dtype)
+    # Asymmetric offsets that cannot be represented exactly use FP32 compute.
+    arithmetic_scales = scales.float()
     weight = _aten_affine_oracle(codes, zeros, arithmetic_scales, g_idx)
     reference_fp32 = torch.matmul(x.float(), weight)
 
@@ -691,8 +688,8 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == dtype
-    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=0.2, rtol=0.01)
+    assert layer.scales.dtype == torch.float32
+    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
 
@@ -906,8 +903,55 @@ def test_layer_transform_dequantize_and_forward(desc_act):
     reference = torch.matmul(x.float(), reference_weight.float()).to(torch.bfloat16)
     torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
 
-    with pytest.raises(NotImplementedError, match="inference-only"):
-        layer.train(True)
+
+def test_layer_train_mode_uses_differentiable_dequant_path():
+    # HF/PEFT load with BACKEND.AUTO, which selects this kernel, then call
+    # model.train() for LoRA fine-tuning. The eval forward must not pin the
+    # cached dispatch to the no-grad fused kernel.
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(92)
+    in_features, out_features, group_size = 256, 64, 64
+    groups = in_features // group_size
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        desc_act=False,
+    )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 15, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    _fill_gptq_buffers(
+        layer,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
+    )
+
+    layer.eval()
+    x_eval = torch.randn(5, in_features, dtype=torch.bfloat16)
+    with torch.no_grad():
+        layer(x_eval)
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+
+    assert layer.train(True) is layer
+    assert layer.training
+    assert layer.linear_mode is None
+
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx).to(scales.dtype).to(torch.bfloat16)
+    x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
+    output = layer(x)
+    output.float().sum().backward()
+
+    assert layer.linear_mode == "train"
+    assert layer._cpu_transformed is True
+    assert output.dtype == torch.bfloat16
+    torch.testing.assert_close(output, x.detach() @ weight, atol=2e-3, rtol=2e-3)
+    expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
+    torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
 
 @pytest.mark.parametrize("desc_act", (False, True))

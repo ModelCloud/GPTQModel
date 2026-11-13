@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import weakref
+
 import pytest
 import torch
 import torch.nn as nn
@@ -33,6 +35,64 @@ def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> fp8_mo
     kernel.pack_original(linear=linear, scales=None, zeros=None)
     kernel._scaled_mm_hard_disabled = True
     return kernel.eval()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="NVIDIA FP8 scaled matmul required",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("biased", [False, True])
+@pytest.mark.parametrize("prefix", [(2,), (2, 3)])
+def test_fp8_empty_cuda_forward_preserves_scaled_mm_for_later_tokens(monkeypatch, dtype, biased, prefix):
+    linear = nn.Linear(64, 64, bias=biased).eval()
+    module = fp8_module.TorchFP8Linear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=64, out_features=64, bias=biased,
+        format="float8_e4m3fn", weight_scale_method="tensor",
+    )
+    module.pack_original(linear, scales=None, zeros=None)
+    module = module.eval().to(device="cuda")
+    x = torch.randn(*prefix, 64, device="cuda", dtype=dtype)
+    empty = x[:0]
+    x_flat = x.reshape(-1, 64)
+    if not module._can_use_scaled_mm(x_flat):
+        pytest.skip("Native FP8 scaled matmul unavailable on this GPU")
+    try:
+        module._forward_scaled_mm(x_flat)
+    except Exception as exc:
+        pytest.skip(f"Native FP8 scaled matmul unavailable: {exc}")
+
+    native_calls = []
+    dequant_refs = []
+    native_forward = module._forward_scaled_mm
+    dequantize_weight = module.dequantize_weight
+
+    def counted_native(tensor):
+        native_calls.append(tuple(tensor.shape))
+        return native_forward(tensor)
+
+    def tracked_dequant(*args, **kwargs):
+        weight = dequantize_weight(*args, **kwargs)
+        dequant_refs.append(weakref.ref(weight))
+        return weight
+
+    monkeypatch.setattr(module, "_forward_scaled_mm", counted_native)
+    monkeypatch.setattr(module, "dequantize_weight", tracked_dequant)
+    with torch.inference_mode():
+        empty_output = module(empty)
+        assert empty_output.shape == empty.shape[:-1] + (64,)
+        assert empty_output.dtype == dtype
+        assert not module._scaled_mm_hard_disabled
+        assert native_calls == []
+        assert all(ref() is None for ref in dequant_refs)
+
+        output = module(x)
+        assert output.shape == x.shape
+        assert output.dtype == dtype
+        assert torch.isfinite(output).all()
+        assert native_calls == [tuple(x_flat.shape)]
+        assert not module._scaled_mm_hard_disabled
 
 
 @pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
@@ -168,7 +228,7 @@ def test_fp8_optimize_compiles_cpu_forward(monkeypatch):
 
     def fake_compile(fn, **kwargs):
         calls.append(kwargs)
-        return lambda value: fn(value)
+        return lambda value, bias=None: fn(value, bias=bias)
 
     monkeypatch.setattr(fp8_module, "TORCH_HAS_COMPILE", True)
     monkeypatch.setattr(fp8_module, "torch_compile", fake_compile)
@@ -192,7 +252,7 @@ def test_fp8_compiled_forward_invalidates_on_move_and_state_load(monkeypatch):
     monkeypatch.setattr(
         fp8_module,
         "torch_compile",
-        lambda fn, **_kwargs: lambda value: fn(value),
+        lambda fn, **_kwargs: lambda value, bias=None: fn(value, bias=bias),
     )
 
     kernel.optimize()
@@ -215,7 +275,8 @@ def test_fp8_compiled_forward_falls_back_to_eager(monkeypatch):
     with torch.inference_mode():
         expected = kernel(x)
 
-    def fail(_value):
+    def fail(_value, bias=None):
+        del bias
         raise RuntimeError("compiled graph failed")
 
     kernel._compiled_forward = fail
@@ -236,7 +297,7 @@ def test_fp8_compiled_forward_reads_live_weight_without_dense_cache(monkeypatch)
     monkeypatch.setattr(
         fp8_module,
         "torch_compile",
-        lambda fn, **_kwargs: lambda value: fn(value),
+        lambda fn, **_kwargs: lambda value, bias=None: fn(value, bias=bias),
     )
     kernel.optimize()
 

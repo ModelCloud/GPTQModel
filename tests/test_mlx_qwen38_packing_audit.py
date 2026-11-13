@@ -11,14 +11,15 @@ import pytest
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("MLX requires macOS", allow_module_level=True)
 
 mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
-from gptqmodel.utils.mlx_packing import repack_awq_4bit, repack_gptq_4bit  # noqa: E402
 from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear  # noqa: E402
+from gptqmodel.utils.mlx_packing import repack_awq_4bit, repack_gptq_4bit  # noqa: E402
 
 
 @pytest.mark.parametrize("source_format", ("gptq", "awq"))

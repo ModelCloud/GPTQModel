@@ -12,13 +12,17 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
+    EXLLAMAV2_AWQ_ROCM_UNSUPPORTED,
     ScratchSpace,
     exllamav2_awq_gemm_half_q_half,
     exllamav2_awq_make_q_matrix,
     exllamav2_awq_runtime_available,
     exllamav2_awq_runtime_error,
+    exllamav2_free_q_matrix,
 )
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -45,7 +49,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -77,16 +81,25 @@ class AwqExllamaV2Linear(AWQuantLinear):
             backend=kwargs.pop("backend", BACKEND.AWQ_EXLLAMA_V2),
             adapter=adapter,
             **kwargs)
+        self.q_handle = None
+        self._awq_repacked = False
+        self._q_handle_key = None
+        self._native_shuffled = False
 
     @classmethod
     def validate_once(cls):
+        # The native ExLlamaV2 AWQ extension is CUDA-only: hipcc cannot build it
+        # and the kernel had accuracy regressions on ROCm. Fail fast with an
+        # actionable error instead of attempting the JIT build.
+        if IS_ROCM:
+            return False, NotImplementedError(EXLLAMAV2_AWQ_ROCM_UNSUPPORTED)
         # Validate through the shared JIT loader so import-time checks match the
         # runtime build path used on first kernel access.
         if not exllamav2_awq_runtime_available():
             return False, ImportError(exllamav2_awq_runtime_error())
         return True, None
 
-    def ext_make_q_matrix_awq(self, qweight, qzeros, scales, temp_dq) -> int:
+    def ext_make_q_matrix_awq(self, qweight, qzeros, scales, *, already_shuffled=False) -> int:
         runtime_scales = scales if scales.dtype == torch.float16 else scales.to(dtype=torch.float16)
         return exllamav2_awq_make_q_matrix(
             qweight,
@@ -98,7 +111,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             qzeros,
             runtime_scales,
             None,
-            temp_dq,
+            **({"already_shuffled": True} if already_shuffled else {}),
         )
 
     def post_init(self, scratch_space: ScratchSpace):
@@ -115,45 +128,131 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if not exllamav2_awq_runtime_available():
             raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
+        self._release_q_handle()
         # awq only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
 
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        self.qweight, self.qzeros = unpack_reorder_pack(
-            self.qweight, self.qzeros, self.bits
-        )
-
-        temp_dq_size = self.temp_dq_size()
-        temp_dq = scratch_space.get_slice(temp_dq_size)
-        self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales, temp_dq)
+        self._ensure_q_handle()
 
         super().post_init()
+
+    def _release_q_handle(self) -> None:
+        if self.q_handle is not None:
+            exllamav2_free_q_matrix(self.q_handle, awq=True)
+            self.q_handle = None
+        self._q_handle_key = None
+
+    def clear_weight_cache(self) -> None:
+        """Release native pointers derived from the current packed buffers."""
+
+        self._release_q_handle()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        metadata = getattr(destination, "_metadata", None)
+        if metadata is not None:
+            metadata.setdefault(prefix[:-1], {})["exllamav2_native_shuffled"] = self._native_shuffled
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        state = args[0] if args else kwargs.get("state_dict", {})
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+        runtime_state = bool(local_metadata.get("exllamav2_native_shuffled", False))
+        weight = state.get(prefix + "qweight")
+        native_shape = (self.in_features // self.pack_factor, self.out_features)
+        if self._awq_repacked and not runtime_state:
+            if weight is not None and tuple(weight.shape) != native_shape and prefix + "qzeros" not in state:
+                raise RuntimeError("ExLlamaV2 AWQ checkpoint qweight also requires qzeros")
+            if weight is None and prefix + "qzeros" in state:
+                raise RuntimeError("ExLlamaV2 AWQ checkpoint qzeros also requires qweight")
+        if weight is not None:
+            self._release_q_handle()
+            if getattr(self, "_fusion_native_view", False):
+                for name in ("qweight", "qzeros", "scales", "bias"):
+                    tensor = getattr(self, name, None)
+                    if tensor is not None:
+                        self.register_buffer(name, tensor.clone(memory_format=torch.contiguous_format))
+                self._fusion_native_view = False
+            for name in ("qweight", "qzeros"):
+                incoming = state.get(prefix + name)
+                current = getattr(self, name)
+                if incoming is not None and current.shape != incoming.shape:
+                    self.register_buffer(name, torch.empty(incoming.shape, dtype=current.dtype, device=current.device))
+        super()._load_from_state_dict(*args, **kwargs)
+        if weight is not None:
+            self._awq_repacked = tuple(weight.shape) == native_shape
+            self._native_shuffled = self._awq_repacked
+
+    def _ensure_q_handle(self) -> int:
+        if getattr(self, "_fusion_native_view", False):
+            if self.q_handle is None:
+                raise RuntimeError("ExLlamaV2 AWQ fusion view lost its native descriptor")
+            return self.q_handle
+        if self.scales.dtype != torch.float16:
+            self.scales = self.scales.to(dtype=torch.float16)
+        native_shape = (self.in_features // self.pack_factor, self.out_features)
+        if self._awq_repacked and tuple(self.qweight.shape) != native_shape:
+            # A caller can replace the registered buffers with checkpoint
+            # words after a native handle was built. Clearing the handle does
+            # not reset the one-way flag, but the raw AWQ layout has a distinct
+            # shape. Repack it before binding another native descriptor.
+            self._release_q_handle()
+            self._awq_repacked = False
+            self._native_shuffled = False
+        if not self._awq_repacked:
+            # A state-dict load restores checkpoint words. Finalize them before
+            # binding a new descriptor, just as post_init does on first load.
+            self.qweight, self.qzeros = unpack_reorder_pack(self.qweight, self.qzeros, self.bits)
+            self._awq_repacked = True
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+        )
+        if self.q_handle is not None and self._q_handle_key != key:
+            self._release_q_handle()
+        if self.q_handle is None:
+            already_shuffled = getattr(self, "_native_shuffled", False)
+            self.q_handle = self.ext_make_q_matrix_awq(
+                self.qweight, self.qzeros, self.scales,
+                **({"already_shuffled": True} if already_shuffled else {}),
+            )
+            self._native_shuffled = True
+            self._q_handle_key = key
+        return self.q_handle
 
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
-        assert self.q_handle is not None, (
-            "module.post_init() must be called before module.forward(). "
-        )
+        self._ensure_q_handle()
         if not exllamav2_awq_runtime_available():
             raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        if input_dtype != torch.float16:
-            x = x.to(dtype=torch.float16)
-
-        x = x.view(-1, x.shape[-1])
+        x = x.reshape(-1, x.shape[-1]).contiguous()
 
         out = torch.empty(
             (x.shape[0], self.out_features),
-            dtype=torch.float16,
+            dtype=x.dtype,
             device=x.device,
         )
-        exllamav2_awq_gemm_half_q_half(x, self.q_handle, out, False)
+        handle, temporaries = self.q_handle, None
+        if getattr(self, "_fusion_native_view", False):
+            from ...utils.exllamav2 import exllamav2_clone_q_matrix
+
+            handle, temporaries = exllamav2_clone_q_matrix(self, awq=True, compact=True)
+        try:
+            exllamav2_awq_gemm_half_q_half(x, handle, out, False)
+        finally:
+            if temporaries is not None:
+                from ...utils.exllamav2 import exllamav2_free_q_matrix
+
+                exllamav2_free_q_matrix(handle, awq=True)
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
@@ -167,10 +266,13 @@ class AwqExllamaV2Linear(AWQuantLinear):
         return out.view(out_shape)
 
     def temp_dq_size(self):
+        """Bytes of retained dense-weight scratch: zero by design.
+
+        The quantized kernel decodes inside its launch and the row-count
+        fallback allocates a transient tensor per call, so no dense weight
+        buffer is attached to the handle or the model.
         """
-        Returns the size of the temporary buffer required for the dq kernel.
-        """
-        return self.in_features * self.out_features * 2 + 128
+        return 0
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
         """

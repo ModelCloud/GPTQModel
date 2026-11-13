@@ -4,8 +4,14 @@
 from __future__ import annotations
 
 import inspect
+from typing import Dict, Optional
 
-from ...utils.model import move_to
+from PIL import Image
+from transformers import AutoProcessor, ProcessorMixin
+
+from ...utils.calibration import batched_conversations
+from ...utils.image import extract_vision_info, fetch_image
+from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from .nemotron_h import NemotronHQModel
@@ -13,6 +19,19 @@ from .nemotron_h import NemotronHQModel
 
 class NemotronOmniQModel(NemotronHQModel):
     """GPTQ wrapper for Nemotron Omni models that embed a Nemotron-H language backbone."""
+
+    # The language backbone is calibrated on activations that already contain
+    # the vision tower's embeddings, so text-only calibration is not
+    # representative of inference.
+    modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
+
+    require_load_processor = True
+
+    # The dynamic-resolution image processor returns `pixel_values` as a list
+    # when image sizes differ, but the remote `generate()` only accepts a
+    # stacked tensor. Keep calibration single-sample so batching cannot mix
+    # differently sized images.
+    support_batch_quantize = False
 
     pre_lm_head_norm_module = "language_model.backbone.norm_f"
 
@@ -104,9 +123,91 @@ class NemotronOmniQModel(NemotronHQModel):
             return self.model(*args, **kwargs)
         return self.model.language_model(*args, **kwargs)
 
+    @staticmethod
+    def process_vision_info(conversations) -> Optional[list[Image.Image]]:
+        image_inputs = []
+        for vision_info in extract_vision_info(conversations):
+            if "image" in vision_info or "image_url" in vision_info:
+                image_inputs.append(fetch_image(vision_info))
+            else:
+                raise ValueError(
+                    "Nemotron Omni calibration supports image content only."
+                )
+        return image_inputs or None
+
+    def preprocess_dataset(self, sample: Dict) -> Dict:
+        return sample
+
+    def load_processor(self) -> ProcessorMixin:
+        return AutoProcessor.from_pretrained(
+            self.model_local_path, trust_remote_code=True
+        )
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        processor = self.__dict__.get("processor") or self.load_processor()
+        calib_data = []
+        for batch_index, batch in enumerate(
+            batched_conversations(
+                calibration_dataset,
+                batch_size,
+                process_func=self.preprocess_dataset,
+            )
+        ):
+            try:
+                text = processor.apply_chat_template(
+                    batch, tokenize=False, add_generation_prompt=True
+                )
+                image_inputs = self.process_vision_info(batch)
+                inputs = processor(
+                    text=text,
+                    images=image_inputs,
+                    padding=True,
+                    return_tensors="pt",
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Nemotron Omni calibration preparation failed for batch {batch_index}: {exc}"
+                ) from exc
+
+            if "input_ids" not in inputs:
+                raise ValueError(
+                    f"Nemotron Omni processor output for batch {batch_index} is missing input_ids."
+                )
+            if image_inputs is not None:
+                missing = [
+                    name
+                    for name in ("pixel_values", "num_patches", "num_tokens", "imgs_sizes")
+                    if inputs.get(name) is None
+                ]
+                if missing:
+                    raise ValueError(
+                        f"Nemotron Omni processor output for batch {batch_index} "
+                        f"is missing required field(s): {', '.join(missing)}."
+                    )
+            calib_data.append(inputs)
+
+        del processor
+        return calib_data
+
     def run_input_capture(self, example, use_cache: bool, data_device):
         if self._has_multimodal_inputs(example):
-            return super().run_input_capture(example, use_cache=use_cache, data_device=data_device)
+            # The top-level `forward()` requires `image_flags` and calls
+            # `torch.distributed.get_rank()` unconditionally, which raises
+            # outside a process group. `generate()` performs the same vision
+            # merge without either requirement; the capture hook aborts it at
+            # the first decoder layer, so no tokens are actually generated.
+            capture_keys = (
+                "input_ids",
+                "attention_mask",
+                "pixel_values",
+                "pixel_values_videos",
+                "sound_clips",
+                "sound_length",
+            )
+            capture_inputs = {
+                key: example[key] for key in capture_keys if example.get(key) is not None
+            }
+            return self.model.generate(**capture_inputs, max_new_tokens=1)
         return self.model.language_model(**example, use_cache=use_cache)
 
     def monkey_patch(self):

@@ -1,0 +1,3835 @@
+{
+  "date_utc": "2026-11-07",
+  "scope": "All 57 registered classes inventoried; native fusion numerical qualification covers GPTQ/AWQ only. Other formats remain explicitly ineligible.",
+  "runs": [
+    {
+      "torch": "2.15.0+cu132",
+      "hip": null,
+      "python": "3.14.4",
+      "accelerator": "NVIDIA GeForce RTX 4090",
+      "registry_class_count": 57,
+      "rows": [
+        {
+          "family": "cpu",
+          "kernel": "AWQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AWQBitBlasKernel",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AWQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AllSparkAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AllSparkLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMMLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMMTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq_triton",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVFastLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_gemv",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq_gemv",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGemvFastMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGemvMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqSwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitblasLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitsAndBytesLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitsandbytes",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitsAndBytesMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "FP8MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFCppKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFCudaKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gguf",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFTritonKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_triton",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GPTQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GPTQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "LLMAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "LLMAwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoQuantTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "SwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchAtenAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchAtenLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchCpuAvx512AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq.TorchCpuAvx512AwqLinear'> only supports `[torch.bfloat16]` dtype: actual dtype = `torch.float16`"
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchCpuAvx512Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.torch_cpu_avx512.TorchCpuAvx512Linear'> only supports `[torch.bfloat16]` dtype: actual dtype = `torch.float16`"
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp8",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm",
+            "xpu",
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFusedAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFusedLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchInt8AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "AWQ_TORCH_INT8 is retired: expanding AWQ INT4 weights to persistent INT8 is disabled. Use BACKEND.AUTO to select a packed kernel, or BACKEND.AWQ_TORCH for a portable fallback."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "AWQ_TORCH_INT8 is retired: expanding AWQ INT4 weights to persistent INT8 is disabled. Use BACKEND.AUTO to select a packed kernel, or BACKEND.AWQ_TORCH for a portable fallback."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchInt8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "int8",
+          "bits": 8,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "gptq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TritonV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.tritonv2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "VPTQCudaLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_cuda",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "VPTQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_torch",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "W4AFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_floatx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq_fp8",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "W4ANVFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_nvfp4",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AWQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AWQBitBlasKernel",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "bitblas is not installed or the version is incompatible. Please install via `pip install bitblas>=0.1.0.post1`."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "bitblas is not installed or the version is incompatible. Please install via `pip install bitblas>=0.1.0.post1`."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AWQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AllSparkAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "bits": 8,
+          "group_size": -1,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AllSparkLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "bits": 8,
+          "group_size": -1,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGEMMLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGEMMTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq_triton",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemm_awq_triton.AwqGEMMTritonLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGEMVFastLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int16",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemv_fast_awq.AwqGEMVFastLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGEMVLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_gemv",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemv_awq.AwqGEMVLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGEMVTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq_gemv",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemv_awq.AwqGEMVTritonLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGemvFastMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqGemvMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqMacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "Machete runtime unavailable."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "Machete runtime unavailable."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqMarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqSwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "Swordfish runtime unavailable."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "Swordfish runtime unavailable."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "AwqTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "BitblasLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "bitblas is not installed or the version is incompatible. Please install via `pip install bitblas>=0.1.0.post1`."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "bitblas is not installed or the version is incompatible. Please install via `pip install bitblas>=0.1.0.post1`."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "BitsAndBytesLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitsandbytes",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "BitsAndBytesMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "ExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "FP8MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GGUFCppKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GGUFCudaKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GGUFMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GGUFTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gguf",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GGUFTritonKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_triton",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GPTQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "GPTQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "LLMAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int16",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemv_fast_awq.LLMAwqLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "LLMAwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "MacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.machete.MacheteLinear'> does not support device: cuda:0 (Machete kernel is Hopper-only (SM90); its generated CUTLASS kernels target arch::Sm90 and have no Blackwell image. Found `NVIDIA GeForce RTX 4090` with compute capability 8.9.)"
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.machete.MacheteLinear'> does not support device: cuda:0 (Machete kernel is Hopper-only (SM90); its generated CUTLASS kernels target arch::Sm90 and have no Blackwell image. Found `NVIDIA GeForce RTX 4090` with compute capability 8.9.)"
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "MarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "ParoLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "ParoMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "ParoQuantTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "QQQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "QQQMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "QQQTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "SwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "Swordfish runtime unavailable."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "Swordfish runtime unavailable."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchAtenAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchAtenLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchCpuAvx512AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchCpuAvx512Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp8",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm",
+            "xpu",
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchFusedAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchFusedLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchInt8AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchInt8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "int8",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "gptq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "TritonV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.tritonv2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "VPTQCudaLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_cuda",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "VPTQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_torch",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cuda",
+          "kernel": "W4AFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_floatx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq_fp8",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cuda",
+          "kernel": "W4ANVFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_nvfp4",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "W4ANVFP4Linear needs a CUDA device with NVFP4 tensor cores (compute capability 12.1+); device 0 reports 8.9."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "W4ANVFP4Linear needs a CUDA device with NVFP4 tensor cores (compute capability 12.1+); device 0 reports 8.9."
+            }
+          },
+          "status": "native_contract_unavailable"
+        }
+      ],
+      "auto": [
+        {
+          "family": "cpu",
+          "method": "gptq",
+          "dtype": "torch.float16",
+          "kernel": "TorchAtenLinear"
+        },
+        {
+          "family": "cpu",
+          "method": "gptq",
+          "dtype": "torch.bfloat16",
+          "kernel": "TorchCpuAvx512Linear"
+        },
+        {
+          "family": "cpu",
+          "method": "awq",
+          "dtype": "torch.float16",
+          "kernel": "TorchAtenAwqLinear"
+        },
+        {
+          "family": "cpu",
+          "method": "awq",
+          "dtype": "torch.bfloat16",
+          "kernel": "TorchCpuAvx512AwqLinear"
+        },
+        {
+          "family": "cuda",
+          "method": "gptq",
+          "dtype": "torch.float16",
+          "kernel": "MarlinLinear"
+        },
+        {
+          "family": "cuda",
+          "method": "gptq",
+          "dtype": "torch.bfloat16",
+          "kernel": "MarlinLinear"
+        },
+        {
+          "family": "cuda",
+          "method": "awq",
+          "dtype": "torch.float16",
+          "kernel": "AwqMarlinLinear"
+        },
+        {
+          "family": "cuda",
+          "method": "awq",
+          "dtype": "torch.bfloat16",
+          "kernel": "AwqMarlinLinear"
+        }
+      ],
+      "specialized_loaders": [
+        {
+          "kernel": "ExllamaV3Linear",
+          "module": "gptqmodel.nn_modules.exllamav3",
+          "declared_devices": [
+            "cuda"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "kernel": "ExllamaV3TorchLinear",
+          "module": "gptqmodel.nn_modules.exllamav3_torch",
+          "declared_devices": [
+            "all"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "kernel": "TorchFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp4",
+          "declared_devices": [
+            "cpu",
+            "cuda"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        }
+      ]
+    },
+    {
+      "torch": "2.16.0.dev20261025+rocm10.1",
+      "hip": "7.16.26385",
+      "python": "3.14.10",
+      "accelerator": "AMD Radeon AI PRO R9700",
+      "registry_class_count": 57,
+      "rows": [
+        {
+          "family": "cpu",
+          "kernel": "AWQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AWQBitBlasKernel",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AWQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AllSparkAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AllSparkLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMMLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMMTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq_triton",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVFastLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_gemv",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGEMVTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq_gemv",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGemvFastMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqGemvMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqSwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "AwqTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitblasLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitsAndBytesLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitsandbytes",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "BitsAndBytesMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "FP8MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFCppKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFCudaKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gguf",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GGUFTritonKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_triton",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GPTQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "GPTQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "LLMAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "LLMAwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "ParoQuantTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "QQQTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "SwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchAtenAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchAtenLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchCpuAvx512AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq.TorchCpuAvx512AwqLinear'> only supports `[torch.bfloat16]` dtype: actual dtype = `torch.float16`"
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchCpuAvx512Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.torch_cpu_avx512.TorchCpuAvx512Linear'> only supports `[torch.bfloat16]` dtype: actual dtype = `torch.float16`"
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp8",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm",
+            "xpu",
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFusedAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchFusedLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchInt8AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": false,
+              "reason": "AWQ_TORCH_INT8 is retired: expanding AWQ INT4 weights to persistent INT8 is disabled. Use BACKEND.AUTO to select a packed kernel, or BACKEND.AWQ_TORCH for a portable fallback."
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "AWQ_TORCH_INT8 is retired: expanding AWQ INT4 weights to persistent INT8 is disabled. Use BACKEND.AUTO to select a packed kernel, or BACKEND.AWQ_TORCH for a portable fallback."
+            }
+          },
+          "status": "native_contract_unavailable"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchInt8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "int8",
+          "bits": 8,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "gptq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "cpu",
+          "kernel": "TritonV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.tritonv2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "VPTQCudaLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_cuda",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "VPTQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_torch",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "cpu",
+          "kernel": "W4AFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_floatx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq_fp8",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "cpu",
+          "kernel": "W4ANVFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_nvfp4",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AWQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AWQBitBlasKernel",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AWQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AllSparkAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "bits": 8,
+          "group_size": -1,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AllSparkLinear",
+          "module": "gptqmodel.nn_modules.qlinear.allspark",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "allspark",
+          "bits": 8,
+          "group_size": -1,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGEMMLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGEMMTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemm_awq_triton",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemm_awq_triton.AwqGEMMTritonLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGEMVFastLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGEMVLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_gemv",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGEMVTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": "awq_gemv",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": false,
+              "reason": "<class 'gptqmodel.nn_modules.qlinear.gemv_awq.AwqGEMVTritonLinear'> only supports `[torch.float16]` dtype: actual dtype = `torch.bfloat16`"
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGemvFastMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqGemvMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqMacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqMarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqSwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "AwqTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "awq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "BitblasLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitblas",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "BitsAndBytesLinear",
+          "module": "gptqmodel.nn_modules.qlinear.bitsandbytes",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "BitsAndBytesMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "bitsandbytes"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "ExllamaV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.exllamav2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "exllamav2",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "FP8MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GGUFCppKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GGUFCudaKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GGUFMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GGUFTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gguf",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GGUFTritonKernel",
+          "module": "gptqmodel.nn_modules.qlinear.gguf_triton",
+          "methods": [
+            "gguf"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GPTQBitBLASMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "GPTQMarlinMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "LLMAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.gemv_fast_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "awq_fast",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "LLMAwqMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "MacheteLinear",
+          "module": "gptqmodel.nn_modules.qlinear.machete",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "MarlinLinear",
+          "module": "gptqmodel.nn_modules.qlinear.marlin",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "marlin",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "MlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "ParoLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "ParoMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "ParoQuantTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "methods": [
+            "paroquant"
+          ],
+          "declared_devices": [
+            "cuda",
+            "rocm"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "QQQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "QQQMlxQuantLinear",
+          "module": "gptqmodel.nn_modules.qlinear.mlx",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "QQQTorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.qqq",
+          "methods": [
+            "qqq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "SwordfishLinear",
+          "module": "gptqmodel.nn_modules.qlinear.swordfish",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchAtenAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchAtenLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_aten",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchCpuAvx512AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchCpuAvx512Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_cpu_avx512",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "cpu_avx512",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp8",
+          "methods": [
+            "fp8"
+          ],
+          "declared_devices": [
+            "cpu",
+            "cuda",
+            "rocm",
+            "xpu",
+            "mps"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchFusedAwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchFusedLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_fused",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu",
+            "xpu"
+          ],
+          "fusion_layout": "cpu_legacy",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchInt8AwqLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8_awq",
+          "methods": [
+            "awq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchInt8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.torch_int8",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cpu"
+          ],
+          "fusion_layout": "int8",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TorchLinear",
+          "module": "gptqmodel.nn_modules.qlinear.torch",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": "gptq",
+          "bits": 4,
+          "group_size": 128,
+          "pack_dtype": "torch.int32",
+          "contracts": {
+            "torch.float16": {
+              "available": true,
+              "reason": ""
+            },
+            "torch.bfloat16": {
+              "available": true,
+              "reason": ""
+            }
+          },
+          "status": "native_contract_available"
+        },
+        {
+          "family": "rocm",
+          "kernel": "TritonV2Linear",
+          "module": "gptqmodel.nn_modules.qlinear.tritonv2",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "VPTQCudaLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_cuda",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "VPTQLinear",
+          "module": "gptqmodel.nn_modules.qlinear.vptq_torch",
+          "methods": [
+            "vptq"
+          ],
+          "declared_devices": [
+            "all"
+          ],
+          "fusion_layout": null,
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "family": "rocm",
+          "kernel": "W4AFP8Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_floatx",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": "gptq_fp8",
+          "status": "different_hardware_family"
+        },
+        {
+          "family": "rocm",
+          "kernel": "W4ANVFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.w4a_nvfp4",
+          "methods": [
+            "gptq"
+          ],
+          "declared_devices": [
+            "cuda"
+          ],
+          "fusion_layout": null,
+          "status": "different_hardware_family"
+        }
+      ],
+      "auto": [
+        {
+          "family": "cpu",
+          "method": "gptq",
+          "dtype": "torch.float16",
+          "kernel": "TorchAtenLinear"
+        },
+        {
+          "family": "cpu",
+          "method": "gptq",
+          "dtype": "torch.bfloat16",
+          "kernel": "TorchCpuAvx512Linear"
+        },
+        {
+          "family": "cpu",
+          "method": "awq",
+          "dtype": "torch.float16",
+          "kernel": "TorchAtenAwqLinear"
+        },
+        {
+          "family": "cpu",
+          "method": "awq",
+          "dtype": "torch.bfloat16",
+          "kernel": "TorchCpuAvx512AwqLinear"
+        },
+        {
+          "family": "rocm",
+          "method": "gptq",
+          "dtype": "torch.float16",
+          "kernel": "TorchLinear"
+        },
+        {
+          "family": "rocm",
+          "method": "gptq",
+          "dtype": "torch.bfloat16",
+          "kernel": "TorchLinear"
+        },
+        {
+          "family": "rocm",
+          "method": "awq",
+          "dtype": "torch.float16",
+          "kernel": "AwqGEMMTritonLinear"
+        },
+        {
+          "family": "rocm",
+          "method": "awq",
+          "dtype": "torch.bfloat16",
+          "kernel": "AwqTorchLinear"
+        }
+      ],
+      "specialized_loaders": [
+        {
+          "kernel": "ExllamaV3Linear",
+          "module": "gptqmodel.nn_modules.exllamav3",
+          "declared_devices": [
+            "cuda"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "kernel": "ExllamaV3TorchLinear",
+          "module": "gptqmodel.nn_modules.exllamav3_torch",
+          "declared_devices": [
+            "all"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        },
+        {
+          "kernel": "TorchFP4Linear",
+          "module": "gptqmodel.nn_modules.qlinear.fp4",
+          "declared_devices": [
+            "cpu",
+            "cuda"
+          ],
+          "status": "outside_gptq_awq_fusion_contract"
+        }
+      ]
+    }
+  ]
+}

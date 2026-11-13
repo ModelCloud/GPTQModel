@@ -97,12 +97,10 @@ steps:
    `self.scales`, match the signature of
    `aten._weight_int4pack_mm_with_scales_and_zeros(x, qweight, group_size, scales, qzeros)`.
 
-For XPU execution, `_fused_op_forward` also permutes activations before the
-matmul:
-
-```
-x = x[:, ret_idx]
-```
+For XPU execution, `_fused_op_forward` keeps the main-branch behavior: it
+always gathers with `ret_idx` and materializes a contiguous zero-offset copy.
+The identity fast path is CPU-only, because the XPU kernel has no coverage for
+activation views with a non-zero storage offset.
 
 This applies the inverse of the group-wise reordering performed in step 3,
 ensuring that column `i` of `qweight` always multiplies the same logical input
@@ -129,7 +127,11 @@ The CPU path shares the unpack/reorder logic but delegates the final packing to
 PyTorch’s helper so the layout matches
 `aten._weight_int4pack_mm_for_cpu`. Steps:
 
-1. **Scales cast** – identical to the XPU path.
+1. **Unpack zero codes and choose metadata dtype** – unpack each packed GPTQ
+   `qzeros` lane into `[G, O]` integer codes. `_cpu_int4pack_scale_dtype`
+   checks whether the resulting affine offsets remain finite and exact in the
+   activation dtype; it selects FP32 metadata when narrowing would lose the
+   offset. Cast `scales` to that compute dtype.
 2. **Unpack + reorder `qweight`** – same as step 3 above, yielding
    `weight_full = [O, I]` with 4-bit integers.
 3. **Convert to int4pack** – `torch.ops.aten._convert_weight_to_int4pack_for_cpu`
@@ -146,9 +148,11 @@ PyTorch’s helper so the layout matches
    raises `_convert_weight_to_int4pack_cpu : expect N to be dividable by 16`
    otherwise.
 
-4. **Merge scales and zeros** – The fused CPU kernel expects scale and zero
-   offsets in a single tensor, so `pack_scales_and_zeros` stacks them along the
-   last dimension:
+4. **Convert zero codes and merge metadata** –
+   `_cpu_int4pack_zero_offsets` computes `(8 - zero_code) * scale`. The fused
+   CPU kernel dequantizes a nibble as `(code - 8) * scale + offset`, which now
+   equals GPTQ's `(code - zero_code) * scale`. `pack_scales_and_zeros` stacks
+   scales and offsets along the last dimension:
 
    ```
    scales_and_zeros[g, o] = [ scale[g, o], zero[g, o] ]    shape = [G, O, 2]
@@ -159,9 +163,9 @@ PyTorch’s helper so the layout matches
      └─────────────────────────────────┘
    ```
 
-   The current GPTQ fused path only uses symmetric int4, so `self.qzeros` is
-   zeroed before packing (`zero[g, o] = 0`). Non-symmetric per-group offsets
-   would require extending this block.
+   The stored integer `qzeros` become affine offsets only for the transformed
+   inference layout. `capture_fused_train_state` keeps the packed checkpoint
+   tensors for eval-to-train restoration and explicit cache clearing.
 
 5. **Buffers used at runtime** – `self.qweight` is now the `uint8`
    int4pack tensor, `self.scales_and_zeros` stores the merged metadata, and
@@ -178,27 +182,283 @@ weight_full (O × I, ints) ──_convert_weight_to_int4pack_for_cpu──►
      ↑                                                         ↑
      └───────── unpack & transpose from raw qweight ───────────┘
 
-scales (G × O, dtype `dtype`)
-qzeros (G × O, zeroed) ──► scales_and_zeros (G × O × 2)
+packed qzeros (G × O/8) ──unpack──► zero codes (G × O)
+zero codes + scales ──(8 - code) * scale──► affine offsets (G × O)
+scales + offsets ──pack_scales_and_zeros──► (G × O × 2)
 ```
+
+### Asymmetric zero-point lifecycle
+
+```mermaid
+flowchart TD
+    A["TorchFusedLinear.forward: eval on CPU"] --> B["capture_fused_train_state"]
+    B --> C["transform_cpu"]
+    C --> D["Unpack packed qzeros to zero_codes"]
+    D --> E["_cpu_int4pack_scale_dtype"]
+    E --> F{"Narrowed offset finite and exact?"}
+    F -- Yes --> G["Use activation metadata dtype"]
+    F -- No --> H["Use FP32 metadata"]
+    G --> I["_cpu_int4pack_zero_offsets"]
+    H --> I
+    I --> J["Convert qweight to int4pack; pack_scales_and_zeros"]
+    J --> K["_refresh_fused_op"]
+    K --> L["_cpu_int4pack_mm"]
+    J -. Invalid int4pack geometry .-> X["ATen error"]
+    L -. Unsupported matmul contract .-> X
+    M["train / checkpoint load / export"] --> N["restore_fused_train_state: packed checkpoint tensors"]
+    O["clear_weight_cache / same-device move"] --> P["_refresh_fused_op: rebuild from live packed buffers"]
+    Q["cross-device move"] --> N
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| GPTQ CPU zero points | `transform_cpu` replaced packed `qzeros` with `zeros_like(scales)` (`gptqmodel/nn_modules/qlinear/torch_fused.py:281` before this change). | It unpacks the checkpoint codes and stores `(8 - zero_code) * scale` offsets (`gptqmodel/nn_modules/qlinear/torch_fused.py:272-295`). |
+| Narrow offset range | `scales` were cast directly to the activation dtype. | `_cpu_int4pack_scale_dtype` chooses FP32 when low-precision offsets would be nonfinite or inexact (`gptqmodel/nn_modules/qlinear/torch_fused.py:277`). |
+| Eval-to-train | Packed checkpoint buffers were already snapshotted. | The same packed snapshot is restored on `train()`, checkpoint load, and export. `clear_weight_cache()` rebuilds derived metadata from the live packed buffers instead. |
+
+On `origin/main` at `520809c8`, a two-group packed checkpoint with codes 12,
+zero codes 3 and 11, and scale 0.25 returned 64 instead of 80 for group size
+32 and 256 instead of 320 for group size 128. The CPU regression decodes
+packed words independently in Python, checks group sizes 32/128, FP16/BF16,
+and both activation-order modes, then verifies the packed-only storage and
+eval-to-train restoration.
+
+With two BF16 activation rows and 32 outputs on a single CPU thread, the
+independent packed-word oracle and corrected fused output agreed exactly after
+BF16 output rounding. Three warmups and 20 timed forwards gave:
+
+| Group size | Checkpoint bytes | Reachable tensor storage after forward | Median forward |
+| --- | ---: | ---: | ---: |
+| 32 | 1,440 | 3,264 bytes | 0.0293 ms |
+| 128 | 5,280 | 10,944 bytes | 0.0502 ms |
+
+The reachable count deduplicates storage pointers and includes packed checkpoint
+snapshots, transformed packed weights, affine metadata, and small indexing
+buffers. No dense or expanded weight is retained. `transform_cpu` temporarily
+unpacks a full `[I, O]` code matrix and an `int32` copy for the ATen packer;
+these are released before inference forwards. No temporary peak was measured.
+
+Asymmetric GPTQ fused CPU zero-point conversion was corrected in
+[PR #3746](https://github.com/ModelCloud/GPTQModel/pull/3746).
+
+## Checkpoint layout restore vs. runtime round-trip
+
+After a CPU inference forward, `qweight`/`qzeros` hold the `int4pack` runtime
+layout while `_fused_train_state` still holds the checkpoint layout. A
+`load_state_dict` can therefore carry one of two layouts, and the load path
+must decide which one it is before touching any buffer:
+
+* a **checkpoint** dict (`save()` output or a file being resumed), whose shapes
+  match the snapshot, and
+* the model's **own runtime** `state_dict()`, whose shapes match the live
+  transformed operands.
+
+Only the checkpoint case may restore the snapshot before the copy. The runtime
+case must keep the live layout the caller just supplied; restoring the snapshot
+first makes the subsequent strict copy fail with a size mismatch, and
+restoring it after the copy would silently discard the loaded values. An
+unchanged runtime self-load keeps the checkpoint snapshot for a later save.
+If the runtime operands changed, their affine offsets may not have an exact
+checkpoint representation; export and training restore then fail explicitly.
+
+`classify_fused_state_layout()` checks the **supplied** operands whose shape
+changed (`_discriminating_operands`): `qweight` and `qzeros` for the CPU
+int4pack and AVX512 paths. This also permits `strict=False` loads containing
+only one of those operands. Supplied discriminators must agree; mixed or
+unknown shapes raise before the module is changed. `scales` keeps its shape in
+both layouts, so a dict containing only shared-shape operands loads into the
+live runtime layout. If those values changed, checkpoint export fails instead
+of writing the old snapshot. A dict with no local operands leaves the layout
+untouched.
+
+### Cache invalidation is not a checkpoint restore
+
+`clear_weight_cache()` is called from three different lifecycle events:
+explicit cache invalidation, `nn.Module._apply` device/dtype moves, and the
+post-load hook. The clear itself only drops derived state (`ret_idx`,
+`scales_and_zeros`, `torch_fused_op`) and rebuilds it from the live packed
+buffers; it deliberately keeps the runtime-layout flags (`linear_mode`,
+`_cpu_transformed`, `_cpu_transform_dtype`) live. The checkpoint snapshot is
+restored only by an explicit checkpoint load, export, `train()` resume, or an
+invalidating move (decided by `_apply`, not by the clear).
+
+```mermaid
+flowchart TD
+    A["checkpoint layout<br/>qweight int32, snapshot present"] -->|"first eval forward<br/>capture_fused_train_state + transform"| B["runtime layout<br/>qweight int4pack uint8"]
+    B -->|"clear_weight_cache<br/>explicit clear or same-device move"| B
+    B -->|"low-precision dtype move<br/>restore_fused_train_state"| A
+    B -->|"cross-device move<br/>restore_fused_train_state"| A
+    B -->|"train / checkpoint load / export<br/>restore_fused_train_state"| A
+    A -->|"clear_weight_cache<br/>invalidate derived state"| A
+    B -. "modified runtime state" .-> X["export raises RuntimeError"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+The old clear path ran `restore_fused_train_state()` unconditionally. Clearing
+after an in-place metadata change such as `scales.mul_(2)` therefore replaced
+the live scales with the snapshot's pre-change values and returned the
+checkpoint layout to the inference kernel. The measured effect was a 0.5x
+output (`max_abs 1.390625` against an expected `2.78125`) instead of a cache
+invalidation.
+
+The runtime layout is coupled to both the scale dtype and the device. The
+runtime `qzeros` holds affine offsets computed from the pre-move scale dtype;
+narrowing them in place would decode different weights, and
+`_cpu_transform_dtype` would still name the old activation dtype. The packed
+`qweight` is also device-specific: the CPU `_convert_weight_to_int4pack_for_cpu`
+layout is not the XPU packing, so a cross-device move that kept the live
+buffers fed the CPU kernel an int32 XPU tensor (`RuntimeError:
+_weight_int4pack_mm_cpu : expect B to be uint8 tensor`). `TorchAtenLinear`,
+`TorchAtenAwqLinear`, `TorchFusedLinear`, and `TorchFusedAwqLinear` therefore
+restore the checkpoint snapshot after a move to FP16/BF16 or to another device
+and let the next forward re-transform. A same-device move to FP32 keeps the
+live layout because it only widens the offsets.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Explicit clear or same-device move | `clear_weight_cache()` restored the snapshot (`gptqmodel/nn_modules/qlinear/torch_fused.py:145-148`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:172-176` before this change). | It drops derived state and rebuilds from the live packed buffers (`gptqmodel/nn_modules/qlinear/torch_fused.py:152-156`, `gptqmodel/nn_modules/qlinear/torch_aten_kernel.py:177-181`). |
+| Checkpoint load | Relied on the cache clear to restore before the copy (`gptqmodel/nn_modules/qlinear/__init__.py:357-366` before this change). | Calls `restore_fused_train_state()` explicitly before the copy and then invalidates derived caches (`gptqmodel/nn_modules/qlinear/__init__.py:356-366`). |
+| Checkpoint export | Relied on the cache clear to restore (`gptqmodel/utils/model.py:2369-2375` before this change). | Calls `restore_fused_train_state()` explicitly for each transformed module (`gptqmodel/utils/model.py:2372-2376`). |
+| Training resume | Restored in `train()` (`gptqmodel/nn_modules/qlinear/torch_fused.py:212-216`). | Unchanged. |
+
+```mermaid
+flowchart TD
+    A["BaseQuantLinear._load_from_state_dict(state_dict, prefix, ...)"] --> B{"_fused_train_state present?"}
+    B -- no --> S["super()._load_from_state_dict"]
+    B -- yes --> C["classify_fused_state_layout<br/>supplied shape-changing operands"]
+    C --> D{"layout?"}
+    D -- invalid --> X["raise RuntimeError<br/>mixed or invalid shapes"]
+    D -- checkpoint --> E["restore_fused_train_state<br/>reset runtime layout"]
+    E --> E2["_clear_runtime_weight_cache<br/>invalidate derived caches"]
+    E2 --> S
+    D -- runtime --> R["runtime_state_matches_live<br/>set exportable flag"]
+    R --> I{"assign_to_params_buffers?"}
+    I -- no --> J["materialize_fused_runtime_state"]
+    I -- yes --> S
+    J --> S
+    D -- empty --> S
+    S --> P{"layout after copy?"}
+    P -- runtime --> L["_clear_runtime_weight_cache<br/>keep live layout"]
+    P -- checkpoint or no snapshot --> Q["_clear_runtime_weight_cache<br/>invalidate derived caches"]
+    P -- empty --> M["load complete"]
+    L --> M
+    Q --> M
+    M --> Y{"later export<br/>snapshot exportable?"}
+    Y -- no --> Z["raise RuntimeError<br/>changed runtime state"]
+    Y -- yes --> T["_restore_checkpoint_layout_for_export<br/>restore + reset + clear"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X,Z failure;
+```
+
+The runtime branch also handles an `inference_mode` side effect: the transform
+runs inside inference mode, so the live operands are inference tensors, and
+`load_state_dict(assign=False)` cannot copy into them outside it. The branch
+clones those operands, including `g_idx`, into normal tensors first; `assign=True` replaces them
+outright and skips the clone.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Layout verdict | `state_dict_matches_checkpoint_layout()` returned `True` on the **first** snapshot operand whose shape matched (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:81-105` before PR #3769). `scales` is shape-identical in both layouts, so a runtime dict was classified as a checkpoint. | PR #3769 required all shape-changing operands to match. `classify_fused_state_layout()` now requires only the **supplied** shape-changing operands to agree, so partial loads work. |
+| Runtime-layout load | The snapshot was restored before the copy, then `super()._load_from_state_dict()` copied `(64, 64)` `qweight` into the restored `(16, 64)` buffer: `RuntimeError: size mismatch for qweight`. | `state_dict_matches_runtime_layout()` keeps the live `int4pack` layout and rebuilds derived metadata. An unchanged self-load retains the checkpoint snapshot for save. |
+| `assign=False` on a transformed layer | Copying into inference tensors raised `Inplace update to inference tensor outside InferenceMode is not allowed`. | `materialize_fused_runtime_state()` clones inference-tensor operands into normal tensors before the copy. |
+| Post-load cache clear | `clear_weight_cache()` restored the snapshot unconditionally, replacing the values just loaded. | The clear only invalidates derived state and rebuilds from the live buffers. A later save restores an unchanged snapshot explicitly; a modified runtime state raises instead of writing stale weights. |
+| Explicit clear or move | A clear restored the snapshot, overwriting uncommitted metadata and returning the checkpoint layout to the inference kernel. | A clear keeps the live packed buffers and rebuilds derived metadata from them. Only a checkpoint load, export, or training resume restores the snapshot. |
+| Partial checkpoint load | The all-operand check (`gptqmodel/nn_modules/qlinear/_fused_train_state.py:168-190` in PR #3769) missed a lone checkpoint `qweight`, then copying into the runtime shape raised even with `strict=False`. | One supplied checkpoint discriminator restores the snapshot before the copy. |
+| Partial runtime or shared-shape load | Missing discriminators fell through to the unconditional cache clear (`gptqmodel/nn_modules/qlinear/__init__.py:399-406` in PR #3769), discarding updated values. | A supplied runtime discriminator, or only shared-shape keys, keeps the live layout and invalidates derived metadata. Empty loads do nothing. |
+| Mixed layouts | A mixed dict reached the copy and could mutate some buffers before a size error. | Conflicting discriminator shapes raise before any local buffer is touched. |
+
+The regression is pinned by
+`tests/test_kernel_audit_regressions.py::test_transformed_cpu_layer_round_trips_its_own_state_dict`
+(both `assign` values, all six CPU GPTQ/AWQ kernels) and
+`::test_checkpoint_layout_gate_uses_discriminating_operands`, plus partial-load,
+save, and inference-buffer regressions. The load path was introduced in
+[PR #3765](https://github.com/ModelCloud/GPTQModel/pull/3765), then refined in
+[PR #3769](https://github.com/ModelCloud/GPTQModel/pull/3769). Partial-load
+classification was added in [PR #3770](https://github.com/ModelCloud/GPTQModel/pull/3770).
 
 ## Activation permutation and fused matmul
 
-Both device paths rely on the same activation permutation:
+Both device paths share the same `ret_idx` derivation, but only the CPU path
+takes the identity fast path. `ret_idx` is built once from `g_idx` so that
+unpacked rows can be restored to the calibration order:
 
-1. `ret_idx` is built once from `g_idx` so that unpacked rows can be restored to
-   the calibration order.
-2. Before calling any fused matmul, `_fused_op_forward` applies `x = x[:, ret_idx]`.
-3. The matmul then multiplies `x` with the packed `qweight`:
+```mermaid
+flowchart TD
+    A["TorchFusedLinear._fused_op_forward(x)"] --> B["_refresh_fused_op()"]
+    B --> X{"x.device.type == xpu"}
+    X -- "yes" --> G["x = x[:, _build_ret_idx().to(x.device)].contiguous()"]
+    X -- "no" --> C{"_ret_idx_is_identity()"}
+    C -- "identity" --> D{"x.is_contiguous()"}
+    D -- "yes" --> F["torch_fused_op(x)"]
+    D -- "no" --> E["x = x.contiguous()"]
+    E --> F
+    C -- "non-identity" --> G
+    G --> F
+    style G fill:#fff3e0,stroke:#ef6c00
+    style F fill:#e8f5e9,stroke:#2e7d32
+```
 
-   * XPU: `aten._weight_int4pack_mm_with_scales_and_zeros`
-     consumes `qweight[int32][O, I/8]`, `scales[G, O]`, and `qzeros[G, O]`.
-   * CPU: `aten._weight_int4pack_mm_for_cpu`
-     consumes `qweight[uint8][O, I/2]` and `scales_and_zeros[G, O, 2]`.
+`desc_act=False` checkpoints have `g_idx == arange(I) // group_size`, so the
+permutation is the identity and the CPU gather is a no-op copy that is skipped
+entirely. `TorchAtenLinear` and `TorchCpuAvx512Linear` already used this guard;
+`TorchFusedLinear` now reuses it instead of gathering unconditionally on CPU.
+XPU still gathers unconditionally to preserve the main-branch zero-offset copy.
+
+The matmul then multiplies the (possibly reordered) `x` with the packed
+`qweight`:
+
+* XPU: `aten._weight_int4pack_mm_with_scales_and_zeros`
+  consumes `qweight[int32][O, I/8]`, `scales[G, O]`, and `qzeros[G, O]`.
+* CPU: `aten._weight_int4pack_mm_for_cpu`
+  consumes `qweight[uint8][O, I/2]` and `scales_and_zeros[G, O, 2]`.
 
 Because the same `ret_idx` is used for both the unpacked weight (during packing)
 and the activation tensor (during inference), every nibble in the packed matrix
 aligns with the correct logical input column.
+
+### Identity-verdict cache and invalidation
+
+`_ret_idx_is_identity()` lives on `PackableQuantLinear`
+(`gptqmodel/nn_modules/qlinear/__init__.py`) so every kernel that reorders
+activations shares one implementation. The verdict is cached in
+`_ret_idx_identity` and validated against `_ret_idx_key`, which holds
+`tensor_cache_key(g_idx)`; repeated forwards therefore stay O(1).
+
+```mermaid
+flowchart TD
+    A["_ret_idx_is_identity()"] --> B{"_ret_idx_identity is set<br/>and _ret_idx_key == tensor_cache_key(g_idx)"}
+    B -- "hit" --> C["return cached verdict"]
+    B -- "miss" --> D["ret_idx = _build_ret_idx()"]
+    D --> E["identity = tensor_equal(ret_idx, arange(numel))"]
+    E --> F["_ret_idx_identity = identity"]
+    F --> G["return identity"]
+    H["_build_ret_idx() rebuild path"] --> I["_ret_idx_identity = None<br/>_ret_idx_key = new key"]
+    J["clear_weight_cache()"] --> K["ret_idx = None<br/>_ret_idx_key = None<br/>_ret_idx_identity = None"]
+    style I fill:#e8f5e9,stroke:#2e7d32
+    style K fill:#e8f5e9,stroke:#2e7d32
+    style C fill:#e3f2fd,stroke:#1565c0
+```
+
+A stale `True` paired with a new `_ret_idx_key` would skip a required gather and
+silently return wrong values, so every path that changes the permutation must
+drop the verdict:
+
+| Path | Effect on `_ret_idx_identity` |
+| --- | --- |
+| `_build_ret_idx()` rebuild (key miss) | cleared, recomputed on the next check |
+| `_build_ret_idx()` cache hit | untouched, the key still matches |
+| `_build_ret_idx()` called explicitly by a caller | cleared by the rebuild path |
+| `g_idx` replaced or mutated without an explicit rebuild (versioned tensor) | key mismatch forces a recompute |
+| `clear_weight_cache()` (state-dict load, `_apply` device/dtype move) | cleared with `ret_idx` and `_ret_idx_key` |
+
+For inference tensors, `tensor_cache_key()` has no version counter to observe an
+in-place write. A `g_idx` mutated in place inside `InferenceMode` without an
+explicit `clear_weight_cache()` can therefore still serve a stale verdict; this
+is the same contract documented in
+`gptqmodel/nn_modules/qlinear/_runtime_cache.py`.
 
 ## Comparing XPU vs CPU transformations
 
@@ -212,11 +472,11 @@ debugging.
 | Packed `qweight` shape     | `[O, I / 8]`, dtype `int32`                                    | `[O, I / 2]`, dtype `uint8`                                       |
 | Bits per storage lane      | 32-bit lane packs 8 inputs; nibble order `[in+7 … in+0]`       | 8-bit lane packs 2 inputs; high nibble = odd, low nibble = even   |
 | Packing direction          | Manual double-loop packs along **columns** of `weight_full`    | `_convert_weight_to_int4pack_for_cpu` packs along **columns** into bytes |
-| Per-group zeros            | Unpacked to full `[G, O]` tensor and passed separately         | Forced to zero and merged with scales via `pack_scales_and_zeros` |
-| Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = zero` (`float`)      |
+| Per-group zeros            | Unpacked integer codes `[G, O]` passed separately               | Converted to `(8 - zero_code) * scale` offsets and merged with scales |
+| Scale format               | One tensor per group (`scales[G, O]`)                          | Concatenated `[..., 0] = scale`, `[..., 1] = affine offset` (`float`) |
 | Fused kernel call          | `_weight_int4pack_mm_with_scales_and_zeros(x, qW, gsz, s, z)`  | `_weight_int4pack_mm_for_cpu(x, qW, gsz, scales_and_zeros)`       |
 | Alignment requirements     | Determined by manual pack loop (only needs `I % 8 == 0`)       | Kernel enforces `I % 16 == 0` and `O % 16 == 0`                   |
-| Activation permutation     | `x = x[:, ret_idx]` prior to matmul (same code path)           | Same permutation reuse                                            |
+| Activation permutation     | always `x[:, ret_idx].contiguous()` (zero-offset copy)          | gather only when `_ret_idx_is_identity()` is false; otherwise `x.contiguous()` when needed |
 
 Visually, you can think of the difference as *row-major lane packing* (XPU)
 versus *byte-tiling* (CPU):
@@ -235,8 +495,8 @@ in the final storage type, accompanying metadata, and fused operator ABI.
 reuses the CPU fused kernel while accepting checkpoints emitted by the AWQ
 tooling. The module always expects `qweight` to be stored in the AWQ layout
 `[in_features, out_features / pack_factor]`, meaning each row corresponds to a
-single logical input channel. `transform_cpu_awq` performs a fixed shim before
-the standard CPU packing runs:
+single logical input channel. `transform_cpu_awq` performs its own CPU
+int4pack transform:
 
 1. **Unpack AWQ rows** – `unpack_awq` expands each column lane into eight
    outputs, yielding `iweight[int8][I, O]` and `izeros[int8][G, O]`. Both
@@ -245,23 +505,14 @@ the standard CPU packing runs:
    logical transformer layout expected by GPTQ.
 2. **Normalize zero codes** – AWQ stores integer zero points per output channel.
    `transform_cpu_awq` converts them into floating offsets compatible with the
-   fused kernel using
-   `zeros_fp16 = (2^{bits-1} - izeros) * scales_fp32`, keeping the result in
-   `float16` so the metadata matches the original AWQ calibration statistics.
-3. **Repack into GPTQ lanes** – The unpacked `iweight` matrix is reshaped to
-   `[I / pack_factor, pack_factor, O]` and re-packed along the `pack_factor`
-   dimension so each row once again represents eight inputs inside a 32-bit
-   lane. After this step `self.qweight` is indistinguishable from a GPTQ v2
-   tensor, which means the regular `transform_cpu` logic can run unchanged.
-4. **Delegate to the base CPU transform** – Calling `super().transform_cpu`
-   converts the temporary GPTQ-formatted `qweight` into the `[O, I/2]` `uint8`
-   int4pack layout and produces `scales_and_zeros` from the (temporarily zeroed)
-   metadata.
-5. **Restore AWQ metadata** – Immediately afterward, the AWQ shim reinstates
-   the real `float16` scales and the converted zero offsets, then rebuilds
-   `scales_and_zeros = pack_scales_and_zeros(scales, zeros_fp16)`. This ensures
-   `_weight_int4pack_mm_for_cpu` receives the same affine parameters the AWQ
-   calibration solved for.
+   fused kernel using `(2^{bits-1} - izeros) * scales_fp32`. It chooses FP32
+   metadata when the offset cannot safely be narrowed.
+3. **Pack the output-major codes** – `transform_cpu_awq` transposes `iweight`
+   and calls `_convert_weight_to_int4pack_for_cpu` directly. It does not call
+   `TorchFusedLinear.transform_cpu`.
+4. **Build AWQ affine metadata** – The AWQ path independently selects a safe
+   metadata dtype, computes `(8 - izeros) * scales`, and calls
+   `pack_scales_and_zeros`. The GPTQ zero-code fix does not change AWQ packing.
 
 Because the shim runs entirely on the CPU path, `TorchFusedAwqLinear`
 currently raises `NotImplementedError` when asked to run the fused transform on
@@ -278,10 +529,10 @@ unavailable), inference falls back to the dense AWQ matmul computed by
 | Packed XPU `qweight`           | `[O, I / 8]`, `int32`                                     | Bits `[3:0]` hold the lowest-numbered channel  |
 | Packed CPU `qweight`           | `[O, I / 2]`, `uint8`                                     | High nibble = odd input, low nibble = even     |
 | `qzeros` (post-XPU transform)  | `[G, O]`, matches `scales`                                | Passed separately to the XPU fused op          |
-| `scales_and_zeros` (CPU only)  | `[G, O, 2]`, float                                        | `[..., 0] = scale`, `[..., 1] = zero`          |
+| `scales_and_zeros` (CPU only)  | `[G, O, 2]`, float                                        | `[..., 0] = scale`, `[..., 1] = affine offset` |
 | Raw AWQ `qweight`              | `[I, O / 8]`, `int32`                                     | Rows are single inputs packed across outputs   |
 | Unpacked AWQ weights/zeros     | `iweight[I, O]`, `izeros[G, O]`, `int8`                    | Produced by `unpack_awq` + `reverse_awq_order` |
-| AWQ zero offsets (final)       | `[G, O]`, `float16`                                       | `(2^{bits-1} - izeros) * scales`; merged via `pack_scales_and_zeros` |
+| AWQ zero offsets (final)       | `[G, O]`, FP16 or FP32                                   | `(2^{bits-1} - izeros) * scales`; merged via `pack_scales_and_zeros` |
 
 These details mirror the expectations of the Intel XPU and CPU fused matmul
 kernels, and the ASCII layouts above describe how rows/columns line up inside

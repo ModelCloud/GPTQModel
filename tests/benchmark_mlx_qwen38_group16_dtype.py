@@ -60,8 +60,8 @@ def run(repeats):
                 old, new = measure_pair(
                     lambda: main_forward(layer, x), lambda: layer(x), repeats,
                 )
-                print(json.dumps(dict(dtype=str(dtype), projection=name, rows=rows,
-                                      main_ms=old, new_ms=new, speedup=old / new)), flush=True)
+                print(json.dumps({"dtype": str(dtype), "projection": name, "rows": rows,
+                                      "main_ms": old, "new_ms": new, "speedup": old / new}), flush=True)
 
 
 if __name__ == "__main__":

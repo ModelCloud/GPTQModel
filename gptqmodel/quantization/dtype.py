@@ -15,8 +15,8 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from ..utils.torch import HAS_NPU
 from ..utils.logger import setup_logger
+from ..utils.torch import HAS_NPU
 
 
 log = setup_logger()
@@ -356,7 +356,7 @@ def _dequantize_f8_reference(
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
 
-    result = tensor.to(target_dtype)
+    result = tensor.to(torch.float32)
     if scale is not None:
         scale_tensor = _expand_scale(scale.to(result.dtype), result, axis_hint=axis)
         result = result * scale_tensor
@@ -366,7 +366,7 @@ def _dequantize_f8_reference(
             result = result * scale_tensor
         else:
             result = result / scale_tensor
-    return result
+    return result.to(target_dtype)
 
 
 def _dequantize_f4_reference(
@@ -393,7 +393,7 @@ def _dequantize_f4_reference(
         unpacked = unpack_uint4(tensor.reshape(-1))
         expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
         unpacked = unpacked.view(*expanded_shape)
-        result = f4_unpacked_to_f32(unpacked).to(target_dtype)
+        result = f4_unpacked_to_f32(unpacked)
     else:
         _warn_torch_only_fp4_fallback()
 
@@ -404,12 +404,12 @@ def _dequantize_f4_reference(
         lookup = torch.tensor(
             (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
              -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
-            dtype=target_dtype,
+            dtype=torch.float32,
             device=tensor.device,
         )
         packed = tensor.contiguous().view(torch.uint8)
         expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
-        result = torch.empty(*expanded_shape, dtype=target_dtype, device=tensor.device)
+        result = torch.empty(*expanded_shape, dtype=torch.float32, device=tensor.device)
         result[..., 0::2] = lookup[(packed & 0x0F).to(torch.long)]
         result[..., 1::2] = lookup[(packed >> 4).to(torch.long)]
 
@@ -422,7 +422,7 @@ def _dequantize_f4_reference(
             result = result * scale_tensor
         else:
             result = result / scale_tensor
-    return result
+    return result.to(target_dtype)
 
 _DTYPE_SUPPORT_CACHE: dict[tuple[str, Optional[int], bool], "DeviceDTypeSupport"] = {}
 
@@ -494,10 +494,43 @@ def _advertised_cuda_linear_dtypes(capability: tuple[int, int]) -> frozenset[tor
     return frozenset(supported)
 
 
+def _is_rocm_runtime() -> bool:
+    """True when torch is a HIP/ROCm build (it reuses the ``cuda`` namespace)."""
+
+    return torch.version.hip is not None
+
+
+def _advertised_rocm_linear_dtypes() -> frozenset[torch.dtype]:
+    """Architecture-level linear dtype surface for ROCm devices.
+
+    ``torch.cuda.get_device_capability`` returns an unrelated numeric pair under
+    HIP (for example ``(12, 0)`` on gfx1201), so the CUDA SM table below cannot
+    describe an AMD device.  ROCm instead exposes the float8/float4 dtypes
+    through the same torch dtype registry, and whether a given HIP build can
+    actually execute one of them (``float8_e4m3fnuz`` is AMD-native while
+    ``float8_e4m3fn`` is emulated, and ``_scaled_mm`` accepts only one of them
+    depending on the library) is decided by the runtime probe in
+    :func:`_validate_linear_dtype_support`.  Advertise the surface here and let
+    ``require_validation=True`` narrow it.
+    """
+
+    supported = {torch.float16, torch.float32, torch.bfloat16}
+    supported.update(_FLOAT8_DTYPES)
+    # FP4 is deliberately *not* advertised on ROCm: ``TorchFP4Linear`` executes
+    # through torchao's NVIDIA NVFP4 path, which has no validated HIP kernel.
+    # Advertising it made ``device_supports_native_fp4(..., require_validation=
+    # False)`` return True for every AMD GPU, so FP4 passthrough checkpoints were
+    # routed to a wrapper that fails at the first forward (a behaviour change for
+    # existing gfx9x CDNA users too). Re-add only with a validated ROCm FP4 path.
+    return frozenset(supported)
+
+
 def _advertised_linear_dtypes_for_device(device: torch.device) -> tuple[Optional[tuple[int, int]], frozenset[torch.dtype]]:
     """Return the architecture-level linear dtype support set for ``device``."""
 
     if device.type == "cuda" and torch.cuda.is_available():
+        if _is_rocm_runtime():
+            return None, _advertised_rocm_linear_dtypes()
         capability = _cuda_capability(device)
         assert capability is not None
         return capability, _advertised_cuda_linear_dtypes(capability)
@@ -778,6 +811,13 @@ def dequantize_f4_e2m1(
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
+
+    # Safetensors may expose byte-packed FP4 checkpoints as signed INT8 even
+    # when the payload is purely bitwise. Normalize storage without changing
+    # any bits before selecting the native or reference decoder.
+    if tensor.dtype is torch.int8:
+        tensor = tensor.view(torch.uint8)
+
     if _can_use_fast_path(
         tensor,
         scale if scale is not None else scale_inv,

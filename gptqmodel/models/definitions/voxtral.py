@@ -8,7 +8,7 @@ from ..base import BaseQModel
 class VoxtralGPTQ(BaseQModel):
     loader = AutoModelForPreTraining
 
-    pre_lm_head_norm_module = "model.norm"
+    pre_lm_head_norm_module = ["model.language_model.norm", "model.norm"]
 
     module_tree = [
         "language_model",

@@ -31,6 +31,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from gptqmodel.quantization import gsq_training as stage

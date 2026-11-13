@@ -7,13 +7,15 @@ import os
 import os.path
 from types import SimpleNamespace
 
+
 os.environ.setdefault("HF_MODULES_CACHE", "/tmp/hf_modules")
 
-from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
+import torch  # noqa: E402
 from model_test import ModelTest  # noqa: E402
 from ovis import image_to_test_dataset  # noqa: E402
-import torch  # noqa: E402
 from torch import nn  # noqa: E402
+
+from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
 
 
 def test_deepseek_vl_v2_pre_quantize_hook_materializes_base_modules():

@@ -5,8 +5,8 @@
 
 """Configuration for staged scalar GSQ block training."""
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 
 
 @dataclass

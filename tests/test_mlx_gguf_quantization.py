@@ -13,6 +13,7 @@ import pytest
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -273,7 +274,7 @@ def _torch_gguf_mxfp4_oracle(weight):
     maxima = blocks.abs().amax(dim=1)
     exponents = torch.where(
         maxima > 0, torch.floor(torch.log2(maxima)) + 125, 0
-    ).to(torch.int32).to(torch.uint8).to(torch.int32)
+    ).clamp(0, 254).to(torch.int32)
     scale_bits = torch.where(
         exponents < 2, 0x00200000 << exponents, (exponents - 1) << 23
     ).to(torch.int32)
@@ -458,6 +459,19 @@ def test_gguf_mxfp4_packing_at_subnormal_scale_boundaries():
     np.testing.assert_array_equal(actual, expected)
 
 
+def test_gguf_mxfp4_minimum_scale_preserves_representable_tiny_weights():
+    # These exact values must use exponent 0, rather than wrapping negative
+    # exponents to bytes 253..255. Include mixed subnormal lanes at scale 2.
+    weight = np.zeros((4, 32), dtype=np.float32)
+    weight[:3] = np.array([2.0 ** -126, 2.0 ** -127, 2.0 ** -128], dtype=np.float32)[:, None]
+    weight[3, 0] = 2.0 ** -123
+    weight[3, 1:4] = [2.0 ** -127, 2.0 ** -128, 2.0 ** -126]
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual[:3, 0], [0, 0, 0])
+    np.testing.assert_array_equal(actual[:3, 1:], np.repeat(np.array([0x44, 0x22, 0x11], dtype=np.uint8)[:, None], 16, axis=1))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+
+
 def test_gguf_mxfp4_bytes_are_accepted_by_existing_runtime():
     from gptqmodel.nn_modules.qlinear.gguf import (
         _dequantize_gguf_tensor_numpy,
@@ -621,6 +635,21 @@ def test_gguf_tq2_0_packing_matches_torch_oracle(rows, width):
     weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
     actual = native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0")
     expected = _torch_gguf_tq2_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("rows", [1, 2, 3, 5, 7, 9])
+def test_gguf_tq2_0_packing_partial_final_warp_group(rows):
+    # The parallel packer runs four blocks per threadgroup. Sizes that are not
+    # a multiple of four leave idle warps in the final group; they must not
+    # read past the weight buffer or write a neighbouring block.
+    weight = np.random.default_rng(118).standard_normal((rows, 65536)).astype(
+        np.float32
+    )
+    weight[-1, -1] = -0.0
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0")
+    expected = _torch_gguf_tq2_0_oracle(weight)
+    assert actual.shape == (rows, 65536 // 256 * 66)
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 
@@ -845,6 +874,21 @@ def test_gguf_q6_k_packing_matches_torch_oracle(rows, width):
     weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
     actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K")
     expected = _torch_gguf_q6_k_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("rows", [1, 2, 3, 5, 7, 9])
+def test_gguf_q6_k_packing_partial_final_warp_group(rows):
+    # The packer runs four blocks per threadgroup. Sizes that are not a multiple
+    # of four leave idle warps in the final group; they must not read past the
+    # weight buffer or write a neighbouring block.
+    weight = np.random.default_rng(117).standard_normal((rows, 256)).astype(
+        np.float32
+    )
+    weight[-1, -1] = -0.0
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K")
+    expected = _torch_gguf_q6_k_oracle(weight)
+    assert actual.shape == (rows, 210)
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 

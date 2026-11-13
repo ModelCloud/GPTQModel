@@ -22,6 +22,7 @@ from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, Quantizer
 
+
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
 
 

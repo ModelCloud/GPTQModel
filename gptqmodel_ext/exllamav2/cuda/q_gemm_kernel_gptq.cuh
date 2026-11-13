@@ -11,11 +11,17 @@ __forceinline__ __device__ half2 dot22_8(half2(&dq)[4], const half* a_ptr, const
 
 __forceinline__ __device__ float dot22_8_f(half2(&dq)[4], const half* a_ptr)
 {
-    half2 result = {};
+    float result0 = 0.0f;
+    float result1 = 0.0f;
     const half2* a2_ptr = (const half2*)a_ptr;
     #pragma unroll
-    for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
-    return __half2float(__low2half(result)) + __half2float(__high2half(result));
+    for (int i = 0; i < 4; i++) {
+        const float2 w = __half22float2(dq[i]);
+        const float2 a = __half22float2(*a2_ptr++);
+        result0 = fmaf(w.x, a.x, result0);
+        result1 = fmaf(w.y, a.y, result1);
+    }
+    return result0 + result1;
 }
 
 typedef void (*fp_gemm_half_q_half_gptq_kernel)
@@ -24,7 +30,7 @@ typedef void (*fp_gemm_half_q_half_gptq_kernel)
     const uint32_t*,
     const uint32_t*,
     const half*,
-    half*,
+    float*,
     const int,
     const int,
     const int,
@@ -32,6 +38,7 @@ typedef void (*fp_gemm_half_q_half_gptq_kernel)
     const int,
     const uint16_t*,
     const int,
+    const int64_t,
     const bool
 );
 
@@ -42,7 +49,7 @@ __global__ void gemm_half_q_half_gptq_kernel
     const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_gptq_qzeros,
     const half* __restrict__ b_gptq_scales,
-    half* __restrict__ c,
+    float* __restrict__ c,
     const int size_m,
     const int size_n,
     const int size_k,
@@ -50,11 +57,11 @@ __global__ void gemm_half_q_half_gptq_kernel
     const int groupsize,
     const uint16_t* __restrict__ b_q_perm,
     const int rows_4,
+    const int64_t c_split_stride,
     const bool clear
 )
 {
     MatrixView_half a_(a, size_m, size_k);
-    MatrixView_half_rw c_(c, size_m, size_n);
     MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
     MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
@@ -90,17 +97,12 @@ __global__ void gemm_half_q_half_gptq_kernel
         }
     }
 
+    // All threads must reach the barrier; inactive columns exit afterwards.
+    __syncthreads();
+
     // Zero output
 
     if (n >= size_n) return;
-
-    if (clear && blockIdx.z == 0) // && (threadIdx.x & 1) == 0)
-    {
-        for (int m = 0; m < m_count; m++)
-            *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
-    }
-
-    __syncthreads();
 
     // Find initial group
 
@@ -183,13 +185,19 @@ __global__ void gemm_half_q_half_gptq_kernel
         k += 32;
     }
 
+    // Each K split may own a private slice of the partial-sum buffer, which
+    // needs no FP32 atomics and no pre-zeroed buffer; a single fused reduce
+    // kernel then sums the splits in FP32 and converts once. When the caller
+    // falls back to one shared buffer, accumulate with FP32 atomics instead.
     for (int m = 0; m < m_count; m++)
     {
-        half2 *out = (half2*) c_.item_ptr(offset_m + m, n);
-        half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
-        half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
-        atomicAdd(out    , result01);
-        atomicAdd(out + 1, result23);
+        float* out = c + (int64_t) blockIdx.z * c_split_stride + (offset_m + m) * size_n + n;
+        #pragma unroll
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            if (c_split_stride == 0) atomicAdd(out + lane, block_c[m][lane]);
+            else out[lane] = block_c[m][lane];
+        }
     }
 }
 

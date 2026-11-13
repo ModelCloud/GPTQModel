@@ -9,7 +9,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...models._const import DEVICE
 from ...quantization.dtype import dequantize_f4_e2m1
+from ._numerics import (
+    bias_narrows_losslessly,
+    linear_needs_wide_bias,
+    linear_wide_bias,
+    promote_bias,
+)
 
 
 try:
@@ -20,6 +27,10 @@ except Exception:
 
 class TorchFP4Linear(nn.Module):
     """Execute one linear layer directly from NVFP4-packed checkpoint weights."""
+
+    # CPU uses the portable decode; accelerator execution uses torchao NVFP4,
+    # whose NVIDIA path has no validated HIP implementation.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA]
 
     def __init__(
         self,
@@ -56,6 +67,26 @@ class TorchFP4Linear(nn.Module):
             orig_dtype=self.orig_dtype,
         )
 
+    def _epilogue_bias(
+        self, x: torch.Tensor, bias: Optional[torch.Tensor]
+    ) -> tuple[torch.Tensor | None, bool]:
+        """Return the bias for the narrow epilogue plus whether it must stay wide.
+
+        ``TorchFP4Linear`` keeps the checkpoint bias at its stored width, which
+        is normally FP32. The epilogue only has to go wide when a stored value
+        is not exactly representable in the activation dtype: an exact cast
+        returns the same bias, so the cheap low-precision epilogue still applies.
+        The comparison is a few microseconds against a full-weight decode, so it
+        is computed per call rather than cached; caching it would go stale after
+        an in-place ``.data`` write, which does not bump the version counter.
+        """
+
+        if not linear_needs_wide_bias(x, bias):
+            return promote_bias(x, bias), False
+        if bias_narrows_losslessly(bias, x.dtype):
+            return bias.to(dtype=x.dtype), False
+        return bias, True
+
     def _cpu_forward(self, x: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
         """Decode live FP4 buffers on CPU without retaining a dense weight."""
 
@@ -65,14 +96,27 @@ class TorchFP4Linear(nn.Module):
             axis=None,
             target_dtype=x.dtype,
         )
+        bias, wide = self._epilogue_bias(x, bias)
+        if wide:
+            return linear_wide_bias(x, weight, bias)
         return F.linear(x, weight, bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Dispatch one dense linear projection through the NVFP4 tensor wrapper."""
 
         bias = self.bias
-        if isinstance(bias, torch.Tensor) and bias.dtype != x.dtype:
-            bias = bias.to(dtype=x.dtype)
         if x.device.type == "cpu" and self.weight.device.type == "cpu":
             return self._cpu_forward(x, bias)
+        bias, wide = self._epilogue_bias(x, bias)
+        if wide:
+            # The activation dtype cannot represent the stored bias, and the
+            # torchao wrapper would narrow it before the reduction. Decode the
+            # packed buffers only for this call and keep the epilogue wide.
+            weight = dequantize_f4_e2m1(
+                self.weight,
+                scale=self.weight_scale,
+                axis=None,
+                target_dtype=x.dtype,
+            )
+            return linear_wide_bias(x, weight, bias)
         return F.linear(x, self._native_weight(), bias)

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
@@ -21,19 +20,25 @@ from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl import InternVLQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
+from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
+from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
 from gptqmodel.models.definitions.llava import LlavaQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
+from gptqmodel.models.definitions.minimax_m3_vl import MiniMaxM3VLGPTQ
 from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
+from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
+from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
+from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 
 
 def format_ovis_dataset(image, assistant):
@@ -296,13 +301,17 @@ def get_calib_dataset(model):
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, Gemma3ForConditionalGenerationGPTQ)
         or isinstance(model, LFM2VLQModel)
+        or isinstance(model, LFM3VLQModel)
+        or isinstance(model, LFM3OmniQModel)
+        or isinstance(model, MiniMaxM3VLGPTQ)
         or isinstance(model, MuseGlimmerQModel)
+        or isinstance(model, NemotronOmniQModel)
         or isinstance(model, SmolVLMQModel)
         or isinstance(model, ZDTaichu5QModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 
-    if isinstance(model, BaseQwen2_5_OmniGPTQ):
+    if isinstance(model, (BaseQwen2_5_OmniGPTQ, Qwen3OmniMoeGPTQ)):
         return prepare_dataset(format_qwen2_5_omni_dataset, n_sample=20)
 
     if isinstance(model, DeepSeekVLV2QModel):

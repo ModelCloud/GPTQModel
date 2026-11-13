@@ -8,7 +8,20 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from accelerate.utils import convert_bytes
+
+
+def _convert_bytes(size):
+    """Convert ``size`` in bytes to the largest possible unit.
+
+    Inlined from ``accelerate.utils.convert_bytes`` so that importing
+    ``gptqmodel`` does not pull in ``accelerate`` (and, through it, NumPy).
+    """
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if size < 1024.0:
+            return f"{round(size, 2)} {unit}"
+        size /= 1024.0
+
+    return f"{round(size, 2)} PB"
 
 
 _ONE_BYTE_FLOATX_DTYPES = frozenset(
@@ -184,7 +197,7 @@ def get_all_layer_size(
         modules_children = list(module.named_children()) if isinstance(module, torch.nn.Module) else []
         if len(modules_children) == 0 or module.__class__.__name__ in no_split_module_classes:
             size = module_sizes[module_name]
-            layer_sizes.append((module_name, convert_bytes(size)))
+            layer_sizes.append((module_name, _convert_bytes(size)))
         else:
             modules_to_treat = [(f"{module_name}.{n}", v) for n, v in modules_children] + modules_to_treat
 
@@ -202,7 +215,7 @@ def get_vram(model):
     sizes = compute_module_sizes(model)
     total_size = sizes[""]
 
-    total_size = convert_bytes(total_size)
+    total_size = _convert_bytes(total_size)
     # List[Tuple[str, str]]
     all_layers = get_all_layer_size(modules_to_treat, sizes, no_split_modules)
 

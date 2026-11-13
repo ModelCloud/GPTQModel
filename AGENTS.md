@@ -5,6 +5,50 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 This file governs the whole repository in addition to any parent agent instructions.
 
+## Product naming
+
+Use **GPT-QModel** in user-facing prose, UI labels, documentation headings, and
+release titles/notes. Keep `gptqmodel` for the package/import name and
+`GPTQModel` for the Python API class. Preserve actual identifiers, filenames,
+repository names, and URLs when editing display text.
+
+## No environment-variable behaviour switches
+
+Runtime behaviour is selected by the config object or an explicit API argument.
+Never by an environment variable.
+
+- Do not add `GPTQMODEL_*` switches that change which code path runs, how many
+  threads are used, or which backend is picked. Extend `BaseQuantizeConfig` /
+  `QuantizeConfig`, or add a keyword argument on the call that owns the choice.
+- When you find such a switch, delete it and route the decision through the
+  config object. Do not keep it "for compatibility": a default that can never be
+  overridden is dead code, and a default that can be overridden is an
+  unreviewed behaviour change in production.
+- Tests must exercise the API argument directly. Do not use
+  `monkeypatch.setenv`/`patch.dict(os.environ, ...)` to select a code path; that
+  hides the real control surface and leaves the production default untested.
+- `GPTQMODEL_DISABLE_PACK_EXT`, `GPTQMODEL_FORCE_PACK_EXT`,
+  `GPTQMODEL_PACK_THREADS` and `GPTQMODEL_PACK_PY_THREADS` were removed for
+  exactly this reason. `pack_block(..., workers=...)` is the only thread-count
+  control, and the Python packer is the only packer.
+
+## Explicit accelerator families
+
+For device selection, model loading/placement, accelerator checks, or kernel
+`SUPPORTS_*` declarations, read and follow
+`.agents/skills/gptqmodel-device-families/SKILL.md` before editing.
+
+GPTQModel uses `DEVICE.CUDA` for NVIDIA and `DEVICE.ROCM` for AMD in kernel
+support declarations. PyTorch's HIP runtime also calls its AMD devices `cuda`;
+that runtime spelling is not a hardware-support declaration. Keep ROCm explicit
+in GPTQModel configuration and support-family decisions, resolving to PyTorch's
+namespace only at execution/placement boundaries. Centralize HIP detection in
+the family resolver instead of scattering `cuda` plus HIP checks across callers.
+Kernels must self-declare supported hardware, including `DEVICE.ROCM` when
+supported; never add ROCm implicitly because CUDA or Triton is available.
+Preserve concrete ordinals separately and validate every selected GPU, including
+on mixed-vendor or mixed-architecture hosts.
+
 ## Quantized inference weight storage
 
 All inference kernels must keep weights in their quantized representation
@@ -25,7 +69,35 @@ the persistent-storage validation requirements in
 `.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md` as well as its numerical
 requirements. Apply this rule when auditing existing inference kernels too.
 
+## Checkpoint serialization
+
+Converted and quantized checkpoints are written as **safetensors** by default,
+including their non-quantized tensors (embeddings, lm-head, norms, biases) and
+every payload uploaded to a model repository. Only an explicit user request may
+select another container, and that override is a named writer option — never a
+`GPTQMODEL_*` environment variable. Pickle is a legacy read-only format: keep
+readers tolerant of `.pt`/`.bin` checkpoints that already exist, never emit new
+ones, and never introduce a second container for a payload a sibling file
+already stores as safetensors.
+
+Transient within-run scratch (calibration replay buffers, captured hidden
+states, training intermediates) is not a checkpoint and is out of scope.
+
+Before writing or changing any checkpoint writer, converter, or export path,
+read and follow `$gptqmodel-checkpoint-serialization` in
+`.agents/skills/gptqmodel-checkpoint-serialization/SKILL.md`.
+
 ## Numerical oracle validation
+
+Fusion backend changes must preserve AUTO's native kernel selection. Add an
+explicit native-layout contract and actual-device numerical tests for each
+newly admitted kernel; a portable substitution or mocked dispatch test does
+not qualify that backend. Cover supported activation dtypes, unequal QKV
+widths, gate/up, native shape boundaries, workspace/descriptor lifecycle,
+mutation, direct source calls, exact packed-weight restoration and persistent
+storage. Keep the complete kernel inventory and measured device report current;
+unavailable architectures/dependencies and other formats require explicit
+coverage reasons. See `tests/module_tree/test_fusion_kernel_backends.py`.
 
 For any new or changed quantization math, weight packer, or inference kernel,
 read and follow `$gptqmodel-torch-oracle-numerics` in
@@ -44,3 +116,84 @@ For tokenizer initialization, tokenization normalization, special-token compatib
 GPT-QModel depends on [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer). Put reusable corrective tokenizer and chat-template normalization in Tokenicer, add relevant tests, increment its version, run its complete test suite, then commit, push, and open a Tokenicer pull request. Do not leave model-loader patches in GPT-QModel merely to avoid fixing the dependency.
 
 Establish a non-quantized baseline before treating bad generation or evaluation scores as a quantization regression. Compare exact rendered prompts and input IDs as well as aggregate scores.
+
+## Free-threaded (GIL=0) PyTorch safety
+
+Multi-GPU quantization and inference run with `PYTHON_GIL=0` on free-threaded
+CPython builds. A `3.14t` wheel is not evidence that an API is thread-safe: we
+have measured PyTorch entry points that hang or return corrupted data when
+called concurrently on both ROCm and CUDA.
+
+Before writing, reviewing, or debugging any PyTorch code that can execute on
+more than one thread, read `pytorch_gil_0_compat.md` at the repository root and
+follow `$gptqmodel-pytorch-gil0` in
+`.agents/skills/gptqmodel-pytorch-gil0/SKILL.md`.
+
+- Never call `torch.cuda.comm.*` from worker threads; use
+  `gptqmodel.utils.p2p.peer_copy_batch`, which drives the runtime peer-copy
+  API through `ctypes` with the GIL released.
+- Configure P2P through `BaseQuantizeConfig.p2p` (`P2PConfig`) or
+  `GPTQModel.load(..., p2p=...)`, never through environment variables. Do not
+  add `GPTQMODEL_*` switches for new runtime behavior; extend the config object.
+- `torch.nn.parallel.replicate` internally uses `broadcast_coalesced`. It is
+  serialized by `_THREAD_SAFE_PARALLEL` today, and `clone_module_for_devices`
+  skips it when the GIL is disabled in favour of the deepcopy +
+  `move_module_to_device` path. `use_torch_replicate` is off by default; turn
+  it on only after qualifying replicate for the target build.
+- Treat any API missing from the ledger as UNVERIFIED. Add a probe with
+  `scripts/gil0_api_probe.py` and record the result before relying on it from
+  threads.
+- Keep the ledger current in the same change that introduces or removes a
+  threaded PyTorch call. A concurrency behaviour change found during review
+  belongs in the ledger, not only in the pull request description.
+
+## Logic-flow change documentation
+
+For any change that alters control flow, replaces a decision mechanism (for
+example name matching replaced by declared metadata), changes resolution or
+selection order, changes data or tensor lifecycle, or introduces a fail-closed
+contract, read and follow `$gptqmodel-logic-flow-diagrams` in
+`.agents/skills/gptqmodel-logic-flow-diagrams/SKILL.md` before opening the pull
+request.
+
+Such a change is not reviewable from the diff alone. The pull request
+description must contain, at minimum, a Mermaid diagram of the new flow drawn
+from the shipped code, a before/after view of the mechanism being removed with
+`file:line` evidence, and an explicitly marked failure/ambiguity path. The same
+diagrams must be committed as a reference page under `docs/`, titled for the
+mechanism rather than the pull request, and linked from `README.md` where the
+related feature is described.
+
+Diagrams must use real symbol names and measured numbers. Do not draw intended
+design, estimate test results, or include follow-up work as if implemented. Keep
+diagrams in sync with the code: a later change to the same flow updates the page
+in the same pull request.
+
+## Model-definition weight coverage
+
+For every new model type or alias in `MODEL_MAP`, and every change to a model
+definition or module-plan consumer, follow
+`.agents/skills/gptqmodel-model-plan-tests/SKILL.md`. New model support must add
+an explicit registry plan case and a model-specific module-plan unit test in
+the same PR. Cover its layout variants and method overrides. The registry
+contract runs without an opt-in flag and must not skip supported definitions.
+
+`module_tree` is the oracle for checkpoint-owned weights, including
+non-quantized weights. Use `state_dict()` (parameters and persistent buffers)
+for model architecture fixtures, not `named_modules()`, `named_parameters()`,
+or `named_buffers()` alone. For an actual checkpoint audit, verify ownership
+against checkpoint keys and declared conversion mappings: tensors created
+after loading must not become definition obligations solely because they
+appear in a runtime `state_dict()`.
+
+For every checkpoint-owned decoder-layer entry:
+
+- The deepest owning module must resolve through `ModulePlan.find()`.
+- A quantized owner must be declared by `simple_layer_modules()`.
+- A non-quantized owner must carry an explicit `:!` or `:?` tag.
+
+Add real-model regression coverage for new or changed definitions. The Flash
+family reference is
+`tests/module_tree/test_flash_model_tree_consumption.py`; it builds the actual
+meta model and checks quantizable paths, weight owners, roles, MoE hooks, and
+looper consumers.

@@ -12,7 +12,6 @@ from pathlib import Path
 from shutil import which
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import numpy
 import torch
 
 from ..utils.logger import setup_logger
@@ -236,7 +235,8 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_diag_suppress=True,
     )
     # This flag is parsed by the local nvcc, not by the Torch wheel metadata.
-    if is_nvcc_compatible():
+    # A ROCm host can still have an nvcc on PATH; hipcc rejects the flag.
+    if not IS_ROCM and is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 
@@ -355,6 +355,71 @@ def marlin_scratch_sizes(
     if not isinstance(sizes, (tuple, list)) or len(sizes) != 2:
         raise RuntimeError(f"Marlin scratch size op returned invalid value: {sizes!r}")
     return int(sizes[0]), int(sizes[1])
+
+
+MARLIN_DEVICE_PROFILE_FIELDS = (
+    "sms",
+    "max_shared_mem",
+    "capability_major",
+    "capability_minor",
+    "l2_cache_size",
+    "max_threads_per_sm",
+    "has_tensor_memory",
+)
+
+
+def marlin_device_profile(
+        device: Optional[Union[int, str, torch.device]] = None,
+        dtype: torch.dtype = torch.float16,
+) -> Dict[str, int]:
+    """Return the cached device profile Marlin uses to pick a kernel.
+
+    Probed once per device inside the extension, so repeated calls are cheap.
+    ``has_tensor_memory`` reports tcgen05 tensor memory, which the datacenter
+    Blackwell parts have and the consumer ones do not.
+    """
+    if IS_ROCM or not torch.cuda.is_available():
+        raise RuntimeError("Marlin device profile requires CUDA.")
+    if device is None:
+        target = torch.device("cuda", torch.cuda.current_device())
+    else:
+        # Torch narrows device indices and wraps values such as
+        # `cuda:256` to device 0. Retain the original ordinal before parsing.
+        raw_index = device if isinstance(device, int) and not isinstance(device, bool) else None
+        if isinstance(device, str) and device.startswith("cuda:"):
+            ordinal = device[5:]
+            if ordinal.isdecimal() or (ordinal.startswith("-") and ordinal[1:].isdecimal()):
+                raw_index = int(ordinal)
+        if raw_index is not None and raw_index < 0:
+            count = torch.cuda.device_count()
+            raise ValueError(
+                f"Marlin device profile: device index {raw_index} is out of range "
+                f"[0, {count})."
+            )
+        target = torch.device(device)
+        if target.type != "cuda":
+            raise ValueError(
+                f"Marlin device profile requires a CUDA device, got {target!r}."
+            )
+        explicit_index = raw_index if raw_index is not None else target.index
+        if explicit_index is not None:
+            count = torch.cuda.device_count()
+            if explicit_index < 0 or explicit_index >= count:
+                raise ValueError(
+                    f"Marlin device profile: device index {explicit_index} is out of range "
+                    f"[0, {count})."
+                )
+    # An explicit index must survive as-is: `0` is falsy, and treating it as
+    # "unset" silently profiles whatever device happens to be current. `cuda`
+    # without an index follows torch's own convention and means the current one.
+    index = target.index if target.index is not None else torch.cuda.current_device()
+    op = _marlin_resolve_op(dtype=dtype, op_name="marlin_device_profile")
+    values = op(index)
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if not isinstance(values, (tuple, list)) or len(values) != len(MARLIN_DEVICE_PROFILE_FIELDS):
+        raise RuntimeError(f"Marlin device profile op returned invalid value: {values!r}")
+    return dict(zip(MARLIN_DEVICE_PROFILE_FIELDS, (int(value) for value in values)))
 
 
 # Validate marlin support
@@ -687,6 +752,11 @@ def apply_gptq_marlin_linear(
         use_atomics: bool = False,
 
 ) -> torch.Tensor:
+    # Source projections can be column views into fused packed storage.
+    # Materialize only for this separate call; never retain the copies.
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    weight_zp = weight_zp.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -771,10 +841,13 @@ def apply_awq_marlin_linear(
         input_size_per_partition: int,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = True) -> torch.Tensor:
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    weight_zp = weight_zp.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+    use_atomic_add = not use_fp32_reduce and should_use_atomic_add_reduce(m=reshaped_x.size(0),
                                                   n=output_size_per_partition,
                                                   k=reshaped_x.size(1),
                                                   device=input.device,
@@ -961,6 +1034,11 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
+def _argsort(values):
+    """Return the indices that sort ``values`` (NumPy ``argsort`` equivalent)."""
+    return sorted(range(len(values)), key=values.__getitem__)
+
+
 def pack_cols(
         q_w: torch.Tensor,
         num_bits: int,
@@ -974,17 +1052,15 @@ def pack_cols(
 
     orig_device = q_w.device
 
-    q_w = q_w.cpu().numpy().astype(numpy.uint32)
+    # Pack on CPU in int32 words. A left shift of a signed int32 wraps exactly
+    # like NumPy's uint32 shift, and the fields are disjoint, so summing the
+    # shifted views equals OR-ing them. One reshape replaces the per-field loop.
+    q_w = q_w.detach().to(device="cpu", dtype=torch.int32).contiguous()
+    fields = q_w.view(size_k, size_n // pack_factor, pack_factor)
+    shifts = torch.arange(pack_factor, dtype=torch.int32) * num_bits
+    q_res = (fields << shifts).sum(dim=2, dtype=torch.int32)
 
-    q_res = numpy.zeros((size_k, size_n // pack_factor), dtype=numpy.uint32)
-
-    for i in range(pack_factor):
-        q_res |= q_w[:, i::pack_factor] << num_bits * i
-
-    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
+    return q_res.to(orig_device).contiguous()
 
 
 def unpack_cols(
@@ -1002,19 +1078,16 @@ def unpack_cols(
 
     orig_device = packed_q_w.device
 
-    packed_q_w_cpu = packed_q_w.cpu().numpy().astype(numpy.uint32)
-    q_res = numpy.zeros((size_k, size_n), dtype=numpy.uint32)
-
+    # Decode every field of every word at once. An arithmetic int32 shift can
+    # sign-extend for the topmost field, but ``& mask`` discards those bits, so
+    # the result matches the old uint32 loop exactly.
+    packed_q_w_cpu = packed_q_w.detach().to(device="cpu", dtype=torch.int32).contiguous()
     mask = (1 << num_bits) - 1
-    for i in range(pack_factor):
-        vals = packed_q_w_cpu & mask
-        packed_q_w_cpu >>= num_bits
-        q_res[:, i::pack_factor] = vals
+    shifts = torch.arange(pack_factor, dtype=torch.int32) * num_bits
+    words = packed_q_w_cpu.view(size_k, size_n // pack_factor, 1)
+    q_res = ((words >> shifts) & mask).view(size_k, size_n)
 
-    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
+    return q_res.to(orig_device).contiguous()
 
 
 def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
@@ -1026,9 +1099,9 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
 
     # Interleave column dim (for the dequantize code) and pack it to int32
     if num_bits == 4:
-        interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
+        interleave = [0, 2, 4, 6, 1, 3, 5, 7]
     elif num_bits == 8:
-        interleave = numpy.array([0, 2, 1, 3])
+        interleave = [0, 2, 1, 3]
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 
@@ -1049,9 +1122,9 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
     # Undo interleaving (use argsort(..) to get inverse perm)
     if num_bits == 4:
-        undo_interleave = numpy.argsort(numpy.array([0, 2, 4, 6, 1, 3, 5, 7]))
+        undo_interleave = _argsort([0, 2, 4, 6, 1, 3, 5, 7])
     elif num_bits == 8:
-        undo_interleave = numpy.argsort(numpy.array([0, 2, 1, 3]))
+        undo_interleave = _argsort([0, 2, 1, 3])
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 

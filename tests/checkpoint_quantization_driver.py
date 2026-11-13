@@ -176,7 +176,11 @@ def main():
 
         from gptqmodel.quantization.gptq import GPTQ
 
-        assert torch.cuda.device_count() == args.require_gpus
+        visible_gpus = torch.cuda.device_count()
+        assert visible_gpus >= args.require_gpus, (
+            f"checkpoint recovery requires at least {args.require_gpus} visible "
+            f"CUDA devices, found {visible_gpus}"
+        )
         placement_lock = threading.Lock()
         observed_devices = set()
         original_finalize = GPTQ.finalize_hessian
@@ -255,7 +259,7 @@ def main():
                 and target
             ):
                 with task.lock:
-                    if task.fwd_counter == 2:
+                    if task.fwd_counter >= 2:
                         assert task.nsamples > 0 and task._device_hessian_partials
                         emit(
                             "kill",

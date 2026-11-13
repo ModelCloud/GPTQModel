@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Checkpoint Serialization"
+  short_description: "Write converted checkpoints as safetensors"
+  default_prompt: "Use $gptqmodel-checkpoint-serialization before choosing a container for any converted or quantized checkpoint payload."

@@ -71,8 +71,11 @@ class TestKernelOutput(unittest.TestCase):
     a_tolerance = 0.016
     input_samples_each_size = 20 # final size == input_samples_each_size * len(m)
 
-    @classmethod
     def setUp(self):
+        # unittest calls setUp on the test instance, so this must not be a
+        # classmethod: with @classmethod, `self` is the class and the
+        # `self.forward(...)` below binds unbound, raising
+        # `TypeError: forward() missing 1 required positional argument: 'x'`.
         _ensure_model_path_available(self.model_path)
         self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device=self.device, dtype=self.dtype)
         self.x = []

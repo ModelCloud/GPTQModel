@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from ...utils.logger import setup_logger
 from ...utils.model import move_to
 from ..base import BaseQModel
+
+
+log = setup_logger()
 
 
 class Zamba2QModel(BaseQModel):
@@ -11,6 +15,21 @@ class Zamba2QModel(BaseQModel):
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
 
     pre_lm_head_norm_module = "lm_head"
+
+    # Module-level kernels the legacy Zamba2 fast path relied on. Newer
+    # transformers releases removed them in favour of kernel-decorated
+    # functions, so their availability must be probed instead of assumed.
+    _fast_path_kernels = (
+        "selective_state_update",
+        "mamba_chunk_scan_combined",
+        "mamba_split_conv1d_scan_combined",
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+    )
+
+    # Methods the legacy upstream mixer exposed for explicit path selection.
+    # Newer transformers versions dispatch kernels internally instead.
+    _legacy_path_methods = ("cuda_kernels_forward", "torch_forward")
 
     module_tree = [
         "model",
@@ -50,20 +69,29 @@ class Zamba2QModel(BaseQModel):
 
         return additional_inputs
 
+    @classmethod
+    def _missing_fast_path_kernels(cls):
+        from transformers.models.zamba2 import modeling_zamba2
+
+        return tuple(name for name in cls._fast_path_kernels if getattr(modeling_zamba2, name, None) is None)
+
     def monkey_patch(self):
         from transformers.models.zamba2 import modeling_zamba2
 
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-        is_fast_path_available = all(
-            (
-                modeling_zamba2.selective_state_update,
-                modeling_zamba2.mamba_chunk_scan_combined,
-                modeling_zamba2.mamba_split_conv1d_scan_combined,
-                modeling_zamba2.causal_conv1d_fn,
-                modeling_zamba2.causal_conv1d_update,
+        missing_kernels = self._missing_fast_path_kernels()
+        is_fast_path_available = not missing_kernels
+        if missing_kernels:
+            log.warn.once(
+                f"Zamba2 fast path disabled: transformers.models.zamba2 is missing "
+                f"{', '.join(missing_kernels)}. The mixer will use the Torch/upstream fallback path."
             )
-        )
+
+        is_torchdynamo_compiling = getattr(modeling_zamba2, "is_torchdynamo_compiling", None)
+
+        def _is_compiling() -> bool:
+            return bool(is_torchdynamo_compiling()) if is_torchdynamo_compiling is not None else False
 
         def _has_dense_cuda_weight(module) -> bool:
             if isinstance(module, BaseQuantLinear):
@@ -84,7 +112,7 @@ class Zamba2QModel(BaseQModel):
                 is_fast_path_available
                 and _has_dense_cuda_weight(self.in_proj)
                 and _has_dense_cuda_weight(self.out_proj)
-                and not modeling_zamba2.is_torchdynamo_compiling()
+                and not _is_compiling()
             ):
                 return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
 
@@ -104,5 +132,13 @@ class Zamba2QModel(BaseQModel):
                     candidates.append(nested_mixer)
 
             for mixer in candidates:
-                if mixer.__class__.__name__ == "Zamba2MambaMixer":
-                    type(mixer).forward = forward
+                mixer_cls = type(mixer)
+                if mixer_cls.__name__ != "Zamba2MambaMixer":
+                    continue
+                if not all(hasattr(mixer_cls, name) for name in self._legacy_path_methods):
+                    log.info.once(
+                        "Zamba2 mixer does not expose the legacy fast/Torch path methods; "
+                        "leaving the upstream forward in place because it selects kernels internally."
+                    )
+                    continue
+                mixer_cls.forward = forward

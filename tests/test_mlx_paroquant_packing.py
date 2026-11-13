@@ -12,6 +12,7 @@ import pytest
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -30,7 +31,10 @@ def _torch_paroquant_oracle(weight, scales, group_size):
     runtime_scales = scales.to(torch.float16) if scales.dtype == torch.float32 else scales
     values = weight.reshape(out_features, groups, group_size)
     codes = torch.round(
-        (values + (scales * 8)[:, :, None]) / runtime_scales[:, :, None]
+        (
+            values.float()
+            + (scales.float() * 8)[:, :, None]
+        ) / runtime_scales.float()[:, :, None]
     ).to(torch.int64)
     assert bool(((codes >= 0) & (codes <= 15)).all())
     order = torch.tensor([0, 2, 4, 6, 1, 3, 5, 7])

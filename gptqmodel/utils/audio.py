@@ -6,8 +6,6 @@
 import base64
 from io import BytesIO
 
-import numpy as np
-
 
 try:
     import audioread
@@ -73,7 +71,9 @@ def process_audio_info(conversations: list[dict] | list[list[dict]],
                         path = ele.get("audio", ele.get("audio_url"))
                         audio_start = ele.get("audio_start", 0.0)
                         audio_end = ele.get("audio_end", None)
-                        if isinstance(path, np.ndarray):
+                        # Accept any array-like sample buffer (NumPy, Torch,
+                        # array.array, ...) without importing NumPy here.
+                        if not isinstance(path, (str, bytes)) and hasattr(path, "ndim"):
                             if path.ndim > 1:
                                 raise ValueError("Support only mono audio")
                             audios.append(

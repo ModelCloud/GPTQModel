@@ -4,10 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import functools
 import importlib
 import os
 import sys
 import time
+import traceback
 from contextlib import contextmanager
 from enum import Enum
 from functools import lru_cache
@@ -34,9 +36,30 @@ HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
 HAS_NPU = False
+HAS_XLA = False
 
 CPU = torch.device("cpu")
 META = torch.device("meta")
+
+
+def as_torch_device(device_like) -> torch.device:
+    """Resolve a device-like value without assigning an implicit ordinal.
+
+    GPT-QModel's ``DEVICE`` enum names a kernel support family, and its
+    ``DEVICE.ROCM`` member intentionally has the value ``"rocm"`` even though
+    PyTorch exposes ROCm through the ``cuda`` namespace.  ``torch.device``
+    therefore rejects it. Resolve enums through their runtime ``type`` while
+    keeping families indexless, just like ``torch.device("cuda")``. Calling
+    ``to_torch_device()`` here would pin family selectors to device 0 instead
+    of honoring the caller's current CUDA/XPU/NPU device.
+    """
+    if isinstance(device_like, torch.device):
+        return device_like
+    resolver = getattr(device_like, "to_torch_device", None)
+    if callable(resolver):
+        return torch.device(device_like.type)
+    return torch.device(device_like)
+
 
 class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
@@ -124,13 +147,117 @@ except Exception:
     HAS_NPU = False
 
 
-# mlx check
-try:
-    import mlx.core  # type: ignore # noqa: F401
-    import mlx.core.metal  # noqa: F401
+def _xla_package_installed() -> bool:
+    """Return whether the optional Torch/XLA package can be imported.
+
+    This probe must remain lazy: importing ``torch_xla`` initializes its PJRT
+    runtime and, with ``pjrt-plugin-tt``, opens every Tenstorrent device.  A
+    plain ``import gptqmodel`` on an accelerator host must not claim hardware
+    or contend with another process using those devices.
+    """
+    return importlib.util.find_spec("torch_xla") is not None
+
+
+def require_xla_runtime():
+    """Import and return ``torch_xla`` for an explicit XLA request.
+
+    Callers use this only after selecting or constructing an ``xla`` device.
+    The returned module is the authoritative owner of the PJRT runtime.
+    """
+    try:
+        module = importlib.import_module("torch_xla")
+    except Exception as exc:
+        raise RuntimeError(
+            "PyTorch/XLA was requested, but `torch_xla` could not be initialized. "
+            "Install the pinned Tenstorrent environment from "
+            "`requirements/tenstorrent-py312.txt` and check the active PJRT plugin."
+        ) from exc
+    return module
+
+
+def xla_device_count() -> int:
+    """Return the addressable XLA device count, recording that PJRT now owns them.
+
+    ``addressable_device_count()`` is the call that actually initializes the
+    PJRT plugin, and with ``pjrt-plugin-tt`` that opens every Tenstorrent chip.
+    TT-Metal allows a single owner per chip, so the whole process becomes
+    unable to use the native TTNN path from this point on. The flag recorded
+    here is the only reliable signal of that state -- importing ``torch_xla``
+    alone is inert, so a bare ``sys.modules`` check cannot tell the two apart.
+    """
+
+    runtime = require_xla_runtime()
+    count = int(runtime.runtime.addressable_device_count())
+    # Mark the claim only after the runtime answered, so a failed probe does not
+    # leave a lingering "claimed" flag that blocks a later native TTNN attempt.
+    try:
+        runtime._gptqmodel_device_claimed = True
+    except Exception:  # pragma: no cover - module objects always accept attributes
+        pass
+    return count
+
+
+def is_xla_available() -> bool:
+    """Probe XLA availability without initializing hardware at import time."""
+    if not _xla_package_installed():
+        return False
+    try:
+        return xla_device_count() > 0
+    except Exception:
+        return False
+
+
+def xla_runtime_claimed() -> bool:
+    """Whether this process has already initialized XLA and taken its devices.
+
+    Importing ``torch_xla`` is inert, so a ``sys.modules`` check alone cannot
+    distinguish "installed" from "in use". Only the flag set after
+    ``addressable_device_count()`` answered means the runtime is live, which is
+    what a generic barrier may synchronize. Anything else would discover and
+    claim another runtime from a job that never selected it.
+    """
+
+    module = sys.modules.get("torch_xla")
+    return bool(module is not None and getattr(module, "_gptqmodel_device_claimed", False))
+
+
+# Availability is deliberately not probed here.  Use ``is_xla_available()``
+# from an explicit device-resolution path; see ``require_xla_runtime``.
+HAS_XLA = _xla_package_installed()
+
+
+mlx = None
+
+
+def _detect_mlx() -> bool:
+    """Probe for a usable MLX install, binding the package on success.
+
+    MLX is an optional accelerator: absence (or a broken native install) is
+    expected on most hosts, so probe failures are reported as "unavailable".
+    ``except Exception`` is deliberate -- ``KeyboardInterrupt``/``SystemExit``
+    must stay visible rather than being reported as a missing dependency.
+
+    ``mlx`` and ``HAS_MLX`` are updated together so callers guarded by
+    ``if HAS_MLX: mlx.core.clear_cache()`` can never see one without the other.
+    A partially-installed package binds ``mlx`` while ``mlx.core.metal`` raises,
+    so the failure path clears it again.
+    """
+    global HAS_MLX, mlx
+
+    try:
+        import mlx.core  # type: ignore # noqa: F401
+        import mlx.core.metal  # noqa: F401
+    except Exception:
+        HAS_MLX = False
+        mlx = None
+        return HAS_MLX
+
     HAS_MLX = True
-except BaseException:
-    pass
+    return HAS_MLX
+
+
+# mlx check
+HAS_MLX = _detect_mlx()
 
 try:
     torch.backends.fp32_precision
@@ -182,6 +309,175 @@ def _restore_tf32_state(state) -> None:
     torch.backends.cudnn.allow_tf32 = state[1]
 
 
+def torch_compile_disabled() -> bool:
+    """Report whether torch compilation is switched off for this process.
+
+    ``TORCHDYNAMO_DISABLE=1`` is PyTorch's own kill switch. Dynamo already turns
+    ``torch.compile`` into a no-op for it; checking here keeps GPT-QModel from
+    importing dynamo just to build a wrapper that would never trace.
+    """
+    return os.environ.get("TORCHDYNAMO_DISABLE", "").strip() == "1"
+
+
+def _dynamo_exception(*names: str):
+    """Resolve a dynamo exception class without importing ``torch._dynamo``."""
+    dynamo = sys.modules.get("torch._dynamo")
+    exc_module = getattr(dynamo, "exc", None)
+    return tuple(
+        cls for cls in (getattr(exc_module, name, None) for name in names)
+        if isinstance(cls, type)
+    )
+
+
+def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool:
+    """Report whether ``exc`` came from the compiler instead of traced user code.
+
+    ``torch.compile`` only builds the wrapper; inductor actually compiles on the
+    first invocation, so the construction-time guard cannot observe these. A
+    backend failure is always eligible for the eager fallback:
+    ``torch._dynamo.exc.BackendCompilerFailed``, which also carries the
+    ``RuntimeError: Attempting to use a closed pool`` raised by an inductor
+    compile worker. Capture failures such as ``Unsupported`` are only eligible
+    without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
+    contract and must still fail closed.
+
+    A plain ``RuntimeError`` is only treated as a compiler failure when it
+    carries a dynamo/inductor exception in its cause chain or was raised inside
+    PyTorch's compiler packages. Otherwise it belongs to the traced user code;
+    retrying eagerly would run that code twice and hide the original error.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return False
+    if isinstance(exc, _dynamo_exception("BackendCompilerFailed", "TorchRuntimeError")):
+        return True
+    if fullgraph:
+        return False
+    chain = []
+    current = exc
+    while current is not None and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    if any(isinstance(item, _dynamo_exception("TorchDynamoException")) for item in chain):
+        return True
+    if isinstance(exc, RuntimeError):
+        # Dynamo's own frame sits between the caller and the traced body, so a
+        # "contains a compiler frame" test would also match user code raising
+        # RuntimeError. Only the innermost frame identifies where it came from:
+        # compile workers raise outside the traced frame.
+        frames = traceback.extract_tb(exc.__traceback__)
+        origin = (frames[-1].filename or "") if frames else ""
+        return any(
+            token in origin
+            for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
+        )
+    return False
+
+
+def _compile_label(target) -> str:
+    """Describe the compiled unit in the one warning emitted on fallback."""
+    name = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
+    if name:
+        return str(name)
+    return type(target).__name__
+
+
+def _describe_compile_failure(exc: BaseException) -> str:
+    """Render the outermost and innermost compiler error on one line.
+
+    Dynamo wraps backend errors (``BackendCompilerFailed``) around the real
+    cause, for example ``RuntimeError: Attempting to use a closed pool``. The
+    inner message is the actionable one, so both are reported.
+    """
+    def first_line(error):
+        lines = str(error).strip().splitlines()
+        return lines[0] if lines else ""
+
+    root = exc
+    seen = 0
+    while (root.__cause__ is not None or root.__context__ is not None) and seen < 8:
+        root = root.__cause__ or root.__context__
+        seen += 1
+    outer = f"{type(exc).__name__}: {first_line(exc)}"
+    if root is exc:
+        return outer
+    return f"{outer} | root cause {type(root).__name__}: {first_line(root)}"
+
+
+def _warn_compile_fallback(label: str, exc: BaseException) -> None:
+    log.warn.once(
+        f"`{label}` torch.compile failed at first use; staying on eager execution: "
+        f"{_describe_compile_failure(exc)}"
+    )
+
+
+def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
+    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    label = _compile_label(original)
+    state = {"fallback": False}
+
+    def call(*args, **kwargs):
+        if state["fallback"]:
+            return original(*args, **kwargs)
+        try:
+            return compiled(*args, **kwargs)
+        except Exception as exc:
+            if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                raise
+            state["fallback"] = True
+            _warn_compile_fallback(label, exc)
+            return original(*args, **kwargs)
+
+    functools.update_wrapper(call, original)
+    # Keep the dynamo wrapper chain truthful: this proxy really does forward to
+    # `original`, and `_torchdynamo_wrapper_id` must name this wrapper. Kernels
+    # and the fusion lifecycle use the presence of the chain to know that a
+    # trace may have run.
+    call._torchdynamo_orig_callable = original
+    call._torchdynamo_wrapper_id = id(call)
+    for attr in ("_is_torch_compile", "_isolate_recompiles_id", "aot_compile",
+                 "get_compiler_config"):
+        call.__dict__.pop(attr, None)
+    return call
+
+
+def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgraph: bool):
+    """Install the same fallback on a compiled module's ``forward``.
+
+    ``torch.compile(nn.Module)`` returns an ``OptimizedModule`` that callers keep
+    because it is still an ``nn.Module`` (attribute delegation, ``modules()`` and
+    hooks depend on it). Replacing ``forward`` leaves that identity intact while
+    a deferred compile failure runs the original module instead.
+    """
+    if not isinstance(compiled, torch.nn.Module):
+        # Callers assign the result back to an nn.Module attribute
+        # (``BaseQModel.optimize`` does ``self.model = torch_compile(...)``), so
+        # never return a plain callable for a module input. Keep the eager module
+        # and report the unusable compiled object once.
+        log.warn.once(
+            f"`{_compile_label(module)}` torch.compile returned "
+            f"{type(compiled).__name__} instead of nn.Module; using eager execution."
+        )
+        return module
+    label = _compile_label(module)
+    compiled_forward = compiled.forward
+    state = {"fallback": False}
+
+    def forward(*args, **kwargs):
+        if state["fallback"]:
+            return module(*args, **kwargs)
+        try:
+            return compiled_forward(*args, **kwargs)
+        except Exception as exc:
+            if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                raise
+            state["fallback"] = True
+            _warn_compile_fallback(label, exc)
+            return module(*args, **kwargs)
+
+    compiled.forward = forward
+    return compiled
+
+
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     # requires torch >2.8 for proper torch.compile + Python 3.13.3t (freethreading)
     if has_gil_disabled() and not gte_python_3_13_3():
@@ -194,6 +490,9 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
 
     if not TORCH_HAS_COMPILE:
         return module
+    if torch_compile_disabled():
+        log.info.once("Optimize: torch.compile disabled; using eager execution.")
+        return module
     configure_dynamo_cache(ensure_import=True)
     if HAS_MPS and not TORCH_GTE_28:
         if not torch._dynamo.config.suppress_errors:
@@ -202,10 +501,20 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
             torch._dynamo.config.suppress_errors = True
         return module
     try:
-        return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
-    except BaseException as e:
+        compiled = torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as e:
         log.warn.once(f"Failed to compile `{module}`, {e}")
         return module
+    if compiled is module:
+        return module
+    # Inductor compiles on the first call, not here. Keep the eager path
+    # reachable so a compile-worker failure degrades instead of aborting.
+    if isinstance(module, torch.nn.Module):
+        return _install_module_compile_fallback(module, compiled, fullgraph)
+    return _install_callable_compile_fallback(module, compiled, fullgraph)
+
 
 def torch_new_stream():
     global STREAM
@@ -221,6 +530,9 @@ def torch_new_stream():
     if HAS_NPU:
         STREAM = torch.npu.Stream()
         return STREAM
+    if is_xla_available():
+        # Torch/XLA supplies its own lazy execution and synchronization model.
+        return None
     return None
 
 def torch_new_stream_ctx():
@@ -230,6 +542,8 @@ def torch_new_stream_ctx():
         return torch.xpu.stream(torch_new_stream())
     if HAS_NPU:
         return torch.npu.stream(torch_new_stream())
+    if is_xla_available():
+        return contextlib.nullcontext()
     return contextlib.nullcontext()
 
 def torch_sync(device: torch.device = None):
@@ -268,6 +582,15 @@ def torch_sync(device: torch.device = None):
                 for idx in range(dev_count):
                     torch.npu.synchronize(idx)
 
+        # Only synchronize XLA if this process already initialized it. Probing
+        # availability here would import the runtime and request addressable
+        # devices, so an ordinary CUDA/CPU barrier would claim the Tenstorrent
+        # chips (or fail on an unrelated XLA error) from a job that never
+        # selected that backend.
+        if xla_runtime_claimed():
+            synchronized_any = True
+            require_xla_runtime().sync(wait=True)
+
         if not synchronized_any:
             torch.cpu.synchronize()
         return
@@ -280,6 +603,8 @@ def torch_sync(device: torch.device = None):
         torch.mps.synchronize()
     elif device.type == "npu":
         torch.npu.synchronize(device=device)
+    elif device.type == "xla":
+        require_xla_runtime().sync(wait=True)
     elif device.type == "cpu":
         torch.cpu.synchronize()
 
@@ -297,6 +622,8 @@ def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[t
             return torch.device("xpu", device)
         if HAS_NPU and torch.npu.device_count() > device:
             return torch.device("npu", device)
+        if is_xla_available() and xla_device_count() > device:
+            return torch.device("xla", device)
         raise ValueError(f"Unable to map integer `{device}` to a known accelerator device.")
     raise TypeError(f"Unsupported device specifier type: {type(device)}")
 
@@ -312,6 +639,8 @@ def resolve_empty_cache_callable(device_type: str) -> Optional[Callable[[], None
             candidate = torch.mps.empty_cache
         elif device_type == "npu" and HAS_NPU:
             candidate = torch.npu.empty_cache
+        elif device_type == "xla" and is_xla_available():
+            candidate = getattr(require_xla_runtime(), "empty_cache", None)
         else:
             candidate = None
     except Exception:
@@ -459,7 +788,19 @@ def torch_empty_cache_any(
 def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
     return torch_empty_cache_any(device=device, gc=gc, sync=sync)
 
+def resolve_torch_device(device: Union[torch.device, str, int, None] = None):
+    """Resolve ``auto`` or a concrete device without assuming CUDA exists."""
+    if device is None or (isinstance(device, str) and device.lower() == "auto"):
+        return auto_select_torch_device()
+    return _normalize_device(device)
+
+
 def auto_select_torch_device(index: int = 0):
+    """Return the fastest available Torch accelerator, with CUDA precedence.
+
+    The ordering preserves existing multi-GPU defaults while allowing the same
+    callers to run on Apple MPS and CPU-only machines.
+    """
     assert index >= 0, f"device index should be a positive integer: actual = `{index}`"
 
     if HAS_CUDA:
@@ -477,12 +818,49 @@ def auto_select_torch_device(index: int = 0):
         if index > 0 and torch.npu.device_count() <= index:
             index = 0
         device = torch.device(f"npu:{index}")
+    elif is_xla_available():
+        count = xla_device_count()
+        if index >= count:
+            index = 0
+        device = torch.device(f"xla:{index}")
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
     else:
         device = CPU # cpu has no index
 
     return device
+
+
+def auto_select_torch_device_unprobed(index: int = 0):
+    """Choose an indexable device without initializing an optional runtime.
+
+    ``torch_xla`` is deliberately absent: asking whether it is usable calls
+    ``addressable_device_count()``, which initializes the PJRT plugin and claims
+    every Tenstorrent chip for the rest of the process. Package presence is not
+    evidence that a device exists either -- an installed XLA runtime with zero
+    devices would otherwise turn a CPU job into ``xla:0``. Callers that want XLA
+    resolve it explicitly through :func:`is_xla_available` and
+    :func:`xla_device_count`, which are allowed to pay that cost.
+    """
+    if HAS_CUDA:
+        # Clamp against the visible count: a caller asking for index 1 on a
+        # single-GPU host would otherwise get ``cuda:1``, which fails later with
+        # "invalid device ordinal" instead of falling back to the device that
+        # exists. CUDA is safe to probe here; XLA is not.
+        count = torch.cuda.device_count()
+        if count > 0:
+            return torch.device(f"cuda:{index if index < count else 0}")
+    if HAS_XPU:
+        count = torch.xpu.device_count()
+        if count > 0:
+            return torch.device(f"xpu:{index if index < count else 0}")
+    if HAS_NPU:
+        count = torch.npu.device_count()
+        if count > 0:
+            return torch.device(f"npu:{index if index < count else 0}")
+    if HAS_MPS:
+        return torch.device("mps")
+    return CPU
 
 # some device types can have multiple gpus cuda/rocm + xpu
 def torch_devices() -> List[torch.device]:
@@ -492,6 +870,9 @@ def torch_devices() -> List[torch.device]:
         return [torch.device(f"xpu:{i}") for i in range(torch.xpu.device_count())]
     elif HAS_NPU:
         return [torch.device(f"npu:{i}") for i in range(torch.npu.device_count())]
+    elif is_xla_available():
+        count = xla_device_count()
+        return [torch.device(f"xla:{i}") for i in range(count)]
     elif HAS_MPS:
         return [torch.device("mps")]
     else:
@@ -533,7 +914,15 @@ def last_npu_device_by_pci_bus_order() -> Optional[torch.device]:
         return None
     return devices[-1]
 
-ALL_DEVICES = torch_devices()
+def all_torch_devices() -> List[torch.device]:
+    """Discover the active accelerator set only when a caller requests it.
+
+    ``torch_devices()`` is an explicit runtime probe. In particular, instantiating
+    ``torch_xla`` opens every Tenstorrent device owned by the PJRT plugin. A
+    plain ``import gptqmodel`` therefore must not cache the result in
+    ``ALL_DEVICES``.
+    """
+    return torch_devices()
 
 
 class _LazyAcceleratorStreams:
@@ -584,11 +973,11 @@ class _LazyAcceleratorStreamRef:
         return self._streams[self._index]
 
 
-ALL_STREAMS = _LazyAcceleratorStreams(ALL_DEVICES)
+ALL_STREAMS = _LazyAcceleratorStreams([auto_select_torch_device_unprobed(index=0)])
 
-DEVICE_0 = auto_select_torch_device(index=0)
+DEVICE_0 = auto_select_torch_device_unprobed(index=0)
 # device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
+DEVICE_1 = auto_select_torch_device_unprobed(index=1)
 
 DEVICE_0_STREAM = _LazyAcceleratorStreamRef(ALL_STREAMS, 0)
 
@@ -601,11 +990,12 @@ NEXT_DEVICE_INDEX = 0
 # def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> torch.device:
 #     global NEXT_DEVICE_INDEX
 #
-#     if len(ALL_DEVICES) <= 1:
-#         return ALL_DEVICES[0]
+#     devices = all_torch_devices()
+#     if len(devices) <= 1:
+#         return devices[0]
 #
-#     device = ALL_DEVICES[NEXT_DEVICE_INDEX]
-#     if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
+#     device = devices[NEXT_DEVICE_INDEX]
+#     if NEXT_DEVICE_INDEX < len(devices) - 1:
 #         NEXT_DEVICE_INDEX += 1
 #     else:
 #         if balance_strategy == BalanceStrategy.MEMORY:

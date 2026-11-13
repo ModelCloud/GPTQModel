@@ -80,9 +80,9 @@ def refine_paro_export(result, *, teacher, inputs, group_size, config=None, stor
     config = normalize_gsq_config(config)
 
     def retained(before=None, after=None, history=None):
-        return dict(pack_weight=result.pack_weight.clone(), pseudo_weight=result.pseudo_weight.clone(),
-                    q_scales=result.q_scales.clone(), q_zeros=result.q_zeros.clone(),
-                    before=before, after=after, history=[] if history is None else history)
+        return {"pack_weight": result.pack_weight.clone(), "pseudo_weight": result.pseudo_weight.clone(),
+                    "q_scales": result.q_scales.clone(), "q_zeros": result.q_zeros.clone(),
+                    "before": before, "after": after, "history": [] if history is None else history}
 
     if config is None or not config.enabled:
         return retained()
@@ -117,5 +117,5 @@ def refine_paro_export(result, *, teacher, inputs, group_size, config=None, stor
     channel = result.channel_scales.to(storage_dtype).float()
     pseudo = _apply_inverse_rotation(packed_grid, result.pairs, angles,
                                      group_size=group, fused_rotation=False) * channel.reshape(-1)
-    return dict(pack_weight=fitted.weight, pseudo_weight=pseudo, q_scales=fitted.scales, q_zeros=fitted.zeros,
-                before=fitted.before, after=fitted.after, history=fitted.history)
+    return {"pack_weight": fitted.weight, "pseudo_weight": pseudo, "q_scales": fitted.scales, "q_zeros": fitted.zeros,
+                "before": fitted.before, "after": fitted.after, "history": fitted.history}

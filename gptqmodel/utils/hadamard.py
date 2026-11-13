@@ -19,6 +19,7 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 
+
 _HADAMARD_OPS_NAME = "gptqmodel_hadamard_ops"
 _HADAMARD_NAMESPACE = "gptqmodel_hadamard"
 

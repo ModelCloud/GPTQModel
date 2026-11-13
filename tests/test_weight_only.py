@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.quantization_run_plan import ProcessorStep
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import (
     GGUFTorchLinear,
@@ -310,6 +311,8 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
+    assert model.quantization_run_plan is not None
+    assert model.quantization_run_plan.processors == (ProcessorStep.WEIGHT_ONLY,)
 
     qmodules = find_modules(model.model, [TorchLinear])
     assert len(qmodules) == 4
@@ -341,6 +344,34 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         assert actual_error <= expected_error + 0.01
         assert actual_error < 0.05
         torch.testing.assert_close(qmodule.g_idx.detach().cpu(), expected_g_idx)
+
+
+def test_baseqmodel_quantize_accepts_string_backend_and_describes_plan():
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+    qcfg = RTNConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        offload_to_disk=False,
+        device=device.type,
+    )
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    model.quantize(calibration=None, backend="torch")
+
+    assert model.quantized is True
+    described = model.quantization_run_plan.describe()
+    # RTN exports through the GPTQ layout, so method-aware normalization maps
+    # the "torch" alias to the GPTQ torch backend, matching pack selection.
+    assert described["loop_backend"] == BACKEND.GPTQ_TORCH.value
+    assert described["checkpoint_supported"] is True
 
 
 def test_baseqmodel_quantize_allows_rtn_awq_export():
@@ -1664,7 +1695,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
     module.clear_autotune()
     module.clear_weight_cache()
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
@@ -1725,7 +1756,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     module.clear_autotune()
     module.clear_weight_cache()
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 

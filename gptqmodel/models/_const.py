@@ -13,7 +13,7 @@ from torch import device
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available
 
 
 def _optional_torch_device(spec: str, fallback: torch.device) -> torch.device:
@@ -32,20 +32,28 @@ XPU_0 = device("xpu:0")
 NPU = _optional_torch_device("npu", CPU)
 NPU_0 = _optional_torch_device("npu:0", CPU)
 MPS = device("mps")
-ROCM = device("cuda:0")  # rocm maps to fake cuda
+ROCM = device("cuda:0")  # Concrete HIP runtime target; use DEVICE.ROCM for the AMD family.
 
 SUPPORTS_MODULE_TYPES = [nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D]
 
 DEFAULT_MAX_SHARD_SIZE = "4GB"
 
 class DEVICE(str, Enum):
+    """GPTQModel hardware families, distinct from PyTorch's runtime namespace.
+
+    In SUPPORTS_DEVICES, CUDA declares NVIDIA and ROCM declares AMD. HIP also
+    calls its runtime devices "cuda"; normalize requests with normalize_device
+    and translate back only at Torch boundaries, never in support declarations.
+    """
+
     ALL = "all"  # All device
     CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
     CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
     NPU = "npu"  # Ascend NPU: portable Torch kernels
     MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
-    ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
+    ROCM = "rocm"  # AMD GPU family; HIP's Torch runtime namespace is "cuda".
+    XLA = "xla"  # PyTorch/XLA runtime, including Tenstorrent PJRT devices.
 
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
@@ -64,7 +72,7 @@ class DEVICE(str, Enum):
     @property
     def index(self) -> int | None:
         """Default index used when materialising a torch.device from this enum."""
-        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.XLA):
             return 0
         return None
 
@@ -86,6 +94,12 @@ class PLATFORM(str, Enum):
 
 def validate_cuda_support(raise_exception: bool = False):
     got_cuda = HAS_CUDA
+    if got_cuda and IS_ROCM:
+        # ROCm reuses the ``cuda`` device namespace, where
+        # ``get_device_capability`` returns an unrelated numeric pair. Every
+        # supported gfx target is newer than the Pascal-era floor below, so the
+        # SM check only applies to NVIDIA builds.
+        return got_cuda
     if got_cuda:
         at_least_one_cuda_v6 = any(
             torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
@@ -101,13 +115,24 @@ def validate_cuda_support(raise_exception: bool = False):
 
 
 def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
+    """Return the kernel support family for a public device value.
+
+    HIP reuses torch's ``cuda`` namespace, so on a ROCm host an integer ordinal
+    and every ``cuda`` spelling name the AMD accelerator.  They must map to
+    ``DEVICE.ROCM``; keeping them as ``DEVICE.CUDA`` lets CUDA-only kernels
+    (Triton V2, W4A-FP8/NVFP4, ...) pass the support-family gate on ROCm.
+    ``DEVICE.CUDA`` is the CUDA support family, which cannot exist on a ROCm
+    host, so it maps to ``DEVICE.ROCM`` there as well.
+    """
     if isinstance(type_value, int):
         if HAS_CUDA:
-            return DEVICE.CUDA
+            return DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
         elif HAS_XPU:
             return DEVICE.XPU
         elif HAS_NPU:
             return DEVICE.NPU
+        elif is_xla_available():
+            return DEVICE.XLA
         elif HAS_MPS:
             return DEVICE.MPS
         else:
@@ -122,12 +147,18 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
         type_value = split_results[0]
 
     if isinstance(type_value, DEVICE):
+        if type_value == DEVICE.CUDA and IS_ROCM:
+            return DEVICE.ROCM
         return type_value
 
     if not isinstance(type_value, str):
         raise ValueError(f"Invalid device type_value type: {type(type_value)}")
 
-    return DEVICE(type_value.lower())
+    device = DEVICE(type_value.lower())
+    if device == DEVICE.CUDA and IS_ROCM:
+        # HIP exposes AMD devices through the ``cuda`` namespace.
+        return DEVICE.ROCM
+    return device
 
 
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
@@ -137,6 +168,8 @@ def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
         return XPU_0
     elif HAS_NPU:
         return NPU_0
+    elif is_xla_available():
+        return DEVICE.XLA.to_torch_device()
     elif HAS_MPS:
         return MPS
     else:

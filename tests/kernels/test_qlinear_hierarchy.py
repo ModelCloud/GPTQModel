@@ -131,8 +131,12 @@ def _install_dummy_bitblas(monkeypatch):
     monkeypatch.setattr(AWQBitBlasKernel, "_get_or_create_bitblas_operator", _fake_get_or_create)
     monkeypatch.setattr(BitblasLinear, "_configure_bitblas_matmul", _fake_configure)
     monkeypatch.setattr(AWQBitBlasKernel, "_configure_bitblas_matmul", _fake_configure)
-    BitblasLinear.cached_validate_once.cache_clear()
-    AWQBitBlasKernel.cached_validate_once.cache_clear()
+    # The dummy operator stands in for a working BitBLAS install, so make the
+    # kernel availability check match it. BitBLAS itself is CUDA-only and
+    # rejects ROCm during construction, but this test only inspects the
+    # grouped/non-packed runtime state of the module.
+    monkeypatch.setattr(BitblasLinear, "cached_validate_once", classmethod(lambda cls: (True, None)))
+    monkeypatch.setattr(AWQBitBlasKernel, "cached_validate_once", classmethod(lambda cls: (True, None)))
 
 
 def test_grouped_nonpacked_kernels_do_not_store_packed_runtime_state(monkeypatch):

@@ -76,8 +76,9 @@ def _requant_args(tmp_path, mode):
 
 
 def _patch_requant_runtime(monkeypatch, requant_module, model):
-    import gptqmodel
     import torch
+
+    import gptqmodel
 
     monkeypatch.setattr(gptqmodel.GPTQModel, "load", lambda *args, **kwargs: model)
     monkeypatch.setattr(

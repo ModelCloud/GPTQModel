@@ -148,7 +148,13 @@ def gptq_quantize_weight_mlx(
     remaining = weight.reshape(rows, columns).astype(mx.float32)
     packed_groups, all_scales, all_biases = [], [], []
     values_per_word = 32 // bits
-    for start in range(0, columns, group_size):
+    # Draining the graph every group costs a full GPU round trip per group and
+    # dominated this loop (2.3 s vs 0.45 s at 17408x5120). Metadata arrays are
+    # small, so evaluate them periodically instead: this keeps the update chain
+    # resident on the GPU while bounding the pending intermediate to a few
+    # groups' worth of the remaining weight matrix.
+    eval_every = 8
+    for group_index, start in enumerate(range(0, columns, group_size)):
         end = start + group_size
         group = remaining[:, :group_size]
         packed_group, errors, scales, biases = kernel(
@@ -172,7 +178,8 @@ def gptq_quantize_weight_mlx(
                 remaining[:, group_size:]
                 - _accurate_matmul_mlx(errors, inverse_hessian[start:end, end:])
             )
-            mx.eval(remaining)
+            if (group_index + 1) % eval_every == 0:
+                mx.eval(remaining)
 
     packed = mx.concatenate(packed_groups, axis=1).reshape(
         *prefix, columns // values_per_word

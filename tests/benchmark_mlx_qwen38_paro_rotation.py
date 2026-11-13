@@ -14,9 +14,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 import torch
+from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear, _rotate_stage
-from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 
 def _paired_milliseconds(main_fn, new_fn, repeats):

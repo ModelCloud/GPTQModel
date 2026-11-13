@@ -56,12 +56,20 @@ def paroquant_pack_weight_mlx(weight, scales, *, group_size: int):
         raise ValueError("scales must have shape (out_features, groups)")
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32) or scales.dtype != weight.dtype:
         raise ValueError("weight and scales must share float16, bfloat16, or float32 dtype")
-    # AwqTorchLinear.pack multiplies the zero point by the original scale,
-    # then casts the stored runtime scale to fp16 when it starts as fp32.
-    scale_zeros = scales * 8
+    # AwqTorchLinear.pack multiplies the zero point by the original scale in
+    # FP32. A finite FP16 scale above 8188 overflows if multiplied first.
+    scale_zeros = scales.astype(mx.float32) * 8
     runtime_scales = scales.astype(mx.float16) if scales.dtype == mx.float32 else scales
     view = weight.reshape(out_features, groups, group_size)
-    codes = mx.round((view + scale_zeros[:, :, None]) / runtime_scales[:, :, None])
+    # Match AwqTorchLinear.pack, which promotes the affine expression to FP32
+    # before rounding. Doing the divide in the input's low precision can move a
+    # value one representable step above a half-integer onto the wrong code.
+    codes = mx.round(
+        (
+            view.astype(mx.float32)
+            + scale_zeros[:, :, None]
+        ) / runtime_scales.astype(mx.float32)[:, :, None]
+    )
     valid_scales = mx.all(mx.isfinite(scales) & (scales > 0))
     valid_stored_scales = mx.all(mx.isfinite(runtime_scales) & (runtime_scales > 0))
     valid_weight = mx.all(mx.isfinite(weight))

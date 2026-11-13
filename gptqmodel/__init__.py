@@ -3,17 +3,53 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import atexit
 import os
 import sys
+import threading
 
 
 # isort: off
+# Must run before any submodule import: importing `.utils` initialises the CUDA
+# caching allocator, and Torch only reads the allocator configuration once. A
+# late assignment is silently ignored, which leaves large quantization runs
+# fragmenting a device until a single multi-GiB request can no longer be served.
+from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
+
+_installed_alloc_conf = apply_default_alloc_conf()
+
+# Still before any other Torch use: HIP reports no last-level cache, so on
+# RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
+# Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
+# from L2 then measures a warm cache. This back-ports the Python half of
+# https://github.com/pytorch/pytorch/pull/203965 and has to run before a device
+# property is read or an Inductor benchmarker caches its size hint.
+from .rocm_llc import apply as _apply_rocm_llc  # noqa: E402
+
+_rocm_llc_status = _apply_rocm_llc()
+
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
+from .utils.logger import setup_logger  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
+from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 # isort: on
 
+
+log = setup_logger()
+
+if any(result.startswith("applied") for result in _rocm_llc_status.values()):
+    log.debug("rocm_llc: %s", _rocm_llc_status)
+
+if _installed_alloc_conf is not None:
+    log.info(
+        "ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.",
+        _installed_alloc_conf,
+    )
+
+# Fail loudly (once) on ROCm releases older than the supported floor.
+warn_unsupported_rocm()
 
 patch_safetensors_save_file()
 
@@ -22,7 +58,7 @@ patch_safetensors_save_file()
 try:
     TritonPatch.apply()
 except Exception:
-    pass
+    log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
 def _patch_transformers_gptq_device_map_compat():
@@ -31,7 +67,16 @@ def _patch_transformers_gptq_device_map_compat():
         from functools import wraps
 
         from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+    except ImportError:
+        # transformers is a hard dependency, so a missing symbol means the
+        # upstream API moved and this compatibility shim is now inert.
+        log.warning(
+            "transformers GPTQ device-map compat is inactive: GptqHfQuantizer API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("transformers GPTQ device-map compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -68,7 +113,14 @@ def _patch_transformers_paroquant_quantizer_compat():
         from transformers.quantizers import auto as hf_quant_auto
         from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
         from transformers.utils.quantization_config import GPTQConfig
+    except ImportError:
+        log.warning(
+            "ParoQuant quantizer compat is inactive: transformers quantizer API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("ParoQuant quantizer compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -84,7 +136,11 @@ def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
         from openvino.frontend.pytorch import gptq as ov_gptq
+    except ImportError:
+        log.debug("OpenVINO GPTQ compat skipped: openvino not installed", exc_info=True)
+        return
     except Exception:
+        log.warning("OpenVINO GPTQ compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -107,7 +163,14 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
 
         import transformers.integrations as hf_integrations
         from transformers.integrations import hub_kernels
+    except ImportError:
+        log.warning(
+            "causal-conv1d hub-kernel compat is inactive: transformers integrations API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("causal-conv1d hub-kernel compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -154,7 +217,6 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
 
 from .utils import has_gil_disabled
 from .utils.env import env_flag
-from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
 
 
@@ -165,6 +227,7 @@ from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 
 
 _DEVICE_THREAD_POOL = None
+_DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
@@ -184,6 +247,18 @@ def _default_cpu_workers() -> int:
     return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
 
 
+def _default_cuda_workers() -> int:
+    """Return the per-CUDA worker count, respecting an explicit env override."""
+
+    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
+    if env_workers is not None:
+        try:
+            return max(1, int(env_workers))
+        except ValueError:
+            pass
+    return 4
+
+
 def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
@@ -194,7 +269,7 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": 4,
+            "cuda:per": _default_cuda_workers(),
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
@@ -208,8 +283,24 @@ def _build_device_thread_pool():
 def get_device_thread_pool():
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
-        _DEVICE_THREAD_POOL = _build_device_thread_pool()
+        with _DEVICE_THREAD_POOL_LOCK:
+            if _DEVICE_THREAD_POOL is None:
+                pool = _build_device_thread_pool()
+                # Register before publishing the pool so every caller that
+                # receives it has a matching exit cleanup. Capture this pool:
+                # a later replacement must not leave its workers unjoined.
+                atexit.register(_shutdown_device_thread_pool, pool)
+                _DEVICE_THREAD_POOL = pool
     return _DEVICE_THREAD_POOL
+
+
+def _shutdown_device_thread_pool(pool: DeviceThreadPool) -> None:
+    """Join pool workers at exit so finalization cannot abort."""
+    try:
+        pool.shutdown(wait=True)
+    except Exception:
+        # Exit cleanup must never turn a successful run into a failed one.
+        pass
 
 
 class _LazyDeviceThreadPoolProxy:
@@ -294,7 +385,15 @@ import torch
 from . import extension
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
-from .models import GPTQModel, get_best_device
+from .models import (
+    FusableConfig,
+    FusableProfile,
+    GPTQModel,
+    LlamaFusableConfig,
+    ModulePlan,
+    ModuleSpec,
+    get_best_device,
+)
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQConfig,
@@ -314,11 +413,13 @@ from .quantization import (
     TelemetryConfig,
     WeightOnlyConfig,
 )
+from .reshard import ShardConfig, ShardLayout, reshard
 from .utils import BACKEND, PROFILE
+from .utils.p2p import P2PConfig
 from .version import __version__
 
 
-setup_logger().info(
+log.info(
     "\n%s",
     get_startup_banner(
         ASCII_LOGO,

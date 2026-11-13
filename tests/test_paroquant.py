@@ -25,6 +25,7 @@ import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 import gptqmodel.utils.paroquant as paroquant_utils_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
@@ -2808,6 +2809,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
         sym=True,
         krot=8,
         opt_pair_ratio=0.25,
+        gsq=None,
         opt_train_samples=128,
         opt_validation_samples=32,
         opt_batch_size=16,
@@ -2919,16 +2921,12 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
     processor = ParoQuantProcessor(
         tokenizer=None,
         qcfg=ParoConfig(bits=4, group_size=128, opt_scope=opt_scope),
-        calibration=None,
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
         gptq_model=None,
         model=None,
     )
 
-    assert processor.execution_config.capture_layer_forward_context is expected_capture
+    assert processor.forward.capture_layer_context is expected_capture
 
 
 @pytest.mark.parametrize(
@@ -3203,6 +3201,7 @@ def test_paroquant_processor_group_clean_inputs_seed_from_input_cache():
     """Guard grouped clean targets against aliasing the noisy replay cache."""
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
+    processor._input_cache_lock = threading.RLock()
     clean_inputs = [[torch.randn(1, 4)]]
     noisy_inputs = [[torch.randn(1, 4)]]
     cache = InputCache(
@@ -3222,6 +3221,7 @@ def test_paroquant_processor_group_clean_inputs_default_to_noisy_stream():
     """Guard default grouped behavior against enabling train-on-noisy-inputs implicitly."""
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=False)
+    processor._input_cache_lock = threading.RLock()
     clean_inputs = [[torch.randn(1, 4)]]
     noisy_inputs = [[torch.randn(1, 4)]]
     processor.receive_input_cache(
@@ -3332,6 +3332,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
     processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
     processor._layer_states = {}
     processor._layer_states_lock = threading.Lock()
+    processor._input_cache_lock = threading.RLock()
 
     clean_inputs = [[torch.tensor([[1.0]])]]
     noisy_inputs = [[torch.tensor([[3.0]])]]
@@ -3418,6 +3419,7 @@ def test_paroquant_processor_group_capture_advances_clean_stream_without_subset_
     processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
     processor._layer_states = {}
     processor._layer_states_lock = threading.Lock()
+    processor._input_cache_lock = threading.RLock()
     processor.receive_input_cache(
         InputCache(
             layer_inputs=[[torch.tensor([[2.0]])]],
@@ -5960,6 +5962,7 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
         register_buffers=True,
     ).to("cuda")
     module.scales.fill_(1)
+    checkpoint_scales_dtype = module.scales.dtype
 
     seen = {}
 
@@ -5978,7 +5981,8 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     assert seen["input_dtype"] == torch.bfloat16
     assert seen["scales_dtype"] == torch.bfloat16
     assert seen["split_k_iters"] == 4
-    assert module.scales.dtype == torch.bfloat16
+    assert module.scales.dtype == checkpoint_scales_dtype
+    assert module._runtime_scales.dtype == torch.bfloat16
     assert out is not None
     assert out.dtype == torch.bfloat16
 

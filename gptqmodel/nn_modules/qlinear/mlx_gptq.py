@@ -8,6 +8,7 @@ from functools import lru_cache
 import mlx.core as mx
 import mlx.nn as nn
 
+from ...quantization.mlx_splitk_dispatch import quantized_matmul as _dispatch_matmul
 from .mlx_group16 import MlxGroup16Linear
 
 
@@ -18,6 +19,130 @@ def _uses_packed_prefill(output_dtype, rows, input_dims, output_dims):
         and output_dims <= 1024
         and (1 < rows <= 8 or rows in (12, 16))
     )
+
+
+# Decode columns per warp for wide projections.  A warp owns `COLUMNS` columns so
+# each activation load feeds several fused multiply-adds, which removes the
+# per-column activation reload that dominates the one-column-per-warp layout.
+_PACKED_COLUMNS = 4
+_PACKED_COLUMN_WARPS = 8
+_PACKED_COLUMNS_MIN_OUTPUT = 5120
+
+
+def _group16_columns_source(output_type, word_wide):
+    """Build the wide-decode MSL body shared by the GPTQ and AWQ kernels.
+
+    `word_wide` is true only when a code can straddle a 32-bit packed word,
+    which happens exactly when `bits` does not divide 32 (3, 5 and 6 bits).
+    Every other width extracts the code from a single word.
+    """
+    if word_wide:
+        extract = """
+                ulong window = ulong(packed[c][word]);
+                if (word + 1 < WORDS) window |= ulong(packed[c][word + 1]) << 32;
+                uint code = uint((window >> shift) & MASK);"""
+    else:
+        extract = """
+                uint code = (packed[c][word] >> shift) & MASK;"""
+    return """
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint column_base =
+                (threadgroup_position_in_grid.y * WARPS + warp) * COLUMNS;
+            float sums[COLUMNS];
+            uint offsets[COLUMNS];
+            for (uint c = 0; c < COLUMNS; ++c) {
+                sums[c] = 0.0f;
+                uint column = column_base + c;
+                offsets[c] = column < N ? column * (K * BITS / 32) : 0u;
+            }
+
+            for (uint group = lane; group < K / 16; group += 32) {
+                uint start_bit = group * 16 * BITS;
+                uint word_base = start_bit >> 5;
+                uint first_shift = start_bit & 31u;
+                uint packed[COLUMNS][4];
+                float group_scales[COLUMNS];
+                float group_biases[COLUMNS];
+                for (uint c = 0; c < COLUMNS; ++c) {
+                    uint column = column_base + c;
+                    for (uint word = 0; word < WORDS; ++word)
+                        packed[c][word] = column < N
+                            ? weight[offsets[c] + word_base + word] : 0u;
+                    uint scale_index = column < N
+                        ? column * (K / 32) + (group >> 1) : 0u;
+                    group_scales[c] = (group & 1u)
+                        ? scales_odd[scale_index] : scales_even[scale_index];
+                    group_biases[c] = (group & 1u)
+                        ? biases_odd[scale_index] : biases_even[scale_index];
+                }
+                for (uint index = 0; index < 16; ++index) {
+                    float value = float(x[group * 16 + index]);
+                    uint bit = first_shift + index * BITS;
+                    uint word = bit >> 5;
+                    uint shift = bit & 31u;
+                    for (uint c = 0; c < COLUMNS; ++c) {EXTRACT
+                        sums[c] = metal::fma(
+                            value,
+                            metal::fma(float(code), group_scales[c], group_biases[c]),
+                            sums[c]);
+                    }
+                }
+            }
+
+            for (uint c = 0; c < COLUMNS; ++c) {
+                uint column = column_base + c;
+                float reduced = simd_sum(sums[c]);
+                if (lane == 0 && column < N)
+                    output[column] = OUTPUT_TYPE(reduced + bias[column]);
+            }
+        """.replace("EXTRACT", extract).replace("OUTPUT_TYPE", output_type)
+
+
+@lru_cache(maxsize=12)
+def _group16_columns_kernel(name, output_dtype, word_wide):
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported group-16 activation dtype: {output_dtype}") from exc
+    return mx.fast.metal_kernel(
+        name=f"gptqmodel_{name}_group16_columns_{output_suffix}",
+        input_names=[
+            "x", "weight", "scales_even", "scales_odd",
+            "biases_even", "biases_odd", "bias",
+        ],
+        output_names=["output"],
+        source=_group16_columns_source(output_type, word_wide),
+    )
+
+
+def _uses_packed_columns(output_dims):
+    return output_dims >= _PACKED_COLUMNS_MIN_OUTPUT
+
+
+def _packed_columns_launch(kernel, inputs, input_dims, output_dims, bits, dtype):
+    """Launch the wide-decode kernel and return its output tensor."""
+    return kernel(
+        inputs=inputs,
+        template=[
+            ("K", input_dims), ("N", output_dims), ("BITS", bits),
+            ("MASK", (1 << bits) - 1), ("WORDS", (bits + 1) // 2),
+            ("WARPS", _PACKED_COLUMN_WARPS), ("COLUMNS", _PACKED_COLUMNS),
+        ],
+        grid=(
+            32 * _PACKED_COLUMN_WARPS,
+            (output_dims + _PACKED_COLUMN_WARPS * _PACKED_COLUMNS - 1)
+            // (_PACKED_COLUMN_WARPS * _PACKED_COLUMNS),
+            1,
+        ),
+        threadgroup=(32 * _PACKED_COLUMN_WARPS, 1, 1),
+        output_shapes=[(1, output_dims)], output_dtypes=[dtype],
+    )[0]
 
 
 @lru_cache(maxsize=6)
@@ -169,8 +294,20 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
                 return super().__call__(x)
             output = self._packed_prefill(x, rows, min(rows, 4))
             return output.reshape(output_shape)
-        threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         bias = self.bias if "bias" in self else self.zero_bias[0]
+        if _uses_packed_columns(output_dims):
+            output = _packed_columns_launch(
+                _group16_columns_kernel(
+                    "gptq", x.dtype, 32 % self.bits != 0,
+                ),
+                [
+                    x, self.weight, self.scales_even, self.scales_odd,
+                    self.biases_even, self.biases_odd, bias,
+                ],
+                self.input_dims, output_dims, self.bits, x.dtype,
+            )
+            return output.reshape(output_shape)
+        threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         output = _gptq_group16_kernel(x.dtype)(
             inputs=[
                 x, self.weight, self.scales_even, self.scales_odd,
@@ -188,6 +325,22 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
         return output.reshape(output_shape)
 
 
+def _mlx_forward(linear, x):
+    """Apply the wrapped quantized affine layer, avoiding MLX's split-K pass."""
+    out = _dispatch_matmul(
+        x,
+        linear.weight,
+        linear.scales,
+        linear.get("biases"),
+        group_size=linear.group_size,
+        bits=linear.bits,
+        mode=linear.mode,
+    )
+    if "bias" in linear:
+        out = out + linear["bias"]
+    return out.astype(x.dtype)
+
+
 class MlxGPTQLinear(nn.Module):
     """Run MLX affine GPTQ matmul and round its output to the input dtype."""
 
@@ -197,4 +350,4 @@ class MlxGPTQLinear(nn.Module):
         self.freeze()
 
     def __call__(self, x):
-        return self.linear(x).astype(x.dtype)
+        return _mlx_forward(self.linear, x)

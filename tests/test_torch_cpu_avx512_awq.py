@@ -347,8 +347,94 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
     restored = layer.dequantize_weight()
     torch.testing.assert_close(restored, expected_weight, atol=2e-3, rtol=2e-3)
 
-    with pytest.raises(NotImplementedError, match="inference-only"):
-        layer.train(True)
+
+@pytest.mark.parametrize("bias", (False, True))
+def test_awq_layer_train_mode_uses_differentiable_dequant_path(bias):
+    # HF/PEFT load with BACKEND.AUTO, which selects this kernel, then call
+    # model.train() for LoRA fine-tuning. The eval forward must not pin the
+    # cached dispatch to the no-grad fused kernel.
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(2027)
+    in_features, out_features, group_size = 256, 64, 64
+    qweight, qzeros, scales = _make_awq_buffers(
+        in_features,
+        out_features,
+        group_size,
+    )
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        bias=bias,
+    )
+    _fill_layer(layer, qweight, qzeros, scales)
+    if bias:
+        layer.bias.copy_(torch.randn(out_features, dtype=torch.float16) * 0.01)
+
+    layer.eval()
+    x_eval = torch.randn(5, in_features, dtype=torch.bfloat16)
+    with torch.no_grad():
+        layer(x_eval)
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+    if bias:
+        # transform_cpu() keeps the fused kernel's bias in FP32.
+        assert layer.bias.dtype == torch.float32
+
+    assert layer.train(True) is layer
+    assert layer.training
+    assert layer.linear_mode is None
+
+    weight = dequantize_gemm(
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.bfloat16)
+
+    x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
+    output = layer(x)
+    output.float().sum().backward()
+
+    assert layer.linear_mode == "train"
+    assert layer._cpu_transformed is True
+    assert output.dtype == torch.bfloat16
+    reference = x.detach() @ weight
+    if bias:
+        reference = (reference.float() + layer.bias.float()).to(torch.bfloat16)
+    torch.testing.assert_close(output, reference, atol=2e-3, rtol=2e-3)
+    expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
+    torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
+
+
+def test_awq_training_bias_rounds_once_after_addition(monkeypatch):
+    # Casting the FP32 bias to BF16 before adding rounds -3.99609375 to -4.0,
+    # turning 4 + (-3.99609375) into 0 instead of the representable
+    # 0.00390625. The ATen path adds the FP32 bias in place and rounds the sum
+    # once, so the training fallback must do the same.
+    _skip_unless_avx512_bf16()
+    in_features, out_features, group_size = 64, 64, 64
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        bias=True,
+    )
+    layer.bias.data.fill_(-3.99609375)
+    layer.train()
+
+    weight = torch.zeros((in_features, out_features), dtype=torch.bfloat16)
+    weight[0, :] = 4.0
+    monkeypatch.setattr(layer, "dequantize_weight", lambda num_itr=1: weight)
+
+    x = torch.zeros((1, in_features), dtype=torch.bfloat16)
+    x[0, 0] = 1.0
+    output = layer(x)
+
+    assert output.dtype == torch.bfloat16
+    expected = torch.full((1, out_features), 0.00390625, dtype=torch.bfloat16)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize(
@@ -510,7 +596,7 @@ def test_aten_awq_layer_matches_affine_oracle(dtype, checkpoint_scale_dtype):
     _fill_layer(layer, qweight, qzeros, scales)
 
     x = torch.randn(tokens, in_features, dtype=dtype)
-    arithmetic_scales = scales.to(dtype)
+    arithmetic_scales = scales.float()
     weight = _awq_affine_oracle(
         qweight,
         qzeros,
@@ -526,8 +612,8 @@ def test_aten_awq_layer_matches_affine_oracle(dtype, checkpoint_scale_dtype):
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == dtype
-    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=0.2, rtol=0.01)
+    assert layer.scales.dtype == torch.float32
+    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
 
@@ -610,6 +696,68 @@ def test_awq_auto_selection_prefers_shared_avx512_kernel():
         assert candidates.index(TorchCpuAvx512AwqLinear) < candidates.index(
             TorchAtenAwqLinear
         )
+
+
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
+def test_fused_layer_keeps_fp32_affine_abi_across_dtype_moves(dtype):
+    """A dtype move must not narrow the FP32 affine operands the kernel requires.
+
+    ``transform_cpu`` packs the weight once and keeps ``scales``/``bias`` in
+    FP32 because the shared AVX512 kernel rejects any other ``absmax`` dtype.
+    ``nn.Module._apply`` casts registered floating buffers, so a plain
+    ``model.float()``/``.half()``/``.to(dtype)`` used to leave a BF16 absmax
+    behind and the next forward raised ``absmax must be float32``.
+    """
+
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(2026)
+    in_features, out_features, group_size = 256, 64, 64
+
+    qweight, qzeros, scales = _make_awq_buffers(in_features, out_features, group_size)
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        bias=True,
+    )
+    _fill_layer(layer, qweight, qzeros, scales)
+    x = torch.randn(2, 5, in_features, dtype=torch.bfloat16)
+
+    with torch.inference_mode():
+        expected = layer(x)
+    # The first fused forward is what installs the packed layout and FP32 operands.
+    assert layer._cpu_transformed
+    reference_weight = _awq_affine_oracle(
+        qweight,
+        qzeros,
+        layer.scales.cpu(),
+        group_size=group_size,
+    )
+    # Compute the mathematical result in FP32 and round once to the visible
+    # dtype; mirroring the kernel's BF16 intermediate rounding would make the
+    # oracle itself differ by a full step near a bias tie.
+    oracle = (x.reshape(-1, in_features).float() @ reference_weight) + layer.bias.float()
+    torch.testing.assert_close(
+        expected.reshape(-1, out_features), oracle.to(torch.bfloat16), rtol=2e-2, atol=2e-2
+    )
+
+    for move in ("to", "float", "half"):
+        moved = layer
+        if move == "to":
+            moved.to(dtype)
+        elif move == "float":
+            moved.float()
+        else:
+            moved.half()
+        # Whatever dtype the module reports, the kernel operands stay FP32.
+        assert moved.scales.dtype == torch.float32, move
+        assert moved.bias is None or moved.bias.dtype == torch.float32, move
+        with torch.inference_mode():
+            actual = moved(x)
+        assert actual.dtype == torch.bfloat16, move
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+        # The packed codes are integer and must never be repacked by a move.
+        assert moved._cpu_transformed, move
 
 
 @pytest.mark.parametrize("group_size", (256, 512))

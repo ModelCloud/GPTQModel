@@ -15,6 +15,7 @@ from gptqmodel.looper.continuation import ContinuationCodec
 from gptqmodel.looper.extension import LoopExtensions, LoopStep
 from gptqmodel.looper.input_cache import InputCache
 
+
 PLAN = LoopPlan(tuple(LoopStep("layer", i, f"model.layers.{i}") for i in range(3)))
 
 

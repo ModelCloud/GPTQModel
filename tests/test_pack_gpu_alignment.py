@@ -81,3 +81,19 @@ def test_pack_gpu_raises_on_misaligned_qzeros():
     assert packed_module.qweight.shape == torch.Size([16, 16])
     assert packed_module.qzeros.shape == torch.Size([16, 1])
     assert packed_module.scales.shape == torch.Size([16, 1])
+
+
+def test_resolve_pack_device_keeps_the_assigned_device_ordinal():
+    """A concrete assignment must win over the loader's index-less DEVICE enum."""
+
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.utils.model import resolve_pack_device
+
+    quant_config = QuantizeConfig(bits=4, device="cuda:0", offload_to_disk=False)
+    # The loader normalizes `device` to the index-less enum.
+    quant_config.device = DEVICE.CUDA
+
+    assert resolve_pack_device(quant_config) == torch.device("cuda:0")
+    assert resolve_pack_device(quant_config, torch.device("cuda:1")) == torch.device("cuda:1")
+    # A CPU assignment must not disable the historical GPU pre-select.
+    assert resolve_pack_device(quant_config, torch.device("cpu")) == torch.device("cuda:0")

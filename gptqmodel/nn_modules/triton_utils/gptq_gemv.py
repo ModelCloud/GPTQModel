@@ -15,11 +15,137 @@ projection shapes of Qwen2.5-0.5B and larger 7B-32B style models
 (K,N in 896..17408). ``BLOCK_K=512, BLOCK_N=8, num_warps=8`` was the fastest
 configuration for every shape tested, and the fused path was 1.5x-2.9x faster
 than the dequantize + matmul path.
+
+The launch constants live in a per-architecture table. ``cdna4`` holds exactly
+the measured gfx950 values above (``block_k`` cap 512, ``block_n`` 8,
+``num_warps`` 8). ``rdna4`` (gfx1200/gfx1201/gfx1250) uses ``block_n=16`` /
+``num_warps=4``, measured on an AMD Radeon AI PRO R9700 (``gfx1201``, HIP
+7.16.26385, torch 2.16.0.dev20261029+rocm10.1), 4-bit, N == K, single token,
+median of 60 iterations.  Per-shape ``block_k`` cap stays 512.
+
+Measured decode latency (both tiles launched on the same gfx1201 device):
+
+======  =============  =============  ========
+K       cdna tile      rdna4 tile     gain
+======  =============  =============  ========
+2048    54.9 us        50.2 us        1.09x
+3584    66.1 us        61.5 us        1.08x
+4096    69.7 us        65.3 us        1.07x
+5120    81.7 us        78.4 us        1.04x
+======  =============  =============  ========
+
+RDNA4 is wave32, so ``num_warps=4`` covers 128 lanes of a CTA against CDNA's
+wave64 ``num_warps=8`` (512 lanes).  The wider ``block_n`` with fewer warps is
+what wins at every K in the table above; the one measured exception is
+K=8192/N=2048, where ``num_warps=8`` was marginally faster (44.1 vs 45.6 us),
+so the shipped tile trades that single point for the rest.
+
+Ada (RTX 4090, SM 8.9) uses ``max_block_k=256, block_n=8, num_warps=8``.  It
+was selected from a sweep over ``block_k`` in {256, 512, 1024}, ``block_n`` in
+{4, 8, 16, 32} and ``num_warps`` in {4, 8} measured on one 4090 (torch
+2.15.0+cu132, Triton 3.9.0, 4-bit gs=128, FP16, single token, median of 80
+iterations with ``torch.cuda.synchronize`` around every launch, alternating
+hot and 256 MiB L2-flushed iterations).  ``block_k=256`` had the lowest
+worst-case regret of the tested tiles (hot max 1.079x / mean 1.017x of the
+per-shape best, L2-flushed max 1.252x / mean 1.083x).  Against the
+A100-derived default ``(512, 8, 8)`` it wins on the larger projections:
+
+======  =========  ======  ==========  ==========  ==========
+K       N           M       (256,8,8)   (512,8,8)   note
+======  =========  ======  ==========  ==========  ==========
+896     128         1       16.0/16.4   15.9/16.4   ~equal (hot/flushed us)
+896     1280        1       16.3/16.4   16.0/17.1   ~equal
+2048    1024        1       16.2/20.7   16.3/20.5   ~equal
+2048    2048        1       16.4/24.1   16.8/24.6   1.02x
+3584    3584        1       21.3/37.7   22.5/38.5   1.06x
+4096    4096        1       22.2/40.1   24.2/40.9   1.09x
+4096    11008       1       36.8/60.4   43.0/67.7   1.17x
+5120    5120        1       27.7/47.0   33.3/58.2   1.20x
+5120    12288       1       45.1/72.7   53.3/81.9   1.18x
+8192    2048        1       25.4/48.7   27.3/49.2   1.07x
+======  =========  ======  ==========  ==========  ==========
+
+A larger ``block_k`` (1024) with ``block_n=8`` is faster at a few large-N /
+small-K shapes (e.g. 8192x2048: 23.6/40.7 us) but its worst-case regret rises
+to 1.80x, so it is deliberately not shipped.
 """
+
+from typing import NamedTuple
 
 import torch
 import triton
 import triton.language as tl
+
+from ...utils.arch import arch_class, normalize_arch, tuning_family
+
+
+class GemvLaunch(NamedTuple):
+    """Resolved launch constants for :func:`gptq_gemv` on one arch class."""
+
+    max_block_k: int
+    block_n: int
+    num_warps: int
+
+
+# ``block_k`` is the cap of ``min(cap, max(32, 1 << (in_features - 1).bit_length()))``;
+# keeping the power-of-two formula means a small ``in_features`` still gets one
+# K tile, while large projections stop at the measured cap.
+_GEMV_LAUNCH_CONFIGS: dict[str, GemvLaunch] = {
+    # Measured on gfx950 (MI350X/MI355X) across K,N in 896..17408.
+    "cdna4": GemvLaunch(max_block_k=512, block_n=8, num_warps=8),
+    # Measured on gfx1201 (R9700): block_n=16 / num_warps=4 beats the
+    # block_n=8 tile at K=2048 (1.09x), K=3584 (1.08x), K=4096 (1.07x) and
+    # K=5120 (1.04x).  At K=8192/N=2048 the (block_n=16, num_warps=8) tile was
+    # marginally best (44.1 vs 45.6 us); num_warps=4 is kept because it wins at
+    # every other measured K.  See the module docstring table and
+    # docs/rocm-rdna4.md.
+    "rdna4": GemvLaunch(max_block_k=512, block_n=16, num_warps=4),
+    # Measured on RTX 4090 (SM 8.9).  ``block_k=256`` has the lowest
+    # worst-case regret of the tested tiles and beats the (512, 8, 8) default
+    # by 1.02x-1.20x on the large projections; see the module docstring table.
+    "ada": GemvLaunch(max_block_k=256, block_n=8, num_warps=8),
+}
+
+_DEFAULT_GEMV_LAUNCH = GemvLaunch(max_block_k=512, block_n=8, num_warps=8)
+
+# Module-level defaults kept for callers that import the constants directly.
+GEMV_MAX_BLOCK_K = _DEFAULT_GEMV_LAUNCH.max_block_k
+GEMV_BLOCK_N = _DEFAULT_GEMV_LAUNCH.block_n
+GEMV_NUM_WARPS = _DEFAULT_GEMV_LAUNCH.num_warps
+
+
+def launch_config(arch=None) -> GemvLaunch:
+    """Return the GEMV launch constants for an architecture string or device.
+
+    Resolves through the shared :func:`gptqmodel.utils.arch.tuning_family`
+    vocabulary, so a device, a ``gfx*``/``sm_*`` string, or a ``(major, minor)``
+    capability tuple all reach the ``cdna4``/``rdna4``/``ada`` entries.  Anything
+    unregistered keeps the A100-tested default (which equals the Ada values, but
+    stays a distinct default so an unmeasured GPU never inherits a tuned tile).
+    """
+
+    if arch is None:
+        # Explicit "no architecture information": keep the portable default
+        # rather than silently inheriting whatever device happens to be current.
+        return _DEFAULT_GEMV_LAUNCH
+    family = tuning_family(arch) if not isinstance(arch, str) else _family_from_str(arch)
+    return _GEMV_LAUNCH_CONFIGS.get(family, _DEFAULT_GEMV_LAUNCH)
+
+
+def _family_from_str(arch: str) -> str:
+    """Classify a string through the shared family vocabulary (keeps defaults)."""
+
+    name = normalize_arch(arch)
+    if not name.startswith("gfx") and not name.startswith("sm_"):
+        return arch_class(name)
+    return tuning_family(name)
+
+
+def block_k_for(in_features: int, arch=None) -> int:
+    """Return the ``block_k`` tile for ``in_features`` under ``arch``."""
+
+    cap = launch_config(arch).max_block_k
+    return min(cap, max(32, 1 << (in_features - 1).bit_length()))
 
 
 @triton.jit
@@ -68,14 +194,16 @@ def gptq_gemv(x: torch.Tensor, qweight: torch.Tensor, scales: torch.Tensor,
               out_dtype: torch.dtype = None, bits: int = 4) -> torch.Tensor:
     in_features = x.shape[1]
     out_features = qweight.shape[1]
-    block_k = min(512, max(32, 1 << (in_features - 1).bit_length()))
-    block_n = 8
+    cfg = launch_config(x.device)
+    block_k = block_k_for(in_features, x.device)
+    block_n = cfg.block_n
     output = torch.empty(
         (x.shape[0], out_features), device=x.device, dtype=x.dtype if out_dtype is None else out_dtype,
     )
     with torch.cuda.device(x.device):
         _gptq_gemv_kernel[(triton.cdiv(out_features, block_n), x.shape[0])](
             x, qweight, scales, qzeros, g_idx, output,
-            in_features, out_features, scales.shape[0], block_k, block_n, bits, num_warps=8,
+            in_features, out_features, scales.shape[0], block_k, block_n, bits,
+            num_warps=cfg.num_warps,
         )
     return output

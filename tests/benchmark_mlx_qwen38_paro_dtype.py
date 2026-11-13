@@ -12,7 +12,6 @@ import time
 import mlx.core as mx
 import numpy as np
 import torch
-
 from benchmark_mlx_qwen38_paro_rotation import _make_layer
 from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 

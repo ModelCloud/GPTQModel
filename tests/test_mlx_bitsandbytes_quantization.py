@@ -12,6 +12,7 @@ import torch
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -27,6 +28,7 @@ from gptqmodel.quantization.mlx_bitsandbytes import (  # noqa: E402
     quantize_4bit_weight_mlx,
     quantize_int8_weight_mlx,
 )
+
 
 BLOCK_SIZES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
 SOURCE_DTYPES = (torch.float16, torch.bfloat16)

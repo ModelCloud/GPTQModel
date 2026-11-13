@@ -15,6 +15,7 @@ from gptqmodel.models.writer import (
     PROCESS_LOG_TIME,
     QUANT_LOG_DAMP,
     QUANT_LOG_LOSS,
+    QUANT_LOG_LOSS_KIND,
     QUANT_LOG_NSAMPLES,
 )
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -53,7 +54,10 @@ def writer(tmp_path: Path) -> LlamaQModel:
 
 
 @pytest.mark.parametrize("samples", [128, 0, None])
-def test_quant_log_columns(writer: LlamaQModel, tmp_path: Path, samples: int | None) -> None:
+@pytest.mark.parametrize("loss_kind", ["relative_weight_mse", None])
+def test_quant_log_columns(
+    writer: LlamaQModel, tmp_path: Path, samples: int | None, loss_kind: str | None,
+) -> None:
     entry = {
         PROCESS_LOG_LAYER: 0,
         PROCESS_LOG_MODULE: "proj",
@@ -63,6 +67,8 @@ def test_quant_log_columns(writer: LlamaQModel, tmp_path: Path, samples: int | N
     }
     if samples is not None:
         entry[QUANT_LOG_NSAMPLES] = samples
+    if loss_kind is not None:
+        entry[QUANT_LOG_LOSS_KIND] = loss_kind
     writer.quant_log = [entry]
     output = tmp_path / "saved"
     writer.save_quantized(str(output))
@@ -73,6 +79,7 @@ def test_quant_log_columns(writer: LlamaQModel, tmp_path: Path, samples: int | N
             PROCESS_LOG_LAYER: "0",
             PROCESS_LOG_MODULE: "proj",
             QUANT_LOG_LOSS: "0.25",
+            QUANT_LOG_LOSS_KIND: "" if loss_kind is None else loss_kind,
             QUANT_LOG_NSAMPLES: "" if samples is None else str(samples),
             QUANT_LOG_DAMP: "0.05",
             PROCESS_LOG_TIME: "1.5",

@@ -6,9 +6,10 @@
 import os
 import unittest
 
+from model_test import ModelTest
+
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
-from model_test import ModelTest
 
 
 # E2E Swordfish (Blackwell sm100/sm110) integration test using the same
@@ -27,7 +28,7 @@ class TestLlama3_2_Swordfish(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
 
-    LOAD_BACKEND = BACKEND.GPTQ_SWORDFISH
+    LOAD_BACKEND = BACKEND.SWORDFISH
     QUANT_BACKEND = BACKEND.AUTO
     BITS = 4
     GROUP_SIZE = 128

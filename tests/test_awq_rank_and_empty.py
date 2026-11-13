@@ -5,9 +5,9 @@ import torch
 
 import gptqmodel.nn_modules.qlinear.gemm_awq as gemm_awq
 import gptqmodel.nn_modules.qlinear.gemm_awq_triton as gemm_awq_triton
+from gptqmodel.nn_modules.qlinear import empty_linear_output, input_rows
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
-from gptqmodel.nn_modules.qlinear import empty_linear_output, input_rows
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear

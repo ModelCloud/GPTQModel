@@ -53,17 +53,16 @@ def test_gptq_checkpoint_formats_auto_select_mlx(fmt, bits):
 
 def test_gptq_format_registry_enforces_layout_capabilities():
     from gptqmodel.models._const import DEVICE
-    from gptqmodel.nn_modules.qlinear.mlx import (GPTQBitBLASMlxQuantLinear,
-                                                  GPTQMarlinMlxQuantLinear)
+    from gptqmodel.nn_modules.qlinear.mlx import GPTQBitBLASMlxQuantLinear, GPTQMarlinMlxQuantLinear
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.utils.backend import BACKEND
     from gptqmodel.utils.importer import select_quant_linear
 
-    common = dict(
-        group_size=128, desc_act=False, pack_dtype=torch.int32,
-        dtype=torch.float16, device=DEVICE.MPS, backend=BACKEND.MLX,
-        quant_method=METHOD.GPTQ,
-    )
+    common = {
+        "group_size": 128, "desc_act": False, "pack_dtype": torch.int32,
+        "dtype": torch.float16, "device": DEVICE.MPS, "backend": BACKEND.MLX,
+        "quant_method": METHOD.GPTQ,
+    }
     for bits in (4, 8):
         assert select_quant_linear(
             **common, bits=bits, sym=True, format=FORMAT.MARLIN,

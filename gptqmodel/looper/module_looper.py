@@ -30,10 +30,12 @@ from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
+from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
+from ..models.module_plan import _model_module_plan
 from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import (
     METHOD,
@@ -48,8 +50,11 @@ from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
+    find_last_quantized_layer_index,
     forward_batch_worker,
+    move_module_to_device,
     normalize_device_like,
+    plan_layer_count,
     rehome_module_to_device,
     select_forward_devices,
 )
@@ -58,12 +63,17 @@ from ..utils.model import (
     get_layers_with_prefixes,
     get_module,
     get_module_by_name_prefix,
-    move_to,
     restore_moe_topk,
     set_moe_topk,
     untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
+from ..utils.p2p import (
+    configure_p2p,
+    enable_for_devices,
+    safe_module_to,
+    safe_move_to,
+)
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
@@ -167,7 +177,7 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper(DeviceAssignmentState):
+class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -191,6 +201,7 @@ class ModuleLooper(DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        self.layer_module_coverage = LayerModuleCoverageTracker()
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
 
@@ -227,7 +238,6 @@ class ModuleLooper(DeviceAssignmentState):
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
-        self._primary_quant_device = quant_devices[0]
 
         # Apply compute device filter if provided to determine which devices to use for quantization
         compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
@@ -254,6 +264,11 @@ class ModuleLooper(DeviceAssignmentState):
             )
             quant_devices = restricted_quant_devices
 
+        # `_primary_quant_device` drives forward/activation placement, so it must
+        # follow the filtered pool. Taking it before the filter pinned every
+        # forward to the family default (cuda:0) even when the caller had asked
+        # for a different subset.
+        self._primary_quant_device = quant_devices[0]
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
@@ -332,6 +347,18 @@ class ModuleLooper(DeviceAssignmentState):
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
+        # Best-effort peer enablement once the dense/MoE pools are known.  The
+        # pools can span devices that ``quant_devices`` does not contain (for
+        # example ``device="cuda:0"`` with
+        # ``dense_vram_strategy_devices=["cuda:0", "cuda:1"]``), and module
+        # replicas still move tensors across that union.  ``enable_for_devices``
+        # caches, logs a single summary line, and never raises in best-effort
+        # mode, so a failed probe never blocks quantization.
+        cross_device_pool = self._cross_device_pool()
+        configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        if len(cross_device_pool) > 1:
+            enable_for_devices(cross_device_pool)
+
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
 
@@ -339,9 +366,16 @@ class ModuleLooper(DeviceAssignmentState):
         self._current_subset: Optional[Dict[str, Any]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
+        # `get_num_experts()` returns None when the config does not expose a
+        # scalar cardinality (e.g. a per-modality list); routing override
+        # cannot be resolved against that, so leave it disabled.
         if getattr(self.gptq_model, "dynamic_expert_index", None):
             num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
-            self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+            self.moe_routing_override = (
+                None
+                if num_experts is None
+                else self.gptq_model.quantize_config.moe_routing_override(num_experts)
+            )
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
@@ -381,6 +415,17 @@ class ModuleLooper(DeviceAssignmentState):
                 if self.output_embeddings_module is not None and callable(get_output_name)
                 else None
             )
+
+    def _cross_device_pool(self) -> List[torch.device]:
+        """Return the de-duplicated union of all pools that move tensors."""
+
+        pool: List[torch.device] = []
+        for device in (*self._quant_devices, *self._dense_quant_devices, *self._moe_quant_devices):
+            if device.type != "cuda":
+                continue
+            if device not in pool:
+                pool.append(device)
+        return pool
 
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
@@ -691,9 +736,23 @@ class ModuleLooper(DeviceAssignmentState):
                 raise
             return
         except BaseException as exc:
-            self._request_loop_stop(exc)
+            # Only the swallowed path needs a record: when the caller asked for
+            # in-place propagation the exception reaches it unchanged, so logging
+            # here would double-report it and would mislabel a user Ctrl-C as a
+            # callback bug. Note `_emit_layer_complete` does not latch a stop on
+            # this path, so this is stricter than its sibling, not identical.
             if raise_in_place:
+                self._request_loop_stop(exc)
                 raise
+            log.warning(
+                "Subset callback raised (stage=%s, layer=%s, subset=%s/%s)",
+                stage,
+                layer_idx,
+                subset_index,
+                subset_total,
+                exc_info=True,
+            )
+            self._request_loop_stop(exc)
             return
 
         if result is StopMainLoop:
@@ -866,6 +925,23 @@ class ModuleLooper(DeviceAssignmentState):
         if not layer_inputs:
             return []
 
+        declared = getattr(layer_inputs, "row_counts", None)
+        if declared is not None:
+            counts = list(declared)
+            expected = self._safe_len(layer_inputs)
+            if expected is None or len(counts) != expected:
+                raise ValueError(
+                    "lazy layer-input row counts differ from the batch sequence"
+                )
+            if any(
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+                for count in counts
+            ):
+                raise ValueError("lazy layer-input row counts must be positive integers")
+            return counts
+
         counts: List[int] = []
         for batch_inputs in layer_inputs:
             count = self._batch_row_count(batch_inputs)
@@ -873,42 +949,23 @@ class ModuleLooper(DeviceAssignmentState):
         return counts
 
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
-        """Collapse expert module names into a stable MoE routing group key."""
+        """Collapse expert module names using the definition's declared experts."""
 
         if not module_name:
             return None
 
-        if ".experts." in module_name:
-            prefix, remainder = module_name.split(".experts.", 1)
-            expert_id = remainder.split(".", 1)[0]
-            if expert_id:
-                return f"{prefix}.experts.{expert_id}"
+        plan = _model_module_plan(self.gptq_model)
+        if plan is None:
             return None
-
-        if ".shared_experts." in module_name:
-            prefix, _ = module_name.split(".shared_experts.", 1)
-            return f"{prefix}.shared_experts"
-
-        if ".shared_expert." in module_name:
-            prefix, _ = module_name.split(".shared_expert.", 1)
-            return f"{prefix}.shared_expert"
-
-        return None
+        return plan.expert_root(module_name)
 
     def _is_attention_module_name(self, module_name: str) -> bool:
-        """Heuristically detect attention modules from their qualified name."""
+        """Return whether the declared tree marks this path as attention."""
 
-        if not module_name:
+        plan = _model_module_plan(self.gptq_model)
+        if plan is None or not module_name:
             return False
-
-        lowered = module_name.lower()
-        if ".attn" in lowered or "attn." in lowered:
-            return True
-        if ".attention" in lowered or "attention." in lowered:
-            return True
-        if lowered.endswith("attn") or lowered.endswith("attention"):
-            return True
-        return False
+        return "q" in plan.roles(module_name) or "k" in plan.roles(module_name) or "v" in plan.roles(module_name)
 
     def _should_use_moe_lifecycle(
         self,
@@ -1031,8 +1088,12 @@ class ModuleLooper(DeviceAssignmentState):
             named_module = subset.get(name)
             module_ref = None
             if named_module is None and fallback_modules is not None:
-                module_ref = fallback_modules.get(name)
-                named_module = module_ref
+                named_module = fallback_modules.get(name)
+                module_ref = (
+                    named_module.module
+                    if isinstance(named_module, NamedModule)
+                    else named_module
+                )
             elif named_module is not None:
                 module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
             if module_ref is None:
@@ -1042,10 +1103,23 @@ class ModuleLooper(DeviceAssignmentState):
             except Exception:
                 current = None
 
+            # Lazy checkpoint-backed layers cannot be moved while their leaf
+            # tensors are still meta. Materialize each planned leaf through the
+            # model's decoder-aware forward boundary directly on its assigned
+            # device, then apply an ordinary move only if one is still needed.
+            # Do not record META as a restore destination: it is not a usable
+            # runtime placement and move_to() intentionally rejects it.
+            if current == META and isinstance(named_module, NamedModule):
+                module_ref = self._prepare_named_module_for_forward(
+                    named_module=named_module,
+                    fallback_device=target,
+                )
+                current = get_device(module_ref)
+
             if target is None or (current is not None and current == target):
                 continue
 
-            if current is not None:
+            if current is not None and current != META:
                 previous[name] = current
 
             emit_device_telemetry(
@@ -1054,14 +1128,23 @@ class ModuleLooper(DeviceAssignmentState):
                 current_device=current,
                 target_device=target,
             )
-            move_to(module_ref, device=target)
-            rehome_module_to_device(
-                module_ref,
-                target,
-                move_parameters=True,
-                move_buffers=True,
-                root_module=getattr(self.gptq_model, "model", None),
-            )
+            try:
+                move_module_to_device(
+                    module_ref,
+                    target,
+                    root_module=getattr(self.gptq_model, "model", None),
+                )
+            except NotImplementedError as exc:
+                module_label = (
+                    named_module.full_name
+                    if isinstance(named_module, NamedModule)
+                    else name
+                )
+                raise NotImplementedError(
+                    "Forward device override could not move "
+                    f"`{module_label}` from {current} to {target} after "
+                    "decoder-aware leaf materialization."
+                ) from exc
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", target)
             setattr(module_ref, "target_device", target)
@@ -1095,12 +1178,9 @@ class ModuleLooper(DeviceAssignmentState):
                 module=getattr(named_module, "full_name", name) if named_module is not None else name,
                 target_device=revert_device,
             )
-            move_to(module_ref, device=revert_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 module_ref,
                 revert_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             if isinstance(named_module, NamedModule):
@@ -1124,6 +1204,14 @@ class ModuleLooper(DeviceAssignmentState):
             return
 
         quant_source = named_module.state.get("quant_source_module")
+        if isinstance(task, dict):
+            capture = task.get("capture")
+            if capture is not None and hasattr(capture, "module"):
+                capture.module = (
+                    quant_source
+                    if isinstance(quant_source, torch.nn.Module)
+                    else named_module.module
+                )
         if isinstance(quant_source, torch.nn.Module) and hasattr(task, "module"):
             task.module = quant_source
 
@@ -1134,24 +1222,18 @@ class ModuleLooper(DeviceAssignmentState):
 
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
-            move_to(module_attr, device=target_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 module_attr,
                 target_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
-            move_to(layer_attr, device=target_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 layer_attr,
                 target_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             setattr(layer_attr, "target_device", target_device)
@@ -1159,7 +1241,7 @@ class ModuleLooper(DeviceAssignmentState):
         quantizer = getattr(task, "quantizer", None)
         if quantizer is not None and hasattr(quantizer, "to"):
             try:
-                quantizer.to(target_device)
+                safe_module_to(quantizer, target_device)
             except Exception:
                 pass
 
@@ -1167,7 +1249,11 @@ class ModuleLooper(DeviceAssignmentState):
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):
-                setattr(task, attr_name, tensor_value.to(device=target_device, non_blocking=True))
+                setattr(
+                    task,
+                    attr_name,
+                    safe_move_to(tensor_value, target_device, non_blocking=True),
+                )
 
         if hasattr(task, "dev"):
             task.dev = target_device
@@ -1179,7 +1265,31 @@ class ModuleLooper(DeviceAssignmentState):
     ) -> torch.nn.Module:
         """Prepare one named module for the forward role before replay starts."""
 
-        target_device = get_device(named_module.module)
+        # Quantizers may retain a compact processed representation while the
+        # dense replay weight is deliberately absent. Give the owning
+        # processor the first opportunity to materialize that representation
+        # directly on the final forward device, after capture/Hessian state has
+        # been released.
+        for processor in getattr(self, "processors", ()):
+            prepare_runtime = getattr(
+                processor, "prepare_runtime_weight_for_forward", None
+            )
+            if not callable(prepare_runtime):
+                continue
+            prepared_runtime = prepare_runtime(
+                module=named_module,
+                target_device=fallback_device,
+            )
+            if prepared_runtime is not None:
+                named_module.module = prepared_runtime
+                setattr(named_module, "target_device", fallback_device)
+                setattr(named_module.module, "target_device", fallback_device)
+                return prepared_runtime
+
+        preferred_device = normalize_device_like(
+            named_module.state.get("preferred_quant_device")
+        )
+        target_device = preferred_device or get_device(named_module.module)
         if target_device == META:
             target_device = fallback_device
 
@@ -1195,6 +1305,58 @@ class ModuleLooper(DeviceAssignmentState):
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
         return prepared
+
+    def _prepare_layer_direct_state_for_forward(
+        self,
+        module: torch.nn.Module,
+        fallback_device: torch.device,
+        *,
+        projection_modules: Optional[Dict[str, object]] = None,
+    ) -> int:
+        """Materialize non-projection direct state needed by a lazy layer forward.
+
+        Projection leaves are excluded because packed floatx weights must pass
+        through decoder-aware NamedModule materialization. Norms, routers,
+        hyper-connections, attention sinks, and other direct parameters/buffers
+        can be restored safely through LazyTurtle's direct-meta boundary.
+        """
+
+        excluded_ids = set()
+        for candidate in (projection_modules or {}).values():
+            candidate_module = (
+                candidate.module if isinstance(candidate, NamedModule) else candidate
+            )
+            if isinstance(candidate_module, torch.nn.Module):
+                excluded_ids.add(id(candidate_module))
+
+        module_names = {id(child): name for name, child in module.named_modules()}
+        materialized = 0
+        for child in module.modules():
+            if id(child) in excluded_ids or getattr(child, "QUANT_TYPE", None):
+                continue
+            direct_tensors = list(child.parameters(recurse=False)) + list(
+                child.buffers(recurse=False)
+            )
+            if not any(getattr(tensor, "is_meta", False) for tensor in direct_tensors):
+                continue
+            self.gptq_model.shell_direct_meta_materialize(
+                target_submodule=child,
+                device=fallback_device,
+            )
+            remaining = [
+                tensor
+                for tensor in list(child.parameters(recurse=False))
+                + list(child.buffers(recurse=False))
+                if getattr(tensor, "is_meta", False)
+            ]
+            if remaining:
+                child_name = module_names.get(id(child), "<layer>")
+                raise RuntimeError(
+                    "Lazy forward direct-state materialization left META tensors "
+                    f"under `{child_name}`."
+                )
+            materialized += 1
+        return materialized
 
     def _prepare_named_module_for_quantization(
         self,
@@ -1219,7 +1381,12 @@ class ModuleLooper(DeviceAssignmentState):
             isinstance(decoder_plan, dict)
             and named_module.state.get("auto_module_decoder_forward_mode") == "native"
         )
-        if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module) or needs_deferred_quant_source:
+        deferred_quant_source = (
+            isinstance(named_module.state.get("quant_source_module"), torch.nn.Module)
+            or needs_deferred_quant_source
+            or get_device(named_module.module) == META
+        )
+        if deferred_quant_source:
             prepared = self.gptq_model.shell_module_materialize(
                 target_submodule=named_module.module,
                 device=target_device,
@@ -1228,16 +1395,25 @@ class ModuleLooper(DeviceAssignmentState):
             )
             if prepared is not named_module.module:
                 named_module.module = prepared
+            # Shell materialization may leave Accelerate hooks pointing at the
+            # previous placement, so realign them explicitly.
+            rehome_module_to_device(
+                named_module.module,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
         else:
-            move_to(named_module.module, device=target_device)
-        rehome_module_to_device(
-            named_module.module,
-            target_device,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=getattr(self.gptq_model, "model", None),
-        )
+            move_module_to_device(
+                named_module.module,
+                target_device,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
 
+        # Remember the device this module was quantized on so the final pack
+        # step runs on the same GPU instead of an index-less default.
+        named_module.state["quant_device"] = target_device
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
         emit_device_telemetry(
@@ -1522,6 +1698,19 @@ class ModuleLooper(DeviceAssignmentState):
     def cache_inputs(self, layers, calibration_data, use_cache, layer_names=None):
         """Capture and cache per-layer calibration inputs for later replay."""
 
+        lazy_cache_builder = getattr(
+            self.gptq_model, "build_quantization_input_cache", None
+        )
+        if callable(lazy_cache_builder):
+            lazy_cache = lazy_cache_builder(
+                layers=layers,
+                calibration_data=calibration_data,
+                use_cache=use_cache,
+                layer_names=layer_names,
+            )
+            if lazy_cache is not None:
+                return lazy_cache
+
         capture_stage = StageInputsCapture(self, logger=log)
         return capture_stage.cache_inputs(
             layers=layers,
@@ -1536,6 +1725,21 @@ class ModuleLooper(DeviceAssignmentState):
 
         with tf32_high_precision_guard():
             return self._loop_impl(fallback=fallback, **kwargs)
+
+    def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
+        """Install a recovered packed prefix only when publication needs it."""
+
+        if checkpoint is None:
+            return
+        materialize_prefix = getattr(
+            checkpoint, "materialize_deferred_prefix", None
+        )
+        if callable(materialize_prefix):
+            materialize_prefix(
+                model=self.gptq_model,
+                processors=self.processors,
+            )
+            self._check_loop_stop()
 
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):
@@ -1663,10 +1867,10 @@ class ModuleLooper(DeviceAssignmentState):
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
-        # Capture-only layer groups are driven by processor execution config,
+        # Capture-only layer groups are driven by processor forward config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(getattr(proc, "execution_config", None), "enable_activation_capture", False)
+            getattr(getattr(proc, "forward", None), "activation_capture", False)
             for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(
@@ -1701,22 +1905,62 @@ class ModuleLooper(DeviceAssignmentState):
 
         shared_kv_cache_dict = {}
 
+        layer_boundary_checkpoint = getattr(
+            self.gptq_model, "quantization_layer_boundary_checkpoint", None
+        )
+        start_layer_index = 0
+        if layer_boundary_checkpoint is not None:
+            restore_boundary = getattr(layer_boundary_checkpoint, "restore", None)
+            if not callable(restore_boundary):
+                raise TypeError(
+                    "quantization layer-boundary checkpoint has no restore() method"
+                )
+            start_layer_index = restore_boundary(
+                model=self.gptq_model,
+                processors=self.processors,
+            )
+            if (
+                isinstance(start_layer_index, bool)
+                or not isinstance(start_layer_index, int)
+                or not 0 <= start_layer_index <= layer_count
+            ):
+                raise ValueError(
+                    "quantization layer-boundary restore returned an invalid layer"
+                )
         # An extension may restore a complete continuation and select the next
         # execution step. Persistence and model-specific schemas live outside
         # the looper. Non-checkpoint observers may omit on_start entirely.
         from ..utils.model import get_layer_name
 
+        last_quantized_layer_index = find_last_quantized_layer_index(
+            self.gptq_model.quantize_config,
+            layer_modules=layer_modules,
+            layer_names=layer_names,
+            layer_count=layer_count,
+        )
+        # `run_layer_stage()` only stops early at the last quantized layer when
+        # no embedding endpoint is requantized. With INPUT/OUTPUT/BOTH it still
+        # replays and publishes every trailing decoder layer, so the plan must
+        # cover them as well.
+        planned_layer_count = plan_layer_count(
+            layer_count,
+            last_quantized_layer_index,
+            replay_all_layers=self.embed_quant_mode is not None,
+        )
         steps = []
         if quant_input_embeddings:
             steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
-        steps.extend(LoopStep("layer", index, get_layer_name(layer_names, index))
-                     for index in range(layer_count))
+        steps.extend(
+            LoopStep("layer", index, get_layer_name(layer_names, index))
+            for index in range(planned_layer_count)
+        )
         if quant_output_embeddings:
             steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
         elif self.gptq_model.quantize_config.lm_head:
             steps.append(LoopStep("lm_head", layer_count, "lm_head"))
+        plan = LoopPlan(tuple(steps))
         self.start_step = self.extensions.start(LoopContext(
-            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
+            plan, self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
         ))
 
         if self.gptq_model.quantize_config.lm_head:
@@ -1741,8 +1985,11 @@ class ModuleLooper(DeviceAssignmentState):
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
+            start_layer_index=start_layer_index,
             embed_quant_mode=self.embed_quant_mode,
             embed_only=self.embed_only,
+            plan=plan,
+            cursor=self.start_step,
             logger=log,
         )
 
@@ -1756,6 +2003,8 @@ class ModuleLooper(DeviceAssignmentState):
         from ..utils.stream import STREAM_DEVICE_POOL
         STREAM_DEVICE_POOL.wait()
         self._check_loop_stop()
+
+        self._materialize_deferred_boundary_prefix(layer_boundary_checkpoint)
 
         # paranoid safety check
         # torch_sync()
@@ -1774,27 +2023,27 @@ class ModuleLooper(DeviceAssignmentState):
                    .subtitle("")
         )
         process_finalize_pb.draw()
+        emit_finalize_records = os.getenv(
+            "GPTQMODEL_LOG_FINALIZE_RECORDS", "0"
+        ).strip().lower() not in {"", "0", "false", "no", "off"}
 
         try:
             for index, reverse_p in enumerate(reversed_processors, start=1):
                 # Finalize processors in reverse order
                 self._check_loop_stop()
-                if isinstance(reverse_p, GPTQProcessor):
-                    pass
-                elif isinstance(reverse_p, EoraProcessor):
-                    pass
-                elif isinstance(reverse_p, DequantizeProcessor):
-                    pass
-                else:
-                    log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
-
                 processor_name = reverse_p.name()
+                log.info(
+                    "%s processor finalizing with %s module records",
+                    processor_name,
+                    len(reverse_p.log),
+                )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptq v2", "awq"]:
+                if processor_name in ["gptq", "gptaq", "awq", "exl3"]:
                     self.gptq_model.quant_log = reverse_p.log
 
-                for module_log in reverse_p.log:
-                    log.info(module_log)
+                if emit_finalize_records:
+                    for module_log in reverse_p.log:
+                        log.info(module_log)
                 reverse_p.log_plotly()
 
                 finalize_start = time.perf_counter() if region_timer is not None else None
@@ -1835,13 +2084,16 @@ class ModuleLooper(DeviceAssignmentState):
                 n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
             if n in full:
                 subset[n] = full[n]
+                self.layer_module_coverage.record_hit(n, layer_index)
             elif capture_only:
                 # Obtain the CAPTURE_ONLY_FLAG Module separately
                 subset[n], _ = get_module_by_name_prefix(module, module_name=n)
-            # some modules have layer_modules that are dynamic based on config
-            # ref: deepseek v2/v3/r1
-            elif self.gptq_model.layer_modules_strict:
-                raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+            else:
+                self.layer_module_coverage.record_miss(n, layer_index)
+                # some modules have layer_modules that are dynamic based on config
+                # ref: deepseek v2/v3/r1
+                if self.gptq_model.layer_modules_strict:
+                    raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []

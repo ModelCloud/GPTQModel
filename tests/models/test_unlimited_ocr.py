@@ -6,10 +6,10 @@
 from pathlib import Path
 
 import torch
-
-from gptqmodel import BACKEND
 from model_test import ModelTest
 from ovis import image_to_test_dataset
+
+from gptqmodel import BACKEND
 
 
 def test_prepare_unlimited_ocr_dataset_reuses_shared_dataset(monkeypatch):

@@ -22,6 +22,7 @@ from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_d
 from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.env import env_flag
+from ..utils.p2p import safe_move_to
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
@@ -604,7 +605,10 @@ class QQQ:
             if partial.device == target_device and partial.dtype == torch.float32:
                 result.add_(partial)
             else:
-                result.add_(partial.to(device=target_device, dtype=torch.float32))
+                # Partials are keyed by the device that captured them, so this
+                # is a cross-device move. On an asymmetric ROCm peer topology a
+                # direct copy segfaults, so route it through the helper.
+                result.add_(safe_move_to(partial, target_device, dtype=torch.float32))
             del partial
 
         result.mul_(2.0 / float(total_samples))
@@ -622,8 +626,8 @@ class QQQ:
         if not self._gsq_moments:
             raise ValueError("QQQ GSQ requires collected calibration moments")
         teacher = self.layer.weight.detach().float().clone()
-        hessian = sum(part[0].to(teacher.device) for part in self._gsq_moments.values())
-        cross = sum(part[1].to(teacher.device) for part in self._gsq_moments.values())
+        hessian = sum(safe_move_to(part[0], teacher.device) for part in self._gsq_moments.values())
+        cross = sum(safe_move_to(part[1], teacher.device) for part in self._gsq_moments.values())
         result = list(self._quantize_impl(blocksize=blocksize))
         weight, scales = result[:2]
         width = weight.shape[1]
@@ -640,8 +644,8 @@ class QQQ:
             hessian=hessian, cross_moment=cross, channel_scales=result[7], config=self.qcfg.gsq)
         if after < before:
             result[0] = qqq_codes_to_packer_weight(best, scales, group_size=group_size, dtype=weight.dtype)
-        self.gsq_diagnostics = dict(before=before, after=after, history=history,
-                                    objective="asymmetric_quadratic_without_constant")
+        self.gsq_diagnostics = {"before": before, "after": after, "history": history,
+                                    "objective": "asymmetric_quadratic_without_constant"}
         self._gsq_moments.clear()
         return tuple(result)
 
@@ -995,7 +999,7 @@ class QQQ:
             scale = self._truncate_last_dim(scale, valid_cols)
             zero = self._truncate_last_dim(zero, valid_cols)
 
-        Q = Q.to(device=self.layer.weight.data.device, non_blocking=False)
+        Q = safe_move_to(Q, self.layer.weight.data.device)
 
         # post int8 quant
         if scale_extra is None and groupsize != self.columns:

@@ -8,26 +8,43 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import torch
+from accelerate.utils import has_offloaded_params
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, get_module, get_module_by_name_prefix, move_to
-from ...utils.offload import offload_to_disk
+from ...utils.model import MODALITY, get_module, move_to
+from ...utils.offload import is_meta_module, offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
+    fusable = FusableConfig("ernie4_5_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     loader = AutoModelForImageTextToText
 
     require_load_processor = True
     require_trust_remote_code = False
+    # Deliberately non-strict: one tree serves both dense and sparse layers, so
+    # each decoder layer legitimately misses the other branch's specs. A dense
+    # layer has `mlp.gate_proj`/`up_proj`/`down_proj` but no experts; a sparse
+    # layer has both MoE families but no dense MLP. Strictness would therefore
+    # fail on every layer regardless of expert coverage. The expert specs are
+    # still fully expanded by `dynamic_expert_index` below, and
+    # `test_layer_modules_expand_every_expert` /
+    # `test_looper_records_no_miss_for_expanded_expert_specs` assert that no
+    # routed expert is among the recorded misses.
     layer_modules_strict = False
 
-    pre_lm_head_norm_module = ["model.norm", "model.language_model.norm", "language_model.norm"]
+    # Both routed-expert families live in the text config; Defuser turns the
+    # fused checkpoint experts into ``text_moe``/``vision_moe`` module lists.
+    dynamic_expert_index = "moe_num_experts"
+
+    pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm", "model.norm"]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
@@ -51,13 +68,18 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                     "down_proj": ("down_proj:1",),
                 },
                 "text_moe": {
-                    "gate": ("gate:!",),
+                    # `gate.moe_statics.e_score_correction_bias` is a separate
+                    # checkpoint-owned tensor under the router, not a child of
+                    # `gate`'s parameter. Declaring only `gate:!` leaves that
+                    # bias with no owning spec, so it needs its own `:!` entry.
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 },
                 "vision_moe": {
-                    "gate": ("gate:!",),
+                    # Same score-correction bias, one per modality router.
+                    "gate": ("gate:!", "moe_statics:!"),
                     "experts": {
                         "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
@@ -102,6 +124,39 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             return
         setattr(parent, attr_name, self.shell_module_materialize(module, self.quantize_config.device))
 
+    def _release_module(self, parent, attr_name: str, *, disk: bool = False):
+        module = getattr(parent, attr_name, None)
+        if module is None:
+            return
+        if is_meta_module(module) and not has_offloaded_params(module):
+            # Some or all leaves never left the checkpoint: they are still on
+            # `meta` and there is no Accelerate hook to restore them.
+            # `move_to()` deliberately raises for that state, so a whole-module
+            # move is not available, and `offload_to_disk()` silently returns
+            # for it (it cannot serialize leaves that have no storage). Release
+            # is still *total*, though: a start hook that raised partway through
+            # a device move (an OOM while materializing the vision tower) leaves
+            # already-moved leaves on the forward device next to the untouched
+            # `meta` ones. Skipping the module there would keep real tensors on
+            # the accelerator for the rest of the run — in both offload
+            # configurations, since the disk branch early-returns on `meta` too.
+            # Move only the materialized leaves and leave the `meta` ones as
+            # they are; `_apply()` keeps quantized subclasses' cache
+            # invalidation and the module's registration intact.
+            module._apply(lambda tensor: tensor if tensor.is_meta else tensor.to(CPU))
+            return
+        if disk:
+            offload_to_disk(
+                model=parent,
+                module=module,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
+            return
+        # setattr() requires the attribute *name*; passing the module object
+        # here raised `TypeError: attribute name must be string, not 'Linear'`
+        # whenever disk offload was disabled.
+        setattr(parent, attr_name, move_to(module, device=CPU))
+
     def _core_multimodal_model(self):
         _, core_model = self._resolve_multimodal_layout(self.model)
         return core_model
@@ -117,56 +172,30 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def pre_quantize_generate_hook_end(self):
         core_model = self._core_multimodal_model()
         language_model = core_model.language_model
-        vision_module = core_model.vision_tower
-        resampler_module = core_model.resampler_model
+        disk = self.quantize_config.offload_to_disk
 
-        if self.quantize_config.offload_to_disk:
-            if hasattr(language_model, "embed_tokens"):
-                offload_to_disk(
-                    model=language_model,
-                    module=language_model.embed_tokens,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if hasattr(language_model, "rotary_emb"):
-                offload_to_disk(
-                    model=language_model,
-                    module=language_model.rotary_emb,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if vision_module is not None:
-                offload_to_disk(
-                    model=core_model,
-                    module=vision_module,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            if resampler_module is not None:
-                offload_to_disk(
-                    model=core_model,
-                    module=resampler_module,
-                    disk_path=self.quantize_config.offload_to_disk_path,
-                )
-            return
-
-        if hasattr(language_model, "embed_tokens"):
-            language_model.embed_tokens = move_to(language_model.embed_tokens, device=CPU)
-        if hasattr(language_model, "rotary_emb"):
-            language_model.rotary_emb = move_to(language_model.rotary_emb, device=CPU)
-        if vision_module is not None:
-            setattr(core_model, vision_module, move_to(vision_module, device=CPU))
-        if resampler_module is not None:
-            setattr(core_model, resampler_module, move_to(resampler_module, device=CPU))
-
-    def lm_head_pre_quantize_generate_hook(self, inputs):
-        norm, _ = get_module_by_name_prefix(self.model, ["model.norm", "model.language_model.norm"])
-        if norm is None:
-            return inputs
-
-        norm = self.pre_quantize(norm)
-        for element in inputs:
-            for index in range(len(element)):
-                element[index] = norm(element[index])
-        self.post_quantize(norm)
-        return inputs
+        # The same four releases serve both configurations. Routing them through
+        # one helper keeps the `meta` handling identical: a partially
+        # materialized module (a start hook that raised mid-move) must have its
+        # real tensors released in the disk configuration too, where
+        # `offload_to_disk()` cannot help because it early-returns on `meta`.
+        first_error = None
+        for parent, attr_name in (
+            (language_model, "embed_tokens"),
+            (language_model, "rotary_emb"),
+            (core_model, "vision_tower"),
+            (core_model, "resampler_model"),
+        ):
+            try:
+                self._release_module(parent, attr_name, disk=disk)
+            except Exception as error:
+                # A failed release must not keep the other captured modules on
+                # the forward device. Report the first failure after attempting
+                # every independent cleanup obligation.
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _flatten_multimodal_features(features: Any) -> torch.Tensor:

@@ -184,6 +184,41 @@ def test_paroquant_identity_forward_matches_awq_torch(monkeypatch):
     torch.testing.assert_close(paro_module(x), awq_module(x), atol=5e-3, rtol=5e-3)
 
 
+def test_paroquant_fp32_dense_fallback_preserves_checkpoint_scale(monkeypatch):
+    """The FP32 fallback must not overflow a valid FP32 scale through FP16."""
+    module = ParoLinear(
+        bits=4,
+        group_size=16,
+        sym=True,
+        desc_act=False,
+        in_features=16,
+        out_features=8,
+        bias=False,
+        register_buffers=True,
+        krot=1,
+    )
+    module.qweight.copy_(_pack_awq_tensor(torch.ones((16, 8), dtype=torch.int32), 4))
+    module.qzeros.zero_()
+    module.scales = torch.full((1, 8), 65536.0, dtype=torch.float32)
+    module.post_init()
+    module.eval()
+    monkeypatch.setattr(module, "_forward_cpu_aten", lambda _x: None)
+
+    actual = module(torch.ones((1, 16), dtype=torch.float32))
+
+    assert actual.dtype is torch.float32
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(
+        actual, torch.full((1, 8), 16 * 65536.0, dtype=torch.float32), rtol=0, atol=0
+    )
+    assert module.scales.dtype is torch.float32
+    retained = list(vars(module).values()) + list(module.buffers()) + list(module.parameters())
+    assert not any(
+        isinstance(value, torch.Tensor) and value.shape == (16, 8)
+        for value in retained
+    )
+
+
 def test_paroquant_forward_matches_explicit_rotated_reference(monkeypatch):
     """Guard the dense reference contract for non-identity ParoQuant rotations."""
     bits = 4
@@ -489,7 +524,10 @@ def test_paroquant_cpu_caches_invalidate_on_rotation_and_weight_mutation():
     assert module._cpu_packed_key is None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant kernel accuracy test")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
 def test_paroquant_cuda_matches_upstream_transformers_contract():
     """Compare the internal CUDA kernel path to an upstream-style contract.
 
@@ -598,7 +636,10 @@ def test_paroquant_triton_backend_mapping():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant Triton kernel parity test")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant baseline required (unavailable on ROCm)",
+)
 def test_paroquant_triton_matches_existing_cuda_kernel():
     """Guard Triton runtime accuracy against the established CUDA implementation."""
     pytest.importorskip("triton")

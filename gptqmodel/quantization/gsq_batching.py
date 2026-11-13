@@ -165,8 +165,8 @@ def collate_llama_documents(documents, *, device=None, implicit_causal=False):
     # Llama MLP width. ``None`` already means "use every output" to the staged
     # reconstruction objectives; retain the mask only when padding exists.
     output_mask = None if all(length == maximum for length in lengths) else valid
-    return hidden_batch, dict(attention_mask=mask, position_ids=positions,
-                              position_embeddings=rotary, use_cache=False), output_mask
+    return hidden_batch, {'attention_mask': mask, 'position_ids': positions,
+                              'position_embeddings': rotary, 'use_cache': False}, output_mask
 
 
 class LazyLlamaStageBatches:

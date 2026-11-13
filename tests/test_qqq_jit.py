@@ -307,3 +307,74 @@ def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
 
     assert cuda_output.dtype == dtype
     torch.testing.assert_close(cuda_output, torch_output, rtol=0.02, atol=0.02)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_qqq_cuda_kernel_uses_tensor_device_context():
+    """A module on a non-current device must run in that device's context.
+
+    A device_map-sharded model calls modules whose tensors live on ``cuda:1``
+    while the calling thread's current device is still ``cuda:0``. The QQQ
+    binding launches on ``A``'s stream, so it must install a device guard;
+    without one the kernel runs in the wrong context and writes NaNs (or
+    raises an illegal memory access) for the sharded layers.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("two CUDA devices required")
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    torch.manual_seed(42)
+    # A 1024-wide projection with a single row matches the decode/warmup shape
+    # where the missing device guard first surfaced as NaNs.
+    in_features = 4096
+    out_features = 1024
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    linear.weight.data.normal_(0, 0.08)
+    scales = torch.rand((out_features, in_features // 128), dtype=torch.float16) * 0.04 + 0.01
+    # Keep the dequantized weights inside the INT8 range the Torch reference
+    # uses, so the oracle output is nonzero and the comparison is meaningful.
+    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.001 + 0.002
+
+    modules = []
+    for module_cls in (qqq_module.QQQLinear, qqq_module.QQQTorchLinear):
+        module = module_cls(
+            bits=4,
+            group_size=128,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            register_buffers=True,
+        )
+        module.pack(linear, scales, s_channel)
+        module.post_init()
+        modules.append(module.eval())
+
+    x = torch.randn((1, in_features), dtype=torch.float16)
+    torch_output = modules[1](x)
+
+    previous_device = torch.cuda.current_device()
+    try:
+        cuda_module = modules[0].cuda()
+        expected = cuda_module(x.cuda())
+        # Move the module to cuda:1 but leave the thread on cuda:0. Without a
+        # device guard the kernel launches into cuda:0's context while reading
+        # cuda:1 pointers, so the launch fails and the output stays
+        # uninitialized (NaN) or zero.
+        cuda_module = cuda_module.to("cuda:1")
+        torch.cuda.set_device(previous_device)
+        actual = cuda_module(x.to("cuda:1")).cpu()
+    finally:
+        torch.cuda.set_device(previous_device)
+
+    assert torch.isfinite(actual).all()
+    # Guard against a vacuous pass: the reference output must be nonzero.
+    assert expected.abs().max() > 1.0
+    # Same kernel, weights and input: only the device context changed.
+    torch.testing.assert_close(actual, expected.cpu(), rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(actual, torch_output, rtol=2e-3, atol=2e-3)

@@ -65,17 +65,109 @@ _CPU_INT8_DENSE_TILE_FEATURES = 512
 def _is_bitsandbytes_available() -> bool:
     try:
         import bitsandbytes as bnb
+        return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
     except Exception as exc:  # pragma: no cover - optional dependency
-        log.debug("bitsandbytes import failed: %s", exc)
+        # A missing package, a shared-library failure, or an unparsable
+        # ``__version__`` all mean "this backend is unusable", never a crash.
+        # ``validate_once`` promises a ``(bool, exception)`` tuple, so the probe
+        # must not raise either.
+        log.debug("bitsandbytes is unavailable: %s", exc)
         return False
 
-    return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
+
+@lru_cache(maxsize=1)
+def _probe_bitsandbytes_available() -> bool:
+    """Probe bitsandbytes once, on first real use.
+
+    Importing bitsandbytes is expensive and must not happen while the kernel
+    registry is merely being discovered. The probe is cached so repeated
+    ``validate_once`` calls stay cheap.
+    """
+
+    return _is_bitsandbytes_available()
+
+
+_probe_cache_clear = _probe_bitsandbytes_available.cache_clear
+
+
+def bitsandbytes_available() -> bool:
+    """Return whether a supported bitsandbytes is usable.
+
+    The legacy ``BITSANDBYTES_AVAILABLE`` name is materialized from the probe on first
+    attribute access, so this accessor reads the same attribute when present
+    and otherwise probes.
+    """
+
+    namespace = sys.modules[__name__].__dict__
+    if "BITSANDBYTES_AVAILABLE" in namespace:
+        return bool(namespace["BITSANDBYTES_AVAILABLE"])
+    return _probe_bitsandbytes_available()
+
+
+def _clear_availability_state() -> None:
+    """Drop the materialized value, the probe result and validation caches.
+
+    This is the escape hatch for tests and for long-lived processes where the
+    environment changes after the first probe (a package installed later, a
+    toolchain that becomes available). It also removes a value restored by
+    ``monkeypatch.undo()``, which is indistinguishable from an explicit
+    override once materialized.
+
+    The kernel's ``cached_validate_once()`` result is invalidated as well, or a
+    kernel that failed before the backend appeared stays unselectable until the
+    process ends.
+    """
+
+    sys.modules[__name__].__dict__.pop("BITSANDBYTES_AVAILABLE", None)
+    _probe_cache_clear()
+    cls = globals().get("BitsAndBytesLinear")
+    if cls is not None:
+        cls.cached_validate_once.cache_clear()
+    # ``validate_quant_linear()`` keeps its own bounded cache of
+    # ``(bool, error)`` results. Clearing only the kernel-level cache leaves a
+    # stale "unavailable" answer there, and that cache short-circuits before
+    # ``validate()`` is ever called again. Import lazily: ``importer`` imports
+    # the kernel package, so a module-level import here would be circular.
+    from ...utils.importer import clear_validation_cache
+
+    clear_validation_cache()
+
+
+# ``cache_clear`` is the documented knob; keep it on the probe, extended with
+# the materialized attribute so clearing really re-arms everything.
+_probe_bitsandbytes_available.cache_clear = _clear_availability_state
+
+
+def __getattr__(name: str):
+    if name == "BITSANDBYTES_AVAILABLE":
+        # Materialize the probe as a normal module attribute. A plain attribute
+        # keeps ``del`` and ``monkeypatch`` semantics working: pytest reads the
+        # old value from ``__dict__`` and restores it on ``undo()``, so two
+        # consecutive patch contexts behave like they did before the lazy
+        # change.
+        value = _probe_bitsandbytes_available()
+        sys.modules[__name__].__dict__[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()``/star-import unless
+    # advertised. Keep the pre-lazy surface.
+    return sorted(set(globals()) | {"BITSANDBYTES_AVAILABLE"})
 
 
 def import_bitsandbytes():
     import bitsandbytes as bnb
 
-    if version.parse(bnb.__version__) < version.parse(MINIMUM_BITSANDBYTES_VERSION):
+    # ``getattr`` + ``try`` keep a build with a missing or unparsable
+    # ``__version__`` on the documented ``ImportError`` path instead of letting
+    # ``AttributeError`` escape the kernel constructor.
+    try:
+        parsed_version = version.parse(getattr(bnb, "__version__", ""))
+    except Exception as exc:
+        raise ImportError(BITSANDBYTES_INSTALL_HINT) from exc
+    if parsed_version < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
     return bnb
 
@@ -111,6 +203,19 @@ def _mlx_quantization_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+@lru_cache(maxsize=1)
+def _triton_backend():
+    """Load the RDNA Triton 4-bit kernels lazily; ``None`` when unavailable."""
+
+    try:
+        from . import bitsandbytes_triton
+
+        return bitsandbytes_triton
+    except Exception as exc:  # pragma: no cover - optional acceleration
+        log.debug("bitsandbytes Triton kernels unavailable: %s", exc)
+        return None
 
 
 def _mlx_array_to_cpu_tensor(value) -> torch.Tensor:
@@ -239,9 +344,6 @@ def _cpu_int8_dense_should_use(
     return in_features * out_features <= _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS
 
 
-BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
-
-
 def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
     weight = linear.weight.detach()
     if isinstance(linear, _ConvNd):
@@ -307,7 +409,9 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA]
+    # HIP uses torch's CUDA namespace for both the vendor 4/8-bit kernels and
+    # our tuned 4-bit Triton path. Keep AMD explicit at the support-family gate.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
     SUPPORTS_ADAPTERS = []
@@ -369,7 +473,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITSANDBYTES_AVAILABLE:
+        if not bitsandbytes_available():
             return False, ImportError(BITSANDBYTES_INSTALL_HINT)
 
         try:
@@ -745,6 +849,29 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
         if self.is_4bit:
             x_compute = x.to(compute_dtype)
+            # RDNA (and other tuned ROCm families) get a fused Triton GEMM for
+            # the row band where the vendor HIP kernel is 2.4x-6.3x slower.
+            # Below that band, and everywhere on CUDA/CPU, bitsandbytes stays.
+            triton_backend = _triton_backend()
+            if (
+                triton_backend is not None
+                and self.weight.device.type == "cuda"
+                and not self._cpu_packing_active
+                and triton_backend.should_use(
+                    self.weight.device,
+                    compute_dtype,
+                    x.numel() // self.in_features,
+                )
+            ):
+                quant_state = self._refresh_quant_state()
+                out = triton_backend.matmul_4bit(
+                    x_compute,
+                    self.weight,
+                    quant_state,
+                    bias=bias,
+                    out_dtype=input_dtype,
+                )
+                return out.to(input_dtype)
             if self._cpu_packing_active:
                 if not self._cpu_packing_supported(x, compute_dtype):
                     self._ensure_unpacked(refresh=True)
@@ -845,8 +972,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 BitsAndBytes4bitLinear = BitsAndBytesLinear
 
 __all__ = [
-    "BITSANDBYTES_AVAILABLE",
+    # Resolved lazily by module ``__getattr__``; ruff cannot see it as a global.
+    "BITSANDBYTES_AVAILABLE",  # noqa: F822
     "BITSANDBYTES_INSTALL_HINT",
+    "bitsandbytes_available",
     "BitsAndBytes4bitLinear",
     "BitsAndBytesLinear",
     "import_bitsandbytes",

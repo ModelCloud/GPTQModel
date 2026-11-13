@@ -7,4 +7,6 @@ from . import LlamaQModel
 
 
 class InternLMQModel(LlamaQModel):
+    fusable = None  # No qualified executor for this definition.
+
     require_pkgs = ["transformers<=4.44.2"]

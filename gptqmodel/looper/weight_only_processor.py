@@ -11,7 +11,17 @@ from typing import Optional
 
 import torch
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    CalibrationConfig,
+    CheckpointSupport,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -26,11 +36,13 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization.config import (
+    METHOD,
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
-    METHOD,
+    NF12Config,
     RTNConfig,
     clone_weight_only_config_for_module,
     resolve_quant_format,
@@ -38,7 +50,6 @@ from ..quantization.config import (
 from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, pack_module
-from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..utils.module_locks import parent_module_lock
 
 
@@ -57,26 +68,27 @@ def _mean_abs_error(reference: torch.Tensor, dequantized: torch.Tensor) -> float
 class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=False,
+            replay_after_process=False,
+        ),
+        checkpointing=CheckpointSupport.PRIMARY,
+    )
+
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig,
+        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        forward: Optional[ForwardConfig] = None,
     ):
         """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
 
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
-            calibration=None,
-            prepare_dataset_func=None,
-            calibration_concat_size=None,
-            calibration_sort=None,
-            calibration_concat_separator=None,
-            batch_size=1,
-            execution_config=ExecutionConfig(
-                require_fwd=False,
-                fwd_replay_after_process=False,
-            ),
+            calibration=CalibrationConfig(),
+            forward=forward,
         )
         self.lock = threading.Lock()
 
@@ -86,10 +98,12 @@ class WeightOnlyProcessor(LoopProcessor):
         return self.qcfg.dynamic_get(layer_name=module.full_name) is False
 
     @staticmethod
-    def _uses_direct_pack(qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig) -> bool:
+    def _uses_direct_pack(
+        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+    ) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.NF12}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         """Backfills the logged loss field after late dequant-error measurement."""
@@ -105,12 +119,16 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         *,
         device: Optional[torch.device] = None,
-    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]:
+    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
-        qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
+        resolved_cfg = get_resolved_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
+        qcfg_clone = clone_weight_only_config_for_module(
+            self.qcfg, module.full_name, resolved_cfg=resolved_cfg,
+        )
         if qcfg_clone is None:
             return None
+        bind_resolved_module_config(module, resolved_cfg)
         if device is not None:
             qcfg_clone.device = device
 
@@ -163,7 +181,9 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig] = None,
+        qcfg: Optional[
+            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config
+        ] = None,
         **kwargs,
     ):
         """Creates and packs the final quantized module into the model graph."""
@@ -205,6 +225,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
                     register_buffers=False,
                     init_kwargs=active_qcfg.quant_linear_init_kwargs(),
+                    resolved_module_config=get_resolved_module_config(module),
                 )
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
@@ -265,8 +286,9 @@ class WeightOnlyProcessor(LoopProcessor):
             if reference_weight is None:
                 reference_weight = qmodule._weight_to_matrix(original_layer).detach()
             dequant_weight = qmodule.dequantize_weight()
-            # BNB exposes native [out, in] weights; FP8/GGUF expose [in, out].
-            if active_qcfg.method != METHOD.BITSANDBYTES:
+            # BNB and NF12 expose native [out, in] weights; FP8/GGUF expose
+            # [in, out].
+            if active_qcfg.method in (METHOD.FP8, METHOD.GGUF):
                 dequant_weight = dequant_weight.T
             mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
@@ -288,6 +310,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     quant_linear_cls=model.qlinear_kernel,
                     lock=self.lock,
                     quantize_config=active_qcfg,
+                    device=module.state.get("quant_device"),
                 )
         if timer is not None and pack_start is not None:
             timer.record(
@@ -316,6 +339,8 @@ class WeightOnlyProcessor(LoopProcessor):
             return "weight_only_fp8"
         if self.qcfg.method == METHOD.BITSANDBYTES:
             return "weight_only_bitsandbytes"
+        if self.qcfg.method == METHOD.NF12:
+            return "weight_only_nf12"
         return "weight_only_rtn"
 
 __all__ = ["WeightOnlyProcessor"]

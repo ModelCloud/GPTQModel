@@ -83,7 +83,6 @@ def _assert_linear_round_trip(module: TorchLinear, linear: torch.nn.Linear) -> N
 def test_pack_module_partial_words(
     bits: int, in_features: int, out_features: int, pack_impl: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "1")
     module, linear = _pack_linear(bits, in_features, out_features, pack_impl)
     _assert_linear_round_trip(module, linear)
 

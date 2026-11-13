@@ -331,3 +331,74 @@ def test_quantize_config_stores_canonical_activation_dict():
     }
     assert config.activation_attention_mode == FP8
     assert config.activation_mlp_fp8_layers == (1, 3)
+
+
+def test_w4a_modules_import_without_gluon_mma_v2():
+    """A Triton build without the Gluon ``mma_v2`` must not break the W4A imports.
+
+    Only the grouped FP8 GEMM needs the Gluon ``mma_v2`` entry point; the token
+    quantizer and the NVFP4 packer are plain ``tl.jit`` kernels and must stay
+    importable.
+    """
+    script = textwrap.dedent("""
+        import sys
+        import triton.experimental.gluon.language.nvidia.ampere as ampere
+
+        # Reproduce a Triton build that predates the Gluon MMA entry point.
+        if hasattr(ampere, 'mma_v2'):
+            delattr(ampere, 'mma_v2')
+
+        from gptqmodel.nn_modules.qlinear import w4a_triton
+
+        # This test is about a missing Gluon entry point, not about the host
+        # platform: pin the flag so a HIP build reports the `mma_v2` reason
+        # instead of its (correct, but different) ROCm reason.
+        w4a_triton.IS_ROCM = False
+
+        assert w4a_triton.mma_v2 is None
+        error = w4a_triton.native_fp8_gemm_error()
+        assert error is not None
+        assert 'mma_v2' in str(error) and '3.6.0' in str(error)
+
+        # The NVFP4 packer does not depend on Gluon and must still load.
+        from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton
+        assert callable(w4a_nvfp4_triton.nvfp4_pack_and_swizzle)
+        print('ok')
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok" in result.stdout
+
+
+@pytest.mark.parametrize("cls_name", ["W4AFP8Linear", "W4ANVFP4Linear"])
+def test_w4a_validate_rejects_a_rocm_target(monkeypatch, cls_name):
+    """A ROCm target must be refused before Triton compiles the W4A kernel.
+
+    ``torch.cuda.is_available()`` is true under HIP and gfx1201 reports a
+    synthetic ``(12, 0)`` capability that clears the FP8 floor, so neither can
+    gate this backend. ``device=None`` (the AUTO path) also skips the base
+    ``validate_device`` family check, so ``validate`` itself has to resolve the
+    family; without that the first forward aborts inside Triton with
+    "Unsupported DotOp ... #ttg.nvidia_mma".
+    """
+    import torch
+
+    import gptqmodel.nn_modules.qlinear.w4a_floatx as w4a_floatx
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+
+    cls = {
+        "W4AFP8Linear": w4a_floatx.W4AFP8Linear,
+        "W4ANVFP4Linear": W4ANVFP4Linear,
+    }[cls_name]
+    # ``W4ANVFP4Linear`` inherits the gate from ``w4a_floatx``.
+    monkeypatch.setattr(w4a_floatx, "normalize_device", lambda device: DEVICE.ROCM)
+
+    ok, error = cls.validate(
+        bits=4, group_size=128, desc_act=False, sym=True, pack_dtype=torch.int32
+    )
+
+    assert ok is False
+    assert isinstance(error, NotImplementedError)
+    assert "ttg.nvidia_mma" in str(error)

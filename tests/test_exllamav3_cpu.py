@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.exllamav3_torch as exllamav3_torch
+from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +103,9 @@ def _codebook_3inst(encoded: torch.Tensor) -> torch.Tensor:
     raw = 0x3B603B60 ^ (raw & 0x8FFF8FFF)
     halves = torch.stack((raw & 0xFFFF, (raw >> 16) & 0xFFFF), dim=-1)
     halves = halves.to(torch.uint16).contiguous().view(torch.float16).double()
-    return halves[..., 0] + halves[..., 1]
+    # Native decode_3inst uses __hadd, which rounds the sum to FP16 before
+    # the decoded value is widened for the Hadamard transforms.
+    return (halves[..., 0] + halves[..., 1]).half().double()
 
 
 def _tensor_core_perm_inverse() -> torch.Tensor:
@@ -242,6 +245,74 @@ def test_exllamav3_torch_chunked_forward_matches_independent_oracle(bits, dtype)
     assert actual.dtype == dtype
     assert raw_error <= 2e-3
     assert visible_error <= 2e-3
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("rows", [32, 33])
+def test_exllamav3_bridge_wide_noncontiguous_input_matches_independent_oracle(device, dtype, rows):
+    if device == "cuda" and (not torch.cuda.is_available() or torch.version.hip is not None):
+        pytest.skip("requires NVIDIA CUDA")
+
+    bits = 4
+    in_features = out_features = 128
+    generator = torch.Generator().manual_seed(3)
+    symbols = torch.randint(
+        0,
+        1 << bits,
+        (in_features // 16, out_features // 16, 256),
+        dtype=torch.int64,
+        generator=generator,
+    )
+    packed = _make_module(size=128, bits=bits, trellis=_pack_symbols(symbols, bits))
+    tensors = {
+        name: getattr(packed, name, None)
+        for name in ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+    }
+    module = ExllamaV3Linear.from_tensors(
+        in_features=in_features,
+        out_features=out_features,
+        name="wide_bridge",
+        tensors=tensors,
+    ).to(device).eval()
+
+    leading_shape = (2, 16) if rows == 32 else (3, 11)
+    x = torch.randn((*leading_shape, in_features), generator=generator).transpose(0, 1)
+    x[..., 0] = 131072.0  # Beyond the finite FP16 range.
+    x = x.to(dtype=dtype, device=device)
+    assert not x.is_contiguous()
+
+    weight = _independent_weight_oracle(symbols, bits, packed.suh, packed.svh)
+    expected = x.cpu().double() @ weight + packed.bias.double()
+    before = {
+        name: getattr(module, name).cpu().clone()
+        for name in ("trellis", "suh", "svh", "bias")
+    }
+    packed_pointer = module.trellis.data_ptr()
+
+    with torch.inference_mode():
+        actual = module(x)
+        repeated = module(x)
+
+    assert actual.dtype == dtype
+    assert actual.shape == (*x.shape[:-1], out_features)
+    assert torch.isfinite(actual).all()
+    assert _relative_l2(actual.cpu(), expected) <= 2e-3
+    assert _relative_l2(actual.cpu(), expected.to(dtype)) <= 2e-3
+    torch.testing.assert_close(actual, repeated, rtol=0, atol=0)
+
+    assert module._inner is None  # Both row-count branches stay away from FP16-only native code.
+    assert module._torch_inner is not None
+    assert module.trellis.data_ptr() == packed_pointer
+    assert module._torch_inner.trellis.data_ptr() == packed_pointer
+    for name, value in before.items():
+        torch.testing.assert_close(getattr(module, name).cpu(), value, rtol=0, atol=0)
+    for owner in (module, module._torch_inner):
+        assert not any(
+            tensor.shape == (in_features, out_features)
+            for tensor in (*owner.__dict__.values(), *owner.buffers())
+            if isinstance(tensor, torch.Tensor)
+        )
 
 
 def test_exllamav3_torch_forward_decodes_per_call_without_dense_cache(monkeypatch):
@@ -511,3 +582,83 @@ def test_exllamav3_torch_cpu_bf16x3_env_disable(monkeypatch):
     exllamav3_torch._cpu_bf16x3_support.cache_clear()
 
     assert not exllamav3_torch._cpu_bf16x3_support()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav3_torch_hadamard_preserves_activation_dtype(dtype):
+    """The cached FP32 Hadamard must not force a dtype mismatch against activations."""
+
+    x = torch.randn(4, 256, dtype=dtype)
+    for apply in (exllamav3_torch._apply_hadamard_right, exllamav3_torch._apply_hadamard_left):
+        source = x if apply is exllamav3_torch._apply_hadamard_right else x.t().contiguous()
+        actual = apply(source)
+        assert actual.dtype == dtype
+        hadamard = exllamav3_torch._hadamard_128("cpu", None).double()
+        if apply is exllamav3_torch._apply_hadamard_right:
+            expected = (source.double().view(source.shape[0], -1, 128) @ hadamard).view_as(source)
+        else:
+            expected = (hadamard @ source.double().view(-1, 128, source.shape[1])).view_as(source)
+        # Pure dtype/rounding check (the forward test above covers accuracy
+        # against the FP64 oracle): BF16's unit roundoff is ~7.8e-3, so allow
+        # that much relative drift here and keep FP16 at the 2e-3 limit.
+        rtol = 8e-3 if dtype is torch.bfloat16 else 2e-3
+        torch.testing.assert_close(actual.double(), expected, rtol=rtol, atol=rtol)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav3_torch_forward_matches_oracle_with_hadamard_matmul(dtype):
+    """Exercises the same Hadamard path task AUTO selects on ROCm (EXL3_TORCH)."""
+
+    in_features, out_features = 384, 256
+    generator = torch.Generator().manual_seed(17 if dtype is torch.float16 else 29)
+    symbols = torch.randint(
+        0,
+        1 << 4,
+        (in_features // 16, out_features // 16, 256),
+        dtype=torch.int64,
+        generator=generator,
+    )
+    module = _make_module(
+        bits=4,
+        seed=3,
+        in_features=in_features,
+        out_features=out_features,
+        trellis=_pack_symbols(symbols, 4),
+    )
+    x = torch.randn(7, in_features, dtype=dtype, generator=generator)
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    expected = x.double() @ _independent_weight_oracle(symbols, 4, module.suh, module.svh) + module.bias.double()
+    assert actual.dtype == dtype
+    assert _relative_l2(actual, expected) <= 2e-3
+    assert _relative_l2(actual, expected.to(dtype)) <= 2e-3
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_exllamav3_wide_activations_stay_finite_through_torch_inner(dtype):
+    """End-to-end: BF16/FP32 inputs that overflow FP16 must round-trip finitely.
+
+    ``ExllamaV3Linear.forward`` routes non-FP16 activations through
+    ``ExllamaV3TorchLinear`` (#3731). The inner upcasts to FP32 for both the
+    Hadamard reconstruction and the bias epilogue, so a value above the FP16
+    maximum (65504) must stay finite and match the FP64 oracle.
+    """
+
+    in_features, out_features = 128, 128
+    module = _make_module(size=128, in_features=in_features, out_features=out_features)
+    # 1e10 and 1e-10 straddle FP16's representable range in both directions;
+    # a naive FP16 round-trip would turn the first into inf and the second to 0.
+    x = torch.tensor(
+        [[1e10, 1e-10] + [0.5] * (in_features - 2)], dtype=dtype
+    )
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+
+    expected = _oracle(module, x)
+    assert _relative_l2(actual, expected) <= 2e-3

@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Ministral3GPTQ(BaseQModel):
+    fusable = FusableConfig("ministral3").merge(LlamaFusableConfig())
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

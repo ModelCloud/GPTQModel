@@ -24,9 +24,10 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 from .logger import setup_logger
-from .marlin_scalar_type import ScalarType, scalar_types
 from .machete import _ensure_cutlass_source
+from .marlin_scalar_type import ScalarType, scalar_types
 from .rocm import IS_ROCM
+
 
 log = setup_logger()
 

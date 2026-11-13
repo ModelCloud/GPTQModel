@@ -6,6 +6,7 @@
 
 from functools import lru_cache
 
+
 _EXL3_CODEBOOKS = {"3inst": 0, "mcg": 1, "mul1": 2}
 
 _EXL3_VITERBI_HEADER = r"""

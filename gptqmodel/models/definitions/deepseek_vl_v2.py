@@ -14,6 +14,7 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
+from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -110,7 +111,7 @@ class DeepSeekVLV2QModel(BaseQModel):
         self.shell_module_materialize(language_model.norm, self.quantize_config.device)
         self.shell_module_materialize(self.model.vision, self.quantize_config.device)
         self.shell_module_materialize(self.model.projector, self.quantize_config.device)
-        self._move_direct_parameters(torch.device(self.quantize_config.device))
+        self._move_direct_parameters(as_torch_device(self.quantize_config.device))
 
     def pre_quantize_generate_hook_end(self):
         language_model = self.model.language.model

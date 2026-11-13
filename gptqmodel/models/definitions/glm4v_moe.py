@@ -5,11 +5,14 @@
 
 from transformers import AutoModel
 
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .glm4v import Glm4vGPTQ
 
 
 class Glm4vMoeQModel(Glm4vGPTQ):
+    fusable = FusableConfig("glm4v_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     dynamic_expert_index = "n_routed_experts"
 
     layer_modules_strict = False
@@ -45,6 +48,8 @@ class Glm4vMoeQModel(Glm4vGPTQ):
 
 
 class Glm4vMoeTextQModel(Glm4vMoeQModel):
+    fusable = FusableConfig("glm4v_moe_text").merge(Glm4vMoeQModel.fusable)
+
     loader = AutoModel
 
     require_load_processor = False

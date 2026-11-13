@@ -13,6 +13,7 @@ import torch
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -256,3 +257,30 @@ def test_rtn_qwen38_projection_oracle(name, rows, cols, sym, dtype):
     assert actual[0].shape == (rows, cols), name
     del source, actual, expected
     gc.collect()
+
+
+@pytest.mark.parametrize("rows", [1, 2, 3, 5, 7, 8, 9, 17])
+def test_rtn_warps_partial_tail_group(rows):
+    """The 8-warp launch must skip lanes past the last real group.
+
+    Packing eight independent groups per threadgroup leaves a partial final
+    threadgroup whenever ``rows * groups`` is not a multiple of eight. Every
+    real group must still produce its own scale and codes, and the padding
+    lanes must not run past the weight buffer.
+    """
+    cols = 64
+    rng = np.random.default_rng(9001 + rows)
+    source = torch.from_numpy(rng.normal(0, 0.05, (rows, cols)).astype(np.float32))
+    actual, expected = _compare(source, bits=4, group_size=32, sym=True)
+    assert actual[0].shape == (rows, cols)
+    assert np.array_equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize("cols", [32, 96, 4096])
+def test_rtn_single_row_multiple_group_sizes(cols):
+    """One output row still spans several warps of the packed launch."""
+    rng = np.random.default_rng(4242 + cols)
+    source = torch.from_numpy(rng.normal(0, 0.03, (1, cols)).astype(np.float32))
+    for group_size in (32, 64):
+        actual, expected = _compare(source, bits=4, group_size=group_size, sym=True)
+        assert np.array_equal(actual[0], expected[0])

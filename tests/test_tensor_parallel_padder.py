@@ -7,6 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig, TensorParallelPadderConfig
@@ -23,11 +24,7 @@ def _build_preprocessor(qcfg: QuantizeConfig) -> ModulePreProcessor:
     return ModulePreProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=[],
-        prepare_dataset_func=None,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
+        calibration=CalibrationConfig(),
     )
 
 

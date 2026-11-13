@@ -18,8 +18,8 @@ import argparse
 import threading
 from pathlib import Path
 
-import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+
 
 # from gptqmodel.hf_minimax_m2.modeling_minimax_m2 import (
 #     MiniMaxAttention,

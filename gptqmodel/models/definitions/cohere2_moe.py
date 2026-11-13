@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Cohere2MoeQModel(BaseQModel):
     # Cohere2-MoE uses dense prefix layers followed by routed MoE layers, both
     # under the same `mlp` attribute.
+    fusable = FusableConfig("cohere2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
+
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"
 

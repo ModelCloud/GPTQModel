@@ -138,7 +138,8 @@ def quantize_fp8_weight_mlx(
 
     def inverse_scale(maximum_bits):
         maximum = maximum_bits.view(mx.float32)
-        return mx.where(maximum_bits > 0, fp8_max / mx.maximum(maximum, tiny), 1.0)
+        inverse = mx.minimum(fp8_max / mx.maximum(maximum, tiny), float.fromhex("0x1.fffffep+127"))
+        return mx.where(maximum_bits > 0, inverse, 1.0)
 
     if method == "tensor":
         scales = inverse_scale(maximum_bits(matrix))

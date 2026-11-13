@@ -5,14 +5,14 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear, _swizzle_scales, nvfp4_input
-from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_pack_and_swizzle
+from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_decode, nvfp4_pack_and_swizzle
 from gptqmodel.quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     nvfp4_block_qdq,
     nvfp4_global_scale,
 )
 from gptqmodel.quantization.config import QuantizeConfig
-from tests.w4a_hardware_marks import NVFP4_HARDWARE
+from tests.w4a_hardware_marks import GLUON_FP8, NVFP4_HARDWARE
 
 
 # Every CUDA case in this file consumes the NVFP4 carrier, which this release
@@ -46,6 +46,7 @@ def test_legacy_recipe_names_load_and_export_expanded_names(tmp_path, legacy, ca
                                nvfp4_block_qdq(x, global_scale, canonical), rtol=0, atol=0)
 
 
+@GLUON_FP8
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("legacy,canonical", [
     ("lsq", "least_squares"),
@@ -84,6 +85,7 @@ def test_fp16_global_scale_underflow_boundary_retains_positive_fp32_scale(recipe
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-20)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("maximum", [2**-24, 1e-5, 2**-15, 2**-14])
@@ -103,6 +105,30 @@ def test_small_dynamic_nvfp4_operands_match_replay_and_oracle(dtype, maximum):
     torch.testing.assert_close(encoded.global_scale, expected_scale, rtol=1e-6, atol=1e-20)
     torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-12)
     torch.testing.assert_close(replay, expected, rtol=1e-6, atol=1e-12)
+
+
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(0, 128), (2, 0, 128)])
+def test_empty_nvfp4_replay_matches_runtime_transport(dtype, shape):
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import (
+        round_w4a_activation,
+        round_w4a_replay_operand,
+    )
+
+    x = torch.empty(shape, device="cuda", dtype=dtype)
+    packed = pack_activation(x, "w4a_nvfp4")
+    assert packed.global_scale.dtype == torch.float32
+    torch.testing.assert_close(packed.global_scale, torch.ones((), device=x.device))
+
+    rounded = round_w4a_activation(x, "w4a_nvfp4")
+    operand = round_w4a_replay_operand(x, "w4a_nvfp4")
+    assert rounded.shape == operand.shape == packed.decode().shape == shape
+    assert rounded.dtype == dtype
+    assert operand.dtype == torch.float32
+    torch.testing.assert_close(rounded, packed.decode())
+    torch.testing.assert_close(operand, packed.decode(torch.float32))
 
 
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
@@ -205,6 +231,7 @@ def _module(k=128, n=128, device="cpu"):
 # The config round-trip itself is hardware independent, but the test also
 # decodes a live W4ANVFP4Linear whose constructor validates the NVFP4 tensor
 # core floor (SM 12.1), so it can only run on GB10.
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_nvfp4_config_and_exact_weight_planes(tmp_path):
     config = QuantizeConfig(
@@ -253,10 +280,15 @@ def test_nvfp4_config_and_exact_weight_planes(tmp_path):
     expected = torch.arange(128).remainder(16).sub(8).float()[:, None].expand(128, 128)
     torch.testing.assert_close(centered, expected, rtol=0, atol=0)
     assert module.qweight.dtype == torch.int32
-    # Mixed-precision attention consumes FP8 carriers, so the module stages a
-    # derived E4M3 plane in post_init. It is non-persistent and never saved.
-    assert module._weight_e4m3.numel() == module.in_features * module.out_features
-    assert module._weight_e4m3.dtype == torch.float8_e4m3fn
+    # The mixed-precision attention lane needs an E4M3 operand, but that plane
+    # is an expansion of the native INT4 codes and is staged per forward. Only
+    # the packed E2M1 planes may persist.
+    assert not hasattr(module, "_weight_e4m3")
+    assert "_weight_e4m3" not in module._WEIGHT_CACHE_NAMES
+    assert module._weight_both.numel() * module._weight_both.element_size() == 128 * 128
+    operand = module.fp8_weight_operand()
+    assert operand.dtype == torch.float8_e4m3fn and operand.numel() == 128 * 128
+    assert not hasattr(module, "_weight_e4m3")
     assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx", "activation_global_scale_bits"}
     assert nvfp4_global_scale(4 * 448).item() == 1.0
     assert nvfp4_global_scale(6 * 448, recipe="nvidia").item() == 1.0
@@ -331,6 +363,7 @@ def test_nvfp4_grid_search_never_increases_least_squares_block_sse():
     assert torch.count_nonzero(grid_sse < refined_sse).item() > 0
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize(
     "recipe", ["nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"]
@@ -352,6 +385,63 @@ def test_fused_nvfp4_pack_matches_torch_codes_and_scale_layout(rows, width, reci
     assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
 
 
+@GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize(
+    "recipe", ["nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"]
+)
+@pytest.mark.parametrize("layout,dtype", [("padded_rows", torch.bfloat16), ("column_stride", torch.float16)])
+def test_fused_nvfp4_pack_matches_torch_for_strided_input(recipe, layout, dtype):
+    generator = torch.Generator(device="cuda").manual_seed(2038)
+    width = 256
+    storage_width = width + 8 if layout == "padded_rows" else width * 2
+    storage = torch.randn((7, storage_width), generator=generator, device="cuda", dtype=dtype)
+    x = storage[:, :width] if layout == "padded_rows" else storage[:, ::2]
+    x[0, :16] = 0
+    assert not x.is_contiguous()
+    global_scale = torch.tensor(0.03125, device="cuda")
+
+    packed, swizzled = nvfp4_pack_and_swizzle(x, global_scale, recipe=recipe)
+    reference_codes, reference_scales = nvfp4_input(x, global_scale, recipe=recipe)
+    expected_scales = torch.stack([
+        _swizzle_scales(reference_scales[:, group * 8:(group + 1) * 8])
+        for group in range(width // 128)
+    ])
+    torch.cuda.synchronize()
+    assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@GLUON_FP8
+@NVFP4_HARDWARE
+@pytest.mark.parametrize("layout", ["codes_rows", "codes_columns", "scales_rows", "scales_columns"])
+def test_nvfp4_decode_accepts_strided_packed_operands(layout):
+    generator = torch.Generator(device="cuda").manual_seed(1281)
+    x = torch.randn((7, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
+    x[0, :16] = 0
+    global_scale = torch.tensor(0.03125, device="cuda")
+    codes, scales = nvfp4_pack_and_swizzle(x, global_scale)
+    source = codes if layout.startswith("codes") else scales
+    if layout.endswith("rows"):
+        storage = torch.empty((source.shape[0], source.shape[1] + 8), device="cuda", dtype=source.dtype)
+        view = storage[:, :source.shape[1]]
+    else:
+        storage = torch.empty((source.shape[0], source.shape[1] * 2), device="cuda", dtype=source.dtype)
+        view = storage[:, ::2]
+    view.view(torch.uint8).copy_(source.view(torch.uint8))
+    assert not view.is_contiguous()
+
+    actual = nvfp4_decode(
+        view if layout.startswith("codes") else codes,
+        view if layout.startswith("scales") else scales,
+        global_scale, x.shape[1], torch.float32,
+    )
+    expected = _independent_nvfp4_qdq(x, global_scale)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+@GLUON_FP8
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_nvfp4_block_scale_rounding_holds_at_e4m3_midpoint_neighbours():
     """E4M3 block scales must round like the Torch oracle on every architecture.
@@ -387,6 +477,7 @@ def test_nvfp4_block_scale_rounding_holds_at_e4m3_midpoint_neighbours():
     assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_nvfp4_forward_can_be_captured_in_cuda_graph():
     module = _module(k=128, n=128, device="cuda")
@@ -400,6 +491,7 @@ def test_nvfp4_forward_can_be_captured_in_cuda_graph():
     torch.testing.assert_close(captured, expected, rtol=2e-3, atol=2e-3)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("rows", [1, 16, 128])
 def test_nvfp4_native_output_against_independent_oracle(rows):
@@ -422,6 +514,7 @@ def test_nvfp4_native_output_against_independent_oracle(rows):
     torch.testing.assert_close(actual, oracle.to(actual.dtype), rtol=2e-3, atol=2e-3)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("n", [96, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -448,6 +541,7 @@ def test_nvfp4_random_columns_and_scales(n, dtype):
     torch.testing.assert_close(actual, oracle.to(actual.dtype), rtol=2e-3, atol=2e-3)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_norm_preserves_codes_and_scales_against_oracle(dtype):

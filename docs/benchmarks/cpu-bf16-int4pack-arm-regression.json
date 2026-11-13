@@ -1,0 +1,40 @@
+{
+  "host": {
+    "architecture": "aarch64",
+    "cpu": "Cortex-X925/A725",
+    "avx512_bf16": false,
+    "torch": "2.15.0+cu132"
+  },
+  "test": {
+    "node_pattern": "qkv_gqa-cpu-*-torch.bfloat16",
+    "input_features": 512,
+    "projection_widths": [512, 256, 256],
+    "group_size": 128,
+    "input_dtype": "torch.bfloat16",
+    "output_dtype": "torch.bfloat16",
+    "rows": [1, 8, 33, 257],
+    "rtol": 0.002,
+    "atol": 0.002,
+    "results": [
+      {"kernel": "TorchAtenAwqLinear", "before_max_abs": 0.0029296875, "after_max_abs": 0.001953125, "parent_max_abs": 0, "extra_packed_weight_bytes": 0},
+      {"kernel": "TorchAtenLinear", "before_max_abs": 0.0029296875, "after_max_abs": 0.001953125, "parent_max_abs": 0, "extra_packed_weight_bytes": 0},
+      {"kernel": "TorchFusedAwqLinear", "before_max_abs": 0.0029296875, "after_max_abs": 0.001953125, "parent_max_abs": 0, "extra_packed_weight_bytes": 0},
+      {"kernel": "TorchFusedLinear", "before_max_abs": 0.0029296875, "after_max_abs": 0.001953125, "parent_max_abs": 0, "extra_packed_weight_bytes": 0}
+    ]
+  },
+  "op_timing_ms": {
+    "threads": 8,
+    "warmups": 4,
+    "timed_calls": 20,
+    "rows": [1, 8, 257],
+    "bf16_operands": [0.052, 0.526, 3.565],
+    "fp32_operands_with_conversion": [0.055, 0.548, 3.07]
+  },
+  "explicit_temporary_fp32_bytes_k512_n512_m257": {
+    "input": 526336,
+    "affine_metadata": 16384,
+    "output": 526336,
+    "total": 1069056
+  },
+  "combined_fusion_suite": {"passed": 165, "skipped": 126}
+}

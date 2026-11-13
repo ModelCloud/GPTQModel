@@ -642,6 +642,7 @@ class _DummyGPTQModelForLooper:
     capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
     capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
     prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
+    prepare_layer_replay_keep_mask = BaseQModel.prepare_layer_replay_keep_mask
 
     def __init__(
         self,

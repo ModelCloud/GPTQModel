@@ -43,4 +43,22 @@ def tensor_cache_key(tensor: Optional[torch.Tensor]):
     )
 
 
-__all__ = ["tensor_cache_key"]
+def build_group_ret_idx(g_idx: torch.Tensor) -> torch.Tensor:
+    """Return the group-sorted row permutation for a GPTQ ``g_idx``.
+
+    ``g_idx`` assigns every input row to a quantization group. ``ret_idx``
+    maps each position in group order back to the source row, so it is the
+    stable ascending sort of ``g_idx``: rows of the same group keep their
+    original relative order.
+
+    The previous implementation rebuilt that permutation with one
+    host-synchronized ``mask``/``count`` pass per group. Sorting once is
+    equivalent for every checkpoint-valid ``g_idx`` (each full group has
+    exactly ``group_size`` entries and the trailing partial group has
+    ``in_features % group_size``) and avoids ``O(groups)`` device syncs.
+    """
+
+    return torch.argsort(g_idx.to(torch.int32), stable=True).to(torch.int32)
+
+
+__all__ = ["tensor_cache_key", "build_group_ret_idx"]

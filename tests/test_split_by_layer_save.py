@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -68,9 +69,15 @@ class _DummyConfig:
         clone.__dict__ = copy.deepcopy(self.__dict__, memo)
         return clone
 
+    def save_pretrained(self, save_dir):
+        with open(os.path.join(save_dir, "config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"dummy": True}, handle)
+
 
 class _DummyGenerationConfig(_DummyConfig):
-    pass
+    def save_pretrained(self, save_dir):
+        with open(os.path.join(save_dir, "generation_config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"do_sample": False}, handle)
 
 
 class _TinySplitModel(nn.Module):
@@ -128,6 +135,57 @@ def _patch_writer_env(monkeypatch):
     monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
+
+
+def test_save_quantized_suspends_active_source_staging_during_materialization(
+    tmp_path, monkeypatch
+):
+    writer = _build_writer(tmp_path)
+    _patch_writer_env(monkeypatch)
+    events = []
+
+    class _Turtle:
+        active = False
+
+        @contextmanager
+        def suspend_active_source_staging(self):
+            assert not self.active
+            self.active = True
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+                self.active = False
+
+    turtle = _Turtle()
+    writer.turtle_model = turtle
+
+    def _record(name, result=None):
+        def inner(*_args, **_kwargs):
+            assert turtle.active
+            events.append(name)
+            return result
+
+        return inner
+
+    monkeypatch.setattr(
+        "gptqmodel.models.writer.alias_all_from_turtle_if_meta",
+        _record("alias"),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.models.writer._materialize_meta_layers_from_turtle",
+        _record("layers", 0),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.models.writer._materialize_remaining_meta_params_from_turtle",
+        _record("remaining", 0),
+    )
+
+    writer.save_quantized(save_dir=str(tmp_path / "save"), max_shard_size="1GB")
+
+    assert events == ["enter", "alias", "layers", "remaining", "exit"]
+    assert turtle.active is False
 
 
 @pytest.mark.skip(reason="see gptqmodel/models/writer.py:SUPPORTED_SPLIT_BY")

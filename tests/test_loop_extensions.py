@@ -6,6 +6,7 @@ import pytest
 
 from gptqmodel.looper.extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
+
 STEP = LoopStep("layer", 0, "model.layers.0")
 
 

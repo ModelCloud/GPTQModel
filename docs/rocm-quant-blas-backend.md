@@ -1,5 +1,8 @@
 # ROCm quantize BLAS backend selection (MI350X / gfx950)
 
+> GPT-QModel supports **ROCm >= 10.1** only. The measurements below were taken
+> on ROCm 10.1; older releases are unsupported and log an upgrade warning.
+
 ## Summary
 
 A cold quantization run on ROCm spends most of its wall time inside hipBLASLt's

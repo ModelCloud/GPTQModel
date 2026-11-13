@@ -16,6 +16,7 @@ from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 from tests.test_mlx_exl3_hadamard import _torch_hadamard_oracle
 from tests.test_mlx_exl3_rms import _normalized_rms_drift, _torch_block_rms_oracle
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -32,6 +33,7 @@ from tests.test_mlx_exl3_tiles import (  # noqa: E402
     _torch_to_tiles_oracle,
 )
 from tests.test_mlx_exl3_viterbi import _torch_viterbi_oracle_tensors  # noqa: E402
+
 
 _CODEBOOK_SCALE = 1.24371088
 

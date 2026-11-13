@@ -6,6 +6,7 @@
 import torch
 from transformers.masking_utils import create_causal_mask
 
+
 try:
     from transformers.masking_utils import create_recurrent_attention_mask
 except ImportError:

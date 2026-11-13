@@ -10,8 +10,8 @@ from time import perf_counter_ns
 import mlx.core as mx
 import numpy as np
 
-from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
 from gptqmodel.nn_modules.qlinear.mlx_gptq import _uses_packed_prefill
+from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 from tests.test_mlx_gptq_group16 import SOURCE_BITS, _group16_fixture, _rounded_oracle
 

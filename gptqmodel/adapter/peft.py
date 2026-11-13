@@ -11,6 +11,7 @@ from typing import Any, Literal, Optional, Set, Union
 from ..adapter.remote import resolve_path
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 @dataclass

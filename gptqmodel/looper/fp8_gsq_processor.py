@@ -7,29 +7,44 @@
 
 import threading
 import time
+from typing import Optional
 
 import torch
 
-from .loop_processor import ExecutionConfig, LoopProcessor
-from .weight_only_processor import WeightOnlyProcessor
 from ..quantization.config import FP8Config, clone_weight_only_config_for_module
 from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
+from .loop_processor import (
+    CalibrationConfig,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+)
+from .weight_only_processor import WeightOnlyProcessor
 
 
 class FP8GSQProcessor(WeightOnlyProcessor):
     """Capture module inputs, then export the fitted FP8 bytes without refitting."""
 
-    def __init__(self, tokenizer, qcfg, calibration, prepare_dataset_func,
-                 calibration_concat_size=None, calibration_sort=None, batch_size=1,
-                 calibration_concat_separator=None):
+    lifecycle = ProcessorLifecycleConfig(forward=ForwardConfig(required=True))
+
+    def __init__(
+        self,
+        tokenizer,
+        qcfg,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
+    ):
         if not isinstance(qcfg, FP8Config):
             raise TypeError('FP8 GSQ processor requires FP8Config')
         LoopProcessor.__init__(
-            self, tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
-            prepare_dataset_func=prepare_dataset_func, calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort, calibration_concat_separator=calibration_concat_separator,
-            batch_size=batch_size, execution_config=ExecutionConfig(require_fwd=True))
+            self,
+            tokenizer=tokenizer,
+            qcfg=qcfg,
+            calibration=calibration,
+            forward=forward,
+        )
         self.lock = threading.Lock()
         self.is_weight_only = False
         self.preserve_batch_keep_mask = True
@@ -44,9 +59,13 @@ class FP8GSQProcessor(WeightOnlyProcessor):
         super().release_calibration_dataset()
 
     def preprocess(self, module, **kwargs):
-        config = clone_weight_only_config_for_module(self.qcfg, module.full_name)
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        config = clone_weight_only_config_for_module(
+            self.qcfg, module.full_name, resolved_cfg=resolved_cfg,
+        )
         if config is None:
             return
+        bind_resolved_module_config(module, resolved_cfg)
         if config.weight_scale_method == "tensor":
             raise ValueError("FP8 calibrated GSQ processor requires native activation replay for tensor scales")
         task = FP8GSQTask(module.weight, config) if gsq_enabled_for(config.gsq, module.full_name) else None

@@ -12,6 +12,8 @@ from . import LlamaQModel
 
 class NanbeigeQModel(LlamaQModel):
     """Nanbeige's looped decoder reuses a Llama-shaped set of physical layers."""
+    fusable = None  # No qualified executor for this definition.
+
 
     require_trust_remote_code = True
 

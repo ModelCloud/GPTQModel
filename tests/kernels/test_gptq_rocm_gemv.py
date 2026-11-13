@@ -1,8 +1,97 @@
+# GPU=-1 for the mocked launch-constant cases; the kernel-oracle cases carry
+# ``pytest.mark.cuda`` and skip without a matching ROCm device.
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.triton_utils.gptq_gemv import gptq_gemv
+from gptqmodel.nn_modules.triton_utils.gptq_gemv import (
+    GEMV_BLOCK_N,
+    GEMV_MAX_BLOCK_K,
+    GEMV_NUM_WARPS,
+    block_k_for,
+    gptq_gemv,
+    launch_config,
+)
+from gptqmodel.utils import arch
+
+
+@pytest.fixture(autouse=True)
+def _arch_cache():
+    arch.clear_arch_cache()
+    yield
+    arch.clear_arch_cache()
+
+
+def _device_arch() -> str:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        return ""
+    props = torch.cuda.get_device_properties(0)
+    return arch.normalize_arch(getattr(props, "gcnArchName", ""))
+
+
+def _require_gpu_arch(arch_name: str) -> None:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("ROCm GPU required")
+    detected = _device_arch()
+    if detected != arch_name:
+        pytest.skip(f"{arch_name} GPU required (found {detected or 'none'})")
+
+
+# --------------------------------------------------------------------------- #
+# CPU-only mocked coverage: launch constants are module-level and arch-tabled.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    ("arch_name", "expected"),
+    [
+        ("gfx950", (512, 8, 8)),
+        ("gfx1200", (512, 16, 4)),
+        ("gfx1201:sramecc+:xnack-", (512, 16, 4)),
+        ("gfx1250", (512, 16, 4)),
+        ("gfx942", (512, 8, 8)),
+        # Ada (RTX 4090) has its own measured entry: the 256-deep K tile wins
+        # on the 4090 for K >= 256.  ``None`` keeps the portable 512 default.
+        ("sm_89", (256, 8, 8)),
+        ((8, 9), (256, 8, 8)),
+        (None, (512, 8, 8)),
+    ],
+)
+def test_gemv_launch_constants_are_module_level(arch_name, expected):
+    # The former literals inside gptq_gemv() must exist as module constants so a
+    # future autotune sweep can change them in one place. The module-level
+    # symbols are the non-ROCm/CDNA defaults; the per-arch table supplies the
+    # rest. Both must agree for gfx950, which is the compatibility contract.
+    assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == (512, 8, 8)
+    cfg = launch_config(arch_name)
+    assert (cfg.max_block_k, cfg.block_n, cfg.num_warps) == expected
+    if isinstance(arch_name, str) and arch_name.startswith("gfx950"):
+        assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == expected
+
+
+def test_gemv_block_k_keeps_power_of_two_formula():
+    # min(cap, max(32, 1 << (in_features - 1).bit_length()))
+    assert block_k_for(896) == 512
+    assert block_k_for(5120) == 512
+    assert block_k_for(4096) == 512
+    assert block_k_for(256) == 256
+    assert block_k_for(48) == 64
+    assert block_k_for(17) == 32
+    assert block_k_for(1) == 32
+    assert block_k_for(896, "gfx1201") == 512
+
+
+def test_gemv_block_k_respects_cap(monkeypatch):
+    from gptqmodel.nn_modules.triton_utils import gptq_gemv as gemv_mod
+
+    monkeypatch.setitem(gemv_mod._GEMV_LAUNCH_CONFIGS, "rdna4", gemv_mod.GemvLaunch(256, 8, 8))
+    assert block_k_for(4096, "gfx1201") == 256
+    assert block_k_for(256, "gfx1201") == 256
+    assert block_k_for(128, "gfx1201") == 128
+
+
+def test_gemv_cdna_values_unchanged():
+    cfg = launch_config("gfx950")
+    assert cfg == (512, 8, 8)
 
 
 def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
@@ -11,7 +100,8 @@ def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
     Decodes the packed codes with Torch integer shifts and accumulates in FP64.
     The dequantized weights are rounded to the activation dtype first, which is
     the arithmetic the reference Torch and Triton dequant paths both specify.
-    The returned tensor excludes bias.
+    The returned tensor excludes bias; the caller applies the module's fused
+    bias epilogue at FP64 before comparing visible outputs.
     """
     pack_factor = 32 // module.bits
     maxq = (1 << module.bits) - 1
@@ -49,31 +139,22 @@ def _make_module(in_features: int, out_features: int, dtype: torch.dtype,
     return module
 
 
-@pytest.fixture(autouse=True)
-def require_gfx950():
-    if not torch.cuda.is_available() or torch.version.hip is None:
-        pytest.skip("ROCm GPU required")
-    if not getattr(torch.cuda.get_device_properties(0), "gcnArchName", "").startswith("gfx950"):
-        pytest.skip("gfx950 GPU required")
+def _dense_weight_candidates(module: TorchLinear) -> list[str]:
+    """Names of floating tensors large enough to be a full dense weight."""
+    shape = (module.in_features, module.out_features)
+    found = []
+    for name, value in vars(module).items():
+        if not torch.is_tensor(value) or not value.is_floating_point():
+            continue
+        if value.dim() == 2 and tuple(value.shape) in (shape, (shape[1], shape[0])):
+            found.append(f"{name}{tuple(value.shape)}")
+    for name, value in module.named_buffers():
+        if value.is_floating_point() and value.dim() == 2 and tuple(value.shape) in (shape, (shape[1], shape[0])):
+            found.append(f"buffer:{name}{tuple(value.shape)}")
+    return found
 
 
-@pytest.mark.cuda
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", [
-    ((896, 128), 128, False, False, 4),
-    ((896, 1280), 128, False, False, 4),
-    ((2048, 1024), 128, False, False, 4),
-    ((4096, 4096), 256, False, True, 4),
-    ((5120, 12288), 128, True, False, 4),
-    ((2048, 1024), 128, False, False, 8),
-    ((2048, 1024), 128, True, True, 8),
-    ((2048, 1024), 128, False, False, 2),
-    ((896, 1280), 128, True, False, 2),
-])
-def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
-    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
-    desc_act: bool, bias: bool, bits: int,
-):
+def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
     torch.manual_seed(810)
     in_features, out_features = shape
     module = _make_module(in_features, out_features, dtype, group_size, desc_act, bias, bits)
@@ -87,29 +168,45 @@ def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
         )
     torch.cuda.synchronize()
     assert visible.dtype == dtype
+    # Storage rule: the fused GEMV path must consume packed weights only and must
+    # not install a dense/dequantized copy on the module.
+    assert _dense_weight_candidates(module) == [], "forward retained a dense weight"
+    with torch.inference_mode():
+        again = module(x)
+    assert again.dtype == dtype
+    assert _dense_weight_candidates(module) == [], "repeated forward retained a dense weight"
 
     # Arithmetic accuracy: raw FP32 accumulation against the independent FP64 oracle.
     drift = (raw.double() - accumulation).abs()
     torch.testing.assert_close(raw, accumulation.float(), rtol=2e-3, atol=2e-3)
     assert drift.max().item() <= 1e-3, f"FP32 accumulation drift {drift.max().item():.3e} exceeds 1e-3"
 
-    # The visible output must be the module's own rounded matmul plus bias. The bias add
-    # rounds in the activation dtype, so this is checked structurally rather than by a
-    # blanket relative tolerance (one bf16 ULP is already 0.5% near 1.5).
-    raw_rounded = raw.to(dtype)
-    accumulation_rounded = accumulation.to(dtype)
-    expected_visible = raw_rounded + module.bias if module.bias is not None else raw_rounded
-    assert torch.equal(visible, expected_visible), "visible output is not round(matmul) + bias"
+    # These oracle cases pin the fused M=1 kernel; a fallback would use a
+    # different epilogue expression and must not be silently accepted here.
+    assert module._can_use_rocm_gemv(x), "oracle case did not dispatch the fused GEMV"
 
-    # Visible accuracy: each remaining difference between the kernel's rounded result and
-    # the FP64 oracle's rounded result is adjudicated. It is accepted only when the FP64
-    # and FP32 accumulations straddle the rounding boundary, i.e. the FP32 accumulation
-    # error is at least the distance from that boundary.
-    differs = raw_rounded != accumulation_rounded
+    # The visible output is one rounding of the fused epilogue, not
+    # ``round(matmul) + bias``: the bias is added to the FP32 partial sum before
+    # the store, so it participates in rounding instead of being added afterwards
+    # in the activation dtype. The visible add also rounds in the activation
+    # dtype, so this is checked structurally rather than by a blanket relative
+    # tolerance (one bf16 ULP is already 0.5% near 1.5).
+    bias = module.bias
+    wide_kernel = raw if bias is None else raw + bias.float()
+    expected_visible = wide_kernel.to(dtype)
+    assert torch.equal(visible, expected_visible), "visible output is not round(matmul + bias)"
+
+    # Visible accuracy: the FP64 oracle applies the same fused-bias epilogue, so
+    # each remaining difference is adjudicated. It is accepted only when the FP64
+    # and FP32 fused accumulations straddle the rounding boundary, i.e. the FP32
+    # accumulation error is at least the distance from that boundary.
+    wide_reference = accumulation if bias is None else accumulation + bias.double()
+    reference_rounded = wide_reference.to(dtype)
+    differs = visible != reference_rounded
     if differs.any():
-        midpoint = (raw_rounded.double() + accumulation_rounded.double()) / 2
-        boundary_distance = (accumulation - midpoint).abs()
-        accumulation_error = (raw.double() - accumulation).abs()
+        midpoint = (visible.double() + reference_rounded.double()) / 2
+        boundary_distance = (wide_reference - midpoint).abs()
+        accumulation_error = (wide_kernel.double() - wide_reference).abs()
         unexplained = differs & (boundary_distance > accumulation_error)
         assert not unexplained.any(), (
             f"{int(unexplained.sum())} visible element(s) differ without the FP32 accumulation "
@@ -117,8 +214,54 @@ def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
         )
 
 
+_SHAPES = [
+    ((896, 128), 128, False, False, 4),
+    ((896, 1280), 128, False, False, 4),
+    ((2048, 1024), 128, False, False, 4),
+    ((4096, 4096), 256, False, True, 4),
+    ((5120, 12288), 128, True, False, 4),
+    ((2048, 1024), 128, False, False, 8),
+    ((2048, 1024), 128, True, True, 8),
+    ((2048, 1024), 128, False, False, 2),
+    ((896, 1280), 128, True, False, 2),
+]
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", _SHAPES)
+def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
+    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
+    desc_act: bool, bias: bool, bits: int,
+):
+    _require_gpu_arch("gfx950")
+    _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", _SHAPES)
+def test_gfx1201_gptq_gemv_matches_independent_torch_oracle(
+    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
+    desc_act: bool, bias: bool, bits: int,
+):
+    _require_gpu_arch("gfx1201")
+    _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits)
+
+
 @pytest.mark.cuda
 def test_gfx950_gptq_gemv_falls_back_for_multi_token_or_grad():
+    _require_gpu_arch("gfx950")
+    _assert_gemv_fallbacks()
+
+
+@pytest.mark.cuda
+def test_gfx1201_gptq_gemv_falls_back_for_multi_token_or_grad():
+    _require_gpu_arch("gfx1201")
+    _assert_gemv_fallbacks()
+
+
+def _assert_gemv_fallbacks():
     module = _make_module(2048, 1024, torch.float16, 128, False, False)
     assert module._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16))
     assert not module._can_use_rocm_gemv(torch.randn(2, 2048, device="cuda", dtype=torch.float16))

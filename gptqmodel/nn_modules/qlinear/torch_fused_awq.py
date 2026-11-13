@@ -19,6 +19,12 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
+from ._fused_train_state import (
+    capture_fused_train_state,
+    refinalize_fused_state_after_apply,
+    restore_fused_train_state,
+)
+from ._runtime_cache import tensor_cache_key
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
@@ -136,7 +142,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         if need_zeros:
             zero_offset = 1 << (self.bits - 1)
-            zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
+            zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
 
         gptq_qweight = self.pack_awq_qweight(iweight)
         gptq_qzeros = self.pack_awq_qzeros(izeros)
@@ -187,7 +193,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         # Compute zeros: (zero_offset - izeros) * scales
         zero_offset = 1 << (self.bits - 1)
-        zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
+
+        from .torch_aten_kernel import _cpu_int4pack_scale_dtype
+
+        dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
@@ -195,6 +204,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
         self.scales = self.scales.to(dtype=dtype).contiguous()
+        zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
@@ -256,6 +266,67 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 "TorchFusedAwqLinear only supports fused transforms on CPU or XPU devices."
             )
 
+    def clear_weight_cache(self) -> None:
+        """Rebuild the packed fused op from the live buffers.
+
+        The checkpoint snapshot is not restored here: a move or explicit clear
+        must keep the live packed weight authoritative. Only checkpoint loads,
+        export, and training resume restore the snapshot.
+        """
+        self._fused_state_key = None
+        self._refresh_fused_op()
+
+    def _refresh_fused_op(self) -> None:
+        if getattr(self, "linear_mode", None) != LinearMode.INFERENCE:
+            return
+        qweight = getattr(self, "qweight", None)
+        scales = getattr(self, "scales", None)
+        qzeros = getattr(self, "qzeros", None)
+        if qweight is None or scales is None or qzeros is None:
+            return
+        if qweight.device.type != "cpu":
+            # The xpu path reads ``scales``/``qzeros`` directly; nothing derived.
+            return
+        key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, qzeros))
+        if getattr(self, "_fused_state_key", None) == key:
+            return
+        current = getattr(self, "scales_and_zeros", None)
+        dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
+        dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        self.torch_fused_op = Int4PackedOp(
+            self.qweight, self.scales_and_zeros, self.group_size
+        ).eval()
+        self._fused_state_key = key
+
+    def _apply(self, fn, recurse: bool = True):
+        """Re-finalize the checkpoint layout after an invalidating move.
+
+        The runtime int4pack layout is device- and scale-dtype-coupled, so a
+        cross-device or low-precision move restores the checkpoint snapshot
+        instead of reinterpreting it in place. A same-device move to FP32 keeps
+        the live layout because it only widens the offsets.
+        """
+
+        scales = getattr(self, "scales", None)
+        transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
+        scale_dtype = scales.dtype if transformed else None
+        device = scales.device if transformed else None
+        result = super()._apply(fn, recurse=recurse)
+        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        return result
+
+    def train(self, mode: bool = True):
+        old_train = self.training
+        if mode == old_train:
+            return self
+        if mode and self.linear_mode == LinearMode.INFERENCE:
+            restore_fused_train_state(self)
+            self.linear_mode = None
+            self.torch_fused_op = None
+            self.scales_and_zeros = None
+        return super().train(mode=mode)
+
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
@@ -269,15 +340,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
         ):
+            capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x_flat.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
                 ).eval()
-                import torch._inductor.config as config
-                config.freezing = True
-                config.max_autotune = True
         elif self.linear_mode is None:
             self.linear_mode = LinearMode.TRAIN
 

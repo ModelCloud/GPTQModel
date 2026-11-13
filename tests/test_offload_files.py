@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import os
+import stat
 import struct
 import threading
 from pathlib import Path
@@ -15,22 +17,25 @@ from accelerate import disk_offload
 from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4RotaryEmbedding
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
+import gptqmodel.utils.model as model_utils
 import gptqmodel.utils.structure as structure_module
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import TensorSource, get_state_dict_for_save, move_to, streaming_state_dict_to_shards
-from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
+from gptqmodel.utils.offload import (
+    offload_to_disk,
+    offload_to_safetensors_reference,
+    undo_offload_to_disk,
+)
 
 
 LazyTurtle = structure_module.LazyTurtle
-alias_all_from_turtle_if_meta = (
-    structure_module.alias_all_from_turtle_if_meta
-)
-alias_from_turtle_for_submodule = (
-    structure_module.alias_from_turtle_for_submodule
-)
+alias_all_from_turtle_if_meta = structure_module.alias_all_from_turtle_if_meta
+alias_from_turtle_for_submodule = structure_module.alias_from_turtle_for_submodule
 
 
 class _LinearWithBuffers(nn.Module):
@@ -149,7 +154,45 @@ class _RotaryWrapper(nn.Module):
         self.config = config
         self.block = nn.Module()
         self.block.linear = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.block.rotary = LlamaRotaryEmbedding(config, device=torch.device("cpu"))
+        self.block.rotary = LlamaRotaryEmbedding(config)
+
+
+def _tiny_deepseek_v4_config() -> DeepseekV4Config:
+    return DeepseekV4Config(
+        vocab_size=32,
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_hidden_layers=3,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        q_lora_rank=8,
+        n_routed_experts=3,
+        num_experts_per_tok=2,
+        hc_mult=2,
+        o_groups=2,
+        o_lora_rank=8,
+        sliding_window=8,
+        layer_types=["sliding_attention"] * 3,
+        mlp_layer_types=["moe"] * 3,
+        dspark_target_layer_ids=[0, 1, 2],
+        dspark_markov_rank=4,
+        dspark_block_size=5,
+        dspark_noise_token_id=31,
+        partial_rotary_factor=0.5,
+        dtype="bfloat16",
+    )
+
+
+class _DeepseekV4RotaryWrapper(nn.Module):
+    """Pair checkpoint state with V4's constructor-only compressor RoPE buffers."""
+
+    def __init__(self, config: DeepseekV4Config):
+        super().__init__()
+        self.config = config
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.block.rotary = DeepseekV4RotaryEmbedding(config)
 
 
 class _AttrBufferTemplate(nn.Module):
@@ -172,6 +215,22 @@ class _AttrBufferWrapper(nn.Module):
         self.block = nn.Module()
         self.block.linear = nn.Linear(width, width, bias=False)
         self.block.rotary = _AttrBufferTemplate(width=width, scale=scale, device=torch.device("cpu"))
+
+
+class _DirectParameterAndInitBuffer(nn.Module):
+    """Keep a checkpoint parameter beside a constructor-only buffer."""
+
+    def __init__(self, width: int, device=None):
+        super().__init__()
+        self.width = width
+        self.weight = nn.Parameter(torch.ones(width, device=device))
+        self.register_buffer("cache", torch.arange(width, device=device), persistent=False)
+
+
+class _DirectParameterAndInitBufferWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.block = _DirectParameterAndInitBuffer(width)
 
 
 class _ScalarMetaBufferTemplate(nn.Module):
@@ -266,7 +325,9 @@ def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurt
     return _build_lazy_turtle_from_checkpoint_tensors(tmp_path, state_dict)
 
 
-def _build_lazy_turtle_from_checkpoint_tensors(tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]) -> LazyTurtle:
+def _build_lazy_turtle_from_checkpoint_tensors(
+    tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]
+) -> LazyTurtle:
     """Persist an arbitrary safetensors checkpoint and reopen it through LazyTurtle."""
 
     model_dir = tmp_path / "source_model"
@@ -299,8 +360,12 @@ def _build_rect_fused_expert_checkpoint_tensors(
             [
                 torch.cat(
                     [
-                        expert.gate_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.gate_proj.weight.detach().clone(),
-                        expert.up_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.up_proj.weight.detach().clone(),
+                        expert.gate_proj.weight.detach().clone().transpose(0, 1)
+                        if is_transposed
+                        else expert.gate_proj.weight.detach().clone(),
+                        expert.up_proj.weight.detach().clone().transpose(0, 1)
+                        if is_transposed
+                        else expert.up_proj.weight.detach().clone(),
                     ],
                     dim=gate_split_dim,
                 )
@@ -326,7 +391,9 @@ def _build_rect_fused_expert_checkpoint_tensors(
     if include_down_proj:
         checkpoint_tensors["block.experts.down_proj"] = torch.stack(
             [
-                expert.down_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.down_proj.weight.detach().clone()
+                expert.down_proj.weight.detach().clone().transpose(0, 1)
+                if is_transposed
+                else expert.down_proj.weight.detach().clone()
                 for expert in experts
             ],
             dim=0,
@@ -390,6 +457,24 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
         torch.testing.assert_close(tensor, original_state[name])
 
 
+def test_reoffload_skips_buffer_only_meta_nf12_module(tmp_path):
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.utils.offload import is_meta_module
+
+    model = nn.Module()
+    model.block = NF12Linear(bits=12, in_features=64, out_features=16)
+    offload_root = tmp_path / "offload"
+    offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+    index_path = offload_root / "block" / "index.json"
+    original_index = index_path.read_bytes()
+    assert model.block.nf12_packed.is_meta
+
+    offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+    assert is_meta_module(model.block)
+    assert index_path.read_bytes() == original_index
+    assert not (offload_root / "block.tmp").exists()
+
+
 def _offloaded_save_model(
     tmp_path: Path, offload_format: str, dtype: torch.dtype = torch.float32
 ) -> tuple[nn.Module, Path, dict[str, torch.Tensor]]:
@@ -402,9 +487,7 @@ def _offloaded_save_model(
     offload_root = tmp_path / "offload_root"
 
     if offload_format == "safetensors":
-        offload_to_disk(
-            module=model.block, model=model, disk_path=str(offload_root), force=True
-        )
+        offload_to_disk(module=model.block, model=model, disk_path=str(offload_root), force=True)
     else:
         module_dir = offload_root / "block"
         disk_offload(
@@ -436,9 +519,7 @@ def test_offload_save_rejects_dtype_mismatch(
     stored_dtype: torch.dtype,
     shell_dtype: torch.dtype,
 ) -> None:
-    model, offload_root, _ = _offloaded_save_model(
-        tmp_path, offload_format, dtype=stored_dtype
-    )
+    model, offload_root, _ = _offloaded_save_model(tmp_path, offload_format, dtype=stored_dtype)
     tensor = getattr(model.block, leaf).to(shell_dtype)
     if leaf == "weight":
         tensor = nn.Parameter(tensor)
@@ -456,9 +537,7 @@ def test_offload_save_rejects_dtype_mismatch(
 
 @pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
 @pytest.mark.parametrize("leaf", ["weight", "scale"])
-def test_offload_save_rejects_shape_mismatch(
-    tmp_path: Path, offload_format: str, leaf: str
-) -> None:
+def test_offload_save_rejects_shape_mismatch(tmp_path: Path, offload_format: str, leaf: str) -> None:
     model, offload_root, _ = _offloaded_save_model(tmp_path, offload_format)
     tensor = getattr(model.block, leaf).reshape(6, 4)
     if leaf == "weight":
@@ -477,12 +556,8 @@ def test_offload_save_rejects_shape_mismatch(
 
 @pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_offload_save_preserves_matching_metadata(
-    tmp_path: Path, offload_format: str, dtype: torch.dtype
-) -> None:
-    model, offload_root, original_state = _offloaded_save_model(
-        tmp_path, offload_format, dtype=dtype
-    )
+def test_offload_save_preserves_matching_metadata(tmp_path: Path, offload_format: str, dtype: torch.dtype) -> None:
+    model, offload_root, original_state = _offloaded_save_model(tmp_path, offload_format, dtype=dtype)
     model.output = nn.Module()
     model.output.weight = model.block.weight
 
@@ -503,6 +578,7 @@ def test_offload_save_preserves_matching_metadata(
     with safe_open(str(save_dir / expected_files[0]), framework="pt") as handler:
         for name, tensor in original_state.items():
             torch.testing.assert_close(handler.get_tensor(name), tensor)
+
 
 
 def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_children(tmp_path):
@@ -824,6 +900,140 @@ def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
     torch.testing.assert_close(shell_model.block.rotary.original_inv_freq, source_model.block.rotary.original_inv_freq)
     assert shell_model.block.rotary.inv_freq.device.type == "cpu"
     assert shell_model.block.rotary._non_persistent_buffers_set == {"inv_freq", "original_inv_freq"}
+
+
+def test_lazy_turtle_direct_meta_restores_nonpersistent_buffers_from_module_init(tmp_path):
+    """Layer-forward direct state must rebuild constructor-only rotary buffers."""
+
+    config = _tiny_llama_config()
+    source_model = _RotaryWrapper(config)
+    shell_model = _RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.rotary.register_buffer(
+        "inv_freq",
+        torch.empty_like(shell_model.block.rotary.inv_freq, device="meta"),
+        persistent=False,
+    )
+    shell_model.block.rotary.register_buffer(
+        "original_inv_freq",
+        torch.empty_like(shell_model.block.rotary.original_inv_freq, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block.rotary,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(
+        shell_model.block.rotary.inv_freq,
+        source_model.block.rotary.inv_freq,
+    )
+    torch.testing.assert_close(
+        shell_model.block.rotary.original_inv_freq,
+        source_model.block.rotary.original_inv_freq,
+    )
+    assert shell_model.block.rotary.inv_freq.device.type == "cpu"
+    assert shell_model.block.rotary._non_persistent_buffers_set == {
+        "inv_freq",
+        "original_inv_freq",
+    }
+
+
+def test_lazy_turtle_direct_meta_defaults_device_for_nonpersistent_buffers(tmp_path):
+    """``device=None`` must resolve to the shell buffer's device, not crash.
+
+    The public helper defaults to ``device=None``; passing it straight to
+    ``safe_move_to`` raises ``TypeError`` from ``torch.device(None)``.
+    """
+
+    config = _tiny_llama_config()
+    source_model = _RotaryWrapper(config)
+    shell_model = _RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    for name in ("inv_freq", "original_inv_freq"):
+        shell_model.block.rotary.register_buffer(
+            name,
+            torch.empty_like(getattr(shell_model.block.rotary, name), device="meta"),
+            persistent=False,
+        )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block.rotary,
+        device=None,
+    )
+
+    for name in ("inv_freq", "original_inv_freq"):
+        restored = getattr(shell_model.block.rotary, name)
+        assert not restored.is_meta
+        torch.testing.assert_close(restored, getattr(source_model.block.rotary, name))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for a real device mismatch")
+@pytest.mark.parametrize("buffer_device", ["meta", "cpu"])
+def test_lazy_turtle_direct_meta_defaults_to_materialized_parameter_device(tmp_path, buffer_device):
+    source_model = _DirectParameterAndInitBufferWrapper(width=4)
+    shell_model = _DirectParameterAndInitBufferWrapper(width=4).to("cuda:0")
+    shell_model.block.register_buffer(
+        "cache", torch.arange(4, dtype=torch.int64, device=buffer_device), persistent=False
+    )
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block,
+    )
+
+    assert shell_model.block.weight.device.type == "cuda"
+    assert shell_model.block.cache.device == shell_model.block.weight.device
+    torch.testing.assert_close(shell_model.block.cache.cpu(), source_model.block.cache)
+
+
+def test_lazy_turtle_direct_meta_restores_deepseek_v4_rotary_buffers(tmp_path):
+    """The layer-2 compressor fast path must rebuild all four V4 RoPE buffers."""
+
+    config = _tiny_deepseek_v4_config()
+    source_model = _DeepseekV4RotaryWrapper(config)
+    shell_model = _DeepseekV4RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    expected_names = {
+        "main_inv_freq",
+        "main_original_inv_freq",
+        "compress_inv_freq",
+        "compress_original_inv_freq",
+    }
+    assert shell_model.block.rotary._non_persistent_buffers_set == expected_names
+    assert not shell_model.block.rotary.state_dict()
+
+    for name, buffer in dict(shell_model.block.rotary.named_buffers(recurse=False)).items():
+        shell_model.block.rotary.register_buffer(
+            name,
+            torch.empty_like(buffer, device="meta"),
+            persistent=False,
+        )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    source.materialize_direct_meta_tensors(
+        target_model=shell_model,
+        target_submodule=shell_model.block.rotary,
+        device=torch.device("cpu"),
+    )
+
+    restored = dict(shell_model.block.rotary.named_buffers(recurse=False))
+    reference = dict(source_model.block.rotary.named_buffers(recurse=False))
+    assert set(restored) == expected_names
+    assert shell_model.block.rotary._non_persistent_buffers_set == expected_names
+    assert not shell_model.block.rotary.state_dict()
+    for name in expected_names:
+        torch.testing.assert_close(restored[name], reference[name])
+        assert restored[name].device.type == "cpu"
 
 
 def test_lazy_turtle_restores_nonpersistent_buffers_from_attribute_ctor(tmp_path):
@@ -1266,7 +1476,9 @@ def test_lazy_turtle_materializes_leaf_qwen_style_expert_gate_proj_from_fused_ch
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = LazyTurtle.maybe_create(
@@ -1303,8 +1515,14 @@ def test_lazy_turtle_materializes_rectangular_transposed_experts_from_fused_chec
             [
                 torch.cat(
                     [
-                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
-                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .gate_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .up_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
                     ],
                     dim=1,
                 )
@@ -1327,7 +1545,10 @@ def test_lazy_turtle_materializes_rectangular_transposed_experts_from_fused_chec
         ),
         "block.experts.down_proj": torch.stack(
             [
-                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.weight.detach().clone().transpose(0, 1)
+                source_model.block.experts.get_submodule(str(expert_idx))
+                .down_proj.weight.detach()
+                .clone()
+                .transpose(0, 1)
                 for expert_idx in range(2)
             ],
             dim=0,
@@ -1410,8 +1631,14 @@ def test_lazy_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_ch
             [
                 torch.cat(
                     [
-                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
-                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .gate_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx))
+                        .up_proj.weight.detach()
+                        .clone()
+                        .transpose(0, 1),
                     ],
                     dim=1,
                 )
@@ -1437,7 +1664,9 @@ def test_lazy_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_ch
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = LazyTurtle.maybe_create(
@@ -1467,7 +1696,9 @@ def test_alias_all_from_turtle_materializes_leaf_qwen_style_expert_gate_proj_fro
     shell_model.load_state_dict(source_model.state_dict())
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = _build_lazy_turtle_from_checkpoint_tensors(
@@ -1490,7 +1721,9 @@ def test_alias_all_from_turtle_materializes_leaf_transposed_expert_gate_proj_fro
     shell_model.load_state_dict(source_model.state_dict())
 
     expert = shell_model.block.experts.get_submodule("1").gate_proj
-    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.weight = nn.Parameter(
+        torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad
+    )
     expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
 
     source = _build_lazy_turtle_from_checkpoint_tensors(
@@ -1512,7 +1745,9 @@ def test_lazy_turtle_raises_when_submodule_materialization_cannot_match_target_s
     shell_model = _HybridWrapper(width=16)
     shell_model.load_state_dict(source_model.state_dict())
 
-    shell_model.block.dt_bias = nn.Parameter(torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad)
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad
+    )
     source = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     with pytest.raises(
@@ -1669,6 +1904,71 @@ def test_sync_all_meta_reports_logbar_progress(monkeypatch):
     assert fake_logger.progress.closed is True
 
 
+def test_sync_all_meta_throttles_progress_for_large_moe_shell(monkeypatch):
+    class _FakeProgress:
+        def __init__(self):
+            self.current_iter_step = 0
+            self.draw_calls = []
+
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self, force: bool = False):
+            self.draw_calls.append((self.current_iter_step, force))
+            return self
+
+        def close(self):
+            return None
+
+    class _FakeLogger:
+        def __init__(self):
+            self.progress = _FakeProgress()
+
+        def pb(self, _iterable, *, output_interval=None):
+            del output_interval
+            return self.progress
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    shell_model = nn.Module()
+    shell_model.experts = nn.ModuleList(nn.Identity() for _ in range(1000))
+    turtle = LazyTurtle.__new__(LazyTurtle)
+    turtle._lock = threading.RLock()
+    visited_modules = []
+
+    def _fake_materialize(self, *, module_path, **_kwargs):
+        del self, _kwargs
+        visited_modules.append(module_path)
+        return 0
+
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(structure_module, "log", fake_logger)
+    monkeypatch.setattr(
+        LazyTurtle, "_materialize_direct_meta_tensors", _fake_materialize
+    )
+
+    materialized = turtle.sync_all_meta(
+        shell_model=shell_model, tie_after=False
+    )
+
+    assert materialized == 0
+    assert len(visited_modules) == 1002
+    # Initial forced draw plus at most ~201 before/after checkpoints.
+    assert len(fake_logger.progress.draw_calls) <= 405
+    assert fake_logger.progress.draw_calls[0] == (0, True)
+    assert fake_logger.progress.draw_calls[-1][0] == 1002
+
+
 def test_copy_checkpoint_tensors_into_submodule_reports_load_progress(tmp_path, monkeypatch):
     class _FakeProgress:
         def __init__(self):
@@ -1781,17 +2081,19 @@ def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
         torch.testing.assert_close(handler.get_tensor("weight"), model.weight.detach())
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
-
-    tensor = torch.randn(8, 16, dtype=torch.float32).to(torch.float8_e4m3fn)
+@pytest.mark.parametrize("dtype_name", ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path, dtype_name):
+    if not hasattr(torch, dtype_name):
+        pytest.skip(f"{dtype_name} dtype not available")
+    dtype = getattr(torch, dtype_name)
+    tensor = torch.randn(8, 16, dtype=torch.float32).to(dtype)
     state_dict = {
-       "fp8_weight": TensorSource(
+        "fp8_weight": TensorSource(
             name="fp8_weight",
             torch_dtype=tensor.dtype,
             shape=tuple(tensor.shape),
             source=tensor,
-       ),
+        ),
     }
     expected_files, _, _ = streaming_state_dict_to_shards(
         state_dict,
@@ -1805,8 +2107,149 @@ def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
     with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
         saved = handler.get_tensor("fp8_weight")
 
-    assert saved.dtype is torch.float8_e4m3fn
+    assert saved.dtype is dtype
     assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e8m0fnu"), reason="float8_e8m0fnu dtype not available")
+def test_streaming_state_dict_to_shards_writes_float8_e8m0_tensors(tmp_path):
+    tensor = torch.tensor([126, 127, 128], dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    state_dict = {
+        "fp8_scale": TensorSource(
+            name="fp8_scale",
+            torch_dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            source=tensor,
+        ),
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(tmp_path),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    shard_path = tmp_path / expected_files[0]
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        saved = handler.get_tensor("fp8_scale")
+
+    assert saved.dtype is torch.float8_e8m0fnu
+    assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
+
+
+def test_streaming_state_dict_to_shards_reuses_only_authenticated_shards(tmp_path, monkeypatch):
+    tensor = torch.arange(32, dtype=torch.int16).reshape(4, 8)
+    state_dict = {
+        "weight": TensorSource(
+            name="weight",
+            torch_dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            source=tensor,
+        ),
+    }
+    arguments = {
+        "state_dict": state_dict,
+        "save_dir": str(tmp_path),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+    shard_path = tmp_path / expected_files[0]
+    original = shard_path.read_bytes()
+    original_writer = model_utils._write_shard_file
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("authenticated shard should have been reused")
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", unexpected_write)
+    assert streaming_state_dict_to_shards(**arguments)[0] == expected_files
+
+    with shard_path.open("r+b") as handle:
+        handle.seek(-1, 2)
+        handle.write(bytes([original[-1] ^ 0xFF]))
+
+    writes = 0
+
+    def repair(path, entries, metadata):
+        nonlocal writes
+        writes += 1
+        return original_writer(path, entries, metadata)
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", repair)
+    streaming_state_dict_to_shards(**arguments)
+    assert writes == 1
+    assert shard_path.read_bytes() == original
+
+
+def test_streaming_state_dict_to_shards_rewrites_when_source_changes(tmp_path):
+    tensor = torch.arange(32, dtype=torch.int16).reshape(4, 8)
+    arguments = {
+        "state_dict": {
+            "weight": TensorSource(
+                name="weight",
+                torch_dtype=tensor.dtype,
+                shape=tuple(tensor.shape),
+                source=tensor,
+            ),
+        },
+        "save_dir": str(tmp_path),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+    shard_path = tmp_path / expected_files[0]
+    original = shard_path.read_bytes()
+
+    changed = tensor.clone()
+    changed[0, 0] = 999
+    arguments["state_dict"] = {
+        "weight": TensorSource(
+            name="weight",
+            torch_dtype=changed.dtype,
+            shape=tuple(changed.shape),
+            source=changed,
+        ),
+    }
+    streaming_state_dict_to_shards(**arguments)
+
+    assert shard_path.read_bytes() != original
+
+
+def test_streaming_state_dict_to_shards_reuses_legacy_unhashed_offload(tmp_path, monkeypatch):
+    model = _LinearWithBuffers(in_features=128, out_features=96)
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=model.linear, model=model, disk_path=str(offload_root))
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    offload_refs = [
+        entry.source
+        for entry in state_dict.values()
+        if isinstance(entry.source, model_utils.OffloadTensorRef)
+    ]
+    assert offload_refs
+    assert all(source.sha256 is None for source in offload_refs)
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    arguments = {
+        "state_dict": state_dict,
+        "save_dir": str(save_dir),
+        "model_base_name": "model",
+        "single_file_name": "model.safetensors",
+        "metadata": {"format": "pt"},
+        "max_shard_size": None,
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(**arguments)
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("legacy offload source should be compared by content")
+
+    monkeypatch.setattr(model_utils, "_write_shard_file", unexpected_write)
+    assert streaming_state_dict_to_shards(**arguments)[0] == expected_files
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")
@@ -1822,3 +2265,331 @@ def test_move_to_restores_offloaded_meta_leaves_before_gpu_transfer(tmp_path):
     for name, tensor in restored.state_dict().items():
         assert tensor.device.type == "cuda"
         torch.testing.assert_close(tensor.cpu(), original_state[name])
+
+
+def test_safetensors_reference_offload_avoids_a_second_payload(tmp_path):
+    model = _LinearWithBuffers(in_features=128, out_features=96)
+    original_state = _clone_state_dict(model.linear)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(original_state, source_path)
+    offload_root = tmp_path / "offload_root"
+
+    index = offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(offload_root),
+    )
+
+    module_dir = offload_root / "linear"
+    assert sorted(path.name for path in module_dir.iterdir()) == ["index.json"]
+    assert all(tensor.device.type == "meta" for tensor in model.linear.state_dict().values())
+    assert set(index) == set(original_state)
+    assert all(entry["safetensors_file"] == str(source_path) for entry in index.values())
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    expected_files, _tensor_to_filename, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    with safe_open(str(save_dir / expected_files[0]), framework="pt", device="cpu") as handler:
+        for name, tensor in original_state.items():
+            torch.testing.assert_close(handler.get_tensor(f"linear.{name}"), tensor)
+
+    # The index binds the source payload, not merely its header and geometry.
+    save_file(
+        {name: torch.zeros_like(tensor) for name, tensor in original_state.items()},
+        source_path,
+    )
+    rejected_dir = tmp_path / "rejected"
+    rejected_dir.mkdir()
+    with pytest.raises(IOError, match="content digest differs"):
+        streaming_state_dict_to_shards(
+            state_dict,
+            save_dir=str(rejected_dir),
+            model_base_name="model",
+            single_file_name="model.safetensors",
+            metadata={},
+            max_shard_size=None,
+        )
+
+
+@pytest.mark.parametrize("offload_kind", ["reference", "bundle"])
+def test_nested_offload_index_keeps_distinct_same_named_weights(tmp_path, offload_kind):
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.full((2, 2), 1.0))
+            self.child = nn.Linear(2, 2, bias=False)
+            with torch.no_grad():
+                self.child.weight.fill_(2.0)
+
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = Block()
+    expected = _clone_state_dict(model.block)
+    offload_root = tmp_path / "offload"
+    if offload_kind == "reference":
+        source = tmp_path / "source.safetensors"
+        save_file(expected, source)
+        offload_to_safetensors_reference(
+            model.block, model, source, disk_path=str(offload_root)
+        )
+    else:
+        offload_to_disk(model.block, model, disk_path=str(offload_root), force=True)
+
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    assert set(state_dict) == {"block.weight", "block.child.weight"}
+    assert state_dict["block.child.weight"].source.weight_name == "child.weight"
+
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    streaming_state_dict_to_shards(
+        state_dict, str(saved), "model", "model.safetensors", {}, None
+    )
+    with safe_open(str(saved / "model.safetensors"), framework="pt", device="cpu") as handle:
+        for name, tensor in expected.items():
+            torch.testing.assert_close(handle.get_tensor(f"block.{name}"), tensor)
+
+
+@pytest.mark.parametrize("index_case", ["missing", "full_name", "conflict"])
+def test_nested_offload_index_uses_scoped_key_and_rejects_conflicts(tmp_path, index_case):
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = nn.Module()
+    model.block.weight = nn.Parameter(torch.ones(2, 2))
+    model.block.child = nn.Linear(2, 2, bias=False)
+    source = tmp_path / "source.safetensors"
+    save_file(_clone_state_dict(model.block), source)
+    offload_root = tmp_path / "offload"
+    offload_to_safetensors_reference(model.block, model, source, disk_path=str(offload_root))
+    index_path = offload_root / "block" / "index.json"
+    index = json.loads(index_path.read_text())
+    child = index.pop("child.weight")
+    if index_case == "full_name":
+        index["block.child.weight"] = child
+    elif index_case == "conflict":
+        index["child.weight"] = child
+        index["block.child.weight"] = index["weight"]
+    index_path.write_text(json.dumps(index))
+
+    if index_case == "missing":
+        with pytest.raises(FileNotFoundError, match="block.child.weight"):
+            get_state_dict_for_save(model, offload_root=str(offload_root))
+    elif index_case == "conflict":
+        with pytest.raises(ValueError, match="Ambiguous offload index entries"):
+            get_state_dict_for_save(model, offload_root=str(offload_root))
+    else:
+        state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+        assert set(state_dict) == {"block.weight", "block.child.weight"}
+        assert state_dict["block.child.weight"].source.weight_name == "child.weight"
+
+
+def test_reference_source_inside_export_dir_is_rejected_before_any_shard_write(tmp_path):
+    model = nn.Module()
+    model.linear = nn.Linear(4, 4)
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    # A 4x4 fp32 weight exceeds the shard limit, while the bias fits. The
+    # first output would otherwise replace this source before reading bias.
+    source_path = save_dir / "model-00001-of-00002.safetensors"
+    original = _clone_state_dict(model.linear)
+    save_file(original, source_path)
+    source_bytes = source_path.read_bytes()
+    offload_root = tmp_path / "offload"
+    offload_to_safetensors_reference(
+        model.linear, model, source_path, disk_path=str(offload_root)
+    )
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+
+    with pytest.raises(ValueError, match="inside the export directory"):
+        streaming_state_dict_to_shards(
+            state_dict, str(save_dir), "model", "model.safetensors", {}, 40
+        )
+
+    assert source_path.read_bytes() == source_bytes
+    assert sorted(path.name for path in save_dir.iterdir()) == [source_path.name]
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    names, _, _ = streaming_state_dict_to_shards(
+        state_dict, str(other_dir), "model", "model.safetensors", {}, 40
+    )
+    assert len(names) == 2
+    exported = {}
+    for name in names:
+        with safe_open(str(other_dir / name), framework="pt", device="cpu") as handle:
+            exported.update({key: handle.get_tensor(key) for key in handle.keys()})
+    for name, tensor in original.items():
+        torch.testing.assert_close(exported[f"linear.{name}"], tensor)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires file symlinks")
+@pytest.mark.parametrize("link_inside", [True, False])
+def test_reference_export_preflight_checks_symlink_path_and_target(tmp_path, link_inside):
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    actual_dir, link_dir = (outside, save_dir) if link_inside else (save_dir, outside)
+    actual = actual_dir / "model.safetensors"
+    actual.write_bytes(b"original source")
+    link = link_dir / "source.safetensors"
+    link.symlink_to(actual)
+    entry = TensorSource(
+        name="weight", torch_dtype=torch.float32, shape=(1,),
+        source=model_utils.OffloadTensorRef(
+            path=str(link), torch_dtype=torch.float32, shape=(1,), format="dat"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="inside the export directory"):
+        streaming_state_dict_to_shards(
+            {"weight": entry}, str(save_dir), "model", "model.safetensors", {}, None
+        )
+
+    assert actual.read_bytes() == b"original source"
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("dtype_name", ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+def test_safetensors_reference_offload_supports_float8(tmp_path, dtype_name):
+    if not hasattr(torch, dtype_name):
+        pytest.skip(f"{dtype_name} dtype not available")
+    dtype = getattr(torch, dtype_name)
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    weight = model.linear.weight
+    model.linear.weight = nn.Parameter(
+        torch.arange(weight.numel(), dtype=torch.float32)
+        .to(dtype)
+        .reshape(weight.shape),
+        requires_grad=False,
+    )
+    original_state = _clone_state_dict(model.linear)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(original_state, source_path)
+
+    index = offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(tmp_path / "offload_root"),
+    )
+
+    assert index["weight"]["dtype"] == dtype_name
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    state_dict = get_state_dict_for_save(model, offload_root=str(tmp_path / "offload_root"))
+    expected_files, _tensor_to_filename, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    with safe_open(str(save_dir / expected_files[0]), framework="pt", device="cpu") as handler:
+        exported = handler.get_tensor("linear.weight")
+    assert exported.dtype == dtype
+    assert torch.equal(exported.view(torch.uint8), original_state["weight"].view(torch.uint8))
+
+
+def test_safetensors_reference_offload_rejects_non_persistent_buffers(tmp_path):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    model.linear.register_buffer("cache", torch.ones(2), persistent=False)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(_clone_state_dict(model.linear), source_path)
+
+    with pytest.raises(ValueError, match="non-persistent buffers"):
+        offload_to_safetensors_reference(
+            module=model.linear,
+            model=model,
+            source_path=source_path,
+            disk_path=str(tmp_path / "offload_root"),
+        )
+
+    assert all(not tensor.is_meta for tensor in model.linear.state_dict().values())
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_safetensors_reference_offload_allows_absent_non_persistent_buffers(tmp_path, nested):
+    model = nn.Module()
+    model._tied_weights_keys = None
+    model.block = nn.Module()
+    model.block.linear = nn.Linear(4, 4)
+    holder = model.block.linear if nested else model.block
+    holder.register_buffer("optional_cache", None, persistent=False)
+    original = _clone_state_dict(model.block)
+    source = tmp_path / "source.safetensors"
+    save_file(original, source)
+    offload_root = tmp_path / "offload"
+
+    index = offload_to_safetensors_reference(
+        model.block, model, source, disk_path=str(offload_root)
+    )
+
+    assert set(index) == set(original)
+    assert holder.optional_cache is None
+    assert all(tensor.is_meta for tensor in model.block.state_dict().values())
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    streaming_state_dict_to_shards(
+        state_dict, str(saved), "model", "model.safetensors", {}, None
+    )
+    with safe_open(saved / "model.safetensors", framework="pt", device="cpu") as handle:
+        for name, tensor in original.items():
+            torch.testing.assert_close(handle.get_tensor(f"block.{name}"), tensor)
+
+
+def test_safetensors_reference_offload_keeps_source_inside_target_directory(tmp_path):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    original_state = _clone_state_dict(model.linear)
+    offload_root = tmp_path / "offload_root"
+    module_dir = offload_root / "linear"
+    module_dir.mkdir(parents=True)
+    source_path = module_dir / "source.safetensors"
+    save_file(original_state, source_path)
+    source_bytes = source_path.read_bytes()
+
+    with pytest.raises(ValueError, match="source is inside the target offload directory"):
+        offload_to_safetensors_reference(
+            module=model.linear,
+            model=model,
+            source_path=source_path,
+            disk_path=str(offload_root),
+        )
+
+    assert source_path.read_bytes() == source_bytes
+    assert sorted(path.name for path in module_dir.iterdir()) == [source_path.name]
+    for name, tensor in model.linear.state_dict().items():
+        torch.testing.assert_close(tensor, original_state[name])
+
+
+def test_safetensors_reference_index_honors_process_umask(tmp_path, monkeypatch):
+    model = _LinearWithBuffers(in_features=8, out_features=4)
+    source_path = tmp_path / "checkpoint.safetensors"
+    save_file(_clone_state_dict(model.linear), source_path)
+    ordinary_file = tmp_path / "ordinary-file"
+    ordinary_file.write_bytes(b"created under the process umask")
+
+    def reject_forced_mode(*_args):
+        raise AssertionError("reference index must honor the process umask")
+
+    monkeypatch.setattr(os, "fchmod", reject_forced_mode, raising=False)
+    offload_root = tmp_path / "offload_root"
+    offload_to_safetensors_reference(
+        module=model.linear,
+        model=model,
+        source_path=source_path,
+        disk_path=str(offload_root),
+    )
+
+    index_mode = stat.S_IMODE((offload_root / "linear" / "index.json").stat().st_mode)
+    assert index_mode == stat.S_IMODE(ordinary_file.stat().st_mode)

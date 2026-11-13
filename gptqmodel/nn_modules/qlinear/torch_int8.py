@@ -5,10 +5,12 @@
 # Credit: int8 kernel sync adapted from Yintong Lu (yintong-lu), vLLM PR #35697.
 
 
+import threading
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
@@ -16,10 +18,20 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._runtime_cache import tensor_cache_key
 
 
-INT8_WEIGHT_BUFFER_NAME = "int8_weight_nk"
-INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
+INT8_WEIGHT_BUFFER_NAME = "int8_weight_gnk"
+INT8_GROUP_SCALE_BUFFER_NAME = "int8_group_scale"
+INT8_GROUP_OFFSET_BUFFER_NAME = "int8_group_offset"
+INT8_INPUT_PERM_BUFFER_NAME = "int8_input_perm"
+# Legacy alias kept so external integrations importing the old name resolve to
+# the group-scale buffer rather than silently reading different semantics.
+INT8_SCALE_BUFFER_NAME = INT8_GROUP_SCALE_BUFFER_NAME
+_INT8_REBUILD_LOCK = threading.Lock()
+# Output channels decoded at once on the asymmetric path. The decoded tile is
+# transient scratch: it is released before the next tile or group is processed.
+_INT8_ASYMMETRIC_DECODE_TILE = 256
 
 
 def _require_native_int8(bits: int) -> None:
@@ -34,62 +46,241 @@ def _has_int8_mm_op() -> bool:
     return hasattr(torch.ops.aten, "_weight_int8pack_mm")
 
 
-def _requantize_to_int8(float_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-channel symmetric int8 re-quantization for [K, N] weights."""
-    if float_weight.ndim != 2:
-        raise ValueError(f"Expected 2D weight, got shape={tuple(float_weight.shape)}")
+def _normalize_g_idx(g_idx: torch.Tensor, num_groups: int) -> torch.Tensor:
+    """Resolve the checkpoint's negative group indices to explicit group rows.
 
-    channel_max = float_weight.abs().amax(dim=0)
-    channel_scale = (channel_max / 127.0).clamp_min(1e-10)
-    weight_int8 = (
-        (float_weight / channel_scale.unsqueeze(0))
-        .round()
-        .clamp_(-128, 127)
-        .to(torch.int8)
-    )
-    return weight_int8, channel_scale
+    GPTQ packers may mark padded rows with ``-1`` (see
+    ``GPTQQuantLinear.pack_block``), which means "the last group" when indexing
+    ``scales``/``zeros``. Both the per-group channel counts and the channel
+    permutation must use that same normalized value, otherwise a negative entry
+    is counted in the last group but sorted before the first group.
+    """
+    groups = g_idx.long()
+    return torch.where(groups < 0, groups + num_groups, groups)
+
+
+def _group_layout(g_idx: torch.Tensor, num_groups: int) -> tuple[tuple[int, ...], int]:
+    """Return per-group channel counts after sorting channels into group order."""
+    groups = _normalize_g_idx(g_idx, num_groups)
+    counts = torch.bincount(groups, minlength=num_groups)[:num_groups].tolist()
+    return tuple(int(count) for count in counts), int(max(counts) if counts else 0)
+
+
+def _dequantize_group_layout(
+    *,
+    int8_weight: torch.Tensor,
+    group_scale: torch.Tensor,
+    group_offset: Optional[torch.Tensor],
+    input_perm: Optional[torch.Tensor],
+    group_lengths: Optional[tuple[int, ...]],
+    in_features: Optional[int],
+) -> torch.Tensor:
+    """Reconstruct the checkpoint ``[K, N]`` matrix from group-preserving codes.
+
+    Codes stay in the checkpoint's own ``w - zero`` integer space, so this is a
+    storage repack rather than a second quantization: every reconstructed
+    weight equals the checkpoint decode exactly.
+    """
+    if int8_weight.dim() != 3:
+        raise ValueError(f"Expected 3D group codes, got shape={tuple(int8_weight.shape)}")
+    num_groups, out_features, group_width = int8_weight.shape
+    lengths = tuple(group_lengths or (group_width,) * num_groups)
+    if len(lengths) != num_groups:
+        raise ValueError(f"Group length metadata has {len(lengths)} entries for {num_groups} groups")
+
+    weight = int8_weight.to(torch.float32) * group_scale.to(torch.float32).unsqueeze(-1)
+    if group_offset is not None:
+        weight = weight + group_offset.to(torch.float32).unsqueeze(-1)
+
+    rows = weight.permute(0, 2, 1).reshape(num_groups * group_width, out_features)
+    if any(length != group_width for length in lengths[:-1]):
+        # A short/empty non-trailing group leaves padding rows inside the flat
+        # layout. Gathering each group's exact rows is required; truncating the
+        # tail would keep padding rows from earlier groups and drop valid rows
+        # from later ones. A ragged final group is already handled by the
+        # trailing truncation below.
+        index = torch.cat([
+            torch.arange(group * group_width, group * group_width + length, device=rows.device)
+            for group, length in enumerate(lengths)
+        ])
+        rows = rows.index_select(0, index)
+    keep = sum(lengths)
+    if in_features is not None:
+        keep = min(keep, in_features)
+    rows = rows[:keep]
+    if input_perm is not None:
+        if input_perm.numel() != rows.shape[0]:
+            raise ValueError(
+                f"Activation permutation has {input_perm.numel()} entries for {rows.shape[0]} decoded rows"
+            )
+        rows = rows.index_select(0, torch.argsort(input_perm.long()))
+    return rows
 
 
 def _cached_int8_dequantize(module: nn.Module) -> Optional[torch.Tensor]:
+    """Reconstruct ``[K, N]`` checkpoint weights from the current runtime layout."""
     int8_weight = getattr(module, INT8_WEIGHT_BUFFER_NAME, None)
-    int8_scale = getattr(module, INT8_SCALE_BUFFER_NAME, None)
-    if int8_weight is None or int8_scale is None:
+    group_scale = getattr(module, INT8_GROUP_SCALE_BUFFER_NAME, None)
+    if int8_weight is None or group_scale is None:
         return None
 
-    weight_kn = int8_weight.t().to(torch.float32)
-    scales = int8_scale.to(torch.float32)
-    return weight_kn * scales.unsqueeze(0)
+    return _dequantize_group_layout(
+        int8_weight=int8_weight,
+        group_scale=group_scale,
+        group_offset=getattr(module, INT8_GROUP_OFFSET_BUFFER_NAME, None),
+        input_perm=getattr(module, INT8_INPUT_PERM_BUFFER_NAME, None),
+        group_lengths=getattr(module, "_int8_group_lengths", None),
+        in_features=getattr(module, "in_features", None),
+    )
 
 
-def _write_int8_buffers(module: nn.Module, float_weight: torch.Tensor, dtype: torch.dtype) -> None:
+def _write_group_buffers(
+    module: nn.Module,
+    *,
+    int8_weight_gnk: torch.Tensor,
+    group_scale: torch.Tensor,
+    group_offset: Optional[torch.Tensor],
+    input_perm: Optional[torch.Tensor],
+    group_lengths: tuple[int, ...],
+    dtype: torch.dtype,
+) -> None:
     _require_native_int8(getattr(module, "bits", None))
-    int8_weight_kn, channel_scale = _requantize_to_int8(float_weight.to(torch.float32))
-
-    int8_weight_nk = int8_weight_kn.t().contiguous()
-    channel_scale = channel_scale.to(dtype=dtype).contiguous()
-
-    if INT8_WEIGHT_BUFFER_NAME not in module._buffers:
-        module.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
-    else:
-        module.int8_weight_nk = int8_weight_nk
-
-    if INT8_SCALE_BUFFER_NAME not in module._buffers:
-        module.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scale, persistent=False)
-    else:
-        module.int8_channel_scale = channel_scale
+    buffers = {
+        INT8_WEIGHT_BUFFER_NAME: int8_weight_gnk.to(torch.int8).contiguous(),
+        INT8_GROUP_SCALE_BUFFER_NAME: group_scale.to(torch.float32).contiguous(),
+        INT8_GROUP_OFFSET_BUFFER_NAME: (
+            None if group_offset is None else group_offset.to(torch.float32).contiguous()
+        ),
+        INT8_INPUT_PERM_BUFFER_NAME: (
+            None if input_perm is None else input_perm.to(torch.int64).contiguous()
+        ),
+    }
+    for name, tensor in buffers.items():
+        if name not in module._buffers:
+            module.register_buffer(name, tensor, persistent=False)
+        else:
+            setattr(module, name, tensor)
+    module._int8_group_lengths = tuple(int(length) for length in group_lengths)
+    module._int8_transform_dtype = dtype
 
 
 class Int8PackedModule(torch.nn.Module):
-    """CPU fused int8 matmul wrapper around aten::_weight_int8pack_mm."""
+    """CPU grouped INT8 matmul around ``aten::_weight_int8pack_mm``.
 
-    def __init__(self, int8_weight_nk: torch.Tensor, channel_scales: torch.Tensor):
+    Each quantization group keeps its own scales and zero points, so the kernel
+    evaluates the checkpoint's ``scale_g * (code - zero_g)`` product instead of
+    re-quantizing to one scale per output channel. Codes are stored as the
+    signed residual ``code - 128``; the residual zero point is folded into a
+    per-(group, output) offset, which is exactly zero for symmetric GPTQ and is
+    then not stored at all. Symmetric groups take the native INT8 op; asymmetric
+    groups decode a bounded tile first so the zero-point subtraction happens
+    before the reduction instead of relying on two large FP32 terms to cancel.
+    Groups with unequal lengths are padded to the widest group and
+    left-multiplied by an augmented activation whose pad columns are zero.
+    """
+
+    def __init__(
+        self,
+        int8_weight_gnk: torch.Tensor,
+        group_scale: torch.Tensor,
+        group_offset: Optional[torch.Tensor] = None,
+        input_perm: Optional[torch.Tensor] = None,
+        group_lengths: Optional[tuple[int, ...]] = None,
+    ):
         super().__init__()
-        self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
-        self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scales, persistent=False)
+        self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_gnk, persistent=False)
+        self.register_buffer(INT8_GROUP_SCALE_BUFFER_NAME, group_scale, persistent=False)
+        self.register_buffer(INT8_GROUP_OFFSET_BUFFER_NAME, group_offset, persistent=False)
+        self.register_buffer(INT8_INPUT_PERM_BUFFER_NAME, input_perm, persistent=False)
+        self.group_lengths = tuple(group_lengths) if group_lengths is not None else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        channel_scales = self.int8_channel_scale.to(dtype=x.dtype)
-        return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, channel_scales)
+    @property
+    def group_width(self) -> int:
+        return int(self.int8_weight_gnk.shape[-1])
+
+    @property
+    def out_features(self) -> int:
+        return int(self.int8_weight_gnk.shape[1])
+
+    def _activations(self, x: torch.Tensor) -> torch.Tensor:
+        """Return FP32 ``[..., G, W]`` group-ordered activations, zero padded.
+
+        FP32 is required by the kernel (activations and scales must share a
+        dtype) and it keeps tiny group scales representable until the final
+        output rounding.
+        """
+        width = self.group_width
+        num_groups = int(self.int8_weight_gnk.shape[0])
+        lengths = self.group_lengths or (width,) * num_groups
+        ordered = x if self.int8_input_perm is None else x.index_select(-1, self.int8_input_perm)
+        ordered = ordered.float()
+        if all(length == width for length in lengths):
+            return ordered.reshape(ordered.shape[:-1] + (num_groups, width))
+        pieces = []
+        start = 0
+        for length in lengths:
+            piece = ordered[..., start:start + length]
+            start += length
+            if piece.shape[-1] != width:
+                piece = F.pad(piece, (0, width - piece.shape[-1]))
+            pieces.append(piece)
+        return torch.stack(pieces, dim=-2)
+
+    def _asymmetric_group_output(self, flat: torch.Tensor, group: int) -> torch.Tensor:
+        """Reduce one asymmetric group with its zero point applied first.
+
+        The native INT8 op only accumulates ``scale * (code - 128)``; the
+        caller would then add ``scale * (128 - zero)``. For an asymmetric
+        checkpoint both terms are large and independently rounded, so their
+        cancellation leaves a residue even when every decoded weight is exactly
+        zero. Reconstructing the checkpoint's integer ``code - zero`` per
+        element before the matmul keeps a zero weight exactly zero. The
+        ``[tile, width]`` scratch is bounded by ``_INT8_ASYMMETRIC_DECODE_TILE``
+        and dropped before the next tile is built.
+        """
+        weight = self.int8_weight_gnk[group]
+        scale = self.int8_group_scale[group].float()
+        offset = self.int8_group_offset[group].float()
+        activations = flat[:, group, :]
+        output = torch.empty(
+            activations.shape[0], weight.shape[0], dtype=torch.float32, device=activations.device
+        )
+        for start in range(0, weight.shape[0], _INT8_ASYMMETRIC_DECODE_TILE):
+            stop = min(start + _INT8_ASYMMETRIC_DECODE_TILE, weight.shape[0])
+            decoded = weight[start:stop].float() * scale[start:stop].unsqueeze(-1)
+            decoded = decoded + offset[start:stop].unsqueeze(-1)
+            output[:, start:stop] = activations @ decoded.t()
+        return output
+
+    def forward(
+        self, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        # The op requires matching activation/scale dtypes and only accepts 2D
+        # activations. FP32 preserves tiny group scales and delays output
+        # rounding until after the group reduction and the bias epilogue.
+        activations = self._activations(x)
+        groups = activations.shape[-2]
+        width = activations.shape[-1]
+        flat = activations.reshape(-1, groups, width)
+        output = None
+        if self.int8_group_offset is None:
+            group_scale = self.int8_group_scale.float()
+            for group in range(groups):
+                part = torch.ops.aten._weight_int8pack_mm(
+                    flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                )
+                output = part if output is None else output.add_(part)
+        else:
+            # Asymmetric zero points must be subtracted before the reduction.
+            # Splitting them into a residual reduction plus an offset reduction
+            # lets FP32 rounding survive the cancellation of two large terms.
+            for group in range(groups):
+                part = self._asymmetric_group_output(flat, group)
+                output = part if output is None else output.add_(part)
+        output = output.reshape(activations.shape[:-2] + (self.out_features,))
+        if bias is not None:
+            output = output + bias.float()
+        return output.to(x.dtype)
 
 
 class TorchInt8Linear(GPTQQuantLinear):
@@ -150,6 +341,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.int8_module: Optional[Int8PackedModule] = None
+        self._int8_source_signature = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -167,13 +359,35 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def post_init(self):
         super().post_init()
-        # One-time conversion: GPTQ 8-bit storage -> int8 packed CPU kernel storage.
-        # Keep only int8 tensors after conversion to reduce memory footprint.
+        # The GPTQ tensors are the checkpoint. Native INT8 is a derived,
+        # non-persistent runtime layout and must never replace those tensors.
         self.transform_cpu(dtype=torch.float32)
-        self._empty_gptq_only_weights()
-        self._drop_unpack_buffers()
-        self.int8_module = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
         self.optimize()
+
+    def _source_signature(self):
+        return tuple(tensor_cache_key(getattr(self, name, None)) for name in self.GPTQ_BUFFER_NAMES)
+
+    def clear_weight_cache(self):
+        """Invalidate the derived INT8 binding after a source edit or load."""
+        self._int8_source_signature = None
+        self.int8_module = None
+
+    def _refresh_int8_runtime(self):
+        if getattr(self, "_int8_fusion_view", False):
+            return self.int8_module
+        signature = self._source_signature()
+        if self.int8_module is not None and signature == self._int8_source_signature:
+            return self.int8_module
+        # A post-load first forward can run from several free-threaded workers.
+        # Serialize only this cold rebuild; steady-state forwards remain lock-free.
+        with _INT8_REBUILD_LOCK:
+            signature = self._source_signature()
+            if self.int8_module is not None and signature == self._int8_source_signature:
+                return self.int8_module
+            if not self._has_all_gptq_buffers():
+                raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+            self.transform_cpu(dtype=torch.float32)
+            return self.int8_module
 
     def optimize(self):
         if self.optimized:
@@ -219,14 +433,17 @@ class TorchInt8Linear(GPTQQuantLinear):
             self._delete_attr_if_exists(name)
 
     def dequantize_weight(self, num_itr: int = 1):
-        # Int8 fallback for dequantized export path after original GPTQ tensors are released.
-        dequantized = _cached_int8_dequantize(self)
-        if dequantized is not None and not self._has_all_gptq_buffers():
-            return dequantized
-
         if num_itr != 1:
             raise NotImplementedError("TorchInt8Linear dequantize_weight only supports num_itr == 1.")
+        # Explicit dequantized export still reflects the native INT8 runtime
+        # when it is current; conversion always decodes the GPTQ source below.
+        if self.int8_module is not None and self._int8_source_signature == self._source_signature():
+            dequantized = _cached_int8_dequantize(self)
+            if dequantized is not None:
+                return dequantized
+        return self._dequantize_gptq_source_weight()
 
+    def _dequantize_gptq_source_weight(self):
         if not self._has_all_gptq_buffers():
             raise RuntimeError("TorchInt8Linear missing GPTQ buffers for dequantization.")
 
@@ -247,7 +464,8 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        return self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+        groups = _normalize_g_idx(self.g_idx, int(self.scales.shape[0]))
+        return self.scales[groups] * (weight - zeros[groups])
 
     @torch.inference_mode()
     def pack_block(
@@ -278,8 +496,91 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def transform_cpu(self, dtype: torch.dtype):
         _require_native_int8(self.bits)
-        float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
-        _write_int8_buffers(self, float_weight=float_weight, dtype=dtype)
+        if not self._has_all_gptq_buffers():
+            raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+        self._ensure_unpack_buffers()
+
+        zeros = torch.bitwise_right_shift(
+            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            self.wf_unsqueeze_zero,
+        ).to(self.dequant_dtype)
+        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+
+        codes = torch.bitwise_and(
+            torch.bitwise_right_shift(
+                torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+                self.wf_unsqueeze_neg_one,
+            ).to(self.dequant_dtype),
+            self.maxq,
+        ).reshape(-1, self.out_features)
+        codes = codes[:self.in_features]
+
+        num_groups = int(self.scales.shape[0])
+        groups = _normalize_g_idx(self.g_idx, num_groups)
+        group_lengths, _ = _group_layout(groups, num_groups)
+        packed_channels = sum(group_lengths)
+        if packed_channels != self.in_features:
+            raise NotImplementedError(
+                "TorchInt8Linear requires exactly one g_idx entry per input channel; "
+                f"got {packed_channels} entries for in_features={self.in_features}."
+            )
+
+        # Channels are stored group-contiguously so one kernel launch per
+        # quantization group covers every channel of that group. Stable sorting
+        # keeps the relative order inside a group and makes the mapping exactly
+        # invertible for dequantization and export.
+        input_perm = torch.argsort(groups, stable=True)
+        ordered_codes = codes.index_select(0, input_perm)
+        group_width = max(group_lengths)
+        if all(length == group_width for length in group_lengths):
+            # [K, N] -> [G, W, N] -> [G, N, W]
+            grouped_codes = ordered_codes.reshape(num_groups, group_width, self.out_features).permute(0, 2, 1)
+        else:
+            pieces = []
+            start = 0
+            for length in group_lengths:
+                piece = ordered_codes[start:start + length]
+                start += length
+                if length != group_width:
+                    piece = torch.cat(
+                        (piece, piece.new_zeros(group_width - length, self.out_features)), dim=0
+                    )
+                pieces.append(piece)
+            grouped_codes = torch.stack(pieces, dim=0).permute(0, 2, 1)
+
+        # Store the signed residual ``code - 128`` so every 8-bit checkpoint
+        # code (``0..255``) maps into the signed INT8 kernel range. The residual
+        # zero point becomes a per-(group, output) offset that is exactly zero
+        # for symmetric GPTQ, in which case it is not stored.
+        grouped_codes = (grouped_codes - 128).to(torch.int8).contiguous()
+        group_scale = self.scales.float().contiguous()
+        # ``scale * (code - zero) == scale * (code - 128) + scale * (128 - zero)``
+        offset = (128.0 - zeros.float()) * group_scale
+        group_offset = None if bool((offset == 0).all()) else offset.contiguous()
+
+        _write_group_buffers(
+            self,
+            int8_weight_gnk=grouped_codes,
+            group_scale=group_scale,
+            group_offset=group_offset,
+            input_perm=input_perm,
+            group_lengths=group_lengths,
+            dtype=dtype,
+        )
+        self._drop_unpack_buffers()
+        self._bind_int8_runtime()
+
+    def _bind_int8_runtime(self):
+        """Bind the executor to the current derived group buffers."""
+        self.int8_module = Int8PackedModule(
+            self.int8_weight_gnk,
+            self.int8_group_scale,
+            self.int8_group_offset,
+            self.int8_input_perm,
+            getattr(self, "_int8_group_lengths", None),
+        ).eval()
+        self._int8_source_signature = self._source_signature()
+        return self.int8_module
 
     def transform(self, dtype: torch.dtype, device: str):
         if device != "cpu":
@@ -290,14 +591,9 @@ class TorchInt8Linear(GPTQQuantLinear):
         _require_native_int8(self.bits)
         if self.training:
             raise NotImplementedError("TorchInt8Linear does not support training mode.")
-        if self.int8_module is None:
-            raise RuntimeError("TorchInt8Linear int8 module is not initialized. Ensure post_init() has been called.")
-
         # Common decode path is 2D [M, K]. Skip reshape/out-shape overhead on this hot path.
         if x.dim() == 2:
-            out = self._fused_op_forward(x)
-            if self.bias is not None:
-                out.add_(self.bias)
+            out = self._fused_op_forward(x, bias=self.bias)
             if self.adapter:
                 out = self.adapter.apply(x=x, out=out)
             return out
@@ -305,26 +601,22 @@ class TorchInt8Linear(GPTQQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
 
-        out = self._fused_op_forward(x).reshape(out_shape)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+        out = self._fused_op_forward(x, bias=self.bias).reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         return out
 
     @torch.no_grad
-    def _fused_op_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _fused_op_forward(
+        self, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise NotImplementedError("TorchInt8Linear fused path is CPU-only.")
-        if self.int8_module is None:
+        int8_module = self._refresh_int8_runtime()
+        if int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
-        return self.int8_module(x.contiguous())
-
-    def _empty_gptq_only_weights(self):
-        for name in self.GPTQ_BUFFER_NAMES:
-            self._delete_attr_if_exists(name)
+        return int8_module(x.contiguous(), bias=bias)
 
 
 def dequantize_model(model: PreTrainedModel):
@@ -356,13 +648,18 @@ def dequantize_model(model: PreTrainedModel):
 
 
 __all__ = [
+    "INT8_GROUP_OFFSET_BUFFER_NAME",
+    "INT8_GROUP_SCALE_BUFFER_NAME",
+    "INT8_INPUT_PERM_BUFFER_NAME",
     "INT8_SCALE_BUFFER_NAME",
     "INT8_WEIGHT_BUFFER_NAME",
     "Int8PackedModule",
     "TorchInt8Linear",
     "_cached_int8_dequantize",
+    "_dequantize_group_layout",
+    "_group_layout",
     "_has_int8_mm_op",
-    "_requantize_to_int8",
-    "_write_int8_buffers",
+    "_normalize_g_idx",
+    "_write_group_buffers",
     "dequantize_model",
 ]

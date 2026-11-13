@@ -29,9 +29,10 @@ from ...quantization.dtype import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
-from .gguf import _apply_optional_smoother
+from ._numerics import autocast_active, matmul_fp32_reduce
 
 
 log = setup_logger()
@@ -95,9 +96,16 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     eps = torch.finfo(torch.float32).tiny
     return torch.where(
         abs_max > 0,
-        torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps),
+        # tiny bounds the denominator but does not bound the quotient: even
+        # fp8_max / tiny overflows FP32. Keep zero*scale finite too.
+        (torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps)).clamp_max(torch.finfo(torch.float32).max),
         torch.ones_like(abs_max),
     )
+
+
+def _require_finite_fp8_source(weight: torch.Tensor) -> None:
+    if not bool(torch.isfinite(weight).all()):
+        raise ValueError("FP8 quantization requires finite source weights representable as float32.")
 
 
 def quantize_fp8_weight(
@@ -127,12 +135,16 @@ def quantize_fp8_weight(
     weight = weight.to(device="cpu", dtype=torch.float32).contiguous()
 
     if weight_scale_method == "tensor":
-        scale_inv = _compute_scale_inv(weight.abs().amax(), fp8_max)
+        abs_max = weight.abs().amax()
+        _require_finite_fp8_source(abs_max)
+        scale_inv = _compute_scale_inv(abs_max, fp8_max)
         quantized = torch.clamp(weight * scale_inv, min=-fp8_max, max=fp8_max).to(fp8_dtype)
         return quantized.contiguous(), scale_inv.to(torch.float32)
 
     if weight_scale_method == "row":
-        scale_inv = _compute_scale_inv(weight.abs().amax(dim=1), fp8_max)
+        abs_max = weight.abs().amax(dim=1)
+        _require_finite_fp8_source(abs_max)
+        scale_inv = _compute_scale_inv(abs_max, fp8_max)
         quantized = torch.clamp(
             weight * scale_inv.unsqueeze(1),
             min=-fp8_max,
@@ -154,7 +166,9 @@ def quantize_fp8_weight(
     row_blocks = rows // block_rows
     col_blocks = cols // block_cols
     blocks = weight.reshape(row_blocks, block_rows, col_blocks, block_cols)
-    scale_inv = _compute_scale_inv(blocks.abs().amax(dim=(1, 3)), fp8_max)
+    abs_max = blocks.abs().amax(dim=(1, 3))
+    _require_finite_fp8_source(abs_max)
+    scale_inv = _compute_scale_inv(abs_max, fp8_max)
     scaled = blocks * scale_inv.unsqueeze(1).unsqueeze(3)
     quantized = torch.clamp(scaled, min=-fp8_max, max=fp8_max).to(fp8_dtype).reshape(rows, cols)
     return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
@@ -208,6 +222,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.weight_block_size = block_size
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(weight_scale_semantics)
         self._scaled_mm_hard_disabled = False
+        # Set when a HIP build cannot cast this format natively, so later forwards
+        # go straight to the validated CPU path instead of retrying the GPU cast.
+        self._native_dequant_disabled = False
 
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
             block_rows, block_cols = self.weight_block_size
@@ -273,7 +290,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", scale)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=torch.float16)
+            # Preserve the full checkpoint bias range. Forward narrows a
+            # working copy to the activation dtype after reading the buffer.
+            bias_tensor = torch.zeros(self.out_features, dtype=torch.float32)
             if "bias" in self._buffers:
                 self.bias = bias_tensor
             else:
@@ -341,7 +360,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     ):
         del scales, zeros, g_idx
 
+        from .gguf import _apply_optional_smoother
+
         weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
+        if smooth is not None:
+            _require_finite_fp8_source(weight)
         weight = _apply_optional_smoother(
             weight,
             smooth=smooth,
@@ -352,6 +375,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and _mlx_quantization_available()
             and weight.numel() >= _MLX_FP8_MIN_ELEMENTS
         ):
+            _require_finite_fp8_source(weight)
             qweight, weight_scale_inv = _quantize_fp8_weight_mlx_to_torch(
                 weight,
                 format=self.fp8_format,
@@ -377,7 +401,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", weight_scale_inv)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -386,6 +410,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.bias = None
 
         self._scaled_mm_hard_disabled = False
+        self._native_dequant_disabled = False
         self._invalidate_compiled()
 
     @torch.inference_mode()
@@ -409,7 +434,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.register_buffer("weight_scale_inv", packed_scale)
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            bias = linear.bias.detach().to(device="cpu").contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -417,6 +442,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.bias = None
         self._scaled_mm_hard_disabled = False
+        self._native_dequant_disabled = False
         self._invalidate_compiled()
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
@@ -461,24 +487,51 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # dense weight matrix, so force the validated CPU LUT path for that format.
         if self.fp8_format == "float8_e8m0fnu":
             prefer_cpu_dequant = True
-        if target_device.type == "cuda" and not device_supports_native_fp8(target_device):
+        if target_device.type == "cuda" and not IS_ROCM and not device_supports_native_fp8(target_device):
             prefer_cpu_dequant = True
 
-        if prefer_cpu_dequant:
-            weight = dequantize_fp8(
-                self.weight.to(device="cpu"),
-                scale_inv=self.weight_scale_inv.to(device="cpu"),
-                axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
-                target_dtype=target_dtype,
-            )
-            if target_device.type != "cpu":
-                weight = weight.to(device=target_device)
-            return weight.transpose(0, 1).contiguous()
+        if not prefer_cpu_dequant and not self._native_dequant_disabled:
+            try:
+                return self._dequantize_native(target_device=target_device, target_dtype=target_dtype)
+            except Exception as exc:
+                # This is a *ROCm* probe only.  HIP builds advertise FP8 support
+                # differently from CUDA and ``get_device_capability`` cannot be
+                # trusted there, so the native cast is attempted once instead.
+                # On gfx1201 both ``float8_e4m3fn`` and ``float8_e4m3fnuz`` casts
+                # work (measured), so this only fires on builds that lack one.
+                # On NVIDIA a failure is a real error (including OOM) and must
+                # propagate instead of silently turning into a CPU copy.
+                if not IS_ROCM or target_device.type != "cuda":
+                    raise
+                self._native_dequant_disabled = True
+                log.warn.once(
+                    f"FP8 native `{self.fp8_format}` dequantization on {target_device} failed "
+                    f"({type(exc).__name__}: {exc}); falling back to CPU dequantization "
+                    "for the rest of this module's lifetime."
+                )
 
+        return self._dequantize_cpu(target_device=target_device, target_dtype=target_dtype)
+
+    def _dequantize_native(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
-        weight = weight.to(target_dtype)
-        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=target_dtype)
-        return (weight / scale_inv).transpose(0, 1).contiguous()
+        weight = weight.to(torch.float32)
+        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32)
+        return (weight / scale_inv).to(target_dtype).transpose(0, 1).contiguous()
+
+    def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
+        # ``dequantize_fp8`` treats ``scale_inv`` heuristically (it multiplies
+        # when every value is <= 1), whereas this module's inverse-scale
+        # semantics always divide. Pass the reciprocal as an ordinary scale so
+        # the CPU fallback is exactly the arithmetic of ``_dequantize_native``.
+        weight = dequantize_fp8(
+            self.weight.to(device="cpu"),
+            scale=torch.reciprocal(self.weight_scale_inv.to(device="cpu", dtype=torch.float32)),
+            axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
+            target_dtype=target_dtype,
+        )
+        if target_device.type != "cpu":
+            weight = weight.to(device=target_device)
+        return weight.transpose(0, 1).contiguous()
 
     def _scaled_mm_weight_scale(self, *, device: torch.device) -> torch.Tensor:
         scale_inv = self.weight_scale_inv
@@ -502,21 +555,53 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return x_q, torch.reciprocal(scale_inv).to(torch.float32)
 
     def _can_use_scaled_mm(self, x_flat: torch.Tensor) -> bool:
+        # ROCm support is decided by the guarded call in ``forward``, not by
+        # ``get_device_capability`` (meaningless under HIP).  Measured on gfx1201
+        # (R9700, torch 2.16/ROCm 7.16): ``_scaled_mm`` accepts the OCP
+        # ``float8_e4m3fn``/``float8_e5m2`` encodings and raises
+        # ``HIPBLAS_STATUS_NOT_SUPPORTED`` for the AMD-native
+        # ``float8_e4m3fnuz``/``float8_e5m2fnuz`` ones, i.e. the opposite of
+        # what the gfx9x CDNA path historically did.  The first failure is
+        # logged once and the module then stays on dequantize + matmul.
         return (
             not self._scaled_mm_hard_disabled
             and hasattr(torch, "_scaled_mm")
             and x_flat.device.type == "cuda"
+            # Tensorwise amax on an empty input would disable this path permanently.
+            and x_flat.numel() > 0
             and self.weight_scale_method == "tensor"
             and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
             and x_flat.shape[-1] == self.in_features
             and self.in_features % 16 == 0
             and self.out_features % 16 == 0
+            and not (
+                torch.is_grad_enabled()
+                and (x_flat.requires_grad or self.weight.requires_grad or self.weight_scale_inv.requires_grad)
+            )
         )
 
-    def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_dequant_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if (
+            bias is not None
+            and x_flat.dtype in (torch.float16, torch.bfloat16)
+            and (
+                x_flat.device.type != "cuda"
+                or bias.dtype != x_flat.dtype
+                or autocast_active(x_flat.device.type)
+            )
+        ):
+            # The bias and the reduction can cancel outside the activation
+            # range. Decode into temporary FP32 storage and round only after
+            # their sum; autocast must not narrow this matmul again.
+            with torch.autocast(device_type=x_flat.device.type, enabled=False):
+                weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+                output = torch.matmul(x_flat.float(), weight)
+                return (output + bias.to(device=x_flat.device, dtype=torch.float32)).to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return torch.matmul(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
     def optimize(
         self,
@@ -550,7 +635,26 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.optimized = False
 
     def _apply(self, fn, recurse=True):
-        result = super()._apply(fn, recurse=recurse)
+        # Module.to()/half()/bfloat16() normally cast every floating buffer.
+        # FP8 codes, inverse scales, and the checkpoint bias are storage
+        # metadata; move their bytes without changing their native dtypes.
+        native_buffers = {
+            id(value): (value.dtype, value.shape)
+            for name in ("weight", "weight_scale_inv", "bias")
+            if isinstance(value := self._buffers.get(name), torch.Tensor)
+        }
+
+        def preserve_storage(tensor):
+            native = native_buffers.get(id(tensor))
+            if native is None:
+                return fn(tensor)
+            dtype, shape = native
+            raw = fn(tensor.reshape(-1).view(torch.uint8))
+            if raw.dtype != torch.uint8 or raw.numel() != tensor.numel() * tensor.element_size():
+                raise RuntimeError("FP8 buffer move changed its packed byte representation")
+            return raw.view(dtype).reshape(shape)
+
+        result = super()._apply(preserve_storage, recurse=recurse)
         self._invalidate_compiled()
         return result
 
@@ -567,36 +671,49 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             weight.t(),
             scale_a=scale_a,
             scale_b=scale_b,
-            out_dtype=x_flat.dtype,
+            # Keep the bias addition ahead of the output rounding on every
+            # accelerator. HIP keeps the wide FP32 request CUDA-only, so gating
+            # this on `_wants_fp32_reduce` rounded (and overflowed) before the
+            # bias could cancel the partial sum there.
+            out_dtype=torch.float32 if self.bias is not None else x_flat.dtype,
         )
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
+        bias = self.bias
+        if bias is not None and bias.device != x_flat.device:
+            bias = bias.to(device=x_flat.device)
 
         if self._can_use_scaled_mm(x_flat):
             try:
                 output = self._forward_scaled_mm(x_flat)
-            except Exception:
+            except Exception as exc:
                 self._scaled_mm_hard_disabled = True
-                output = self._forward_dequant_matmul(x_flat)
+                log.warn.once(
+                    f"FP8 `torch._scaled_mm` is unavailable for `{self.fp8_format}` on "
+                    f"{x_flat.device} ({type(exc).__name__}: {exc}); "
+                    "falling back to dequantize + matmul for the rest of the process."
+                )
+                output = self._forward_dequant_matmul(x_flat, bias=bias)
+                bias = None
         elif self._compiled_forward is not None:
             try:
-                output = self._compiled_forward(x_flat)
+                output = self._compiled_forward(x_flat, bias=bias)
+                bias = None
             except Exception as exc:
                 log.warn.once(
                     f"FP8 compiled CPU forward failed; falling back to eager: {exc}"
                 )
                 self._invalidate_compiled()
-                output = self._forward_dequant_matmul(x_flat)
+                output = self._forward_dequant_matmul(x_flat, bias=bias)
+                bias = None
         else:
-            output = self._forward_dequant_matmul(x_flat)
+            output = self._forward_dequant_matmul(x_flat, bias=bias)
+            bias = None
 
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+        if bias is not None:
+            output = (output + bias.to(dtype=output.dtype)).to(x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

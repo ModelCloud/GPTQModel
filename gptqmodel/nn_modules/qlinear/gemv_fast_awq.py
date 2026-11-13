@@ -18,13 +18,25 @@ from ...utils.awq import (
 )
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
+from ...utils.packing_math import scaled_zero_offset
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
     # unpacked_qweight: [N, K] int32 codes.  Every permutation runs on the
     # input device, so packing no longer round-trips through host numpy.
+    # Confine each code to its nibble before shifting, including narrow input
+    # dtypes and negative values supplied directly to the layout helper.
+    unpacked_qweight = unpacked_qweight.to(torch.int32) & 15
     N = unpacked_qweight.shape[0]
     K = unpacked_qweight.shape[1]
+    if N % interleave:
+        raise ValueError(
+            f"GEMV-fast out_features must be divisible by {interleave}: actual={N}"
+        )
+    if K % kstride:
+        raise ValueError(
+            f"GEMV-fast in_features must be divisible by {kstride}: actual={K}"
+        )
 
     # np.arange(32).reshape(4, 4, 2).transpose(1, 0, 2) => [0, 1, 8, 9, 16, 17, 24, 25, ...]
     Packed_Kernel = unpacked_qweight.reshape(N, K // 32, 4, 4, 2).permute(0, 1, 3, 2, 4)
@@ -61,16 +73,19 @@ class AwqGEMVFastLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 30}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    # The decode path calls the same native CUDA AWQ extension as
+    # ``AwqGEMVLinear`` (``gemv_fast_forward_decode``/``gemm_fast_forward_prefill``),
+    # so it has the same ROCm restriction; see ``AWQ_GEMV_ROCM_UNSUPPORTED``.
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
@@ -171,12 +186,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         self._ensure_runtime_buffers(device=inputs.device, dtype=inputs.dtype)
 
-        zeros = self._runtime_zeros()
+        zeros = self._runtime_zeros().contiguous()
+        scales = self.scales.contiguous()
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_fast_gemv_forward_decode(
                 inputs,
                 self.qweight,
-                self.scales,
+                scales,
                 zeros,
                 inputs.numel() // inputs.shape[-1],
                 self.out_features,
@@ -185,13 +201,14 @@ class AwqGEMVFastLinear(AWQuantLinear):
             )
         else:
             out = awq_fast_gemm_forward_prefill(
-                inputs, self.qweight, self.scales, zeros
+                inputs, self.qweight, scales, zeros
             )
 
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
-
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            # Add before narrowing to the activation dtype so cancellation
+            # retains all precision available in the FP16 result and bias.
+            out = out.float() + self.bias.float()
+        out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -203,7 +220,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
             self.qweight = self.qweight.to(device=device).contiguous()
 
         zeros = self._runtime_zeros()
-        if zeros.device != device or zeros.dtype != dtype or not zeros.is_contiguous():
+        if zeros.device != device or zeros.dtype != dtype:
             zeros = zeros.to(device=device, dtype=dtype).contiguous()
             if self.zeros_name == "qzeros":
                 self.qzeros = zeros
@@ -212,7 +229,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
             else:
                 raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
 
-        if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
+        if self.scales.device != device or self.scales.dtype != dtype:
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
 
         if self.bias is not None and (
@@ -230,7 +247,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -242,6 +259,9 @@ class AwqGEMVFastLinear(AWQuantLinear):
             device=scales.device,
         )
         qscales[:, : scales.shape[1]] = scales
+        # GEMV_FAST/LLM_AWQ store FP16 offsets in the checkpoint. Reject an
+        # unrepresentable offset before replacing any packed module state.
+        offsets = scaled_zero_offset(qscales[:, : scales.shape[1]], zeros)
         self.register_buffer("scales", qscales.transpose(1, 0).contiguous())
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.clone().half())
@@ -252,19 +272,16 @@ class AwqGEMVFastLinear(AWQuantLinear):
         # of launching one tiny kernel per input column.
         group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data + scale_zeros.index_select(1, group_index))
-            / qscales.index_select(1, group_index)
-        ).to(torch.int32)
+            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            / qscales.index_select(1, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(
             intweight.contiguous(), interleave=4, kstride=64
         ))
 
-        zeros = zeros.to(dtype=torch.int32)
         qzeros = torch.zeros_like(qscales)
 
-        qzeros[:, : scales.shape[1]] = -(
-                qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
-        ).to(torch.float16)
+        qzeros[:, : scales.shape[1]] = offsets
         self.register_buffer(self.zeros_name, qzeros.transpose(1, 0).contiguous())
 
     def extra_repr(self) -> str:
@@ -284,16 +301,18 @@ class LLMAwqLinear(AwqGEMVFastLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 100}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    # Inherits the native-CUDA-only restriction from ``AwqGEMVFastLinear``; see
+    # ``gemv_awq.AWQ_GEMV_ROCM_UNSUPPORTED``.
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]

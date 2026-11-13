@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.hy_v3 import HYV3QModel
 
+
 def test_hy_v3_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="hy_v3")
 

@@ -17,19 +17,9 @@ import sys
 from typing import Dict, List
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig
-
-
-def _dummy_prepare_dataset(
-        *,
-        calibration_dataset,
-        calibration_dataset_concat_size,
-        calibration_dataset_sort,
-        batch_size,
-        calibration_concat_separator=None,
-):
-    return calibration_dataset
 
 
 class _DummyProgressBar:
@@ -58,12 +48,12 @@ def _run_quant_on_device(device_index: int) -> torch.device:
     processor = GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=_dummy_prepare_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
-        require_fwd=False,
+        calibration=CalibrationConfig(),
+        forward=ForwardConfig(
+            required=False,
+            replay_after_process=True,
+            subset_early_stop=True,
+        ),
         calculate_w_wq_diff=False,
     )
     processor.pb = _DummyProgressBar()
@@ -161,11 +151,12 @@ def test_fp8_weight_dequant_matches_scaled_matmul():
     scale_inv_blocks = scale_inv_tensor.reshape(blocks_r, blocks_c)
     expanded_scale_inv = scale_inv_blocks.repeat_interleave(block_rows, dim=0).repeat_interleave(block_cols, dim=1)
 
-    expanded_scale_inv_bf16 = expanded_scale_inv.to(torch.bfloat16)
-    if torch.max(torch.abs(expanded_scale_inv_bf16)) <= 1:
-        weight_native_bf16 = weight_tensor.to(torch.bfloat16) * expanded_scale_inv_bf16
+    if torch.max(torch.abs(expanded_scale_inv)) <= 1:
+        weight_native = weight_tensor.to(torch.float32) * expanded_scale_inv
     else:
-        weight_native_bf16 = weight_tensor.to(torch.bfloat16) / expanded_scale_inv_bf16
+        weight_native = weight_tensor.to(torch.float32) / expanded_scale_inv
+    weight_native_bf16 = weight_native.to(torch.bfloat16)
     out_native = (inputs @ weight_native_bf16.transpose(0, 1)).to(torch.float32)
 
-    assert torch.allclose(out_dequant, out_native, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dequant_weight, weight_native_bf16, atol=0, rtol=0)
+    torch.testing.assert_close(out_dequant, out_native, atol=0, rtol=0)

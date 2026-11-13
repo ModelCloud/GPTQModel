@@ -8,7 +8,6 @@
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -25,7 +24,29 @@ from ._runtime_cache import tensor_cache_key
 log = setup_logger()
 
 
+@lru_cache(maxsize=1)
+def _qqq_gpu_quantizer():
+    try:
+        from .qqq_triton import dynamic_quant
+    except ImportError:
+        return None
+    return dynamic_quant
+
+
 _INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
+
+# The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
+# written against CUDA inline PTX: ``cp.async``, ``mma.sync``, ``ldmatrix``,
+# ``__cvta_generic_to_shared``, ``cvt.rn.f16.f32`` and ``ld.global.acquire.gpu``.
+# hipify rewrites the bindings but cannot translate that PTX, so on gfx1201
+# (RDNA4) hipcc rejects the build (20 errors, first at
+# ``gptqmodel_ext/qqq/qqq_gemm.hip:61``).  QQQ therefore has no native ROCm
+# kernel, and AUTO must select the portable ``QQQTorchLinear`` instead.
+QQQ_ROCM_UNSUPPORTED = (
+    "QQQ (BACKEND.QQQ) has no ROCm kernel: the Marlin-derived W4A8 extension "
+    "uses CUDA-only inline PTX and cannot be built by hipcc. "
+    "Use BACKEND.QQQ_TORCH, which is selected automatically for AUTO on AMD GPUs."
+)
 
 
 @lru_cache(maxsize=1)
@@ -46,7 +67,9 @@ def _invert_permutation(values) -> torch.Tensor:
     inverse = [0] * len(values)
     for index, value in enumerate(values):
         inverse[int(value)] = index
-    return torch.tensor(inverse, dtype=torch.long)
+    # These fixed permutation tables are used after a meta-device checkpoint
+    # restore, so they must contain real data even inside torch.device("meta").
+    return torch.tensor(inverse, dtype=torch.long, device="cpu")
 
 
 def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
@@ -94,12 +117,16 @@ class QQQLinear(GroupedQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    #: Whether the native Marlin kernel's device restrictions apply: SM80 or
+    #: newer on NVIDIA, and no ROCm. The portable FP32 kernel clears this.
+    MARLIN_DEVICE_RESTRICTIONS = True
 
     REQUIRES_FORMAT_V2 = False
 
@@ -222,14 +249,20 @@ class QQQLinear(GroupedQuantLinear):
             for j in range(4):
                 perm.extend([p + 256 * j for p in perm1])
 
-        perm = np.array(perm)
         if self.group_size == self.in_features:
-            interleave = np.array([4, 0, 5, 1, 6, 2, 7, 3])
+            interleave = [4, 0, 5, 1, 6, 2, 7, 3]
         else:
-            interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-        perm = perm.reshape((-1, 8))[:, interleave].ravel()
-        perm = torch.from_numpy(perm)
-        perm_i = _invert_permutation(perm.tolist())
+            interleave = [0, 2, 4, 6, 1, 3, 5, 7]
+        perm = [
+            perm[row * 8 + column]
+            for row in range(len(perm) // 8)
+            for column in interleave
+        ]
+        # Checkpoint restore constructs this module under torch.device("meta").
+        # Invert the Python layout before materializing it: meta tensors cannot
+        # be copied back to a list.
+        perm_i = _invert_permutation(perm)
+        perm = torch.tensor(perm, dtype=torch.long, device="cpu")
         scale_perm = []
         for i in range(8):
             scale_perm.extend([i + 8 * j for j in range(8)])
@@ -251,6 +284,11 @@ class QQQLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: probing the JIT
+        # extension on ROCm spends ~18 s compiling before failing, and would
+        # still be the wrong kernel even if a future hipify translated it.
+        if IS_ROCM:
+            return False, NotImplementedError(QQQ_ROCM_UNSUPPORTED)
         if not qqq_runtime_available():
             return False, ImportError(qqq_runtime_error())
         return True, None
@@ -265,16 +303,35 @@ class QQQLinear(GroupedQuantLinear):
         ):
             raise ValueError(f"{cls} not supported `infeatures`: {in_features} and `outfeatures`: {out_features}.")
 
+        # ``_validate`` alone never consults ``validate_once``, so without this
+        # check AUTO selected QQQLinear on any host even when the Marlin-derived
+        # JIT extension could not be built.  On ROCm that is the steady state:
+        # ``qqq_gemm.cu`` relies on CUDA-only inline PTX, which hipify cannot
+        # translate, so the extension fails to build for gfx1201 and the first
+        # forward raises instead of the selector picking ``QQQTorchLinear``.
+        # Check the runtime here so the portable kernel is chosen up front.
+        ok_once, error_once = cls.cached_validate_once()
+        if not ok_once:
+            return False, error_once
+
         return cls._validate(**args)
 
     @classmethod
     def validate_device(cls, device: DEVICE | torch.device):
-        super().validate_device(device)
-        # QQQ has an independent ROCm implementation. ROCm exposes CUDA
-        # device values through torch, so an exact cuda:N target must not
-        # be mistaken for the unsupported CUDA Marlin path.
-        if IS_ROCM:
+        # The native kernel runs Marlin, so it needs SM80 and has no ROCm path.
+        # The portable subclass clears this flag: it computes with a plain FP32
+        # matmul, so neither restriction applies to it. Keeping the difference
+        # as data means one implementation and no `super()` call that skips a
+        # class in the MRO.
+        if not cls.MARLIN_DEVICE_RESTRICTIONS:
+            super().validate_device(device)
             return
+        # ROCm exposes the CUDA device namespace through torch, so the device
+        # check alone would accept a cuda:N target.  Reject it explicitly here
+        # instead of inferring CUDA capability from a HIP device.
+        if IS_ROCM:
+            raise NotImplementedError(QQQ_ROCM_UNSUPPORTED)
+        super().validate_device(device)
         if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
             targets = (
                 (device,)
@@ -328,7 +385,9 @@ class QQQLinear(GroupedQuantLinear):
         else:
             packed_s_group = None
             packed_s_channel = (
-                (raw_scales / (2 ** (8 - self.bits)))
+                # The stored channel scale is FP32; dividing in FP16 first
+                # can round a representable FP32 scale all the way to zero.
+                (raw_scales.float() / (2 ** (8 - self.bits)))
                 .reshape((-1, len(self._scale_perm_single)))[:, self._scale_perm_single]
                 .to(dtype=torch.float32)
                 .reshape((-1, self.out_features))
@@ -378,11 +437,14 @@ class QQQLinear(GroupedQuantLinear):
 
                 weight_chunk = weight[output_start:output_end, input_start:input_end].transpose(0, 1)
                 scale_chunk_view = scale_chunk[:, output_start:output_end]
-                codes = torch.round(weight_chunk / scale_chunk_view).to(dtype=torch.int32)
+                codes = torch.round(weight_chunk.float() / scale_chunk_view.float())
                 if self.group_size != self.in_features:
                     codes.add_((self.maxq + 1) // 2).clamp_(0, self.maxq)
                 else:
-                    codes.clamp_(-self.maxq, self.maxq)
+                    # Channelwise codes are signed INT4, unlike the biased
+                    # unsigned codes used by the grouped representation.
+                    codes.clamp_(-(1 << (self.bits - 1)), (1 << (self.bits - 1)) - 1)
+                codes = codes.to(dtype=torch.int32)
 
                 transformed = codes.reshape(
                     input_size // self.tile,
@@ -450,7 +512,15 @@ class QQQLinear(GroupedQuantLinear):
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
-        quant_scale = x.abs().max(dim=-1, keepdim=True)[0].div(127.0).to(torch.float32)
+        if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
+                and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and not torch.compiler.is_compiling()):
+            quantizer = _qqq_gpu_quantizer()
+            if quantizer is not None:
+                return quantizer(x)
+        x = x.float()
+        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
+        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         return x, quant_scale
 
@@ -506,7 +576,7 @@ class QQQTorchLinear(QQQLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -514,6 +584,12 @@ class QQQTorchLinear(QQQLinear):
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "qqq"
+
+    #: This kernel computes with a plain FP32 matmul, so it needs neither the
+    #: Marlin compute-capability floor nor the CUDA-only requirement. Without
+    #: this, a pre-Ampere NVIDIA card that could run the fallback is rejected at
+    #: selection time.
+    MARLIN_DEVICE_RESTRICTIONS = False
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
@@ -667,13 +743,11 @@ class QQQTorchLinear(QQQLinear):
                 )
         accum = accum * s1
         accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
-        D = accum.to(dtype=A_dtype).reshape(out_shape)
-
         if self.bias is not None:
-            bias = self.bias
-            if bias.device != D.device or bias.dtype != D.dtype:
-                bias = bias.to(device=D.device, dtype=D.dtype)
-            D.add_(bias)
+            # The INT8 reduction and scales are still FP32 here. Add bias
+            # before the output cast so a finite sum cannot overflow in FP16.
+            accum = accum + self.bias.to(device=accum.device, dtype=accum.dtype)
+        D = accum.to(dtype=A_dtype).reshape(out_shape)
 
         if self.adapter:
             D = self.adapter.apply(x=A_flat, out=D)

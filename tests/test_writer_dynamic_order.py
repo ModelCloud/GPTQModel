@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import LlamaConfig, PreTrainedModel
 
@@ -94,3 +95,48 @@ def test_dynamic_rule_order_survives_save(
     assert saved["hidden_size"] == 32
     assert saved["model_type"] == "llama"
     assert saved["quantization_config"]["group_size"] == quant["group_size"] == 32
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_repeated_module_replacement_save_drops_prior_layout(
+    writer: LlamaQModel, tmp_path: Path, indexed: bool
+) -> None:
+    source = Path(writer.model_local_path)
+    shard_name = "model.safetensors"
+    save_file(
+        {"proj.weight": torch.ones(2, 2), "norm.weight": writer.model.norm.weight.detach()},
+        source / shard_name,
+    )
+    index_name = "model.safetensors.index.json" if indexed else None
+    if index_name:
+        (source / index_name).write_text(
+            json.dumps({"weight_map": {"proj.weight": shard_name, "norm.weight": shard_name}})
+        )
+    writer._module_replacement_prefixes = {"proj"}
+    writer._module_replacement_source = SimpleNamespace(
+        model_local_path=str(source),
+        _weight_map={"proj.weight": shard_name, "norm.weight": shard_name},
+        _index_filename=index_name,
+    )
+
+    first = torch.nn.Module()
+    first.register_buffer("qweight", torch.tensor([1, 2], dtype=torch.int32))
+    first.register_buffer("old_scale", torch.tensor([1.0]))
+    writer.model.proj = first
+    output = tmp_path / "saved"
+    writer.save_quantized_embeddings(str(output))
+
+    second = torch.nn.Module()
+    second.register_buffer("qweight", torch.tensor([3, 4], dtype=torch.int32))
+    writer.model.proj = second
+    writer.save_quantized_embeddings(str(output))
+
+    with safe_open(output / shard_name, framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"proj.qweight", "norm.weight"}
+        torch.testing.assert_close(handler.get_tensor("proj.qweight"), second.qweight)
+    if index_name:
+        saved_index = json.loads((output / index_name).read_text())
+        assert saved_index["weight_map"] == {
+            "proj.qweight": shard_name,
+            "norm.weight": shard_name,
+        }

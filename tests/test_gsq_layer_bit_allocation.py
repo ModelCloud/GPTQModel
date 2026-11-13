@@ -20,7 +20,7 @@ def test_projection_bits_accept_scalar_and_map():
 
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    assert resolve_projection_bits(3) == {name: 3 for name in names}
+    assert resolve_projection_bits(3) == dict.fromkeys(names, 3)
 
     partial = {name: (3 if name.startswith('self_attn.q') else 2) for name in names}
     assert resolve_projection_bits(partial) == partial
@@ -42,7 +42,7 @@ def test_projection_bits_reject_unknown_projection():
 
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    mapping = {name: 2 for name in names}
+    mapping = dict.fromkeys(names, 2)
     mapping['mlp.nonexistent'] = 3
     with pytest.raises(ValueError):
         resolve_projection_bits(mapping)
@@ -52,7 +52,7 @@ def test_budget_plan_reproduces_paper_promoted_layers():
     """Sixteen equal-width blocks promote 6 / 10 layers at 2.375 / 2.625 bits."""
     from gptqmodel.quantization.gsq_training import projection_bits_for_budget
 
-    counts = {index: 1 for index in range(16)}
+    counts = dict.fromkeys(range(16), 1)
     plan = projection_bits_for_budget(counts, [2.375, 2.625])
 
     for target, expected in ((2.375, 6), (2.625, 10)):
@@ -152,6 +152,63 @@ def test_block_exports_mixed_projection_widths():
     for name, want in widths.items():
         module = packed.get_submodule(name)
         assert int(module.bits) == want
+        assert torch.isfinite(module.dequantize_weight()).all()
+
+
+def test_qwen3_block_capture_and_packing_match_dense_layout():
+    """Qwen3 shares the staged dense-decoder projection contract."""
+    from transformers.models.qwen3.modeling_qwen3 import (
+        Qwen3Config,
+        Qwen3ForCausalLM,
+    )
+
+    from gptqmodel.looper.gsq_training_capture import capture_llama_gsq_inputs
+    from gptqmodel.quantization.gsq_training import quantize_llama_gsq_block
+    from gptqmodel.quantization.gsq_training_config import GSQTrainingConfig
+
+    torch.manual_seed(5)
+    config = Qwen3Config(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=768,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=64,
+        max_position_embeddings=256,
+        num_hidden_layers=1,
+        tie_word_embeddings=True,
+    )
+    config._attn_implementation = "eager"
+    model = Qwen3ForCausalLM(config).eval()
+    documents = [
+        {"input_ids": torch.randint(0, 128, (32,)).tolist()}
+        for _ in range(2)
+    ]
+    cache = capture_llama_gsq_inputs(model, documents, layer_index=0)
+    batches = [
+        (hidden[0], kwargs)
+        for hidden, kwargs in zip(cache.layer_inputs, cache.layer_input_kwargs)
+    ]
+    gsq = GSQTrainingConfig(
+        enabled=False,
+        epochs=1,
+        batch_size=1,
+        microbatch_size=1,
+        qk_steps=1,
+    )
+    packed, result = quantize_llama_gsq_block(
+        model.model.layers[0],
+        batches,
+        bits=2,
+        group_size=128,
+        gsq=gsq,
+        pack=True,
+    )
+
+    assert set(result["projection_bits"].values()) == {2}
+    for name, bits in result["projection_bits"].items():
+        module = packed.get_submodule(name)
+        assert int(module.bits) == bits
         assert torch.isfinite(module.dequantize_weight()).all()
 
 

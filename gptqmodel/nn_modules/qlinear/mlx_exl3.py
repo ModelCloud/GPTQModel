@@ -10,6 +10,7 @@ from mlx import nn
 
 from ...quantization.mlx_exl3_hadamard import _exl3_hadamard_kernel
 
+
 _CODEBOOK_IDS = {"3inst": 0, "mcg": 1, "mul1": 2}
 _ROW_THREADS = 64
 _FUSED_ROW_THREADS = 128

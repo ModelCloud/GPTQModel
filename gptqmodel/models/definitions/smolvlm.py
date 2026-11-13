@@ -12,9 +12,13 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..fusable import FusableConfig
+from .llama import LlamaQModel
 
 
 class SmolVLMQModel(BaseQModel):
+    fusable = FusableConfig("smolvlm").merge(LlamaQModel.fusable)
+
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = "model.text_model.norm"

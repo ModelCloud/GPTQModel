@@ -1,0 +1,605 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Execute finalized native GPTQ/AWQ layouts on actual CPU, CUDA and HIP.
+
+Every registered GPTQ/AWQ backend is accounted for. Optional dependencies and
+architecture exclusions are explicit skips, never portable-kernel substitutions.
+"""
+
+import copy
+import weakref
+
+import pytest
+import torch
+from torch.utils.cpp_extension import CUDA_HOME
+from transformers import LlamaConfig, LlamaForCausalLM
+
+from gptqmodel.models._const import DEVICE
+from gptqmodel.models.fusion import FusionDecision, _FusionGroup, _incompatible
+from gptqmodel.models.fusion_kernels import kernel_specs
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import _dequantize_group_layout
+from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.utils import importer
+from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.cpu_features import has_avx512_bf16
+from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
+from tests.module_tree.test_fusion_device_inference import _target
+
+
+SPECS = kernel_specs()
+# These layouts are deliberately not admitted by the executor. Keep the
+# inventory exhaustive so new kernel registrations require an explicit review.
+EXCLUDED = {
+    "BitblasLinear": "Optional BitBLAS operator layout has no qualified fusion adapter",
+    "AWQBitBlasKernel": "Optional BitBLAS operator layout has no qualified fusion adapter",
+    "MacheteLinear": "Machete requires SM90+; this host is SM89",
+    "AwqMacheteLinear": "Machete requires SM90+; this host is SM89",
+    "SwordfishLinear": "Swordfish requires Blackwell",
+    "AwqSwordfishLinear": "Swordfish requires Blackwell",
+    "W4ANVFP4Linear": "NVFP4 requires SM121+",
+    "TorchInt8AwqLinear": "Retired INT4-to-INT8 expanded-weight backend",
+}
+
+
+def test_every_registered_gptq_awq_kernel_has_an_explicit_fusion_contract():
+    for cls in importer._registry_kernel_classes():
+        if not set(importer.infer_quant_methods(cls)) & {METHOD.GPTQ, METHOD.AWQ}:
+            continue
+        if not set(cls.SUPPORTS_DEVICES) & {DEVICE.ALL, DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM}:
+            continue  # Metal kernels require an Apple host, outside this matrix.
+        assert cls in SPECS or cls.__name__ in EXCLUDED, cls.__name__
+
+
+def test_zero_free_kernel_contracts_never_include_a_zero_operand():
+    for cls, spec in SPECS.items():
+        if spec.zero_name is None:
+            # Padding these collections would make source rebinding consume
+            # zero tensors that this finalized native layout does not own. The
+            # INT8 group layout is the one exception: its zero-free contract
+            # still concatenates an optional per-group residual offset, which is
+            # ``None`` for symmetric checkpoints and never a packed zero tensor.
+            expected = {spec.weight_name, spec.scale_name, "bias"}
+            if spec.layout == "int8":
+                expected.add("int8_group_offset")
+            assert set(dict(spec.axes)) == expected, cls.__name__
+
+
+def _cases():
+    for cls in sorted(SPECS, key=lambda cls: cls.__name__):
+        for family in (DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM):
+            if DEVICE.ALL not in cls.SUPPORTS_DEVICES and family not in cls.SUPPORTS_DEVICES:
+                continue
+            for dtype in (torch.float16, torch.bfloat16):
+                if dtype in cls.SUPPORTS_DTYPES:
+                    yield pytest.param(cls, family, dtype, id=f"{family.value}-{cls.__name__}-{dtype}")
+
+
+def _contract(cls):
+    spec = SPECS[cls]
+    bits = 8 if cls.SUPPORTS_BITS == [8] else 4
+    return bits, -1 if spec.layout == "allspark" else 128, torch.int16 if spec.layout == "awq_fast" else torch.int32
+
+
+def _available(cls, family, dtype):
+    device = _target(family)
+    # A visible NVIDIA device does not imply that optional native extensions
+    # can be loaded. Prebuilt ops still run without a local CUDA toolkit.
+    if family == DEVICE.CUDA and CUDA_HOME is None:
+        if cls in (AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear) and not awq_runtime_available():
+            reason = awq_runtime_error().partition(" | ")[0]
+            pytest.skip(f"Native AWQ extension unavailable: {reason}")
+        if cls in (MarlinLinear, AwqMarlinLinear) and not marlin_runtime_available(dtype):
+            reason = marlin_runtime_error(dtype).partition(" | ")[0]
+            pytest.skip(f"Native Marlin extension unavailable for {dtype}: {reason}")
+    bits, group_size, pack_dtype = _contract(cls)
+    ok, error = cls.validate(bits=bits, group_size=group_size, sym=True, desc_act=False,
+                             pack_dtype=pack_dtype, dtype=dtype, device=device,
+                             in_features=512, out_features=1024)
+    if not ok:
+        pytest.skip(f"{cls.__name__} native contract unavailable: {error}")
+    return device
+
+
+def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_checkpoint=False):
+    """Independent logical integer matrices, finalized by the actual backend."""
+    spec = SPECS[cls]
+    k, n = linear.in_features, linear.out_features
+    bits, group, pack_dtype = _contract(cls)
+    group_width = k if group == -1 else group
+    codes = torch.randint(0, 1 << bits, (k, n))
+    zeros = torch.full((k // group_width, n), 1 << (bits - 1), dtype=torch.int32)
+    # Vary metadata across both groups and output channels; uniform scales can
+    # hide a wrong native stride or tile permutation.
+    scales = (torch.full(zeros.shape, 1 / (64 * (1 << bits)), dtype=dtype) if uniform_scales else
+              (2.0 ** torch.randint(-2, 1, zeros.shape).float() / (64 * (1 << bits))).to(dtype))
+    indices = torch.arange(k, dtype=torch.int32) // group_width
+    weight = ((codes - zeros[indices]) * scales[indices]).to(dtype)
+    linear.weight.data.copy_(weight.t())
+    linear.bias.data.uniform_(-0.01, 0.01)
+    kwargs = {"bits": bits, "group_size": group, "pack_dtype": pack_dtype, "sym": True, "desc_act": False,
+                  "in_features": k, "out_features": n, "bias": True, "register_buffers": True, "dtype": dtype}
+    if spec.gptq:
+        kwargs["format"] = FORMAT.GPTQ_V2
+    module = cls(**kwargs)
+    if spec.gptq or cls is AwqMarlinLinear or not callable(getattr(module, "pack", None)):
+        source = (TorchLinear if spec.gptq else AwqTorchLinear)(**kwargs)
+        if spec.gptq:
+            source.pack_block(linear, scales.t(), zeros.t().float(), indices)
+        else:
+            source.pack(linear, scales.t(), zeros.t(), indices)
+        for name in ("qweight", "qzeros", "scales", "bias", "g_idx"):
+            src, dst = getattr(source, name, None), getattr(module, name, None)
+            if isinstance(src, torch.Tensor) and isinstance(dst, torch.Tensor) and src.shape == dst.shape:
+                dst.data.copy_(src)
+    else:
+        module.pack(linear, scales.t(), zeros.t(), indices)
+    module.bias = module.bias.detach()
+    if spec.gptq:
+        module.qzero_format(2)
+    module.to(device).eval()
+    checkpoint = {name: value.clone() for name, value in module.state_dict().items()} if return_checkpoint else None
+    if spec.layout == "exllamav2":
+        module.post_init(None)
+    else:
+        module.post_init()
+    if spec.layout == "int8":
+        # This backend repacks native eight-bit sources into per-group runtime
+        # codes before fusion. The oracle reconstructs the checkpoint matrix
+        # from those derived buffers independently of the kernel forward.
+        weight = _dequantize_group_layout(
+            int8_weight=module.int8_weight_gnk,
+            group_scale=module.int8_group_scale,
+            group_offset=module.int8_group_offset,
+            input_perm=module.int8_input_perm,
+            group_lengths=module._int8_group_lengths,
+            in_features=module.in_features,
+        )
+    return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
+
+
+def _assert_no_dense_weights(module, spec):
+    seen = set()
+
+    def inspect(value):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, torch.Tensor):
+            if value.numel() == module.in_features * module.out_features:
+                assert not value.is_floating_point()
+                assert module.bits == 8 or value.dtype not in (torch.int8, torch.uint8)
+        elif isinstance(value, torch.nn.Module):
+            inspect(vars(value))
+        elif isinstance(value, dict):
+            for child in value.values():
+                inspect(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                inspect(child)
+
+    inspect(module)
+
+
+def _oracle(x, weights, biases, spec):
+    values = x.float()
+    if spec.layout == "gptq_fp8":
+        maximum = values.abs().amax(-1, keepdim=True)
+        scale = torch.where(maximum > 0, maximum / 448, 1.0)
+        values = (values / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale
+    # Compute the mathematical result independently in FP32, then round once
+    # to the visible dtype. Mirroring a kernel's intermediate BF16 rounding
+    # can make the oracle itself differ by a full BF16 step near a bias tie.
+    return torch.cat([(values @ w.float() + b.float()).to(x.dtype) for w, b in zip(weights, biases)], -1)
+
+
+@pytest.mark.parametrize("cls", [ExllamaV2Linear, AwqExllamaV2Linear])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav2_rebinds_shuffled_words_without_changing_output(cls, dtype):
+    device = _available(cls, DEVICE.CUDA, dtype)
+    torch.manual_seed(29)
+    linear = torch.nn.Linear(512, 1024, bias=True, dtype=dtype)
+    module, weight, bias, checkpoint = _projection(cls, linear, dtype, device, return_checkpoint=True)
+    spec = SPECS[cls]
+    x = torch.randn(8, 512, dtype=dtype, device=device)
+    expected = _oracle(x, [weight], [bias], spec)
+
+    def check(current_x, current_weight, current_bias):
+        actual = module(current_x)
+        torch.testing.assert_close(actual, _oracle(current_x, [current_weight], [current_bias], spec),
+                                   rtol=2e-3, atol=2e-3)
+        _assert_no_dense_weights(module, spec)
+
+    check(x, weight, bias)
+    module.clear_weight_cache()
+    check(x, weight, bias)
+    module.to(device)  # QuantLinear._apply clears a descriptor even for the same device.
+    check(x, weight, bias)
+    module.to(dtype=torch.bfloat16)
+    check(x, weight, module.bias)
+    module.to(dtype=torch.float16)
+    check(x, weight, module.bias)
+    module.post_init(None)
+    check(x, weight, bias)
+    if torch.cuda.device_count() > 1:
+        second = torch.device("cuda:1")
+        module.to(second)
+        check(x.to(second), weight.to(second), bias.to(second))
+        module.to(device)
+        check(x, weight, bias)
+
+    with torch.no_grad():
+        module.scales.mul_(0.5)
+    check(x, weight * 0.5, bias)
+    module.clear_weight_cache()
+    check(x, weight * 0.5, bias)
+    if cls is AwqExllamaV2Linear:
+        with pytest.raises(RuntimeError, match="also requires qzeros"):
+            module.load_state_dict({"qweight": checkpoint["qweight"]}, strict=False)
+        with pytest.raises(RuntimeError, match="also requires qweight"):
+            module.load_state_dict({"qzeros": checkpoint["qzeros"]}, strict=False)
+        runtime_zeros = copy.deepcopy(module.state_dict())
+        for name in tuple(runtime_zeros):
+            if name != "qzeros":
+                del runtime_zeros[name]
+        module.load_state_dict(runtime_zeros, strict=False)
+        check(x, weight * 0.5, bias)
+    module.load_state_dict(checkpoint)
+    check(x, weight, bias)
+    runtime_state = copy.deepcopy(module.state_dict())
+    module.load_state_dict(runtime_state)
+    check(x, weight, bias)
+    assert module._native_shuffled
+    assert torch.isfinite(expected).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav2_act_order_rebind_preserves_permutation(dtype):
+    device = _available(ExllamaV2Linear, DEVICE.CUDA, dtype)
+    torch.manual_seed(31)
+    k, n, group = 256, 256, 128
+    indices = (torch.arange(k, dtype=torch.int32) // group)[torch.randperm(k)]
+    codes = torch.randint(0, 16, (k, n), dtype=torch.int32)
+    zeros = torch.full((k // group, n), 8, dtype=torch.int32)
+    scales = (2.0 ** torch.randint(-2, 1, (k // group, n)).float() / 1024).to(dtype)
+    weight = ((codes - zeros[indices]) * scales[indices]).to(dtype)
+    linear = torch.nn.Linear(k, n, bias=True, dtype=dtype)
+    linear.weight.data.copy_(weight.T)
+    kwargs = {"bits": 4, "group_size": group, "sym": True, "desc_act": True, "in_features": k,
+              "out_features": n, "bias": True, "pack_dtype": torch.int32, "register_buffers": True,
+              "dtype": dtype, "format": FORMAT.GPTQ_V2}
+    source = TorchLinear(**kwargs)
+    source.pack_block(linear, scales.T, zeros.T.float(), indices)
+    module = ExllamaV2Linear(**kwargs)
+    for name in ("qweight", "qzeros", "scales", "bias", "g_idx"):
+        getattr(module, name).data.copy_(getattr(source, name))
+    module.qzero_format(2)
+    module.to(device).eval()
+    module.post_init(None)
+    x = torch.randn(33, k, dtype=dtype, device=device)
+    expected = (x.float() @ weight.to(device).float() + linear.bias.to(device).float()).to(dtype)
+    original_perm = module.q_tensors["q_perm"].clone()
+    original_invperm = module.q_tensors["q_invperm"].clone()
+
+    def check(current_x):
+        actual = module(current_x)
+        torch.testing.assert_close(actual, expected.to(current_x.device), rtol=2e-3, atol=2e-3)
+        assert torch.equal(module.q_tensors["q_perm"], original_perm.to(current_x.device))
+        assert torch.equal(module.q_tensors["q_invperm"], original_invperm.to(current_x.device))
+        _assert_no_dense_weights(module, SPECS[ExllamaV2Linear])
+
+    check(x)
+    module.clear_weight_cache()
+    check(x)
+    module.load_state_dict(copy.deepcopy(module.state_dict()))
+    check(x)
+    module.to(device)
+    check(x)
+    if torch.cuda.device_count() > 1:
+        module.to("cuda:1")
+        check(x.to("cuda:1"))
+        module.to(device)
+        check(x)
+
+
+@pytest.mark.parametrize("cls", [ExllamaV2Linear, AwqExllamaV2Linear])
+def test_exllamav2_fused_checkpoint_reload(cls):
+    dtype = torch.float16
+    device = _available(cls, DEVICE.CUDA, dtype)
+    torch.manual_seed(37)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8, vocab_size=64,
+                         attention_bias=True, mlp_bias=True)
+    parent = LlamaForCausalLM(config).to(dtype).model.layers[0].mlp.eval()
+    modules, checkpoints = [], []
+    for name in ("gate_proj", "up_proj"):
+        module, _, _, checkpoint = _projection(cls, getattr(parent, name), dtype, device, return_checkpoint=True)
+        setattr(parent, name, module)
+        modules.append(module)
+        checkpoints.append(checkpoint)
+    parent.to(device)
+    x = torch.randn(1, 8, 512, dtype=dtype, device=device)
+    baseline = parent(x)
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    bf16_output = None
+    try:
+        group.install()
+        torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        modules[0].load_state_dict(checkpoints[0])
+        for _ in range(2):
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        assert group.packed is not None
+        if torch.cuda.device_count() > 1:
+            parent.to("cuda:1")
+            moved = x.to("cuda:1")
+            for _ in range(2):
+                torch.testing.assert_close(parent(moved), baseline.to("cuda:1"), rtol=2e-3, atol=2e-3)
+            parent.to(device)
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        parent.to(dtype=torch.bfloat16)
+        x_bf16 = x.to(torch.bfloat16)
+        parent(x_bf16)
+        bf16_output = parent(x_bf16)
+        assert group.packed is not None
+    finally:
+        group.remove()
+    torch.testing.assert_close(parent(x_bf16), bf16_output, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("cls,family,dtype", list(_cases()))
+@pytest.mark.parametrize("profile", ["gate_up", "qkv_gqa", "qkv_mha"])
+def test_native_fusion_shapes_oracle_ownership_and_invalidation(cls, family, dtype, profile, record_property):
+    _check_native_fusion(cls, family, dtype, profile, record_property)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_uniform_scales_large_m_and_fp32_bias_oracle(dtype, record_property):
+    from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+
+    _check_native_fusion(W4AFP8Linear, DEVICE.CUDA, dtype, "gate_up", record_property, uniform_scales=True)
+
+
+def _check_native_fusion(cls, family, dtype, profile, record_property, *, uniform_scales=False):
+    device = _available(cls, family, dtype)
+    spec = SPECS[cls]
+    torch.manual_seed(17)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8 if profile == "qkv_mha" else 4,
+                         vocab_size=64, attention_bias=True, mlp_bias=True)
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    parent_name = "mlp" if profile == "gate_up" else "self_attn"
+    parent = getattr(model.model.layers[0], parent_name)
+    names = ("gate_proj", "up_proj") if profile == "gate_up" else ("q_proj", "k_proj", "v_proj")
+    modules, weights, biases = [], [], []
+    for name in names:
+        module, weight, bias, _ = _projection(cls, getattr(parent, name), dtype, device, uniform_scales=uniform_scales)
+        setattr(parent, name, module)
+        modules.append(module)
+        weights.append(weight)
+        biases.append(bias)
+    parent.to(device)
+
+    def invoke(x):
+        if parent_name == "mlp":
+            return parent(x)
+        cos = torch.ones(1, x.shape[1], 64, device=device, dtype=dtype)
+        return parent(x, position_embeddings=(cos, torch.zeros_like(cos)), attention_mask=None)[0]
+
+    rows = (1, 8, 33, 257, 1025) if profile == "gate_up" else (1, 8, 33, 257)
+    xs = [torch.randn(1, size, 512, device=device, dtype=dtype) for size in rows]
+    with torch.inference_mode():
+        before = [invoke(x) for x in xs]
+        repeat = [invoke(x) for x in xs]
+    baseline_noise = max((a.float() - b.float()).abs().max().item() for a, b in zip(before, repeat))
+    snapshots = [{name: getattr(m, name).clone() for name, _ in spec.axes
+                  if isinstance(getattr(m, name, None), torch.Tensor)} for m in modules]
+    reason = _incompatible(modules)
+    if cls is AwqTorchLinear and profile == "qkv_gqa":
+        assert "AWQ GQA" in reason
+        record_property("declared_rejection", reason)
+        return
+    assert not reason, reason
+    if spec.layout == "gptq_fp8":
+        modules[-1]._require_activation_stream = True
+        assert "encoded W4A" in _incompatible(modules)
+        del modules[-1]._require_activation_stream
+    width = modules[-1].out_features
+    modules[-1].out_features += 1
+    assert _incompatible(modules), "A non-native output shape must be rejected before a launch"
+    modules[-1].out_features = width
+    refs = [weakref.ref(getattr(m, spec.weight_name)) for m in modules]
+    decision = FusionDecision("gate_up" if profile == "gate_up" else "qkv", parent_name,
+                              tuple(f"{parent_name}.{name}" for name in names))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    max_oracle = max_drift = 0.0
+    try:
+        group.install()
+        assert type(group.packed) is cls
+        assert all(ref() is None for ref in refs), "Original native weight allocations were retained"
+        with torch.inference_mode():
+            for x, baseline in zip(xs, before):
+                actual = invoke(x)
+                torch.testing.assert_close(actual, baseline, rtol=2e-3, atol=2e-3)
+                combined = group.packed(x)
+                expected = _oracle(x, weights, biases, spec)
+                assert combined.dtype == dtype
+                torch.testing.assert_close(combined, expected, rtol=2e-3, atol=2e-3)
+                direct = torch.cat([m(x) for m in modules], -1)
+                torch.testing.assert_close(direct, combined, rtol=2e-3, atol=2e-3)
+                max_oracle = max(max_oracle, (combined.float() - expected.float()).abs().max().item())
+                max_drift = max(max_drift, (actual.float() - baseline.float()).abs().max().item())
+            empty = group.packed(torch.empty(1, 0, 512, device=device, dtype=dtype))
+            assert empty.shape == (1, 0, sum(m.out_features for m in modules))
+        assert group.calls == len(xs)
+        for module in modules:
+            for name, _ in spec.axes:
+                source, packed = getattr(module, name), getattr(group.packed, name)
+                if isinstance(source, torch.Tensor) and source.numel():
+                    assert source.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr()
+            _assert_no_dense_weights(module, spec)
+        _assert_no_dense_weights(group.packed, spec)
+
+        # Rebuild after an in-place write through the final sibling's view.
+        previous = group.packed
+        scale = getattr(modules[-1], spec.scale_name)
+        with torch.no_grad():
+            scale.mul_(0.5)
+        assert not group.guard()
+        with torch.inference_mode():
+            invoke(xs[0])
+            torch.testing.assert_close(group.packed(xs[0]), torch.cat([m(xs[0]) for m in modules], -1),
+                                       rtol=2e-3, atol=2e-3)
+        assert group.packed is not previous
+        with torch.no_grad():
+            getattr(modules[-1], spec.scale_name).mul_(2)
+        with torch.inference_mode():
+            invoke(xs[0])
+        # Explicit clear also covers unversioned inference-tensor mutations.
+        modules[0].clear_weight_cache()
+        assert group.packed is None
+        with torch.inference_mode():
+            invoke(xs[0])
+        assert group.packed is not None
+    finally:
+        group.remove()
+    with torch.inference_mode():
+        for x, baseline in zip(xs, before):
+            torch.testing.assert_close(invoke(x), baseline, rtol=2e-3, atol=2e-3)
+    for module, snapshot in zip(modules, snapshots):
+        for name, expected in snapshot.items():
+            actual = getattr(module, name)
+            assert actual.is_contiguous()
+            assert torch.equal(actual, expected), name
+    record_property("family", family.value)
+    record_property("kernel", cls.__name__)
+    record_property("dtype", str(dtype))
+    record_property("profile", profile)
+    record_property("bits", modules[0].bits)
+    record_property("uniform_scales", uniform_scales)
+    record_property("projection_oracle_max_abs", max_oracle)
+    record_property("parent_max_abs", max_drift)
+    record_property("baseline_repeat_max_abs", baseline_noise)
+    record_property("extra_packed_weight_bytes", 0)
+
+
+@pytest.mark.skipif(not has_avx512_bf16(), reason="AVX512-BF16 CPU is required")
+def test_avx512_fusion_does_not_restore_source_checkpoint_state():
+    """The fused layer must own concatenated int4pack tensors.
+
+    ``copy.copy(first)`` inherits the sources' ``_fused_train_state`` snapshot,
+    which holds the pre-transform GPTQ-v2 ``qweight``/``qzeros`` shapes. Clearing
+    the fused shell restored that snapshot over the combined int4pack operands,
+    so ``_share_operands`` then failed to split them across the sources.
+    """
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+
+    if not TorchCpuAvx512Linear.cached_validate_once()[0]:
+        pytest.skip("int4pack CPU extension is unavailable")
+
+    torch.manual_seed(23)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8, vocab_size=64,
+                         attention_bias=True, mlp_bias=True)
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(torch.bfloat16).eval()
+    parent = model.model.layers[0].mlp
+    modules = []
+    for name in ("gate_proj", "up_proj"):
+        module, _w, _b, _ = _projection(TorchCpuAvx512Linear, getattr(parent, name), torch.bfloat16, "cpu")
+        setattr(parent, name, module)
+        modules.append(module)
+    parent.to("cpu")
+
+    # The snapshot is captured lazily by the first fused forward, so warm the
+    # sources up before fusing exactly as a real inference server would.
+    with torch.inference_mode():
+        warmup = torch.randn(1, 8, 512, dtype=torch.bfloat16)
+        for module in modules:
+            module(warmup)
+    for module in modules:
+        assert module._fused_train_state, "sources must carry a pre-transform snapshot"
+        assert tuple(module.qweight.shape) == (module.out_features, module.in_features // 2)
+        assert isinstance(module._fused_train_state, dict)
+
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=torch.bfloat16)
+    try:
+        group.install()
+        fused = group.packed
+        assert type(fused) is TorchCpuAvx512Linear
+        assert getattr(fused, "_fused_train_state", None) is None
+        total = sum(module.out_features for module in modules)
+        assert tuple(fused.qweight.shape) == (total, modules[0].in_features // 2)
+        assert tuple(fused.qzeros.shape) == (modules[0].in_features // modules[0].group_size, total)
+        for module in modules:
+            for name in ("qweight", "qzeros", "scales", "bias"):
+                source, packed = getattr(module, name), getattr(fused, name)
+                assert isinstance(source, torch.Tensor) and source.numel()
+                assert source.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr(), name
+        with torch.inference_mode():
+            x = torch.randn(1, 8, 512, dtype=torch.bfloat16)
+            torch.testing.assert_close(fused(x), torch.cat([m(x) for m in modules], -1),
+                                       rtol=2e-3, atol=2e-3)
+    finally:
+        group.remove()
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq"])
+@pytest.mark.parametrize("mutation", ["replace", "resize", "dtype"])
+def test_marlin_rebuilds_native_workspace_after_binding_changes(method, mutation):
+    device = _target(DEVICE.CUDA)
+    from tests.module_tree.test_llama_fusion import _wrapper
+
+    model, _ = _wrapper(method, device=device, native=True, automatic=True)
+    plan = model.fuse()
+    group = plan.groups[0]
+    previous = group.packed
+    if mutation == "replace":
+        group.packed.workspace = torch.empty(0, device=device, dtype=torch.int32)
+    elif mutation == "resize":
+        group.packed.workspace.resize_(0)
+    else:
+        group.packed.workspace = group.packed.workspace.half()
+    assert not group.guard()
+    with torch.inference_mode():
+        model.model(torch.tensor([[1, 2]], device=device))
+    assert group.packed is not previous
+    workspace = group.packed.workspace
+    assert workspace.dtype == torch.int32
+    assert workspace.numel() >= max(128, torch.cuda.get_device_properties(device).multi_processor_count)
+    assert torch.count_nonzero(workspace) == 0
+    model.fuse(False)
+
+
+@pytest.mark.parametrize("family", [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM])
+@pytest.mark.parametrize("method,fmt", [(METHOD.GPTQ, FORMAT.GPTQ_V2), (METHOD.AWQ, FORMAT.GEMM)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_auto_keeps_the_native_optimized_kernel(family, method, fmt, dtype, record_property):
+    device = _target(family)
+    selected = importer.select_quant_linear(bits=4, group_size=128, sym=True, desc_act=False,
+                                            pack_dtype=torch.int32, dtype=dtype, device=device,
+                                            backend=BACKEND.AUTO, format=fmt, quant_method=method)
+    cpu_avx512 = has_avx512_bf16()
+    expected = {
+        (DEVICE.CPU, METHOD.GPTQ): ("TorchAtenLinear", "TorchCpuAvx512Linear" if cpu_avx512 else "TorchAtenLinear"),
+        (DEVICE.CPU, METHOD.AWQ): ("TorchAtenAwqLinear", "TorchCpuAvx512AwqLinear" if cpu_avx512 else "TorchAtenAwqLinear"),
+        (DEVICE.CUDA, METHOD.GPTQ): ("MarlinLinear", "MarlinLinear"),
+        (DEVICE.CUDA, METHOD.AWQ): ("AwqMarlinLinear", "AwqMarlinLinear"),
+        (DEVICE.ROCM, METHOD.GPTQ): ("TorchLinear", "TorchLinear"),
+        (DEVICE.ROCM, METHOD.AWQ): ("AwqGEMMTritonLinear", "AwqTorchLinear"),
+    }[family, method][dtype == torch.bfloat16]
+    # AVX512-BF16 is hardware-specific; AUTO must preserve its native selection when available.
+    assert selected.__name__ == expected
+    assert selected in SPECS
+    record_property("auto_kernel", expected)

@@ -9,31 +9,31 @@ import pytest
 import torch
 
 from gptqmodel.utils import marlin
-from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from gptqmodel.utils.marlin_scalar_type import scalar_types
+from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 
 
 def _gemm_args(a: torch.Tensor, *, g_idx=None, perm=None, fp32=True):
-    return dict(
-        a=a,
-        c=None,
-        b_q_weight=torch.zeros((1, 1), dtype=torch.int32),
-        b_bias=None,
-        b_scales=torch.ones((1, 1), dtype=a.dtype),
-        global_scale=None,
-        b_zeros=None,
-        g_idx=g_idx,
-        perm=perm,
-        workspace=torch.zeros(1, dtype=torch.int32),
-        b_q_type=scalar_types.uint4b8,
-        size_m=a.shape[0],
-        size_n=1,
-        size_k=a.shape[1],
-        is_k_full=True,
-        use_atomic_add=False,
-        use_fp32_reduce=fp32,
-        is_zp_float=False,
-    )
+    return {
+        "a": a,
+        "c": None,
+        "b_q_weight": torch.zeros((1, 1), dtype=torch.int32),
+        "b_bias": None,
+        "b_scales": torch.ones((1, 1), dtype=a.dtype),
+        "global_scale": None,
+        "b_zeros": None,
+        "g_idx": g_idx,
+        "perm": perm,
+        "workspace": torch.zeros(1, dtype=torch.int32),
+        "b_q_type": scalar_types.uint4b8,
+        "size_m": a.shape[0],
+        "size_n": 1,
+        "size_k": a.shape[1],
+        "is_k_full": True,
+        "use_atomic_add": False,
+        "use_fp32_reduce": fp32,
+        "is_zp_float": False,
+    }
 
 
 def _patch_ops(monkeypatch, sizes):

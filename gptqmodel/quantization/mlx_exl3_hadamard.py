@@ -6,6 +6,7 @@
 
 from functools import lru_cache
 
+
 _EXL3_HADAMARD_SIZE = 128
 
 

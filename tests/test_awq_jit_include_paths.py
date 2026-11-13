@@ -8,6 +8,7 @@ from gptqmodel.utils import cpp as cpp_module
 
 
 def test_awq_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     root = tmp_path / "awq"
     local_cuda_include = tmp_path / "local_cuda_include"
     wheel_cuda_include = tmp_path / "wheel_cuda_include"

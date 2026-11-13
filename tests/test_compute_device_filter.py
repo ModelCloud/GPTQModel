@@ -1,8 +1,10 @@
 # GPU=-1
 import types
+from types import SimpleNamespace
 
 import torch
 
+from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.module_looper import ModuleLooper
 
 
@@ -121,6 +123,57 @@ def test_compute_device_filter_applies_to_forward_devices(monkeypatch):
     assert outputs == []
     assert called_devices
     assert torch.device("meta") not in called_devices
+
+
+class _ForwardStubLooper:
+    def __init__(self, compute_device_filter):
+        self.gptq_model = SimpleNamespace(
+            quantize_config=SimpleNamespace(
+                compute_device_filter=compute_device_filter,
+                auto_forward_data_parallel=True,
+                calibration_data_device=None,
+            ),
+            write_shared_kv_cache=False,
+        )
+        self.moe_routing_override = None
+        self.moe_routing_bypass = False
+        self.support_batch_quantize = False
+
+
+def test_serial_fallback_stages_on_sole_surviving_filtered_device():
+    base_device = torch.device("cuda:0")
+    surviving_device = torch.device("cuda:1")
+    candidates = [base_device, surviving_device]
+
+    def compute_device_filter(devices):
+        return [device for device in devices if device.index == 1]
+
+    executor = ForwardExecutor(_ForwardStubLooper(compute_device_filter))
+    captured = {}
+
+    def fake_run_single(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    executor.run_single = fake_run_single
+
+    executor.run(
+        module=torch.nn.Linear(1, 1),
+        processor=SimpleNamespace(num_batches=1),
+        layer_inputs=[[torch.zeros(1, 1)]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[None],
+        cur_layer_device=base_device,
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=False,
+        reuse_kv=False,
+        select_forward_devices_fn=lambda _base: list(candidates),
+    )
+
+    assert captured["cur_layer_device"] == surviving_device
 
 
 def test_parallel_forward_writes_shared_kv_cache_when_model_requests_it(monkeypatch):

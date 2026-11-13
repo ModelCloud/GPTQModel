@@ -75,8 +75,11 @@ def test_qqq_metal_dynamic_quant_matches_torch_codes(width, dtype):
     source[0, 0] = 0
     source[0, 1, 0] = 1
     source[0, 1, 1] = -1
+    source[1, 0] = 2**-20
+    source[1, 1] = -(2**-20)
     half = source.half()
-    expected_scales = (half.abs().amax(dim=-1, keepdim=True) / 127).float()
+    expected_scales = (half.float().abs().amax(dim=-1, keepdim=True) / 127)
+    expected_scales = torch.where(expected_scales == 0, 1., expected_scales)
     expected_codes = (half / expected_scales).round().clamp(-128, 127).to(torch.int8)
     quantized, scales = _dynamic_quant(mx.array(half.numpy()))
     mx.eval(quantized, scales)
@@ -114,7 +117,7 @@ def test_qqq_qwen_down_wide_reduction_matches_previous_and_torch(
     )
 
     torch_input = torch.from_numpy(np.asarray(half)).double()
-    torch_scale = (torch_input.abs().amax(dim=-1, keepdim=True).half() / 127).double()
+    torch_scale = (torch_input.float().abs().amax(dim=-1, keepdim=True) / 127).double()
     torch_codes = (torch_input / torch_scale).round().clamp(-128, 127)
     raw_row = (
         torch_codes @ torch.from_numpy(row_weight.astype(np.float64))
@@ -203,7 +206,7 @@ def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, row
     output = model(mx.array(x))
     mx.eval(output)
     x_t = torch.from_numpy(x)
-    scale = (x_t.abs().amax(dim=-1, keepdim=True) / 127).float()
+    scale = (x_t.float().abs().amax(dim=-1, keepdim=True) / 127)
     quantized = (x_t / scale).round().clamp(-128, 127).to(torch.int8)
     expected = (quantized.float() @ weight.float() * scale * channel).half()
     expected += source.linear.bias

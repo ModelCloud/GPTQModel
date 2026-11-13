@@ -83,7 +83,8 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
     torch.manual_seed(7)
     hidden_size, intermediate_size = (64, 128) if method == "awq" else (32, 64)
     config = LlamaConfig(vocab_size=128, hidden_size=hidden_size, intermediate_size=intermediate_size,
-                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1,
+                         attention_bias=method == "fp8_e5m2")
     config._attn_implementation = "eager"
     model = LlamaForCausalLM(config).half().eval()
     if method == "awq":
@@ -146,6 +147,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             packed = wrapper.model.get_submodule(name)
             assert torch.equal(packed.weight.cpu().view(torch.uint8), fitted_weight.view(torch.uint8))
             assert torch.equal(packed.weight_scale_inv.cpu(), fitted_scale)
+            assert packed.weight_scale_inv.dtype == torch.float32
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         before = wrapper.model(ids, use_cache=False).logits.detach()
@@ -160,6 +162,43 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
             assert torch.equal(saved[f"{name}.weight_scale_inv"], fitted_scale)
     loaded = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
                             dtype=torch.float16, attn_implementation="eager")
+    if method == "fp8_e5m2":
+        from safetensors.torch import load_file
+
+        saved = load_file(checkpoint / "model.safetensors")
+        loaded_bf16 = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
+                                     dtype=torch.bfloat16, attn_implementation="eager")
+        for name, scale in saved.items():
+            if not name.endswith(".weight_scale_inv"):
+                continue
+            module = loaded_bf16.model.get_submodule(name.removesuffix(".weight_scale_inv"))
+            assert module.weight_scale_inv.dtype == torch.float32
+            torch.testing.assert_close(module.weight_scale_inv.cpu(), scale, rtol=0, atol=0)
+        fp8_biases = [
+            name for name in saved
+            if name.endswith(".bias")
+            and saved[f"{name.removesuffix('.bias')}.weight"].dtype == torch.float8_e5m2
+        ]
+        assert fp8_biases
+        for name in fp8_biases:
+            module = loaded_bf16.model.get_submodule(name.removesuffix(".bias"))
+            assert module.bias.dtype == torch.float32
+            torch.testing.assert_close(module.bias.cpu(), saved[name].float(), rtol=0, atol=0)
+        for reloaded in (loaded, loaded_bf16):
+            for name, packed in saved.items():
+                if packed.dtype != torch.float8_e5m2:
+                    continue
+                module = reloaded.model.get_submodule(name.removesuffix(".weight"))
+                assert module.weight.dtype == torch.float8_e5m2
+                assert module.weight.numel() * module.weight.element_size() == packed.numel()
+                assert torch.equal(module.weight.cpu().view(torch.uint8), packed.view(torch.uint8))
+                assert torch.equal(reloaded.model.state_dict()[name].cpu().view(torch.uint8),
+                                   packed.view(torch.uint8))
+    if method == "fp8_calibrated":
+        for name, (_, fitted_scale) in fitted_payloads.items():
+            reloaded = loaded.model.get_submodule(name)
+            assert reloaded.weight_scale_inv.dtype == torch.float32
+            assert torch.equal(reloaded.weight_scale_inv.cpu(), fitted_scale)
     assert loaded.quantize_config.gsq == gsq
     if method.startswith("fp8"):
         assert loaded.quantize_config.gsq_calibration == (method == "fp8_calibrated")

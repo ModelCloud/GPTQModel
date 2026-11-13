@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -17,20 +18,55 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
 
-try:
-    import llama_cpp as _llama_cpp_pkg
-    from llama_cpp import llama_cpp as _llama_cpp_lib
-    from llama_cpp._ctypes_extensions import load_shared_library as _llama_cpp_load_shared_library
+# Imported lazily by ``_require_llama_cpp``: importing llama-cpp-python costs
+# tens of milliseconds and must not happen while the kernel registry is merely
+# being discovered. The module attributes stay available for callers that read
+# them after an explicit import.
+_llama_cpp_pkg = None
+_llama_cpp_lib = None
+_llama_cpp_load_shared_library = None
+_LLAMA_CPP_IMPORT_ERROR = None
+_LLAMA_CPP_LOADED = False
+_LLAMA_CPP_LOCK = threading.Lock()
 
-    _LLAMA_CPP_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - optional dependency
-    _llama_cpp_pkg = None
-    _llama_cpp_lib = None
-    _llama_cpp_load_shared_library = None
-    _LLAMA_CPP_IMPORT_ERROR = exc
+
+def _require_llama_cpp():
+    """Import llama-cpp-python once and return its module objects.
+
+    The lock keeps a concurrent caller from observing the "already loaded" flag
+    before the module objects are assigned, which used to hand back
+    ``(None, None, None)`` and turn a missing backend into an ``AttributeError``
+    on ``Path(None.__file__)``.
+    """
+
+    global _LLAMA_CPP_LOADED, _LLAMA_CPP_IMPORT_ERROR
+    global _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
+
+    if _LLAMA_CPP_LOADED:
+        return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
+
+    with _LLAMA_CPP_LOCK:
+        if not _LLAMA_CPP_LOADED:
+            try:
+                import llama_cpp as llama_cpp_pkg
+                from llama_cpp import llama_cpp as llama_cpp_lib
+                from llama_cpp._ctypes_extensions import (
+                    load_shared_library as llama_cpp_load_shared_library,
+                )
+
+                _llama_cpp_pkg = llama_cpp_pkg
+                _llama_cpp_lib = llama_cpp_lib
+                _llama_cpp_load_shared_library = llama_cpp_load_shared_library
+                _LLAMA_CPP_IMPORT_ERROR = None
+            except Exception as exc:  # pragma: no cover - optional dependency
+                _LLAMA_CPP_IMPORT_ERROR = exc
+            _LLAMA_CPP_LOADED = True
+
+    return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
 
 
 class _GGMLInitParams(ctypes.Structure):
@@ -87,6 +123,18 @@ class _GGMLMatmulPlan:
             pass
 
 
+# Q8_1 and Q8_K are KV-cache/auxiliary types upstream with no vec_dot kernel
+# for an F32 source, so the CPU backend must never hand them to ggml either:
+# ggml_mul_mat dereferences the missing pointer instead of raising.
+_GGML_CPU_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
+
+# The CUDA backend has no convert/vec_dot kernel for the ternary types on top of
+# the two above, and `GGML_ASSERT(convert_func != nullptr)` in ggml-cuda.cu
+# aborts the whole process rather than raising. The CPU backend does handle
+# TQ1_0/TQ2_0, so this set must not be reused there.
+_GGML_CUDA_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED | frozenset({"TQ1_0", "TQ2_0"})
+_MAX_GGML_CUDA_PLANS = 8
+
 # Upstream enum ggml_type values for constants llama-cpp-python does not export
 # (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35).
 _GGML_TYPE_ID_FALLBACK = {
@@ -100,24 +148,25 @@ class _GGMLBridge:
     GGML_METADATA_BYTES = 1 << 20
 
     def __init__(self) -> None:
+        llama_cpp_pkg, llama_cpp_lib, load_shared_library = _require_llama_cpp()
         if _LLAMA_CPP_IMPORT_ERROR is not None:
             raise ModuleNotFoundError(
                 "GGUFCppKernel requires `llama-cpp-python` to be installed."
             ) from _LLAMA_CPP_IMPORT_ERROR
 
-        lib_dir = Path(_llama_cpp_pkg.__file__).resolve().parent / "lib"
-        self._ggml_base = _llama_cpp_load_shared_library("ggml-base", lib_dir)
-        self._ggml_cpu = _llama_cpp_load_shared_library("ggml-cpu", lib_dir)
+        lib_dir = Path(llama_cpp_pkg.__file__).resolve().parent / "lib"
+        self._ggml_base = load_shared_library("ggml-base", lib_dir)
+        self._ggml_cpu = load_shared_library("ggml-cpu", lib_dir)
         self._ggml_cuda = None
         self._ggml_cuda_error: Optional[Exception] = None
         try:
-            self._ggml_cuda = _llama_cpp_load_shared_library("ggml-cuda", lib_dir)
+            self._ggml_cuda = load_shared_library("ggml-cuda", lib_dir)
         except Exception as exc:  # pragma: no cover - optional shared library
             self._ggml_cuda_error = exc
         self._bind_functions()
 
-        self.ggml_type_f32 = int(_llama_cpp_lib.GGML_TYPE_F32)
-        self.ggml_type_f16 = int(_llama_cpp_lib.GGML_TYPE_F16)
+        self.ggml_type_f32 = int(llama_cpp_lib.GGML_TYPE_F32)
+        self.ggml_type_f16 = int(llama_cpp_lib.GGML_TYPE_F16)
         self.ggml_qtypes = {}
         for name in (
             "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
@@ -126,7 +175,7 @@ class _GGMLBridge:
             "IQ2_S", "IQ4_XS", "I8", "I16", "I32", "I64", "F64", "IQ1_M",
             "BF16", "TQ1_0", "TQ2_0", "MXFP4", "NVFP4", "Q1_0", "Q2_0",
         ):
-            value = getattr(_llama_cpp_lib, f"GGML_TYPE_{name}", None)
+            value = getattr(llama_cpp_lib, f"GGML_TYPE_{name}", None)
             if value is None:
                 value = _GGML_TYPE_ID_FALLBACK.get(name)
             if value is not None:
@@ -423,9 +472,10 @@ class _GGMLBridge:
         elif x_cuda.dtype == torch.float32:
             ggml_input_type = self.ggml_type_f32
         elif x_cuda.dtype == torch.bfloat16:
-            # ggml in llama-cpp-python does not expose BF16 here, so use native CUDA fp16.
-            x_cuda = x_cuda.to(dtype=torch.float16)
-            ggml_input_type = self.ggml_type_f16
+            # ggml has no BF16 input type here. FP32 preserves the BF16 range;
+            # casting to FP16 can turn finite values into inf or zero.
+            x_cuda = x_cuda.to(dtype=torch.float32)
+            ggml_input_type = self.ggml_type_f32
         else:
             raise RuntimeError(
                 "GGUFCudaKernel only supports float16, bfloat16, or float32 inputs."
@@ -674,10 +724,9 @@ class _GGMLBridge:
         )
         return output
 
-    # Q8_1 and Q8_K are KV-cache/auxiliary types upstream with no vec_dot
-    # kernel for an F32 source, and ggml_mul_mat dereferences the missing
-    # pointer instead of erroring, so they must never reach graph compute.
-    _GGML_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
+    # CPU-side set, kept as a class attribute because callers read
+    # `_GGMLBridge._GGML_MATMUL_UNSUPPORTED`.
+    _GGML_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED
 
     def quantized_matmul_cpu(
         self,
@@ -731,6 +780,13 @@ class _GGMLBridge:
     ) -> tuple[torch.Tensor, _GGMLMatmulPlan]:
         if x.device.type != "cuda":
             raise RuntimeError("GGUFCudaKernel only supports CUDA input tensors.")
+        if gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED:
+            # ggml-cuda aborts the process on these (no convert/vec_dot kernel),
+            # so refuse them instead of building a graph.
+            raise NotImplementedError(
+                f"ggml CUDA matmul does not support `{gguf_tensor_qtype}` weights; "
+                "use BACKEND.GGUF_TORCH instead."
+            )
 
         device = x.device
         backend = self._get_cuda_backend(0 if device.index is None else device.index)
@@ -766,6 +822,33 @@ def _get_ggml_bridge() -> _GGMLBridge:
         if _GGML_BRIDGE is None:
             _GGML_BRIDGE = _GGMLBridge()
         return _GGML_BRIDGE
+
+
+def _finish_ggml_output(
+    module: GGUFTorchLinear, x_flat: torch.Tensor, output: torch.Tensor
+) -> torch.Tensor:
+    """Add the stored bias before rounding a ggml result to the input dtype."""
+
+    bias = module.bias
+    if bias is not None and (
+        x_flat.device.type == "cuda" or output.dtype in (torch.float16, torch.bfloat16)
+    ):
+        # A low-precision ggml output has already rounded the dot product.
+        # GGML CUDA can also return an FP32 tensor whose product has already
+        # overflowed or lost precision, including inf for a finite result.
+        # Recompute these biased cases before rounding to the input dtype.
+        with torch.autocast(device_type=x_flat.device.type, enabled=False):
+            weight = module.dequantize_weight(device=x_flat.device, dtype=torch.float32)
+            output = x_flat.float() @ weight
+            output = output + bias.to(device=x_flat.device, dtype=torch.float32)
+            del weight
+        return output.to(x_flat.dtype)
+
+    if output.device != x_flat.device:
+        output = output.to(device=x_flat.device)
+    if bias is not None:
+        output = output + bias.to(device=output.device, dtype=output.dtype)
+    return output.to(x_flat.dtype)
 
 
 class GGUFCppKernel(GGUFTorchLinear):
@@ -840,10 +923,12 @@ class GGUFCppKernel(GGUFTorchLinear):
             out_features=self.out_features,
         )
 
-    def _forward_torch_cpu(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_torch_cpu(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if self._should_use_fused_k_forward(x_flat):
-            return self._forward_fused_k(x_flat)
-        return self._forward_dequant_matmul(x_flat)
+            return self._forward_fused_k(x_flat, bias=bias)
+        return self._forward_dequant_matmul(x_flat, bias=bias)
 
     def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
@@ -857,10 +942,14 @@ class GGUFCppKernel(GGUFTorchLinear):
         if cached is None:
             try:
                 ggml_time = self._benchmark_forward_runner(
-                    lambda: self._forward_ggml_cpu(x_flat), device=x_flat.device
+                    lambda: _finish_ggml_output(
+                        self, x_flat, self._forward_ggml_cpu(x_flat)
+                    ),
+                    device=x_flat.device,
                 )
                 torch_time = self._benchmark_forward_runner(
-                    lambda: self._forward_torch_cpu(x_flat), device=x_flat.device
+                    lambda: self._forward_torch_cpu(x_flat, bias=self.bias),
+                    device=x_flat.device,
                 )
                 cached = ggml_time <= torch_time
             except Exception:
@@ -886,17 +975,9 @@ class GGUFCppKernel(GGUFTorchLinear):
             )
 
         if self._use_ggml_cpu_matmul(x_flat):
-            output = self._forward_ggml_cpu(x_flat)
+            output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
         else:
-            output = self._forward_torch_cpu(x_flat)
-        if output.dtype != x_flat.dtype:
-            output = output.to(dtype=x_flat.dtype)
-
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+            output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
@@ -907,6 +988,11 @@ class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
+    # `bits` alone cannot express this: 1-bit Q1_0/IQ1_S/IQ1_M and 2-bit
+    # Q2_K/IQ2_* run through ggml CUDA, but TQ1_0 (1-bit) and TQ2_0 (2-bit)
+    # have no GPU convert kernel and abort the process. `__init__` rejects them
+    # with NotImplementedError so AUTO can fall back to GGUF_TORCH, and
+    # `quantized_matmul_cuda` re-checks as defence in depth.
     SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -957,7 +1043,18 @@ class GGUFCudaKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self._ggml_cuda_plans: Dict[tuple[int, int, torch.dtype, int], _GGMLMatmulPlan] = {}
+        self._ggml_cuda_plans: OrderedDict[
+            tuple[int, int, torch.dtype, tuple], _GGMLMatmulPlan
+        ] = OrderedDict()
+        # Reject at construction: `create_quant_layer` retries the next AUTO
+        # candidate only on a NotImplementedError raised here. A guard in
+        # `forward()` is too late to fall back and would surface as a runtime
+        # failure on an already-built layer.
+        if self.gguf_tensor_qtype in _GGML_CUDA_MATMUL_UNSUPPORTED:
+            raise NotImplementedError(
+                f"ggml CUDA matmul does not support `{self.gguf_tensor_qtype}` weights; "
+                "use BACKEND.GGUF_TORCH instead."
+            )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -972,14 +1069,32 @@ class GGUFCudaKernel(GGUFTorchLinear):
         self._ggml_cuda_plans.clear()
         return super().clear_weight_cache()
 
-    def _cuda_plan_key(self, x_flat: torch.Tensor) -> tuple[int, int, torch.dtype, int]:
+    def _cuda_plan_key(
+        self,
+        x_flat: torch.Tensor,
+    ) -> tuple[int, int, torch.dtype, tuple]:
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
         return (
             device_index,
             x_flat.shape[0],
             x_flat.dtype,
-            self.qweight.data_ptr(),
+            tensor_cache_key(self.qweight),
         )
+
+    def _remember_cuda_plan(
+        self,
+        plan_key: tuple[int, int, torch.dtype, tuple],
+        plan: _GGMLMatmulPlan,
+        *,
+        cached: bool,
+    ) -> None:
+        if cached:
+            self._ggml_cuda_plans.move_to_end(plan_key)
+            return
+        self._ggml_cuda_plans[plan_key] = plan
+        while len(self._ggml_cuda_plans) > _MAX_GGML_CUDA_PLANS:
+            _, evicted = self._ggml_cuda_plans.popitem(last=False)
+            evicted.close()
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
@@ -991,23 +1106,21 @@ class GGUFCudaKernel(GGUFTorchLinear):
             )
 
         plan_key = self._cuda_plan_key(x_flat)
+        cached_plan = self._ggml_cuda_plans.get(plan_key)
         output, plan = _get_ggml_bridge().quantized_matmul_cuda(
             qweight=self.qweight,
             x=x_flat,
             gguf_tensor_qtype=self.gguf_tensor_qtype,
             padded_in_features=self.padded_in_features,
             out_features=self.out_features,
-            plan=self._ggml_cuda_plans.get(plan_key),
+            plan=cached_plan,
         )
-        self._ggml_cuda_plans.setdefault(plan_key, plan)
-        if output.device != x_flat.device or output.dtype != x_flat.dtype:
-            output = output.to(device=x_flat.device, dtype=x_flat.dtype)
-
-        if self.bias is not None:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
-            output = output + bias
+        self._remember_cuda_plan(
+            plan_key,
+            plan,
+            cached=cached_plan is not None,
+        )
+        output = _finish_ggml_output(self, x_flat, output)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

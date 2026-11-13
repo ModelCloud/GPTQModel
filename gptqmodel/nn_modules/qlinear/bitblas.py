@@ -9,6 +9,7 @@ import ctypes
 import os
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -23,6 +24,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -128,19 +130,109 @@ def _is_bitblas_available() -> bool:
         except Exception as retry_exc:
             log.debug("BitBLAS import retry failed: %s", retry_exc)
             return False
-    parsed_version = version.parse(bitblas.__version__)
-    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    # Capture the attribute once. Reading ``bitblas.__version__`` inside the
+    # handler below would raise again for a module that has no ``__version__``
+    # at all, escaping ``validate_once``'s ``(bool, exception)`` contract.
+    raw_version = getattr(bitblas, "__version__", None)
+    try:
+        parsed_version = version.parse(raw_version)
+        minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    except Exception as exc:
+        # An unparsable or missing ``__version__`` means the build is unusable.
+        log.debug("BitBLAS version %r could not be parsed: %s", raw_version, exc)
+        return False
     if parsed_version < minimum_version:
         log.debug(
             "BitBLAS version %s below minimum required %s",
-            bitblas.__version__,
+            raw_version,
             MINIMUM_BITBLAS_VERSION,
         )
         return False
     return True
 
 
-BITBLAS_AVAILABLE = _is_bitblas_available()
+@lru_cache(maxsize=1)
+def _probe_bitblas_available() -> bool:
+    """Probe BitBLAS once, on first real use.
+
+    Importing BitBLAS is expensive and must not happen while the kernel
+    registry is merely being discovered. The probe is cached so repeated
+    ``validate_once`` calls stay cheap.
+    """
+
+    return _is_bitblas_available()
+
+
+_probe_cache_clear = _probe_bitblas_available.cache_clear
+
+
+def bitblas_available() -> bool:
+    """Return whether a supported BitBLAS is usable.
+
+    The legacy ``BITBLAS_AVAILABLE`` name is materialized from the probe on first
+    attribute access, so this accessor reads the same attribute when present
+    and otherwise probes.
+    """
+
+    namespace = sys.modules[__name__].__dict__
+    if "BITBLAS_AVAILABLE" in namespace:
+        return bool(namespace["BITBLAS_AVAILABLE"])
+    return _probe_bitblas_available()
+
+
+def _clear_availability_state() -> None:
+    """Drop the materialized value, the probe result and validation caches.
+
+    This is the escape hatch for tests and for long-lived processes where the
+    environment changes after the first probe (a package installed later, a
+    toolchain that becomes available). It also removes a value restored by
+    ``monkeypatch.undo()``, which is indistinguishable from an explicit
+    override once materialized.
+
+    The kernel's ``cached_validate_once()`` result is invalidated as well, or a
+    kernel that failed before the backend appeared stays unselectable until the
+    process ends.
+    """
+
+    sys.modules[__name__].__dict__.pop("BITBLAS_AVAILABLE", None)
+    _probe_cache_clear()
+    cls = globals().get("BitblasLinear")
+    if cls is not None:
+        cls.cached_validate_once.cache_clear()
+    # ``validate_quant_linear()`` keeps its own bounded cache of
+    # ``(bool, error)`` results. Clearing only the kernel-level cache leaves a
+    # stale "unavailable" answer there, and that cache short-circuits before
+    # ``validate()`` is ever called again. Import lazily: ``importer`` imports
+    # the kernel package, so a module-level import here would be circular.
+    from ...utils.importer import clear_validation_cache
+
+    clear_validation_cache()
+
+
+# ``cache_clear`` is the documented knob; keep it on the probe, extended with
+# the materialized attribute so clearing really re-arms everything.
+_probe_bitblas_available.cache_clear = _clear_availability_state
+
+
+def __getattr__(name: str):
+    if name == "BITBLAS_AVAILABLE":
+        # Materialize the probe as a normal module attribute. A plain attribute
+        # keeps ``del`` and ``monkeypatch`` semantics working: pytest reads the
+        # old value from ``__dict__`` and restores it on ``undo()``, so two
+        # consecutive patch contexts behave like they did before the lazy
+        # change.
+        value = _probe_bitblas_available()
+        sys.modules[__name__].__dict__[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()``/star-import unless
+    # advertised. Keep the pre-lazy surface.
+    return sorted(set(globals()) | {"BITBLAS_AVAILABLE"})
+
+
 _BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
 _BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 
@@ -150,14 +242,26 @@ BITBLAS_INSTALL_HINT = (
     f"Please install via `pip install bitblas>={MINIMUM_BITBLAS_VERSION}`."
 )
 
+BITBLAS_ROCM_UNSUPPORTED = (
+    "BitBLAS (BACKEND.GPTQ_BITBLAS / AWQ_BITBLAS) is CUDA-only: it emits "
+    "NVIDIA TensorCore code and has no ROCm backend. Use BACKEND.GPTQ_TORCH / "
+    "AWQ_GEMM_TRITON (or AUTO) on ROCm."
+)
+
 
 def import_bitblas():
     global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
 
     import bitblas
 
-    parsed_version = version.parse(bitblas.__version__)
-    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    # ``getattr`` + ``try`` keep a build with a missing or unparsable
+    # ``__version__`` on the documented ``ImportError`` path instead of letting
+    # ``AttributeError`` escape the kernel constructor.
+    try:
+        parsed_version = version.parse(getattr(bitblas, "__version__", ""))
+        minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    except Exception as exc:
+        raise ImportError(BITBLAS_INSTALL_HINT) from exc
     if parsed_version < minimum_version:
         raise ImportError(BITBLAS_INSTALL_HINT)
 
@@ -260,16 +364,25 @@ def _normalize_bitblas_target(target):
 def unpack_gptq_qzeros(qzeros: torch.Tensor, bits: int, is_gptq_v2: bool = False) -> torch.Tensor:
     qzeros = qzeros.view(torch.int32)
     elems_per_int32 = 32 // bits
+    # int8 holds 0..15 with room to spare but cannot represent an 8-bit zero
+    # point above 127: 200 wraps to -56, and the caller then subtracts one and
+    # hands it to BitBLAS as a negative offset.
+    unpacked_dtype = torch.int16 if bits > 7 else torch.int8
     unpacked_zeros = torch.zeros(
         (qzeros.shape[0], qzeros.shape[1] * elems_per_int32),
-        dtype=torch.int8,
+        dtype=unpacked_dtype,
         device=qzeros.device,
         requires_grad=False,
     )
 
+    # Mask with the full field width. A hardcoded 0xF is only correct at
+    # bits == 4: at 8 bits it drops the high nibble (127 unpacks as 15), and at
+    # 2 bits it keeps two bits of the neighbouring field (0,1,2,3 unpacks as
+    # 4,9,14,3). Both are silent - the result is still a small integer.
+    mask = (1 << bits) - 1
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
+        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & mask
 
     if not is_gptq_v2:
         return unpacked_zeros + 1
@@ -455,7 +568,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
         del fast_decoding  # unused, kept for signature compatibility
 
-        if not BITBLAS_AVAILABLE:
+        if not bitblas_available():
             raise ImportError(BITBLAS_INSTALL_HINT)
 
         self.TORCH_DTYPE = dtype
@@ -494,7 +607,11 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITBLAS_AVAILABLE:
+        # BitBLAS compiles TensorCore IR for NVIDIA targets; there is no ROCm
+        # backend, so report that instead of a misleading "not installed" hint.
+        if IS_ROCM:
+            return False, NotImplementedError(BITBLAS_ROCM_UNSUPPORTED)
+        if not bitblas_available():
             return False, ValueError(BITBLAS_INSTALL_HINT)
 
         try:
@@ -821,7 +938,19 @@ class BitblasLinear(BitblasBaseQuantLinear):
         intzeros = None
         if self.quant_config.with_zeros and hasattr(gptq_module, "qzeros") and gptq_module.qzeros is not None:
             intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).contiguous()
-            intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
+            # A v2-requiring source in the v1 checkpoint domain stores zp-1
+            # fields; shift them back to logical zero points first. Non-v2
+            # sources already carry logical values regardless of the flag.
+            if (
+                getattr(type(gptq_module), "REQUIRES_FORMAT_V2", False)
+                and getattr(gptq_module, "qzero_format", lambda: 2)() == 1
+            ):
+                intzeros = (intzeros + 1) & ((1 << bits) - 1)
+            # Remove the unpacker's +1 and keep each code in its unsigned
+            # field. The v1 correction above wraps a maximum zero point to
+            # zero; subtracting one then leaves -1, whose sign bits would
+            # overwrite neighboring fields in BitBLAS's OR-based compressor.
+            intzeros = (intzeros - 1) & ((1 << bits) - 1)
 
         bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None
         self._load_bitblas_quant_state(

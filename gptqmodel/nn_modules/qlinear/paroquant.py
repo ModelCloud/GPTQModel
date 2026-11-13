@@ -67,7 +67,7 @@ class ParoLinear(AwqTorchLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -159,16 +159,17 @@ class ParoLinear(AwqTorchLinear):
         else:
             self.channel_scales = channel_scales
 
-    def post_init(self):
-        """Refresh cached runtime state after weights or rotation buffers change."""
-        super().post_init()
-        self._clear_rotation_runtime_cache()
-        self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
-
     def clear_weight_cache(self) -> None:
         """Drop packed-weight and rotation-derived state after a mutation."""
         super().clear_weight_cache()
         self._clear_rotation_runtime_cache()
+        # A meta/offloaded buffer has no values to inspect. Keep the shortcut
+        # disabled until a materialized load or move clears the cache again.
+        self._rotation_identity = (
+            not self.theta.is_meta
+            and not self.channel_scales.is_meta
+            and is_identity_rotation(self.theta, self.channel_scales)
+        )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -197,12 +198,50 @@ class ParoLinear(AwqTorchLinear):
         self._cpu_aten_layer = None
         self._cpu_aten_key = None
         self._cpu_aten_failed_key = None
+        self._runtime_dtype_key = None
+        self._runtime_scales = None
+        self._runtime_bias = None
 
-    def _ensure_runtime_dtype(self, device: torch.device, dtype: torch.dtype) -> None:
-        if self.scales is not None and (self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous()):
-            self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
-        if self.bias is not None and (self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()):
-            self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+    def _runtime_dtype_tensors(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        cache: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        runtime_key = (
+            tensor_cache_key(self.scales),
+            tensor_cache_key(self.bias),
+            device,
+            dtype,
+        )
+        if cache and self._runtime_dtype_key == runtime_key:
+            return self._runtime_scales, self._runtime_bias
+
+        scales = self.scales
+        if (
+            scales.device != device
+            or scales.dtype != dtype
+            or not scales.is_contiguous()
+        ):
+            scales = scales.to(device=device, dtype=dtype).contiguous()
+
+        bias = self.bias
+        if (
+            bias is not None
+            and (
+                bias.device != device
+                or bias.dtype != dtype
+                or not bias.is_contiguous()
+            )
+        ):
+            bias = bias.to(device=device, dtype=dtype).contiguous()
+
+        if cache:
+            self._runtime_dtype_key = runtime_key
+            self._runtime_scales = scales
+            self._runtime_bias = bias
+        return scales, bias
 
     def _ensure_rotation_runtime_dtype(
         self,
@@ -286,24 +325,11 @@ class ParoLinear(AwqTorchLinear):
         use_cached_runtime_dtype = self.cache_runtime_dtype or (
             self.auto_cache_bf16_runtime_dtype and compute_dtype == torch.bfloat16
         )
-        if use_cached_runtime_dtype:
-            self._ensure_runtime_dtype(kernel_input.device, compute_dtype)
-            kernel_scales = self.scales
-            kernel_bias = self.bias
-        else:
-            kernel_scales = self.scales
-            if (
-                kernel_scales.device != kernel_input.device
-                or kernel_scales.dtype != compute_dtype
-                or not kernel_scales.is_contiguous()
-            ):
-                kernel_scales = kernel_scales.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
-            kernel_bias = self.bias
-            if (
-                kernel_bias is not None
-                and (kernel_bias.device != kernel_input.device or kernel_bias.dtype != compute_dtype or not kernel_bias.is_contiguous())
-            ):
-                kernel_bias = kernel_bias.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
+        kernel_scales, kernel_bias = self._runtime_dtype_tensors(
+            kernel_input.device,
+            compute_dtype,
+            cache=use_cached_runtime_dtype,
+        )
         out = _awq_cuda_gemm_forward(
             kernel_input.reshape(-1, kernel_input.shape[-1]),
             self.qweight,

@@ -8,12 +8,18 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    CalibrationConfig,
+    ForwardConfig,
+    LoopProcessor,
+    ProcessorLifecycleConfig,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
+
 
 log = setup_logger()
 
@@ -23,17 +29,20 @@ NATIVE_INPUTS_STATE_KEY = "native_inp"
 class NativeProcessor(LoopProcessor):
     """Caches raw module inputs for later native or GPTAQ-style processing."""
 
+    lifecycle = ProcessorLifecycleConfig(
+        forward=ForwardConfig(
+            required=True,
+            replay_after_process=False,
+            all_modules_in_single_pass=True,
+        ),
+    )
+
     def __init__(
         self,
         tokenizer,
         qcfg: QuantizeConfig,
-        calibration,
-        prepare_dataset_func,
-        calibration_concat_size: Optional[int],
-        calibration_sort: Optional[str],
-        batch_size: int,
-        require_fwd: bool = True,
-        calibration_concat_separator: Optional[str] = None,
+        calibration: CalibrationConfig,
+        forward: Optional[ForwardConfig] = None,
     ):
         """Initializes the processor and enables single-pass input capture."""
 
@@ -41,16 +50,7 @@ class NativeProcessor(LoopProcessor):
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort=calibration_sort,
-            calibration_concat_separator=calibration_concat_separator,
-            prepare_dataset_func=prepare_dataset_func,
-            batch_size=batch_size,
-            execution_config=ExecutionConfig(
-                require_fwd=require_fwd,
-                fwd_replay_after_process=False,
-                fwd_all_modules_in_single_pass=True,
-            ),
+            forward=forward,
         )
 
         self.native_inp_caches = {}

@@ -18,7 +18,6 @@
 
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -35,8 +34,8 @@ from ...utils.marlin import (
     apply_gptq_marlin_linear_padded,
     gptq_marlin_repack,
     marlin_import_exception,
-    marlin_is_tile_aligned,
     marlin_is_k_full,
+    marlin_is_tile_aligned,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_pad_dim,
@@ -64,7 +63,10 @@ _MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
 
 
 class MarlinLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+    # GPTQ sub-kernel of the shared Marlin backend. ``BACKEND.MARLIN`` plus the
+    # checkpoint method/format selects this class; no separate GPTQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.GPTQ_V2: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -122,14 +124,14 @@ class MarlinLinear(GPTQQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
-        selected_backend = kwargs.pop("backend", BACKEND.GPTQ_MARLIN)
+        selected_backend = kwargs.pop("backend", BACKEND.MARLIN)
         # Padding adds work to every forward, so automatic selection stays conservative.
         if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
             out_features, in_features
         ):
             raise NotImplementedError(
                 "Automatic Marlin selection keeps tile-misaligned shapes on "
-                "the next compatible backend; request GPTQ_MARLIN explicitly "
+                "the next compatible backend; request BACKEND.MARLIN explicitly "
                 "to enable runtime tile padding."
             )
 
@@ -500,10 +502,13 @@ def _get_perms():
         for j in range(4):
             perm.extend([p + 256 * j for p in perm1])
 
-    perm = np.array(perm)
-    interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel()
-    perm = torch.from_numpy(perm)
+    interleave = [0, 2, 4, 6, 1, 3, 5, 7]
+    perm = [
+        perm[row * 8 + column]
+        for row in range(len(perm) // 8)
+        for column in interleave
+    ]
+    perm = torch.tensor(perm, dtype=torch.long)
     scale_perm = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])

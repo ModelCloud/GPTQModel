@@ -13,6 +13,7 @@ import torch
 from gptqmodel.nn_modules.qlinear import fp8 as fp8_linear
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -99,12 +100,14 @@ def test_fp8_all_zero_groups(fmt):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_fp8_subnormal_groups_and_infinite_inverse_scale(fmt):
+def test_fp8_subnormal_groups_and_bounded_inverse_scale(fmt):
     tiny = np.float32(1e-40)
     weight = np.zeros((4, 128), dtype=np.float32)
     weight[0, :4] = [tiny, -tiny, 0, -0.0]
     weight[1, :4] = [2 * tiny, -2 * tiny, 0, -0.0]
     _compare(weight, fmt, "tensor")
+    _, scales = quantize_fp8_weight_mlx(mx.array(weight), format=fmt, weight_scale_method="tensor")
+    assert np.isfinite(np.asarray(scales)).all()
     weight[2, 64] = 1
     _compare(weight, fmt, "row")
     _compare(weight, fmt, "block", (2, 64))

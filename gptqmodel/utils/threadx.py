@@ -93,6 +93,12 @@ def _coerce_device(d: DeviceLike) -> torch.device:
     """
     if isinstance(d, torch.device):
         return d
+    # ``DEVICE.ROCM`` (and the other DEVICE members) are support-family enums;
+    # their value is not necessarily a torch device type. Resolve to the
+    # runtime family (ROCm -> ``cuda``) so family-wide locks keep working.
+    family = getattr(d, "type", None)
+    if isinstance(family, str) and hasattr(d, "to_torch_device"):
+        return torch.device(family)
     if isinstance(d, int):
         if torch.cuda.is_available():
             return torch.device("cuda", d)
@@ -905,9 +911,21 @@ class DeviceThreadPool:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
                 continue
             for worker in self._worker_groups.get(key, ()):
-                worker.submit(_noop)
+                # The no-op runs through the worker's normal completion path,
+                # which calls _on_task_finished() -> _mark_finished(). Account
+                # for it exactly like submit() does; otherwise its completion
+                # decrements in-flight work that is still running and wait()
+                # can return before that work finishes.
+                self._mark_scheduled(key)
+                try:
+                    worker.submit(_noop)
+                except BaseException:
+                    self._mark_finished(key)
+                    raise
 
     def _resolve_device_key(self, device: DeviceLike | str) -> str:
+        if hasattr(device, "to_torch_device"):
+            device = device.type
         if isinstance(device, str):
             if device == "all":
                 raise ValueError("'all' is not a valid concrete device specification")
@@ -1266,6 +1284,8 @@ class DeviceThreadPool:
           - 'all' for every device in the pool
         Returns a context manager.
         """
+        if hasattr(device, "to_torch_device"):
+            device = device.type
         # Family string shortcut (e.g., "cuda" or "all")
         if isinstance(device, str):
             if device == "all":
@@ -1477,6 +1497,8 @@ class DeviceThreadPool:
         keys: List[str] = []
         seen: set[str] = set()
         for s in scope:
+            if hasattr(s, "to_torch_device"):
+                s = s.type
             if isinstance(s, str):
                 if s == "all":
                     for key in self._ordered_keys:

@@ -5,11 +5,10 @@
 
 from typing import Dict
 
-import requests
-from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched_conversations
+from ...utils.image import load_image_from_url
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -121,9 +120,7 @@ class InternS1QModel(BaseQModel):
 
             for item in msg["content"]:
                 if isinstance(item, dict) and item.get("type") == "image":
-                    item["image"] = Image.open(
-                        requests.get(item["image"], stream=True).raw
-                    )
+                    item["image"] = load_image_from_url(item["image"])
 
         return sample
 

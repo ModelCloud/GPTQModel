@@ -18,21 +18,30 @@ from huggingface_hub import snapshot_download
 from transformers import PreTrainedModel
 
 from ..models import BaseQModel
-from ..nn_modules.qlinear.mlx import (AWQBitBLASMlxQuantLinear, AWQMarlinMlxQuantLinear,
-                                      AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
-                                      AwqMlxQuantLinear, BitsAndBytesMlxQuantLinear,
-                                      FP8MlxQuantLinear, GGUFMlxQuantLinear,
-                                      GPTQBitBLASMlxQuantLinear, GPTQMarlinMlxQuantLinear,
-                                      LLMAwqMlxQuantLinear, MlxQuantLinear,
-                                      ParoMlxQuantLinear, QQQMlxQuantLinear)
-from ..nn_modules.qlinear.paroquant import ParoLinear
-from ..nn_modules.qlinear.qqq import QQQTorchLinear
-from ..nn_modules.qlinear.gguf import GGUFTorchLinear
-from ..nn_modules.qlinear.fp8 import TorchFP8Linear
+from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
-from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+from ..nn_modules.qlinear.gguf import GGUFTorchLinear
+from ..nn_modules.qlinear.mlx import (
+    AWQBitBLASMlxQuantLinear,
+    AwqGemvFastMlxQuantLinear,
+    AwqGemvMlxQuantLinear,
+    AWQMarlinMlxQuantLinear,
+    AwqMlxQuantLinear,
+    BitsAndBytesMlxQuantLinear,
+    FP8MlxQuantLinear,
+    GGUFMlxQuantLinear,
+    GPTQBitBLASMlxQuantLinear,
+    GPTQMarlinMlxQuantLinear,
+    LLMAwqMlxQuantLinear,
+    MlxQuantLinear,
+    ParoMlxQuantLinear,
+    QQQMlxQuantLinear,
+)
+from ..nn_modules.qlinear.paroquant import ParoLinear
+from ..nn_modules.qlinear.qqq import QQQTorchLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization import FORMAT
@@ -44,19 +53,18 @@ from .torch import torch_empty_cache
 try:
     import mlx.core as mx
     import mlx.nn as nn
-
+    from mlx.utils import tree_map_with_path
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_logits_processors, make_sampler
     from mlx_lm.utils import _get_classes, load_config, quantize_model
-    from mlx.utils import tree_map_with_path
 
-    from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
-    from ..nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
     from ..nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
-    from ..nn_modules.qlinear.mlx_fp8 import MlxFP8Linear, MlxFP8PackedLinear
-    from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
     from ..nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
     from ..nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
+    from ..nn_modules.qlinear.mlx_fp8 import MlxFP8Linear, MlxFP8PackedLinear
+    from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
+    from ..nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
+    from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from ..nn_modules.qlinear.mlx_paro import MlxParoLinear
     from ..nn_modules.qlinear.mlx_qqq import MlxQQQLinear
     MLX_AVAILABLE = True

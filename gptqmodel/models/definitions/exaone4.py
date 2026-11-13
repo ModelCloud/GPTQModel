@@ -1,10 +1,13 @@
 from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Exaone4QModel(BaseQModel):
+
+    fusable = FusableConfig("exaone4").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -37,6 +40,8 @@ class Exaone4QModel(BaseQModel):
 
 class Exaone4_5QModel(BaseQwen3VLGPTQ):
     """Quantization layout for the EXAONE 4.5 vision-language model."""
+    fusable = FusableConfig("exaone4_5").merge(Exaone4QModel.fusable)
+
 
     loader = AutoModelForImageTextToText
     require_load_processor = True

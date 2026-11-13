@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 from torch import nn
+from transformers import AutoConfig
 
 from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
@@ -9,7 +10,6 @@ from gptqmodel.models.definitions import hunyuan_vl as hunyuan_vl_module
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.utils.hf import normalize_hf_config_compat
 from gptqmodel.utils.model import MODALITY
-from transformers import AutoConfig
 
 
 def test_hunyuan_vl_model_type_selects_definition(monkeypatch):

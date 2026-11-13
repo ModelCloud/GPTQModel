@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from gptqmodel import BACKEND
 from model_test import ModelTest
+
+from gptqmodel import BACKEND
 
 
 class TestMinimaxM3(ModelTest):
@@ -23,6 +24,10 @@ class TestMinimaxM3(ModelTest):
     EVAL_BATCH_SIZE = 1
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     LOAD_BACKEND = BACKEND.AUTO
+    # MiniMax-M3 only ships a remote `AutoProcessor` implementation. Loading it
+    # with trust_remote_code also swaps in a remote config that cannot rebuild
+    # the model, so calibration builds the native processor itself.
+    LOAD_PROCESSOR = False
 
     def test_minimax_m3(self):
         self.quantize_and_evaluate()

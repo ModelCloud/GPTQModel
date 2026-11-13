@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -390,3 +391,41 @@ def test_model_entry_point_quantizes_tiny_qwen2(method, monkeypatch, tmp_path):
     assert isinstance(
         saved["model"].model.layers[0].self_attn.q_proj, nn.QuantizedLinear
     )
+
+
+@pytest.mark.parametrize("bits,group_size", [(4, 32), (8, 64)])
+def test_gptq_wide_layer_beats_eval_per_group(monkeypatch, bits, group_size):
+    """Batched evaluation must not change the packed result.
+
+    The update chain used to drain the GPU after every group, which dominated
+    the loop. It now evaluates every ``eval_every`` groups. Force the drain on
+    every group through that knob and require bit-identical output, so the
+    batching cannot silently alter accumulated rounding.
+    """
+    mx.random.seed(707)
+    rows, columns = 96, 512
+    weight = mx.random.normal((rows, columns))
+    hinv = mx.eye(columns) + mx.triu(mx.random.normal((columns, columns)) * 1e-4, k=1)
+    mx.eval(weight, hinv)
+
+    batched = native.gptq_quantize_weight_mlx(weight, hinv, bits, group_size)
+
+    source = _source.read_text()
+    per_group = source.replace("    eval_every = 8", "    eval_every = 1")
+    assert per_group != source
+    scratch = _source.parent / "_mlx_native_eval_per_group.py"
+    try:
+        scratch.write_text(per_group)
+        spec = importlib.util.spec_from_file_location(
+            "gptqmodel_mlx_native_per_group", scratch
+        )
+        per_group_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(per_group_module)
+        drained = per_group_module.gptq_quantize_weight_mlx(
+            weight, hinv, bits, group_size
+        )
+    finally:
+        scratch.unlink(missing_ok=True)
+
+    for batched_part, drained_part in zip(batched, drained):
+        assert bool(mx.array_equal(batched_part, drained_part).item())

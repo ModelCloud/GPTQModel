@@ -18,8 +18,8 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
     _cpu_int8_dense_should_use,
-    _cpu_packed_max_rows,
     _cpu_packed_kernels,
+    _cpu_packed_max_rows,
     _dequantize_int8_weight,
 )
 from gptqmodel.quantization import FORMAT, METHOD

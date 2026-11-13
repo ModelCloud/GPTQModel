@@ -9,13 +9,13 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import GSQConfig, QuantizeConfig
 from gptqmodel.quantization.config import FORMAT
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.gsq_scalar import gsq_enabled_for, refine_gptq_scalar
-from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
 
 def test_gsq_config_round_trip_and_scope():

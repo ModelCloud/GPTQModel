@@ -15,6 +15,7 @@ from gptqmodel.models.writer import QUANT_LOG_NSAMPLES
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
+
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 MODEL_PATH = Path(

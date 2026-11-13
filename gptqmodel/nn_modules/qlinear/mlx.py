@@ -20,19 +20,25 @@ import torch
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.mlx_packing import (repack_awq, repack_awq_4bit, repack_awq_bitblas,
-                                  repack_awq_gemv, repack_awq_gemv_fast, repack_gptq,
-                                  repack_gptq_bitblas)
-from .torch import TorchLinear
-from .torch_awq import AwqTorchLinear
-from .paroquant import ParoLinear
-from .qqq import QQQTorchLinear
-from .gguf import GGUFTorchLinear
-from .fp8 import TorchFP8Linear
+from ...utils.mlx_packing import (
+    repack_awq,
+    repack_awq_4bit,
+    repack_awq_bitblas,
+    repack_awq_gemv,
+    repack_awq_gemv_fast,
+    repack_gptq,
+    repack_gptq_bitblas,
+)
+from . import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from .bitsandbytes import BitsAndBytesLinear
+from .fp8 import TorchFP8Linear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
-from . import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
+from .gguf import GGUFTorchLinear
+from .paroquant import ParoLinear
+from .qqq import QQQTorchLinear
+from .torch import TorchLinear
+from .torch_awq import AwqTorchLinear
 
 
 class _MlxLinearContract:

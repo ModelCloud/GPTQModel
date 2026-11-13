@@ -21,6 +21,7 @@ from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
 from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from gptqmodel.utils.model import get_layers_with_prefixes, thinker_multimodal_model
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
@@ -188,13 +189,30 @@ class TestQwen2_5_OmniModuleTree(ModelTest):
         with init_empty_weights(include_buffers=True):
             shell = AutoModelForTextToWaveform.from_config(config, trust_remote_code=False)
 
-        decoder_layer = shell.thinker.model.layers[0]
+        variants = Qwen2_5_OmniGPTQ._iter_module_tree_variants()
+        self.assertEqual(
+            [variant[:-1] for variant in variants],
+            [
+                ["thinker", "model", "layers", "#"],
+                ["thinker", "model", "language_model", "layers", "#"],
+            ],
+        )
+        for variant in variants:
+            self.assertIn("q_proj:0", variant[-1]["self_attn"])
+
+        layers, layer_names = get_layers_with_prefixes(shell, Qwen2_5_OmniGPTQ.extract_layers_node())
+        self.assertIsNotNone(layers)
+        # Only one of the two layouts exists in a given transformers release,
+        # and it must not be collected twice.
+        self.assertEqual(len(layers), len({id(layer) for layer in layers}))
+        self.assertIn(layer_names[0], ("thinker.model.layers.0", "thinker.model.language_model.layers.0"))
+
+        decoder_layer = layers[0]
         self.assertTrue(hasattr(shell, "thinker"))
-        self.assertTrue(hasattr(shell.thinker, "visual"))
-        self.assertTrue(hasattr(shell.thinker, "audio_tower"))
+        mm_model = thinker_multimodal_model(shell)
+        self.assertTrue(hasattr(mm_model, "visual"))
+        self.assertTrue(hasattr(mm_model, "audio_tower"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
-        self.assertIn("q_proj:0", Qwen2_5_OmniGPTQ.module_tree[-1]["self_attn"])
-        self.assertEqual(Qwen2_5_OmniGPTQ.module_tree[:4], ["thinker", "model", "layers", "#"])
 
 
 class TestQwen3MoeModuleTree(ModelTest):
@@ -227,9 +245,9 @@ class TestQwen3_5ModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.linear_attn, "conv1d"))
         self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_b"))
         self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_a"))
-        self.assertIn("conv1d:!", Qwen3_5QModel.module_tree[-1]["linear_attn"])
-        self.assertIn("in_proj_b:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
-        self.assertIn("in_proj_a:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
+        self.assertIn("conv1d:!", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
+        self.assertIn("in_proj_b:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
+        self.assertIn("in_proj_a:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn:!"])
 
 
 class TestQwen3_5MoeModuleTree(ModelTest):
@@ -269,12 +287,22 @@ class TestQwen3OmniModuleTree(ModelTest):
         with init_empty_weights(include_buffers=True):
             shell = AutoModelForTextToWaveform.from_config(config, trust_remote_code=False)
 
-        decoder_layer = shell.thinker.model.layers[0]
+        self.assertEqual(
+            Qwen3OmniMoeGPTQ.extract_layers_node(),
+            ["thinker.model.layers", "thinker.model.language_model.layers"],
+        )
+        layers, layer_names = get_layers_with_prefixes(shell, Qwen3OmniMoeGPTQ.extract_layers_node())
+        self.assertIsNotNone(layers)
+        self.assertEqual(len(layers), len({id(layer) for layer in layers}))
+        self.assertIn(layer_names[0], ("thinker.model.layers.0", "thinker.model.language_model.layers.0"))
+
+        decoder_layer = layers[0]
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
-        self.assertEqual(Qwen3OmniMoeGPTQ.module_tree[-1]["mlp:moe"]["gate"], ("gate:!",))
-        self.assertIn("q_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
-        self.assertIn("k_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
+        for variant in Qwen3OmniMoeGPTQ._iter_module_tree_variants():
+            self.assertEqual(variant[-1]["mlp:moe"]["gate"], ("gate:!",))
+            self.assertIn("q_norm:!", variant[-1]["self_attn"])
+            self.assertIn("k_norm:!", variant[-1]["self_attn"])
 
 
 class TestQwen3NextModuleTree(ModelTest):

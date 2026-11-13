@@ -92,6 +92,8 @@ class CudaEventActivationBuffer:
         Enqueue an async D2H copy of ``activation`` onto the buffer stream.
 
         Returns an ActivationPacket which is also available later via drain().
+        The source may be released after this returns, but must not be modified
+        in place until the packet event completes.
         """
         if activation.device != self._device:
             raise ValueError(
@@ -112,6 +114,9 @@ class CudaEventActivationBuffer:
 
         with torch.cuda.stream(copy_stream):
             host.copy_(activation, non_blocking=True)
+            # The producer can drop its last reference before this side-stream
+            # copy finishes. Delay device-storage reuse until it completes.
+            activation.record_stream(copy_stream)
             event.record(copy_stream)
 
         packet = ActivationPacket(event=event, host_tensor=host, meta=meta)
@@ -146,9 +151,14 @@ class CudaEventActivationBuffer:
 
     def recycle(self, packet: ActivationPacket) -> None:
         """
-        Return a packet's host buffer to the allocator pool (if provided).
+        Return a completed packet's host buffer to the allocator pool.
+
+        Waits for an in-flight copy when a host reclaimer is configured.
         """
         if self._host_reclaimer is not None:
+            # drain(wait=False) and capture_async(enqueue=False) can hand out
+            # in-flight packets. A pool must not reuse their pinned storage.
+            packet.event.synchronize()
             self._host_reclaimer(packet.host_tensor)
 
     def pending_count(self) -> int:

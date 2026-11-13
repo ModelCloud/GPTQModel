@@ -15,13 +15,17 @@ from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
+    EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED,
     ScratchSpace,
+    exllamav2_free_q_matrix,
     exllamav2_gemm_half_q_half,
     exllamav2_gptq_runtime_available,
     exllamav2_gptq_runtime_error,
     exllamav2_make_q_matrix,
 )
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -53,7 +57,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -104,9 +108,17 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
         self.q_handle = None
         self.q_tensors = None
+        self._q_handle_key = None
+        self._native_shuffled = False
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # The native ExLlamaV2 extension is CUDA-only: hipcc cannot build it and
+        # the kernel had accuracy regressions on ROCm. Fail fast with an
+        # actionable error instead of attempting the JIT build (~15 s of hipcc
+        # errors) and surfacing a build failure.
+        if IS_ROCM:
+            return False, NotImplementedError(EXLLAMAV2_GPTQ_ROCM_UNSUPPORTED)
         if not exllamav2_gptq_runtime_available():
             return False, ImportError(exllamav2_gptq_runtime_error())
         return True, None
@@ -124,19 +136,93 @@ class ExllamaV2Linear(GPTQQuantLinear):
         #     if self.bias is not None:
         #         self.bias.resize_(self.out_features)
 
+        self._release_q_handle()
         # ext_make_q_matrix only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
+        self.q_tensors = None
+        self._ensure_q_handle()
 
-        self.q_tensors = {
+        super().post_init()
+
+    def _release_q_handle(self) -> None:
+        if self.q_handle is not None:
+            exllamav2_free_q_matrix(self.q_handle)
+            self.q_handle = None
+        self._q_handle_key = None
+
+    def clear_weight_cache(self) -> None:
+        """Release native pointers derived from the current packed buffers."""
+
+        self._release_q_handle()
+        self.q_tensors = None
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        metadata = getattr(destination, "_metadata", None)
+        if metadata is not None:
+            metadata.setdefault(prefix[:-1], {})["exllamav2_native_shuffled"] = self._native_shuffled
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        state = args[0] if args else kwargs.get("state_dict", {})
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+        native_shuffled = bool(local_metadata.get("exllamav2_native_shuffled", False))
+        if prefix + "qweight" in state:
+            self._release_q_handle()
+            if getattr(self, "_fusion_native_view", False):
+                # A checkpoint must not be copied into a strided slice of the
+                # group's finalized words. Detach every borrowed operand.
+                for name in ("qweight", "qzeros", "scales", "bias"):
+                    tensor = getattr(self, name, None)
+                    if tensor is not None:
+                        self.register_buffer(name, tensor.clone(memory_format=torch.contiguous_format))
+                self._fusion_native_view = False
+            self.q_tensors = None
+        super()._load_from_state_dict(*args, **kwargs)
+        if prefix + "qweight" in state:
+            # Standard checkpoints contain raw words; a Torch state_dict from
+            # this finalized module carries its layout in local metadata.
+            self._native_shuffled = native_shuffled
+
+    def _ensure_q_handle(self) -> int:
+        if getattr(self, "_fusion_native_view", False):
+            if self.q_handle is None:
+                raise RuntimeError("ExLlamaV2 fusion view lost its native descriptor")
+            return self.q_handle
+        if self.scales.dtype != torch.float16:
+            self.scales = self.scales.to(dtype=torch.float16)
+        tensors = {
             "qweight": self.qweight,
             "qzeros": self.qzeros,
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        temp_dq = scratch_space.get_slice(self.temp_dq_size())
-        self.q_handle = self.ext_make_q_matrix(self.q_tensors, temp_dq)
-
-        super().post_init()
+        if self.q_tensors is None:
+            self.q_tensors = tensors
+        else:
+            self.q_tensors.update(tensors)
+        key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
+        if (
+            self.q_handle is not None
+            and self._q_handle_key is not None
+            and self._q_handle_key != key
+        ):
+            self._release_q_handle()
+        if self.q_handle is None:
+            already_shuffled = getattr(self, "_native_shuffled", False)
+            if already_shuffled:
+                self.q_handle = self.ext_make_q_matrix(self.q_tensors, already_shuffled=True)
+            else:
+                self.q_handle = self.ext_make_q_matrix(self.q_tensors)
+            self._native_shuffled = True
+            # Act-order matrix creation adds/fills q_perm and q_invperm in
+            # ``q_tensors``. Key the completed dictionary so the next forward
+            # does not mistake those newly inserted tensors for a replacement
+            # and rebuild the native matrix every call.
+            self._q_handle_key = tuple(
+                tensor_cache_key(tensor) for tensor in self.q_tensors.values()
+            )
+        return self.q_handle
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -151,20 +237,24 @@ class ExllamaV2Linear(GPTQQuantLinear):
             return self.empty_linear_output(x)
 
         x_dtype = x.dtype
-        if x_dtype != torch.float16:
-            # log.warn.once(
-            #     f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            # )
-
-            x = x.to(dtype=torch.float16)
-
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.in_features:
         #     x = F.pad(x, self.in_features_padding_shape)
 
 
-        out = self.ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+        handle, temporaries = self._ensure_q_handle(), None
+        if getattr(self, "_fusion_native_view", False):
+            from ...utils.exllamav2 import exllamav2_clone_q_matrix
+
+            handle, temporaries = exllamav2_clone_q_matrix(self, compact=True)
+        try:
+            out = self.ext_gemm_half_q_half(x, handle, self.out_features, force_cuda)
+        finally:
+            if temporaries is not None:
+                from ...utils.exllamav2 import exllamav2_free_q_matrix
+
+                exllamav2_free_q_matrix(handle)
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -175,7 +265,13 @@ class ExllamaV2Linear(GPTQQuantLinear):
         return out.to(dtype=x_dtype)
 
     def temp_dq_size(self):
-        return self.in_features * self.out_features * 2 + 128
+        """Bytes of retained dense-weight scratch: zero by design.
+
+        The kernel never keeps a reconstructed FP16 weight. The row-count
+        fallback in the extension allocates a transient tensor per call, so no
+        dense buffer is attached to the handle or the model.
+        """
+        return 0
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
         return self.out_features * max_input_len * max_batch_size * 4 + 128
@@ -186,19 +282,20 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
-        x = x.view(-1, x.shape[-1])
-        output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
+        x = x.reshape(-1, x.shape[-1]).contiguous()
+        output = torch.empty((x.shape[0], q4_width), dtype=x.dtype, device=x.device)
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 
-    def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):
+    def ext_make_q_matrix(self, w: dict, key: str = None, *, already_shuffled: bool = False):
         """
         Create Q matrix
         """
         # EXL2
         # won't work as the moment because the tensors are not the same.
         if "q_weight" in w:
-            w["q_scale_max"] /= 256
+            if not already_shuffled:
+                w["q_scale_max"] /= 256
             w["q_perm"] = w["q_perm"].short()
             w["q_invperm"] = w["q_invperm"].short()
             return exllamav2_make_q_matrix(
@@ -208,11 +305,11 @@ class ExllamaV2Linear(GPTQQuantLinear):
                 w["q_scale"],
                 w["q_scale_max"],
                 w["q_groups"],
-                    None,
-                    None,
-                    None,
-                    temp_dq,
-                )
+                None,
+                None,
+                None,
+                already_shuffled=already_shuffled,
+            )
         # GPTQ
         elif "qweight" in w:
             if w["scales"].dtype == torch.float:
@@ -220,12 +317,17 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
             # GPTQ with g_idx (act_order)
             if "g_idx" in w and not (w["g_idx"] == 0).all().item():
-                w["q_perm"] = torch.empty(
-                    (w["qweight"].shape[0] * 8,),
-                    dtype=torch.short,
-                    device=w["qweight"].device,
-                )
-                w["q_invperm"] = torch.empty_like(w["q_perm"])
+                if already_shuffled:
+                    perm = torch.argsort(w["g_idx"], stable=True).to(device=w["qweight"].device, dtype=torch.short)
+                    invperm = torch.argsort(perm, stable=True).to(dtype=torch.short)
+                    w["q_perm"], w["q_invperm"] = perm, invperm
+                else:
+                    w["q_perm"] = torch.empty(
+                        (w["qweight"].shape[0] * 8,),
+                        dtype=torch.short,
+                        device=w["qweight"].device,
+                    )
+                    w["q_invperm"] = torch.empty_like(w["q_perm"])
                 # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
                 return exllamav2_make_q_matrix(
                     w["qweight"],
@@ -236,8 +338,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     None,
                     w["qzeros"],
                     w["scales"],
-                    w["g_idx"].cpu(),
-                    temp_dq,
+                    None if already_shuffled else w["g_idx"].cpu(),
+                    **({"already_shuffled": True} if already_shuffled else {}),
                 )
             # GPTQ without g_idx
             else:
@@ -251,7 +353,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
                     w["qzeros"],
                     w["scales"],
                     None,
-                    temp_dq,
+                    **({"already_shuffled": True} if already_shuffled else {}),
                 )
         else:
             raise ValueError("q_weight not found in exllama v2 quantized weights")

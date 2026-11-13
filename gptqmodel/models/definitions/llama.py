@@ -4,9 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class LlamaQModel(BaseQModel):
+    fusable = FusableConfig((
+        "llama", "cohere", "cohere2", "gemma", "granite", "helium", "mistral",
+        "olmo", "olmo2", "seed_oss", "smollm3", "stablelm",
+    )).merge(LlamaFusableConfig())
     shared_input_verified_model_types = frozenset({"llama", "mistral", "gemma", "granite", "olmo2", "stablelm", "cohere", "cohere2"})
 
 

@@ -19,7 +19,6 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
-
 from ...utils.rocm import IS_ROCM
 from ...utils.swordfish import (
     _validate_swordfish_device_support,
@@ -33,11 +32,21 @@ from ...utils.swordfish import (
     swordfish_runtime_error,
 )
 
+
 log = setup_logger()
+
+SWORDFISH_ROCM_UNSUPPORTED = (
+    "Swordfish (BACKEND.SWORDFISH) is CUDA-only: it is a Blackwell CUTLASS "
+    "GEMM for NVIDIA tensor cores and has no HIP port. "
+    "Use BACKEND.GPTQ_TORCH / AWQ_GEMM_TRITON (or AUTO) on ROCm."
+)
 
 
 class SwordfishLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_SWORDFISH]
+    # GPTQ sub-kernel of the shared Swordfish backend. ``BACKEND.SWORDFISH``
+    # plus the checkpoint method/format selects this class; no separate
+    # GPTQ-specific backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.SWORDFISH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 101}
     SUPPORTS_BITS = [4, 8]
@@ -96,7 +105,7 @@ class SwordfishLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_SWORDFISH),
+            backend=kwargs.pop("backend", BACKEND.SWORDFISH),
             adapter=adapter,
             register_buffers=False,
             format=format,
@@ -163,6 +172,11 @@ class SwordfishLinear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: the CUTLASS
+        # ``sm100``/``sm110`` GEMM only targets NVIDIA tensor cores and the
+        # extension cannot be built against HIP.
+        if IS_ROCM:
+            return False, NotImplementedError(SWORDFISH_ROCM_UNSUPPORTED)
         if not swordfish_extension_available():
             return False, ImportError(swordfish_extension_error())
         return True, None
@@ -402,7 +416,10 @@ def _undo_awq_interleave(values: torch.Tensor, num_bits: int) -> torch.Tensor:
 
 
 class AwqSwordfishLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_SWORDFISH]
+    # AWQ sub-kernel of the shared Swordfish backend. ``BACKEND.SWORDFISH``
+    # plus the checkpoint method/format selects this class; no separate
+    # AWQ-specific backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.SWORDFISH]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 101}
     SUPPORTS_BITS = [4]
@@ -459,7 +476,7 @@ class AwqSwordfishLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.AWQ_SWORDFISH),
+            backend=kwargs.pop("backend", BACKEND.SWORDFISH),
             adapter=adapter,
             register_buffers=False,
             **kwargs,
@@ -517,6 +534,11 @@ class AwqSwordfishLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: the CUTLASS
+        # ``sm100``/``sm110`` GEMM only targets NVIDIA tensor cores and the
+        # extension cannot be built against HIP.
+        if IS_ROCM:
+            return False, NotImplementedError(SWORDFISH_ROCM_UNSUPPORTED)
         if not swordfish_extension_available():
             return False, ImportError(swordfish_extension_error())
         return True, None

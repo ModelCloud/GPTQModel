@@ -10,9 +10,9 @@ bounded, eager execution scope without putting temporary tensors on a model.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from contextvars import ContextVar, Token
-import threading
 from typing import Any, Optional
 
 import torch
@@ -355,6 +355,9 @@ class MarlinScratchContext:
             return self._workspace
         if self.device.type == "cuda":
             sms = int(torch.cuda.get_device_properties(self.device).multi_processor_count)
+            # Match marlin_make_workspace_new(): some kernels index a fixed
+            # minimum lock workspace even when the device exposes fewer SMs.
+            sms = max(sms, 128)
         else:
             sms = 1
         sms = max(sms, 1)
@@ -429,6 +432,7 @@ class MarlinScratchContext:
     def _lock_workspace_bytes(self) -> int:
         if self.device.type == "cuda":
             sms = int(torch.cuda.get_device_properties(self.device).multi_processor_count)
+            sms = max(sms, 128)
         else:
             sms = 1
         return max(sms, 1) * 4

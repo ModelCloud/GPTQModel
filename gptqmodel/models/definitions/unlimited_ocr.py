@@ -15,6 +15,7 @@ from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, get_module, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
+from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -90,7 +91,7 @@ class UnlimitedOCRQModel(BaseQModel):
         )
         self.shell_module_materialize(core_model.projector, self.quantize_config.device)
         self._restore_vision_position_ids(core_model)
-        self._move_direct_parameters(torch.device(self.quantize_config.device))
+        self._move_direct_parameters(as_torch_device(self.quantize_config.device))
 
     def _move_direct_parameters(self, device: torch.device) -> None:
         core_model = self.model.model

@@ -5,9 +5,13 @@
 
 from ..base import BaseQModel
 
-
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
+from ..fusable import FusableConfig, LlamaFusableConfig
+
+
 class GlmQModel(BaseQModel):
+    fusable = FusableConfig(("glm", "glm4")).merge(LlamaFusableConfig(), profiles=("qkv",))
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

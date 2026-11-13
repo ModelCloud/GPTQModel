@@ -160,6 +160,31 @@ DEFAULT_FLOOR_PCT = 0.05
 DEFAULT_CEIL_PCT = 0.10
 DEFAULT_TASK_NAMES = ("arc_challenge",)
 
+# Non-metric metadata keys that may appear alongside metric baselines in an
+# eval-task config. They are consumed by `get_eval_tasks()` for the evalution
+# harness and must never be treated as numeric metric baselines.
+EVAL_TASK_METADATA_KEYS = frozenset(
+    {
+        "chat_template",
+        "evalution_suite_kwargs",
+        "evalution_model_args",
+        "evalution_use_model_path",
+        "evalution_batch_size",
+    }
+)
+
+
+def is_eval_task_metadata_key(metric_name) -> bool:
+    """Return True when `metric_name` is eval-task metadata, not a metric baseline.
+
+    `get_eval_tasks()` pops these keys before normalizing baselines, so any code
+    that walks raw task configs (for example `derive_fast_eval_tasks`) must skip
+    them too. The `evalution_` prefix check keeps future metadata keys, which are
+    frequently non-numeric sentinels such as `"auto"`, from being coerced with
+    `float()`.
+    """
+    return metric_name in EVAL_TASK_METADATA_KEYS or str(metric_name).startswith("evalution_")
+
 
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
@@ -277,7 +302,7 @@ class ModelTest(unittest.TestCase):
             if not isinstance(metrics, dict):
                 continue
             for metric_name, spec in list(metrics.items()):
-                if metric_name == "chat_template":
+                if is_eval_task_metadata_key(metric_name):
                     continue
                 if isinstance(spec, dict):
                     current_ceil = spec.get("ceil_pct", spec.get("max_delta_ceil_percent", DEFAULT_CEIL_PCT))

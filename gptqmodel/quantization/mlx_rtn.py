@@ -20,8 +20,10 @@ def _rtn_kernel(output_type="float32"):
         input_names=["weight"],
         output_names=["quantized", "scales", "zeros"],
         source="""
-            uint lane = thread_position_in_threadgroup.x;
-            uint group = threadgroup_position_in_grid.y;
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint group = threadgroup_position_in_grid.y * WARPS
+                + (thread_position_in_threadgroup.x >> 5u);
+            if (group >= TOTAL) return;
             uint row = group / GROUPS;
             uint start = (group % GROUPS) * GROUP_SIZE;
             uint end = min(start + uint(GROUP_SIZE), uint(COLS));
@@ -79,6 +81,12 @@ def quantize_rtn_weight_mlx(weight, *, bits=4, group_size=128, sym=True):
     rows, cols = weight.shape
     effective = cols if group_size == -1 else group_size
     groups = (cols + effective - 1) // effective
+    # One 32-lane threadgroup per group launches millions of tiny threadgroups
+    # for model-scale weights (2.79M at 17408x5120/group_size=32) and reached
+    # only ~68 GB/s. Packing independent groups into the warps of a wider
+    # threadgroup is arithmetically identical and measured 2.6x faster
+    # (2.62 ms -> 1.01 ms at 17408x5120/group_size=32).
+    warps = 8
     direct_input = weight.dtype in (mx.float16, mx.bfloat16, mx.float32)
     kernel_weight = mx.contiguous(weight) if direct_input else weight.astype(mx.float32)
     output_type = {
@@ -95,9 +103,11 @@ def quantize_rtn_weight_mlx(weight, *, bits=4, group_size=128, sym=True):
             ("GROUP_SIZE", effective),
             ("MAXQ", (1 << bits) - 1),
             ("SYMMETRIC", int(sym)),
+            ("WARPS", warps),
+            ("TOTAL", rows * groups),
         ],
-        grid=(32, rows * groups, 1),
-        threadgroup=(32, 1, 1),
+        grid=(warps * 32, (rows * groups + warps - 1) // warps, 1),
+        threadgroup=(warps * 32, 1, 1),
         output_shapes=[(rows, cols), (rows, groups), (rows, groups)],
         output_dtypes=[output_dtype, mx.float32, mx.float32],
     )

@@ -104,6 +104,53 @@ Packing is a CPU-storage operation: even `pack_impl="gpu"` registers the packed
 buffers on CPU (the GPU is used only as a compute accelerator), matching the
 internal model packing path. Move the module to its runtime device afterwards.
 
+### Packing dispatch
+
+The dispatcher selects a packer from declared kernel metadata, not only from a
+backend name prefix. QQQ keeps its dedicated `pack(linear, scales, s_extra)`
+entry point; every other kernel that declares `METHOD.AWQ` (or keeps the
+legacy `awq_`/`llm-awq` `QUANT_TYPE` label) uses the shared AWQ
+`pack(linear, scales, zeros, g_idx)`; GPTQ-family kernels use
+`pack_original`/`pack_block`/`pack_gpu`.
+
+```mermaid
+flowchart TD
+    A["hf_pack_layer(module, ...)"] --> B{"QUANT_TYPE == 'qqq'?"}
+    B -->|yes| C["module.pack(linear, scales, s_extra)"]
+    B -->|no| D{"AWQ backend?<br/>QUANT_TYPE starts with 'awq_' or is 'llm-awq'<br/>OR METHOD.AWQ in SUPPORTS_METHODS"}
+    D -->|yes| E["module.pack(linear, scales, zeros, g_idx)"]
+    D -->|no| F{"hasattr(module, 'pack_original')?"}
+    F -->|no| G["raise ValueError<br/>no supported packing path"]
+    F -->|yes| H["pack_gpu / pack_block / pack_original"]
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| AWQ recognition (`gptqmodel/utils/packing.py:609`) | `QUANT_TYPE` prefix `awq_` or exact `llm-awq` only | prefix **or** declared `METHOD.AWQ` in `SUPPORTS_METHODS` |
+| AllSpark (`QUANT_TYPE="allspark"`, `METHOD.AWQ`) | fell through to the `pack_original` branch and raised `ValueError` | routed to its AWQ `pack()` |
+
+### Split pack / initialize lifecycle
+
+`hf_pack_layer(..., post_init=False)` is the default and leaves a `gptq`
+checkpoint request in the v1 export layout (stored zero point minus one). A
+later `hf_post_init` restores the v2 runtime layout before running
+`post_init()`, exactly like the inline `post_init=True` path, so a split
+lifecycle decodes the same values.
+
+```mermaid
+flowchart LR
+    A["hf_pack_layer(post_init=False)"] --> B["v1 checkpoint words<br/>qzero_format() == 1"]
+    B --> C["hf_post_init(module or container)"]
+    C --> D{"GPTQ and REQUIRES_FORMAT_V2<br/>and qzero_format() == 1?"}
+    D -->|yes| E["convert_gptq_v1_to_v2_format_module"]
+    D -->|no| F["skip conversion"]
+    E --> G["module.post_init()"]
+    F --> G
+```
+
+The conversion lives in `_restore_gptq_runtime_qzeros`
+(`gptqmodel/utils/packing.py:248`) and is shared by both entry points.
+
 ## Repacking a layer
 
 `hf_repack_layer` converts an already-packed module to another backend. Kernels
@@ -125,21 +172,46 @@ from gptqmodel.utils.exllamav2 import ScratchSpace
 from gptqmodel.utils.packing import hf_post_init, hf_repack_layer
 
 target = hf_repack_layer(source, backend="exllama_v2", device="cuda:1", post_init=False)
-hf_post_init(target, scratch_space=ScratchSpace(target.temp_dq_size(), dev="cuda:1"))
+hf_post_init(target, scratch_space=ScratchSpace(target.scratch_space_fixed(), dev="cuda:1"))
 ```
+
+`ScratchSpace` only covers per-forward temporaries: `temp_dq_size()` is `0`
+by design because the kernel keeps no reconstructed dense weight, and
+`ScratchSpace.get_slice()` allocates a fresh transient tensor per call rather
+than slicing model-owned storage. Use `scratch_space_fixed()` (the forward
+temporary size), not `temp_dq_size()`, so the value is not a stale zero.
 
 When the requested backend is already in use, the source module is returned
 unchanged. Targets that cannot consume the source layout raise
 `NotImplementedError`, and unsupported backends raise `ValueError`.
 
-Two guarantees keep copy-based repacking numerically correct:
+Three guarantees keep copy-based repacking numerically correct:
 
 * GPTQ v1/v2 zero-point flavors are aligned automatically. Kernels with
   `REQUIRES_FORMAT_V2` keep qzeros in the corrected v2 domain, so a copy into a
   v1-native target (Marlin, BitBLAS) runs the same conversion the loader/saver
   uses instead of copying offset zero points.
+* Floating checkpoint buffers keep the source storage width. `dtype` selects
+  the target kernel's activation/output dtype; it is not permission to narrow
+  checkpoint storage, so `scales`/`bias` are retargeted to the source dtype
+  before the copy. A BF16 or FP32 value outside the FP16 range therefore stays
+  finite instead of becoming infinity or zero. The kernel's `post_init()` still
+  performs any ABI conversion it needs.
 * Kernels that repack their buffers into a private runtime ABI inside
   `post_init()` (Marlin, Machete, Swordfish, BitBLAS) are valid repack targets
   but are rejected as repack *sources*, because their buffers no longer hold
   the checkpoint layout. Repack from the kernel holding the checkpoint layout
   (for example a Torch kernel) instead.
+
+```mermaid
+flowchart TD
+    A["hf_repack_layer(source, backend, dtype=...)"] --> B["_instantiate_kernel(target_cls)"]
+    B --> C["target buffers allocated at kernel default width"]
+    C --> D["_copy_packed_state(source, target)"]
+    D --> E{"shared floating buffer<br/>source dtype != target dtype?"}
+    E -->|yes| F["_preserve_checkpoint_buffer_dtypes<br/>retarget buffer to source dtype"]
+    E -->|no| G["keep target width"]
+    F --> H["load_state_dict copies checkpoint values"]
+    G --> H
+    H --> I["post_init() applies kernel ABI conversion"]
+```
