@@ -640,12 +640,12 @@ flowchart TD
 
 | Area | Before | After |
 |---|---|---|
-| gfx1200/gfx1201 fused dot | direct `__builtin_amdgcn_fdot2_f32_bf16` (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 203-221) | same builtin behind `bf16x2_dot` (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 144-165) |
-| gfx1250 fused dot | same builtin; hipcc rejects the target with `needs target feature dot12-insts` | FMA fast path plus FP64 recompute on non-finite (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 147-165) |
-| Finite-input overflow/cancellation | not reachable on gfx1250; the naive FMA fallback returned `-inf` | FP64 recompute matches the packed dot (`gptqmodel_ext/nf12_hip/nf12_ad_decode.hip` lines 153-160) |
+| gfx1200/gfx1201 fused dot | direct `__builtin_amdgcn_fdot2_f32_bf16` (`gptqmodel_ext/nf12_hip/nf12_decode.hip` lines 203-221) | same builtin behind `bf16x2_dot` (`gptqmodel_ext/nf12_hip/nf12_decode.hip` lines 144-165) |
+| gfx1250 fused dot | same builtin; hipcc rejects the target with `needs target feature dot12-insts` | FMA fast path plus FP64 recompute on non-finite (`gptqmodel_ext/nf12_hip/nf12_decode.hip` lines 147-165) |
+| Finite-input overflow/cancellation | not reachable on gfx1250; the naive FMA fallback returned `-inf` | FP64 recompute matches the packed dot (`gptqmodel_ext/nf12_hip/nf12_decode.hip` lines 153-160) |
 
-`gptqmodel/utils/nf12_ad_hip.py` line 35 lists `gfx1200`, `gfx1201`, and
-`gfx1250`; line 126 adds the `GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK`
+`gptqmodel/utils/nf12_hip.py` line 35 lists `gfx1200`, `gfx1201`, and
+`gfx1250`; line 126 adds the `GPTQMODEL_NF12_HIP_FORCE_DOT_FALLBACK`
 validation switch.
 
 ### AllSpark gfx1250: compilation vs runtime support
@@ -698,7 +698,7 @@ rejects the device when `allspark_hip_available()` is false (lines 87-92).
 |---|---|
 | `tests/test_extension_load_api.py::test_load_all_skips_cuda_only_extensions_on_rocm` | `all` excludes AWQ/QQQ/Marlin on ROCm |
 | `tests/test_rocm_backend_gating.py::test_cuda_only_extensions_are_skipped_by_load_all_on_rocm` | explicit loads refuse with actionable, host-independent messages |
-| `tests/test_nf12_ad_codec.py::test_hip_linear_preserves_finite_overflow_cancellation` | finite BF16 overflow/cancellation matches the FP64 oracle |
+| `tests/test_nf12_codec.py::test_hip_linear_preserves_finite_overflow_cancellation` | finite BF16 overflow/cancellation matches the FP64 oracle |
 | `tests/test_allspark_hip.py::test_arch_allowlist` | gfx1250 is rejected at runtime |
 | `tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | no nvcc-only flag on ROCm |
 | `tests/test_machete_jit.py::test_machete_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | same for Machete |

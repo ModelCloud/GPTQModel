@@ -317,7 +317,7 @@ asserts exactness must therefore say which realization it ran.
 | FP8 / NVFP8 / MX checkpoint dequantization | `gptqmodel/utils/model_dequant.py` |
 | `bf2_b` / `bf4_b` / `bf8_b` grid, codes, exponents | `gptqmodel/utils/tt_blockfloat_quant.py` |
 | `bf4_b` / `bf8_b` modules and packing | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py` |
-| `nf12` codec | `gptqmodel/quantization/nf12_ad.py` |
+| `nf12` codec | `gptqmodel/quantization/nf12.py` |
 
 ## 12. Adding a dtype
 

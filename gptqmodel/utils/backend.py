@@ -80,8 +80,8 @@ class BACKEND(str, Enum):
     VPTQ_TORCH = "vptq_torch"
     VPTQ_CUDA = "vptq_cuda"
 
-    # NF12-AD (NyoomFloat12) lossless 12-bit BF16 weights
-    NF12_AD = "nf12_ad"
+    # NF12 (NyoomFloat12) lossless 12-bit BF16 weights
+    NF12 = "nf12"
 
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
@@ -164,7 +164,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.TORCH: BACKEND.VPTQ_TORCH,
     },
     "nf12": {
-        BACKEND.TORCH: BACKEND.NF12_AD,
+        BACKEND.TORCH: BACKEND.NF12,
     },
 }
 

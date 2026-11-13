@@ -2606,7 +2606,7 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
 def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
     """Read tensor shapes from a safetensors file, directory, or index.
 
-    NF12-AD stores a data-dependent escape table. The module cannot know its
+    NF12 stores a data-dependent escape table. The module cannot know its
     row count from `in_features`/`out_features` alone, so the loader must size
     that buffer before accelerate assigns checkpoint tensors.
     """
@@ -2665,7 +2665,7 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             module = model.get_submodule(module_name)
         except AttributeError:
             continue
-        if getattr(module, "QUANT_TYPE", None) != "nf12_ad":
+        if getattr(module, "QUANT_TYPE", None) != "nf12":
             continue
         buffer_name = suffix[1:]
         current = getattr(module, buffer_name, None)

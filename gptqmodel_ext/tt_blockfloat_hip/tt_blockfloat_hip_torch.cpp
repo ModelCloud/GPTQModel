@@ -5,7 +5,7 @@
 //
 // Host-only translation unit: no device code lives here, so the .hip file can
 // be compiled without torch/ATen headers (mirrors allspark_torch_hip.cpp and
-// nf12_ad_torch.cpp).
+// nf12_torch.cpp).
 //
 // Every op takes the packed ``codes`` buffer and the int8 ``exponents`` buffer
 // exactly as the checkpoint stores them.  Nothing here expands a weight to a

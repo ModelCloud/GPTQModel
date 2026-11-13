@@ -4,10 +4,10 @@
 #
 # Adapted from the nf12 reference implementation
 # (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
-"""NF12-AD quantization: lossless 12-bit BF16 weight encoding.
+"""NF12 quantization: lossless 12-bit BF16 weight encoding.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 format. This
-quantizer implements the AlpinDale *modified* tiled layout used by
+quantizer implements the tiled layout used by
 https://github.com/dphnAI/nf12 and vendored under ``gptqmodel_ext/nf12``.
 
 The only lossy step is casting non-BF16 module weights to BF16 with
@@ -46,8 +46,8 @@ def _encode_weight(
     results never depend on which route ran.
     """
 
-    from ..utils import nf12_ad as cuda_rt
-    from ..utils import nf12_ad_hip as hip_rt
+    from ..utils import nf12 as cuda_rt
+    from ..utils import nf12_hip as hip_rt
 
     matrix = weight.detach().to(device="cpu", dtype=dtype).contiguous()
 
@@ -80,7 +80,7 @@ def _native_encode_runtime(weight: torch.Tensor, hip_rt, cuda_rt):
 
     device = weight.device
     if device.type == "cuda":
-        if hip_rt.nf12_ad_hip_supported(device):
+        if hip_rt.nf12_hip_supported(device):
             return hip_rt, device
         if cuda_rt.available():
             return cuda_rt, device
@@ -88,7 +88,7 @@ def _native_encode_runtime(weight: torch.Tensor, hip_rt, cuda_rt):
     if not torch.cuda.is_available():
         return None, None
     device = torch.device("cuda", torch.cuda.current_device())
-    if hip_rt.nf12_ad_hip_supported(device):
+    if hip_rt.nf12_hip_supported(device):
         return hip_rt, device
     if cuda_rt.available():
         return cuda_rt, device
@@ -96,8 +96,8 @@ def _native_encode_runtime(weight: torch.Tensor, hip_rt, cuda_rt):
 
 
 @dataclass(frozen=True)
-class NF12ADQuantResult:
-    """Packed NF12-AD tensors for one weight.
+class NF12QuantResult:
+    """Packed NF12 tensors for one weight.
 
     Only the quantized representation is retained; no dense or dequantized
     weight is stored.
@@ -129,13 +129,13 @@ def weight_to_matrix(module: nn.Module) -> torch.Tensor:
     return weight
 
 
-def quantize_nf12_ad_weight(
+def quantize_nf12_weight(
     weight: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
     exp_base: int | None = None,
-) -> NF12ADQuantResult:
-    """Quantize one 2-D weight to NF12-AD.
+) -> NF12QuantResult:
+    """Quantize one 2-D weight to NF12.
 
     Args:
         weight: ``[out_features, in_features]`` tensor in any floating dtype.
@@ -146,9 +146,9 @@ def quantize_nf12_ad_weight(
     """
 
     if dtype != torch.bfloat16:
-        raise ValueError("NF12-AD encodes bfloat16 weights; `dtype` must be torch.bfloat16")
+        raise ValueError("NF12 encodes bfloat16 weights; `dtype` must be torch.bfloat16")
     if weight.dim() != 2:
-        raise ValueError(f"NF12-AD expects a 2-D weight, got shape {tuple(weight.shape)}")
+        raise ValueError(f"NF12 expects a 2-D weight, got shape {tuple(weight.shape)}")
     n, k = weight.shape
     nf12_codec.check_shape(n, k)
 
@@ -157,7 +157,7 @@ def quantize_nf12_ad_weight(
         dtype=dtype,
         exp_base=exp_base,
     )
-    return NF12ADQuantResult(
+    return NF12QuantResult(
         packed=packed.contiguous(),
         escapes=escapes.contiguous(),
         exp_base=int(base),
@@ -166,8 +166,8 @@ def quantize_nf12_ad_weight(
     )
 
 
-class NF12ADQuantizer:
-    """Quantize one ``nn.Linear``/``Conv1D``/``ConvNd`` module to NF12-AD."""
+class NF12Quantizer:
+    """Quantize one ``nn.Linear``/``Conv1D``/``ConvNd`` module to NF12."""
 
     def __init__(self, module: nn.Module, name: str | None = None):
         if not isinstance(
@@ -175,22 +175,22 @@ class NF12ADQuantizer:
             (nn.Linear, _ConvNd, transformers.pytorch_utils.Conv1D),
         ):
             raise NotImplementedError(
-                "NF12-AD supports nn.Linear, transformers.Conv1D, and ConvNd modules, "
+                "NF12 supports nn.Linear, transformers.Conv1D, and ConvNd modules, "
                 f"got {type(module).__name__}"
             )
         self.module = module
         self.name = name
-        self.result: NF12ADQuantResult | None = None
+        self.result: NF12QuantResult | None = None
 
-    def quantize(self, *, exp_base: int | None = None) -> NF12ADQuantResult:
+    def quantize(self, *, exp_base: int | None = None) -> NF12QuantResult:
         matrix = weight_to_matrix(self.module)
-        self.result = quantize_nf12_ad_weight(matrix, exp_base=exp_base)
+        self.result = quantize_nf12_weight(matrix, exp_base=exp_base)
         return self.result
 
 
 __all__ = [
-    "NF12ADQuantResult",
-    "NF12ADQuantizer",
-    "quantize_nf12_ad_weight",
+    "NF12QuantResult",
+    "NF12Quantizer",
+    "quantize_nf12_weight",
     "weight_to_matrix",
 ]

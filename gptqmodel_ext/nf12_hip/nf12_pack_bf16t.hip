@@ -5,7 +5,7 @@
 // Port of csrc/codec/decode.cu's pack_bf16t_kernel using the shared
 // format_hip.cuh row-tile helpers.
 
-#include "nf12_ad_format_hip.cuh"
+#include "nf12_format_hip.cuh"
 
 namespace nf12_hip {
 namespace {

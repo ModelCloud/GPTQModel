@@ -5,7 +5,7 @@
 #
 # Adapted from the nf12 reference implementation
 # (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
-"""NF12-AD accuracy + performance validation with full metric tables.
+"""NF12 accuracy + performance validation with full metric tables.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 weight format
 (Liberman, Fang, Zhang, Dao, Fu, 2026). The reference implementation and CUDA
@@ -18,10 +18,10 @@ recorded and printed.
 Usage
 -----
     # NVIDIA (CUDA kernels)
-    python scripts/validate_nf12_ad.py --device cuda:0
+    python scripts/validate_nf12.py --device cuda:0
     # AMD RDNA4 (HIP decode port)
-    python scripts/validate_nf12_ad.py --device cuda:0 --backend hip
-    python scripts/validate_nf12_ad.py --json-out /tmp/nf12_4090.json
+    python scripts/validate_nf12.py --device cuda:0 --backend hip
+    python scripts/validate_nf12.py --json-out /tmp/nf12_4090.json
 
 Accuracy criterion
 ------------------
@@ -161,24 +161,24 @@ def backend_module(backend: str, device: str):
             return None, "torch"
         raise ValueError(f"--backend {backend} requires a CUDA/HIP device, got {device}")
 
-    from gptqmodel.utils import nf12_ad as cuda_rt
+    from gptqmodel.utils import nf12 as cuda_rt
 
     if backend == "hip":
-        from gptqmodel.utils import nf12_ad_hip as hip
+        from gptqmodel.utils import nf12_hip as hip
 
-        if not hip.prewarm_nf12_ad_hip_extension():
-            raise RuntimeError(f"NF12-AD HIP extension unavailable: {hip.last_error()}")
+        if not hip.prewarm_nf12_hip_extension():
+            raise RuntimeError(f"NF12 HIP extension unavailable: {hip.last_error()}")
         return hip, "hip"
 
     if cuda_rt.load():
         return cuda_rt, "cuda"
     if backend == "cuda":
         reason = cuda_rt.last_error() or "the native extension did not load"
-        raise RuntimeError(f"NF12-AD CUDA extension unavailable: {reason}")
+        raise RuntimeError(f"NF12 CUDA extension unavailable: {reason}")
     if torch.version.hip is not None:
-        from gptqmodel.utils import nf12_ad_hip as hip
+        from gptqmodel.utils import nf12_hip as hip
 
-        if hip.prewarm_nf12_ad_hip_extension():
+        if hip.prewarm_nf12_hip_extension():
             return hip, "hip"
     return None, "torch"
 
@@ -296,14 +296,14 @@ def run_accuracy(device: str, backend: str, quick: bool, results: dict) -> bool:
                                     "twin_ratio": round(twin.numel() / (512 * 512 * 2), 4), **met})
         all_ok = all_ok and met["ok"]
 
-    banner("E. NF12ADLinear module end-to-end")
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    banner("E. NF12Linear module end-to-end")
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     for n, k in [(256, 256), (1024, 4096)]:
-        lin = NF12ADLinear(bits=12, in_features=k, out_features=n, bias=True)
+        lin = NF12Linear(bits=12, in_features=k, out_features=n, bias=True)
         w = make_weight(n, k, "normal", 17)
-        lin.load_quant_result(quantize_nf12_ad_weight(w))
+        lin.load_quant_result(quantize_nf12_weight(w))
         lin = lin.to(device=device, dtype=torch.bfloat16)
         x = torch.randn(8, k, device=device, dtype=torch.bfloat16) * 0.05
         met = accuracy_metrics(lin(x), oracle(x, w.to(device), lin.bias))
@@ -536,7 +536,7 @@ def print_reports(results: dict) -> None:
 
     for tag, title in (("linear+bias", "C. fused linear + bias"),
                        ("bf16t", "D. bf16t twin"),
-                       ("module", "E. NF12ADLinear end-to-end")):
+                       ("module", "E. NF12Linear end-to-end")):
         rows = [a for a in results["accuracy"] if a["test"] == tag]
         if not rows:
             continue

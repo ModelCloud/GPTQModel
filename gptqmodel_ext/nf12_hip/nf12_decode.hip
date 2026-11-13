@@ -2,15 +2,15 @@
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) decode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
+// NF12 (NyoomFloat12) decode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
 //
 // Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
 // (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
 // and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
 //
-// It consumes the same NF12-AD byte stream as the CUDA kernels (docs/SPEC.md
+// It consumes the same NF12 byte stream as the CUDA kernels (docs/SPEC.md
 // in gptqmodel_ext/nf12), so a checkpoint is portable between NVIDIA and AMD
-// hosts and NF12-AD runs on RDNA4 without the CUDA toolchain.
+// hosts and NF12 runs on RDNA4 without the CUDA toolchain.
 //
 // Design
 // ------
@@ -20,10 +20,10 @@
 // this port decodes NF12 -> exact BF16 with the same super-atom walk the CUDA
 // decoder uses and hands the result to rocBLAS. That is SPEC.md 6.5's
 // "decode-then-GEMM" route: decode is exact, so the result equals the same
-// BF16 GEMM on the exactly decoded weights. `nf12_ad_decode` output is
+// BF16 GEMM on the exactly decoded weights. `nf12_decode` output is
 // bit-identical to the CUDA `nf12.decode` output.
 // ---------------------------------------------------------------------------
-#include "nf12_ad_format_hip.cuh"
+#include "nf12_format_hip.cuh"
 
 #include <algorithm>
 #include <cstdint>
@@ -84,7 +84,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 
 // ---------------------------------------------------------------------------
-// Fused small-M NF12-AD x BF16 GEMM
+// Fused small-M NF12 x BF16 GEMM
 // ---------------------------------------------------------------------------
 // Decode-then-GEMM moves 24 MiB (packed) + 32 MiB (dense write) + 32 MiB
 // (dense read) = 88 MiB. A BF16 GEMM only needs 32 MiB. Nothing that
@@ -321,30 +321,30 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
   // A switch, not a table of function pointers: torch's hipify rewrites
   // `kernel<<<...>>>` by matching an identifier, so a launch through an indexed
   // expression is silently mangled.
-#define NF12_AD_FUSED_LAUNCH(K)                                                              \
+#define NF12_FUSED_LAUNCH(K)                                                              \
   linear_kernel<S, K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>( \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
       escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),       \
       reinterpret_cast<const __hip_bfloat16*>(bias))
   switch (m) {
-    case 1: NF12_AD_FUSED_LAUNCH(1); break;
-    case 2: NF12_AD_FUSED_LAUNCH(2); break;
-    case 3: NF12_AD_FUSED_LAUNCH(3); break;
-    case 4: NF12_AD_FUSED_LAUNCH(4); break;
-    case 5: NF12_AD_FUSED_LAUNCH(5); break;
-    case 6: NF12_AD_FUSED_LAUNCH(6); break;
-    case 7: NF12_AD_FUSED_LAUNCH(7); break;
-    case 8: NF12_AD_FUSED_LAUNCH(8); break;
-    case 9: NF12_AD_FUSED_LAUNCH(9); break;
-    case 10: NF12_AD_FUSED_LAUNCH(10); break;
-    case 11: NF12_AD_FUSED_LAUNCH(11); break;
-    case 12: NF12_AD_FUSED_LAUNCH(12); break;
-    case 13: NF12_AD_FUSED_LAUNCH(13); break;
-    case 14: NF12_AD_FUSED_LAUNCH(14); break;
-    case 15: NF12_AD_FUSED_LAUNCH(15); break;
-    default: NF12_AD_FUSED_LAUNCH(16); break;
+    case 1: NF12_FUSED_LAUNCH(1); break;
+    case 2: NF12_FUSED_LAUNCH(2); break;
+    case 3: NF12_FUSED_LAUNCH(3); break;
+    case 4: NF12_FUSED_LAUNCH(4); break;
+    case 5: NF12_FUSED_LAUNCH(5); break;
+    case 6: NF12_FUSED_LAUNCH(6); break;
+    case 7: NF12_FUSED_LAUNCH(7); break;
+    case 8: NF12_FUSED_LAUNCH(8); break;
+    case 9: NF12_FUSED_LAUNCH(9); break;
+    case 10: NF12_FUSED_LAUNCH(10); break;
+    case 11: NF12_FUSED_LAUNCH(11); break;
+    case 12: NF12_FUSED_LAUNCH(12); break;
+    case 13: NF12_FUSED_LAUNCH(13); break;
+    case 14: NF12_FUSED_LAUNCH(14); break;
+    case 15: NF12_FUSED_LAUNCH(15); break;
+    default: NF12_FUSED_LAUNCH(16); break;
   }
-#undef NF12_AD_FUSED_LAUNCH
+#undef NF12_FUSED_LAUNCH
   return hipGetLastError();
 }
 
@@ -356,8 +356,8 @@ using namespace nf12_hip;
 
 extern "C" {
 
-// Decode a whole [N, K] NF12-AD matrix to row-major BF16.
-hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+// Decode a whole [N, K] NF12 matrix to row-major BF16.
+hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                           int64_t n, int64_t k, void* out, int64_t ldo,
                           hipStream_t stream) {
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
@@ -380,7 +380,7 @@ hipError_t nf12_ad_decode(const uint8_t* packed, const uint4* escapes, uint32_t 
 
 // Uncompressed bf16t twin (SPEC.md 4.4). Same walk, no escape table and no
 // exp_base: the super-atom is already the decoded register image.
-hipError_t nf12_ad_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
+hipError_t nf12_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
                                  int64_t ldo, hipStream_t stream) {
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
   if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldo < k) {
@@ -407,7 +407,7 @@ __global__ void selftest_kernel(uint32_t* out) {
 }
 }  // namespace
 
-hipError_t nf12_ad_selftest(uint32_t* out, hipStream_t stream) {
+hipError_t nf12_selftest(uint32_t* out, hipStream_t stream) {
   selftest_kernel<<<1, 32, 0, stream>>>(out);
   return hipGetLastError();
 }
@@ -415,10 +415,10 @@ hipError_t nf12_ad_selftest(uint32_t* out, hipStream_t stream) {
 
 // Fused small-M linear (decode + GEMM in one pass, no dense materialisation).
 // `out` is [M, N] row-major BF16.
-int nf12_ad_linear_fused_small_m_supported(int64_t m) { return m >= 1 && m <= kFusedMaxM; }
+int nf12_linear_fused_small_m_supported(int64_t m) { return m >= 1 && m <= kFusedMaxM; }
 
 
-hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+hipError_t nf12_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                                 const void* x, void* out, int64_t n, int64_t k,
                                 int64_t m, const void* bias, hipStream_t stream) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
@@ -428,7 +428,7 @@ hipError_t nf12_ad_linear_fused(const uint8_t* packed, const uint4* escapes, uin
 
 // bf16t twin of the small-M route (SPEC.md 4.4): same kernel, uncompressed
 // source, so the exactness comparison runs through one code path.
-hipError_t nf12_ad_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
+hipError_t nf12_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
                                       int64_t n, int64_t k, int64_t m, const void* bias,
                                       hipStream_t stream) {
   return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias, stream);

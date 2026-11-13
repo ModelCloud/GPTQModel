@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
-"""JIT loader for the NF12-AD HIP/RDNA4 codec.
+"""JIT loader for the NF12 HIP/RDNA4 codec.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 weight format
 (Liberman, Fang, Zhang, Dao, Fu, 2026). The reference implementation and CUDA
@@ -10,7 +10,7 @@ kernels are AlpinDale's at https://github.com/dphnAI/nf12.
 The vendored CUDA kernels in ``gptqmodel_ext/nf12`` use ``mma.sync`` m16n8k16,
 ``wgmma``, ``tcgen05`` and TMA, none of which exist on RDNA4. This module
 builds the HIP port in ``gptqmodel_ext/nf12_hip``, which decodes the identical
-NF12-AD byte stream to exact BF16 and hands it to rocBLAS through
+NF12 byte stream to exact BF16 and hands it to rocBLAS through
 ``torch.matmul`` (SPEC.md section 6.5, the decode-then-GEMM route).
 
 Validated on ROCm SDK 10.1.0 / HIP 7.16.26385 (R9700, gfx1201); see the
@@ -31,8 +31,8 @@ from .cpp import TorchOpsJitExtension, default_jit_cuda_cflags, default_torch_op
 from .env import env_flag
 
 
-_OPS_NAME = "gptqmodel_nf12_ad_hip_ops"
-_NAMESPACE = "nf12_ad_hip"
+_OPS_NAME = "gptqmodel_nf12_hip_ops"
+_NAMESPACE = "nf12_hip"
 
 # RDNA4 (gfx12xx). gfx1250 shares the wave32 ISA subset used here.
 SUPPORTED_ARCHS = ("gfx1200", "gfx1201", "gfx1250")
@@ -43,22 +43,22 @@ def _root() -> Path:
 
 
 _SOURCE_FILES = (
-    "nf12_ad_torch.cpp",
-    "nf12_ad_decode.hip",
-    "nf12_ad_encode.hip",
-    "nf12_ad_wmma.hip",
-    "nf12_ad_moe.hip",
-    "nf12_ad_pack_bf16t.hip",
-    "nf12_ad_format_hip.cuh",
-    "nf12_ad_validation.cuh",
+    "nf12_torch.cpp",
+    "nf12_decode.hip",
+    "nf12_encode.hip",
+    "nf12_wmma.hip",
+    "nf12_moe.hip",
+    "nf12_pack_bf16t.hip",
+    "nf12_format_hip.cuh",
+    "nf12_validation.cuh",
 )
 
 
 def _staging_root() -> Path:
     """Writable directory that receives a copy of the kernel sources."""
 
-    override = os.environ.get("GPTQMODEL_NF12_AD_HIP_BUILD_ROOT")
-    base = Path(override).expanduser() if override else default_torch_ops_build_root("nf12_ad_hip")
+    override = os.environ.get("GPTQMODEL_NF12_HIP_BUILD_ROOT")
+    base = Path(override).expanduser() if override else default_torch_ops_build_root("nf12_hip")
     return base / "_src"
 
 
@@ -85,7 +85,7 @@ def _sources() -> list[str]:
     for name in _SOURCE_FILES:
         source = originals / name
         if not source.exists():
-            raise FileNotFoundError(f"NF12-AD HIP source is missing: {source}")
+            raise FileNotFoundError(f"NF12 HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
     # Derived from _SOURCE_FILES so a new kernel cannot be staged but silently
     # left out of the build. Headers are staged above but are not sources.
@@ -127,7 +127,7 @@ def _cuda_cflags() -> list[str]:
         "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
     ]
-    if env_flag("GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK"):
+    if env_flag("GPTQMODEL_NF12_HIP_FORCE_DOT_FALLBACK"):
         # gfx1250 has no `dot12-insts`, so the kernel takes the portable FMA
         # path there. Force that path on gfx1200/gfx1201 to validate it against
         # the same oracle without gfx1250 hardware.
@@ -148,12 +148,12 @@ _EXTENSION = TorchOpsJitExtension(
     namespace=_NAMESPACE,
     required_ops=("encode", "decode", "linear", "selftest", "arch_info"),
     sources=_sources,
-    build_root_env="GPTQMODEL_NF12_AD_HIP_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("nf12_ad_hip"),
-    display_name="NF12-AD codec (HIP/RDNA4)",
+    build_root_env="GPTQMODEL_NF12_HIP_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("nf12_hip"),
+    display_name="NF12 codec (HIP/RDNA4)",
     extra_cuda_cflags=_cuda_cflags,
     extra_ldflags=_ldflags,
-    force_rebuild_env="GPTQMODEL_NF12_AD_HIP_FORCE_REBUILD",
+    force_rebuild_env="GPTQMODEL_NF12_HIP_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
@@ -162,7 +162,7 @@ _EXTENSION = TorchOpsJitExtension(
 _SELFTESTED = False
 
 
-def nf12_ad_hip_supported(device: torch.device | None = None) -> bool:
+def nf12_hip_supported(device: torch.device | None = None) -> bool:
     """Return whether this host is an RDNA4 device the HIP kernel targets."""
 
     if not torch.cuda.is_available() or torch.version.hip is None:
@@ -177,19 +177,19 @@ def nf12_ad_hip_supported(device: torch.device | None = None) -> bool:
     return arch in SUPPORTED_ARCHS
 
 
-def prewarm_nf12_ad_hip_extension() -> bool:
+def prewarm_nf12_hip_extension() -> bool:
     """Build and self-test the extension once per process."""
 
     global _SELFTESTED
-    if not nf12_ad_hip_supported():
+    if not nf12_hip_supported():
         return False
     if not _EXTENSION.load():
         return False
     if not _SELFTESTED:
         ref = torch.zeros(1, dtype=torch.float32, device="cuda")
-        if not torch.ops.nf12_ad_hip.selftest(ref):
+        if not torch.ops.nf12_hip.selftest(ref):
             raise RuntimeError(
-                "nf12_ad_hip: kernel did not execute (sentinel missing) - "
+                "nf12_hip: kernel did not execute (sentinel missing) - "
                 "device code compiled empty or the wrong gfx target was used"
             )
         _SELFTESTED = True
@@ -199,7 +199,7 @@ def prewarm_nf12_ad_hip_extension() -> bool:
 def available(device: torch.device | None = None) -> bool:
     """Return whether the HIP decode kernel can run on this device."""
 
-    return nf12_ad_hip_supported(device) and _EXTENSION.load()
+    return nf12_hip_supported(device) and _EXTENSION.load()
 
 
 def last_error() -> str:
@@ -216,17 +216,17 @@ def encode(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
     """
 
     if not _EXTENSION.load():
-        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_ad_hip extension is unavailable")
-    packed, escapes, exp_base = torch.ops.nf12_ad_hip.encode(weight)
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    packed, escapes, exp_base = torch.ops.nf12_hip.encode(weight)
     return packed, escapes, int(exp_base)
 
 
 def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
-    """Decode NF12-AD bytes to the exact BF16 ``[N, K]`` matrix on RDNA4."""
+    """Decode NF12 bytes to the exact BF16 ``[N, K]`` matrix on RDNA4."""
 
     if not _EXTENSION.load():
-        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_ad_hip extension is unavailable")
-    return torch.ops.nf12_ad_hip.decode(packed, escapes, int(exp_base))
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base))
 
 
 def linear(
@@ -239,8 +239,8 @@ def linear(
     """Decode-then-GEMM on RDNA4 (SPEC.md 6.5)."""
 
     if not _EXTENSION.load():
-        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_ad_hip extension is unavailable")
-    return torch.ops.nf12_ad_hip.linear(x, packed, escapes, int(exp_base), bias)
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    return torch.ops.nf12_hip.linear(x, packed, escapes, int(exp_base), bias)
 
 
 __all__ = [
@@ -250,6 +250,6 @@ __all__ = [
     "encode",
     "last_error",
     "linear",
-    "nf12_ad_hip_supported",
-    "prewarm_nf12_ad_hip_extension",
+    "nf12_hip_supported",
+    "prewarm_nf12_hip_extension",
 ]

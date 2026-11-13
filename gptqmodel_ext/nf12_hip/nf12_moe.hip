@@ -24,8 +24,8 @@
 // Everything is host-synchronisation free so a launch can be graph-captured:
 // per-expert counts are device-side and the host only supplies bounds.
 // ---------------------------------------------------------------------------
-#include "nf12_ad_format_hip.cuh"
-#include "nf12_ad_validation.cuh"
+#include "nf12_format_hip.cuh"
+#include "nf12_validation.cuh"
 
 #include <hip/hip_runtime_api.h>
 
@@ -389,12 +389,12 @@ AlignPlan align_plan(int64_t num_assignments, int64_t num_experts) {
 
 }  // namespace
 
-size_t nf12_ad_moe_align_workspace_bytes(int64_t num_assignments, int64_t num_experts) {
+size_t nf12_moe_align_workspace_bytes(int64_t num_assignments, int64_t num_experts) {
   if (num_assignments <= 0 || num_experts < 1) return 0;
   return align_plan(num_assignments, num_experts).bytes;
 }
 
-hipError_t nf12_ad_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_t topk,
+hipError_t nf12_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_t topk,
                               int64_t num_experts, int32_t* sorted_out,
                               int64_t* expert_offsets_out, void* workspace,
                               size_t workspace_bytes, hipStream_t stream) {
@@ -452,15 +452,15 @@ hipError_t nf12_ad_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_
   return hipGetLastError();
 }
 
-hipError_t nf12_ad_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_tokens, int64_t topk,
+hipError_t nf12_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_tokens, int64_t topk,
                                 int64_t n, void* out_bf16, int64_t ldo, hipStream_t stream) {
   if (num_tokens < 0 || topk < 1 || topk > 0x7fffffffLL || n <= 0 || n % 8 != 0) {
     return hipErrorInvalidValue;
   }
   if (num_tokens == 0) return hipSuccess;
   constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
-  if (!nf12_ad::validation::valid_bf16_matrix(y_bf16, n, ldy) ||
-      !nf12_ad::validation::valid_bf16_matrix(out_bf16, n, ldo) ||
+  if (!nf12::validation::valid_bf16_matrix(y_bf16, n, ldy) ||
+      !nf12::validation::valid_bf16_matrix(out_bf16, n, ldo) ||
       num_tokens > kMax / 2 / topk / ldy || num_tokens > kMax / 2 / ldo) {
     return hipErrorInvalidValue;
   }
@@ -473,13 +473,13 @@ hipError_t nf12_ad_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_toke
   return hipGetLastError();
 }
 
-hipError_t nf12_ad_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, int64_t inter,
+hipError_t nf12_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, int64_t inter,
                                  void* out_bf16, int64_t ldo, hipStream_t stream) {
   constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
   if (rows < 0 || inter <= 0 || inter % 8 != 0 || inter > kMax / 2) return hipErrorInvalidValue;
   if (rows == 0) return hipSuccess;
-  if (!nf12_ad::validation::valid_bf16_matrix(h_bf16, 2 * inter, ldh) ||
-      !nf12_ad::validation::valid_bf16_matrix(out_bf16, inter, ldo) ||
+  if (!nf12::validation::valid_bf16_matrix(h_bf16, 2 * inter, ldh) ||
+      !nf12::validation::valid_bf16_matrix(out_bf16, inter, ldo) ||
       rows > kMax / 2 / ldh || rows > kMax / 2 / ldo) {
     return hipErrorInvalidValue;
   }
@@ -492,13 +492,13 @@ hipError_t nf12_ad_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, i
   return hipGetLastError();
 }
 
-hipError_t nf12_ad_moe_decode(const uint8_t* packed, const uint4* escapes,
+hipError_t nf12_moe_decode(const uint8_t* packed, const uint4* escapes,
                                const int64_t* escape_offsets, const uint8_t* exp_base,
                                int32_t num_experts, int64_t n, int64_t k,
                                const int64_t* expert_offsets,
                                int64_t max_assignments, int64_t row0, int64_t rows, void* out,
                                int64_t ldo, hipStream_t stream) {
-  using namespace nf12_ad::validation;
+  using namespace nf12::validation;
   if (!valid_moe_shape(num_experts, n, k) || packed == nullptr || !aligned16(packed) ||
       !aligned16(escapes) || escape_offsets == nullptr || !aligned(escape_offsets, 8) ||
       exp_base == nullptr || !aligned(expert_offsets, 8) || max_assignments < 0 ||
@@ -521,12 +521,12 @@ hipError_t nf12_ad_moe_decode(const uint8_t* packed, const uint4* escapes,
   return hipGetLastError();
 }
 
-hipError_t nf12_ad_moe_grouped_operands(const void* x_bf16, int64_t ldx, const int32_t* gather,
+hipError_t nf12_moe_grouped_operands(const void* x_bf16, int64_t ldx, const int32_t* gather,
                                          int64_t gather_div, const int64_t* expert_offsets,
                                          int64_t max_assignments, int64_t num_experts, int64_t k,
                                          void* x_out_bf16, int64_t ldo, int32_t* group_ends,
                                          hipStream_t stream) {
-  using namespace nf12_ad::validation;
+  using namespace nf12::validation;
   constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
   if (num_experts < 1 || num_experts > 0x7fffffffLL || k <= 0 || k % 8 != 0 || gather_div < 1 ||
       max_assignments < 0 || max_assignments > std::numeric_limits<int32_t>::max() ||

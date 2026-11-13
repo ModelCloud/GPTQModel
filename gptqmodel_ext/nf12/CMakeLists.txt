@@ -67,7 +67,7 @@ set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 
-option(NF12_BUILD_TORCH "Build the torch extension (libnf12_ad_torch.so)" ON)
+option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
 
 # --use_fast_math would violate the numerical contract in SPEC.md section 6.
 # NVCC's warning policy does not cover the host compiler or PTX assembler.
@@ -96,7 +96,7 @@ set_target_properties(nf12 PROPERTIES
   LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/csrc/nf12.map"
   CUDA_SEPARABLE_COMPILATION OFF
   BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
-  OUTPUT_NAME nf12_ad)
+  OUTPUT_NAME nf12)
 
 install(TARGETS nf12 LIBRARY DESTINATION nf12)
 
@@ -124,7 +124,7 @@ if(NF12_BUILD_TORCH)
   target_compile_definitions(nf12_torch PRIVATE USE_CUDA TORCH_TARGET_VERSION=0x020A000000000000ULL)
   target_link_libraries(nf12_torch PRIVATE nf12 "${NF12_TORCH_CPU_LIB}" "${NF12_TORCH_CUDA_LIB}")
   set_target_properties(nf12_torch PROPERTIES
-    OUTPUT_NAME nf12_ad_torch
+    OUTPUT_NAME nf12_torch
     CXX_VISIBILITY_PRESET hidden
     CUDA_VISIBILITY_PRESET hidden
     CUDA_SEPARABLE_COMPILATION OFF

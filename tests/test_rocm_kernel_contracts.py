@@ -27,7 +27,7 @@ ROCM_KERNELS = set("""
     AllSparkLinear AllSparkAwqLinear AwqGEMMTritonLinear AwqGEMVTritonLinear
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
-    GGUFTorchLinear ParoLinear VPTQLinear NF12ADLinear
+    GGUFTorchLinear ParoLinear VPTQLinear NF12Linear
 """.split())
 CUDA_ONLY_KERNELS = set("""
     TritonV2Linear W4AFP8Linear W4ANVFP4Linear ExllamaV2Linear AwqExllamaV2Linear

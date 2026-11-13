@@ -48,7 +48,7 @@ def nf12_loader(monkeypatch, tmp_path):
         library=_library,
         jit=_jit,
         package=tmp_path / "package",
-        cache=tmp_path / "cache" / "gptqmodel" / "nf12_ad" / "fixture",
+        cache=tmp_path / "cache" / "gptqmodel" / "nf12" / "fixture",
     )
 
 
@@ -64,7 +64,7 @@ def _ready_nf12_runtime(loader, mode):
     else:
         directory = loader.package if mode == "packaged" else loader.cache / "build"
         directory.mkdir(parents=True)
-        for name in ("libnf12_ad.so", "libnf12_ad_torch.so"):
+        for name in ("libnf12.so", "libnf12_torch.so"):
             (directory / name).touch()
         if mode == "cached":
             (loader.cache / "complete").touch()

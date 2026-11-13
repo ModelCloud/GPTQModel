@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) encode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
+// NF12 (NyoomFloat12) encode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
 //
 // Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
 // (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
@@ -31,7 +31,7 @@
 // escape indices must follow flat group id order. The validator asserts
 // bytes_match / escapes_match / exp_base against the Torch oracle.
 // ---------------------------------------------------------------------------
-#include "nf12_ad_format_hip.cuh"
+#include "nf12_format_hip.cuh"
 
 #include <algorithm>
 #include <functional>
@@ -251,12 +251,12 @@ int64_t g_num_units(int64_t n, int64_t k) { return num_units(num_super_atoms(n, 
 
 extern "C" {
 
-size_t nf12_ad_encode_workspace_bytes(int64_t n, int64_t k) {
+size_t nf12_encode_workspace_bytes(int64_t n, int64_t k) {
   const size_t unit_bytes = sizeof(uint64_t) * size_t(g_num_units(n, k) + 1);
   return std::max(kAnalyzeWorkspaceBytes, (unit_bytes + 15) & ~size_t(15));
 }
 
-hipError_t nf12_ad_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_t ldw, void* workspace,
+hipError_t nf12_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_t ldw, void* workspace,
                                   size_t workspace_bytes, uint8_t* exp_base_out,
                                   uint32_t* num_escapes_out, hipStream_t stream) {
   // SPEC.md 4 geometry. Without this a k that is not a multiple of 64 is
@@ -269,7 +269,7 @@ hipError_t nf12_ad_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_
   // then written by the analyze kernel, so a short or null buffer must be
   // rejected before any device write.
   if (exp_base_out == nullptr || num_escapes_out == nullptr || workspace == nullptr ||
-      workspace_bytes < nf12_ad_encode_workspace_bytes(n, k)) {
+      workspace_bytes < nf12_encode_workspace_bytes(n, k)) {
     return hipErrorInvalidValue;
   }
   const auto* w = reinterpret_cast<const __hip_bfloat16*>(w_in);
@@ -311,7 +311,7 @@ hipError_t nf12_ad_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_
   return hipSuccess;
 }
 
-hipError_t nf12_ad_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base,
+hipError_t nf12_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base,
                           uint8_t* packed, uint4* escapes, uint32_t escapes_capacity,
                           void* workspace, size_t workspace_bytes, hipStream_t stream) {
   if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldw < k) {
@@ -320,7 +320,7 @@ hipError_t nf12_ad_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, u
   const auto* w = reinterpret_cast<const __hip_bfloat16*>(w_in);
   if (exp_base > kMaxExpBase) return hipErrorInvalidValue;
   if (packed == nullptr || workspace == nullptr ||
-      workspace_bytes < nf12_ad_encode_workspace_bytes(n, k)) {
+      workspace_bytes < nf12_encode_workspace_bytes(n, k)) {
     return hipErrorInvalidValue;
   }
   if (escapes_capacity > 0 && escapes == nullptr) return hipErrorInvalidValue;
