@@ -2,7 +2,7 @@
 
 The fusion planner consumes `model.module_plan()` and combines compatible
 Q/K/V or gate/up projections for inference. Definition-owned contracts qualify
-101 registered model types, with per-model profiles listed in the
+102 registered model types, with per-model profiles listed in the
 [qualification matrix](fusion-model-coverage.md). MoE expert paths remain
 excluded; compatible attention in MoE models can qualify independently.
 Introduced in [PR #3567](https://github.com/ModelCloud/GPTQModel/pull/3567).
@@ -521,9 +521,9 @@ compiled descriptor are runtime state, not new model-definition weight obligatio
   Its public API regression checks the returned `FusionPlanner`, terminal/JSON
   inspection, empty eligible plans, and `None` on disable. Benchmarks retain
   this return value and pass it to storage/diagnostic helpers explicitly.
-- `tests/module_tree/test_fusable_models.py` pins admission for all 198 aliases,
-  exercises 101 real native model definitions through the public module-plan API
-  and fusion planner, and checks 116 distinct native parent/family pairs in
+- `tests/module_tree/test_fusable_models.py` pins admission for all 205 aliases,
+  exercises 102 real native model definitions through the public module-plan API
+  and fusion planner, and checks 118 distinct native parent/family pairs in
   GPTQ/AWQ and FP16/BF16 against separate forwards and integer-weight oracles.
 - `tests/module_tree/test_fusable_merge.py` checks target-first construction,
   multiple sources, diamond deduplication, alias variants, explicit conflict

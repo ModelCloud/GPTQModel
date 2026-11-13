@@ -156,12 +156,16 @@ def test_gptq_act_group_aware_accepts_effective_columns_with_tail_group():
     assert gptq.columns == 10
 
 
-def test_gptq_act_group_aware_rejects_non_positive_group_size():
+def test_gptq_act_group_aware_is_disabled_for_per_channel_quantization():
     layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
     qcfg = QuantizeConfig(bits=4, group_size=-1, act_group_aware=True)
 
-    with pytest.raises(ValueError, match="group_size > 0"):
-        GPTQ(layer, qcfg=qcfg)
+    # QuantizeConfig normalizes this ineffective combination before GPTQ sees
+    # it. Per-channel quantization remains valid and does not group columns.
+    assert qcfg.act_group_aware is False
+    gptq = GPTQ(layer, qcfg=qcfg)
+    assert gptq.qcfg.act_group_aware is False
+    assert gptq.columns == 8
 
 
 def _make_embedding_gptq(*, group_size: int = 2, desc_act: bool = False) -> GPTQ:

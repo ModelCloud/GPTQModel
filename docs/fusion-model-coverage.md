@@ -6,20 +6,20 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **200 registered model types**: **101 qualified** and **99 not
+accounts for all **205 registered model types**: **102 qualified** and **103 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
 paths remain excluded, and a model with an attention-only profile has no MoE
 expert fusion.
 
-The native numerical matrix covers **116 distinct parent/family pairs**, each
-with GPTQ and AWQ, FP16 and BF16: **464 cases** using symmetric INT4,
+The native numerical matrix covers **118 distinct parent/family pairs**, each
+with GPTQ and AWQ, FP16 and BF16: **472 cases** using symmetric INT4,
 `group_size=128`, `desc_act=False`, and Marlin on NVIDIA CUDA. All use separate
 native-forward baselines plus an independent integer-code weight oracle with
-`rtol=atol=2e-3`. Together with one registry contract and 101 real-model topology
-checks, the qualification suite has **566 passing cases** in the tested
-Transformers 5.22.1 / Torch 2.15.0+cu132 environment. The full-model generation,
+`rtol=atol=2e-3`. Together with one registry contract and 102 real-model topology
+checks, the qualification suite has **575 passing cases** in the tested
+Transformers 5.22.2 / Torch 2.15.0+cu132 environment. The full-model generation,
 accuracy and performance results in the [fusion planner guide](fusion-planner.md)
 are measured on Llama 3.2 1B; they are not measurements for every architecture.
 
@@ -165,6 +165,7 @@ leaves. Multimodal profiles cover only the declared decoder text stack.
 | `olmo` | `LlamaQModel` | `qkv`, `gate_up` | `OlmoAttention`, `OlmoMLP` |
 | `olmo2` | `Olmo2QModel` | `qkv`, `gate_up` | `Olmo2Attention`, `Olmo2MLP` |
 | `olmo3` | `Olmo3QModel` | `qkv`, `gate_up` | `Olmo3Attention`, `Olmo3MLP` |
+| `olmo_hybrid` | `OlmoHybridQModel` | `qkv`, `gate_up` | `OlmoHybridAttention`, `OlmoHybridMLP` |
 | `olmoe` | `OlmoeQModel` | `qkv` | `OlmoeAttention` |
 | `opt` | `OptQModel` | `qkv` | `OPTAttention` |
 | `ovis2` | `Ovis2QModel` | `qkv`, `gate_up` | `Qwen2Attention`, `Qwen2MLP` |

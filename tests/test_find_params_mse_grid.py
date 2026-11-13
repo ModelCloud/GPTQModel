@@ -68,9 +68,13 @@ def _legacy_find_params(self, x, weight=False):
     else:
         if self.requires_groupwise_processing():
             self.scale = xmax / self.maxq
+            if weight:
+                self.scale = self.scale.clamp_min(2.0**-24)
             self.zero = torch.zeros_like(self.scale)
         else:
             self.scale = (xmax - xmin) / self.maxq
+            if weight:
+                self.scale = self.scale.clamp_min(2.0**-24)
             if self.qcfg.sym:
                 self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
             else:
@@ -93,6 +97,8 @@ def _legacy_find_params(self, x, weight=False):
                 if self.requires_groupwise_processing()
                 else (xmax1 - xmin1) / self.maxq
             )
+            if weight and self._maxq_value >= 0:
+                scale1 = scale1.clamp_min(2.0**-24)
             zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
             zero_candidates = (zero1,)
             if search_adjacent_zero_points:
@@ -164,6 +170,9 @@ def _case(kind, shape, dtype=torch.float32, seed=0):
         return x
     if kind == "tiny":
         return x * 1e-8
+    if kind == "floor_boundary":
+        # Candidate ranges cross the storage floor during shrink search.
+        return x * 3e-7
     raise ValueError(kind)
 
 
@@ -196,7 +205,10 @@ class TestMseShrinkGridVectorized(unittest.TestCase):
         (2, False, "const"),   # all-equal candidates -> tie-order check
         (8, False, "outlier"),
         (4, False, "naninf"),  # NaN objectives must stay unselectable
-        (4, False, "tiny"),    # zero/near-zero scales hit the zero-scale guard
+        (4, False, "tiny"),    # candidates are all below the storage floor
+        (4, True, "floor_boundary"),
+        (4, False, "floor_boundary"),
+        (2, False, "floor_boundary"),
     ])
     def test_weight_grid_matches_oracle(self, bits, sym, kind):
         qcfg = QuantizeConfig(bits=bits, group_size=-1, sym=sym, mse=2.4)
