@@ -196,7 +196,7 @@ class _BlockfloatStorage(nn.Module):
 
         The kernel reads the packed codes and exponents directly, so no dense
         weight is built.  That is the whole point of the emulation: on a CUDA
-        part a ``bfloat4_b`` layer then costs what it will cost on Tensix,
+        part a ``bf4_b`` layer then costs what it will cost on Tensix,
         rather than what a dequantise-then-matmul costs.
 
         Returning ``None`` keeps every other device on the dense path.
@@ -222,6 +222,8 @@ class _BlockfloatStorage(nn.Module):
             return out.reshape(*x.shape[:-1], out.shape[-1])
 
         if x.device.type != "cuda" or self.codes.device != x.device:
+            return None
+        if self.bits not in (4, 8):
             return None
         if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return None
@@ -426,6 +428,8 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
 
         if input_ids.device.type != "cuda" or self.codes.device != input_ids.device:
             return None
+        if self.bits not in (4, 8):
+            return None
         if self.output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return None
 
@@ -448,6 +452,15 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         return out.reshape(*shape, self.in_features)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if input_ids.numel() == 0:
+            # An empty gather still has a shape and a dtype to preserve; the
+            # table's own precision, and a zero-block launch is an error.
+            return torch.empty(
+                *input_ids.shape,
+                self.in_features,
+                dtype=self.output_dtype,
+                device=input_ids.device,
+            )
         kernel = self._kernel_embedding(input_ids)
         if kernel is not None:
             return kernel

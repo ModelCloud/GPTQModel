@@ -10,6 +10,12 @@ expectation.  Quantise and decompose are required to be *bit* identical; the
 GEMM is allowed float32 accumulation error.
 """
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -20,12 +26,33 @@ from gptqmodel.utils.tt_blockfloat_quant import (
     quantize_blockfloat,
     recompose_blockfloat,
 )
+from tests.accelerator_gates import cuda_only_skip_reason
 
 
-pytestmark = pytest.mark.skipif(
-    not bf_cuda.supported(),
-    reason="Tenstorrent block-float CUDA kernels need a CUDA device of sm_80 or newer",
-)
+def _skip_reason() -> str | None:
+    """Why this suite cannot run here, or ``None``.
+
+    The shared gate rejects a HIP build before any capability probe: ROCm reuses
+    the CUDA namespace and reports gfx as a compute capability, which would read
+    as a supported NVIDIA part.
+    """
+
+    reason = cuda_only_skip_reason("Tenstorrent block-float")
+    if reason is not None:
+        return reason
+    if not torch.cuda.is_available():
+        return "Tenstorrent block-float CUDA kernels need a CUDA device"
+    if bf_cuda.supported():
+        return None
+    capability = torch.cuda.get_device_capability()
+    return (
+        "Tenstorrent block-float CUDA kernels need sm_80 or newer, "
+        f"got sm{capability[0]}{capability[1]}"
+    )
+
+
+_SKIP_REASON = _skip_reason()
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 BITS = (4, 8)
 # Small, odd and padded geometries; ``k`` must stay a multiple of the block.
@@ -385,3 +412,106 @@ def test_linear_handles_a_full_grid_y():
     expected = x.to(torch.float32) @ grid.reshape(n, k).T
     assert tuple(got.shape) == (m, n)
     assert ((got.to(torch.float32) - expected).abs().max() / expected.abs().max()).item() < 5e-3
+
+
+def test_fused_fallback_masks_an_odd_output_width():
+    """The fused path must not write past the last column when ``n`` is odd.
+
+    Regression for the review finding: the MMA epilogue owns a *pair* of
+    adjacent columns, so an odd ``n`` used to store into ``out[m * n]`` and read
+    ``bias[n]``.  The fallback is only selected when cuBLAS is unavailable, so
+    this runs in a subprocess with the escape hatch set and checks a canary
+    immediately after the last valid element.
+    """
+
+    bf_cuda.prewarm()  # build once here so the child only has to load it
+
+    script = textwrap.dedent(
+        """
+        import torch
+
+        from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
+
+        assert bf_cuda.prewarm(), "extension did not load"
+
+        m, k = 1, 16
+        # bf4_b: levels 4, offset 7, so code 8 is (8 - 7) / 4 = 0.25.
+        for n in (1, 3, 5):
+            codes = torch.full((n * k // 2,), 0x88, dtype=torch.uint8, device="cuda")
+            exponents = torch.zeros((n * (k // 16),), dtype=torch.int8, device="cuda")
+            x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
+            buffer = torch.full((m * n + 1,), 123.0, dtype=torch.bfloat16, device="cuda")
+            out = buffer[: m * n].view(m, n)
+            torch.ops.gptqmodel_blockfloat_cuda.blockfloat_linear(
+                x, codes, exponents, 4, None, out
+            )
+            torch.cuda.synchronize()
+            expected = torch.full((m, n), 4.0, dtype=torch.bfloat16, device="cuda")
+            assert torch.equal(out, expected), f"n={n}: wrong result"
+            assert buffer[-1].item() == 123.0, f"n={n}: wrote past the last column"
+        print("ok")
+        """
+    )
+    env = dict(os.environ, GPTQMODEL_BLOCKFLOAT_NO_CUBLAS="1")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_empty_inputs_keep_their_shapes():
+    """Empty forwards must return an empty result, not raise.
+
+    Regression for the review finding: the embedding dispatch launched a
+    zero-block kernel and the linear binding rejected a zero-row activation,
+    while the dense paths returned ``(0, 16)`` and ``(1, 0, 3)``.
+    """
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    torch.manual_seed(21)
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4).cuda()
+    empty_ids = torch.empty(0, dtype=torch.int64, device="cuda")
+
+    got = embedding(empty_ids)
+    assert tuple(got.shape) == (0, 16)
+    assert got.dtype is embedding.output_dtype
+    dense = torch.nn.functional.embedding(
+        empty_ids, embedding.dequantize(dtype=embedding.output_dtype)
+    )
+    assert torch.equal(got, dense)
+
+    # A cast table emits its own precision on the kernel, empty and dense paths.
+    cast = TTBlockfloatEmbedding(3, 16, bits=4).bfloat16().cuda()
+    assert cast.output_dtype is torch.bfloat16
+    ids = torch.tensor([0, 2], device="cuda")
+    assert cast(ids).dtype is torch.bfloat16
+    assert cast(empty_ids).dtype is torch.bfloat16
+
+    head = TTBlockfloatTiedHead(embedding)
+    empty_states = torch.empty(1, 0, 16, dtype=torch.bfloat16, device="cuda")
+    out = head(empty_states)
+    assert tuple(out.shape) == (1, 0, 3)
+    assert out.dtype is torch.bfloat16
+
+    # The op itself tolerates empty operands, so direct callers match.
+    codes, exponents = _cuda_quantize(torch.randn(16, 16, device="cuda"), 4)
+    empty_out = torch.empty(0, 16, dtype=torch.bfloat16, device="cuda")
+    torch.ops.gptqmodel_blockfloat_cuda.blockfloat_linear(
+        torch.empty(0, 16, dtype=torch.bfloat16, device="cuda"),
+        codes,
+        exponents,
+        4,
+        None,
+        empty_out,
+    )
+    assert empty_out.numel() == 0

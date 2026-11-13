@@ -51,7 +51,9 @@ process that loads this extension already has the library mapped through torch.
 **Fallback** — if cuBLAS cannot be resolved, a fused dequant + `mma.m16n8k16`
 kernel runs instead (128x128x32 tile, 8 warps, `cp.async` double buffering,
 register-prefetched dequantise for the weight tile). It is correct but slower; it
-exists so the extension still works on a bare toolkit.
+exists so the extension still works on a bare toolkit. Setting
+`GPTQMODEL_BLOCKFLOAT_NO_CUBLAS=1` forces it, which is how the tests reach that
+path on a machine that does have cuBLAS.
 
 `fp32` activations take a separate SIMT path and are not the performance target.
 

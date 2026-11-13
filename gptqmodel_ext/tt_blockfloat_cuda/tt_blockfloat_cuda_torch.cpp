@@ -85,7 +85,7 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   const torch::Tensor xc = x.contiguous();
   const int64_t m = xc.size(0);
   const int64_t k = xc.size(1);
-  TORCH_CHECK(m > 0 && k > 0, "x must not be empty");
+  TORCH_CHECK(k > 0, "x must have at least one column");
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
   check_like(codes, xc, "codes");
   check_like(exponents, xc, "exponents");
@@ -97,6 +97,8 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   TORCH_CHECK(out.scalar_type() == xc.scalar_type(), "out dtype must match x");
   TORCH_CHECK(out.dim() == 2 && out.size(0) == m && out.size(1) == n,
               "out must be [", m, ", ", n, "]");
+  // An empty activation has an empty result; there is nothing to launch.
+  if (m == 0) return;
 
   const void* bias_ptr = nullptr;
   if (bias.has_value()) {
@@ -201,6 +203,8 @@ void blockfloat_embedding_out(const torch::Tensor& ids, const torch::Tensor& cod
   check_like(out, idx, "out");
   const int64_t tokens = idx.numel();
   TORCH_CHECK(out.numel() == tokens * k, "out must hold tokens * k elements");
+  // An empty gather has an empty result; a zero-block launch is an error.
+  if (tokens == 0) return;
 
   const c10::cuda::CUDAGuard guard(idx.device());
   ok(blockfloat_embedding(idx.data_ptr<int64_t>(), codes.data_ptr<uint8_t>(),

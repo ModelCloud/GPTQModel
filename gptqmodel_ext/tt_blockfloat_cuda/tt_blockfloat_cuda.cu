@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstdint>
+#include <cstdlib>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -593,15 +594,18 @@ __global__ __launch_bounds__(PTHREADS) void linear_mma_kernel(
       const int64_t gm = m0 + wm * 64 + i * 16 + crow;
       const int64_t gn = n0 + wn * 32 + j * 8 + ccol;
       if (gn < n) {
+        // The fragment covers a pair of adjacent columns, but n may be odd, so
+        // the second column of the last pair is out of range.
+        const bool has_hi = gn + 1 < n;
         const float b0 = bias ? bf_load<T>(&bias[gn]) : 0.0f;
-        const float b1 = bias ? bf_load<T>(&bias[gn + 1]) : 0.0f;
+        const float b1 = (bias != nullptr && has_hi) ? bf_load<T>(&bias[gn + 1]) : 0.0f;
         if (gm < m) {
           out[gm * n + gn] = bf_cast<T>(acc[i][j][0] + b0);
-          out[gm * n + gn + 1] = bf_cast<T>(acc[i][j][1] + b1);
+          if (has_hi) out[gm * n + gn + 1] = bf_cast<T>(acc[i][j][1] + b1);
         }
         if (gm + 8 < m) {
           out[(gm + 8) * n + gn] = bf_cast<T>(acc[i][j][2] + b0);
-          out[(gm + 8) * n + gn + 1] = bf_cast<T>(acc[i][j][3] + b1);
+          if (has_hi) out[(gm + 8) * n + gn + 1] = bf_cast<T>(acc[i][j][3] + b1);
         }
       }
     }
@@ -712,6 +716,13 @@ struct CublasApi {
 inline const CublasApi& cublas_api() {
   static const CublasApi api = [] {
     CublasApi a;
+    // Escape hatch that forces the fused fallback.  It is the only way to
+    // exercise that path on a machine which does have cuBLAS, and it lets a
+    // build with no cuBLAS at all run the same tests.
+    if (const char* off = std::getenv("GPTQMODEL_BLOCKFLOAT_NO_CUBLAS");
+        off != nullptr && off[0] != '\0' && off[0] != '0') {
+      return a;
+    }
     static const char* kSonames[] = {"libcublas.so.13", "libcublas.so.12",
                                      "libcublas.so.11", "libcublas.so"};
     void* lib = nullptr;
