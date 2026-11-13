@@ -43,10 +43,22 @@ def _has_int8_mm_op() -> bool:
     return hasattr(torch.ops.aten, "_weight_int8pack_mm")
 
 
+def _normalize_g_idx(g_idx: torch.Tensor, num_groups: int) -> torch.Tensor:
+    """Resolve the checkpoint's negative group indices to explicit group rows.
+
+    GPTQ packers may mark padded rows with ``-1`` (see
+    ``GPTQQuantLinear.pack_block``), which means "the last group" when indexing
+    ``scales``/``zeros``. Both the per-group channel counts and the channel
+    permutation must use that same normalized value, otherwise a negative entry
+    is counted in the last group but sorted before the first group.
+    """
+    groups = g_idx.long()
+    return torch.where(groups < 0, groups + num_groups, groups)
+
+
 def _group_layout(g_idx: torch.Tensor, num_groups: int) -> tuple[tuple[int, ...], int]:
     """Return per-group channel counts after sorting channels into group order."""
-    groups = g_idx.long()
-    groups = torch.where(groups < 0, groups + num_groups, groups)
+    groups = _normalize_g_idx(g_idx, num_groups)
     counts = torch.bincount(groups, minlength=num_groups)[:num_groups].tolist()
     return tuple(int(count) for count in counts), int(max(counts) if counts else 0)
 
@@ -78,11 +90,26 @@ def _dequantize_group_layout(
         weight = weight + group_offset.to(torch.float32).unsqueeze(-1)
 
     rows = weight.permute(0, 2, 1).reshape(num_groups * group_width, out_features)
+    if any(length != group_width for length in lengths[:-1]):
+        # A short/empty non-trailing group leaves padding rows inside the flat
+        # layout. Gathering each group's exact rows is required; truncating the
+        # tail would keep padding rows from earlier groups and drop valid rows
+        # from later ones. A ragged final group is already handled by the
+        # trailing truncation below.
+        index = torch.cat([
+            torch.arange(group * group_width, group * group_width + length, device=rows.device)
+            for group, length in enumerate(lengths)
+        ])
+        rows = rows.index_select(0, index)
     keep = sum(lengths)
     if in_features is not None:
         keep = min(keep, in_features)
     rows = rows[:keep]
     if input_perm is not None:
+        if input_perm.numel() != rows.shape[0]:
+            raise ValueError(
+                f"Activation permutation has {input_perm.numel()} entries for {rows.shape[0]} decoded rows"
+            )
         rows = rows.index_select(0, torch.argsort(input_perm.long()))
     return rows
 
@@ -401,7 +428,8 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        return self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+        groups = _normalize_g_idx(self.g_idx, int(self.scales.shape[0]))
+        return self.scales[groups] * (weight - zeros[groups])
 
     @torch.inference_mode()
     def pack_block(
@@ -452,7 +480,8 @@ class TorchInt8Linear(GPTQQuantLinear):
         codes = codes[:self.in_features]
 
         num_groups = int(self.scales.shape[0])
-        group_lengths, _ = _group_layout(self.g_idx, num_groups)
+        groups = _normalize_g_idx(self.g_idx, num_groups)
+        group_lengths, _ = _group_layout(groups, num_groups)
         packed_channels = sum(group_lengths)
         if packed_channels != self.in_features:
             raise NotImplementedError(
@@ -464,7 +493,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         # quantization group covers every channel of that group. Stable sorting
         # keeps the relative order inside a group and makes the mapping exactly
         # invertible for dequantization and export.
-        input_perm = torch.argsort(self.g_idx.long(), stable=True)
+        input_perm = torch.argsort(groups, stable=True)
         ordered_codes = codes.index_select(0, input_perm)
         group_width = max(group_lengths)
         if all(length == group_width for length in group_lengths):
@@ -591,8 +620,10 @@ __all__ = [
     "Int8PackedModule",
     "TorchInt8Linear",
     "_cached_int8_dequantize",
+    "_dequantize_group_layout",
     "_group_layout",
     "_has_int8_mm_op",
+    "_normalize_g_idx",
     "_write_group_buffers",
     "dequantize_model",
 ]

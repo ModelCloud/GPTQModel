@@ -39,7 +39,7 @@ flowchart TD
     T --> E{"one g_idx entry per input channel?"}
     E -->|no| X["NotImplementedError: padding-aware metadata required"]
     E -->|yes| F["decode codes and zeros; no FP32 matrix needed"]
-    F --> P["_group_layout: stable sort channels into group order"]
+    F --> P["_normalize_g_idx: negative entries resolve to the last group; group counts + stable sort"]
     P --> G["_write_group_buffers: code-128 residuals, per-group scale, optional offset, input permutation"]
     G --> H["_bind_int8_runtime: Int8PackedModule aliases the buffers"]
     H --> I["_fused_op_forward"]
@@ -103,6 +103,10 @@ FP16/BF16 visible outputs match the fp64 oracle inside the `2e-3` inference gate
 - Exactly one `g_idx` entry per input channel is required. Checkpoints whose
   packed words carry zero-filled tail codes are truncated to `in_features`; a
   mismatch raises instead of silently mis-indexing groups.
+- Negative `g_idx` entries are the packer's padding marker and resolve to the
+  last group, matching `pack_block`. The group counts and the channel
+  permutation use the same normalized value; the dequantized export gathers
+  each group's exact rows, so empty and ragged groups keep their own bounds.
 - 8-bit sources only. Expanding a 2/4-bit checkpoint into persistent INT8
   remains rejected by `_require_native_int8`.
 - The activation-order permutation must be identical across fused siblings;

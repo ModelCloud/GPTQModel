@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.torch_int8 import (
     INT8_WEIGHT_BUFFER_NAME,
     Int8PackedModule,
     TorchInt8Linear,
+    _dequantize_group_layout,
     _write_group_buffers,
 )
 from gptqmodel.quantization import FORMAT, METHOD
@@ -120,6 +121,11 @@ def _group_runtime_oracle(state):
     scale = state["scales"].double()
     offset = (128.0 - zeros.double()) * scale
     return residual, scale, (None if bool((offset == 0).all()) else offset), perm
+
+
+def _pack_int8_words(words):
+    return ((words[..., 0] << 0) | (words[..., 1] << 8) | (words[..., 2] << 16)
+            | (words[..., 3] << 24)).to(torch.int32).contiguous()
 
 
 @pytest.mark.parametrize("group_size", [-1, 16, 32, 64, 128])
@@ -277,6 +283,66 @@ def test_native_int8_ragged_last_group_keeps_exact_weights():
     with torch.inference_mode():
         zero_output = module(torch.zeros(2, in_features))
     torch.testing.assert_close(zero_output, torch.zeros_like(zero_output), rtol=0, atol=0)
+
+
+def test_native_int8_negative_g_idx_matches_checkpoint_decode():
+    """``-1`` marks the last group in both the counts and the permutation.
+
+    ``pack_block`` normalizes negative group indices to the last group, so the
+    runtime layout must count and sort those rows the same way. Counting them in
+    the last group while sorting them first silently permutes the weight rows.
+    """
+    in_features, out_features, group_size = 96, 32, 32
+    num_groups = in_features // group_size
+    generator = torch.Generator().manual_seed(31337)
+    codes = torch.randint(0, 256, (in_features, out_features), generator=generator)
+    zeros = torch.full((num_groups, out_features), 128, dtype=torch.int64)
+    scales = (torch.rand(num_groups, out_features, generator=generator) * 0.01 + 1e-3).half()
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    # Two rows of the first group are padding marked with ``-1``; they resolve to
+    # the last group, so the group lengths become (30, 32, 34).
+    g_idx[0] = -1
+    g_idx[1] = -1
+    normalized = torch.where(g_idx.long() < 0, g_idx.long() + num_groups, g_idx.long())
+    weight = (codes - zeros[normalized]).double() * scales.double()[normalized]
+
+    module = TorchInt8Linear(bits=8, group_size=group_size, sym=True, desc_act=True,
+                             in_features=in_features, out_features=out_features, bias=False)
+    module.load_state_dict({
+        "qweight": _pack_int8_words(codes.reshape(in_features // 4, 4, out_features).permute(0, 2, 1)),
+        "qzeros": _pack_int8_words(zeros.reshape(-1, out_features // 4, 4)),
+        "scales": scales,
+        "g_idx": g_idx,
+    }, strict=True)
+    module.post_init()
+    module.eval()
+
+    assert module._int8_group_lengths == (30, 32, 34)
+    torch.testing.assert_close(module.int8_input_perm, torch.argsort(normalized, stable=True),
+                               rtol=0, atol=0)
+    torch.testing.assert_close(module.dequantize_weight().double(), weight, rtol=0, atol=0)
+    activation = torch.randn(3, in_features)
+    with torch.inference_mode():
+        output = module(activation)
+    torch.testing.assert_close(output.double(), activation.double() @ weight, rtol=2e-3, atol=2e-3)
+
+
+def test_native_int8_dequantize_layout_handles_empty_and_ragged_groups():
+    """Ragged/empty groups may not be flattened into the trailing rows."""
+    num_groups, out_features, width = 3, 2, 3
+    codes = (torch.arange(num_groups * out_features * width, dtype=torch.int64)
+             .reshape(num_groups, out_features, width).remainder(200).sub(100).to(torch.int8))
+    lengths = (2, 0, 3)
+    decoded = _dequantize_group_layout(
+        int8_weight=codes,
+        group_scale=torch.ones(num_groups, out_features),
+        group_offset=None,
+        input_perm=None,
+        group_lengths=lengths,
+        in_features=sum(lengths),
+    )
+    expected = torch.cat([codes[0, :, :2].t(), codes[2, :, :3].t()], dim=0).float()
+    torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("group_size", [32, 128])
