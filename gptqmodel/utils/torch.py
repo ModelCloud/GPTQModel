@@ -4,10 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import functools
 import importlib
 import os
 import sys
 import time
+import traceback
 from contextlib import contextmanager
 from enum import Enum
 from functools import lru_cache
@@ -227,6 +229,175 @@ def _restore_tf32_state(state) -> None:
     torch.backends.cudnn.allow_tf32 = state[1]
 
 
+def torch_compile_disabled() -> bool:
+    """Report whether torch compilation is switched off for this process.
+
+    ``TORCHDYNAMO_DISABLE=1`` is PyTorch's own kill switch. Dynamo already turns
+    ``torch.compile`` into a no-op for it; checking here keeps GPT-QModel from
+    importing dynamo just to build a wrapper that would never trace.
+    """
+    return os.environ.get("TORCHDYNAMO_DISABLE", "").strip() == "1"
+
+
+def _dynamo_exception(*names: str):
+    """Resolve a dynamo exception class without importing ``torch._dynamo``."""
+    dynamo = sys.modules.get("torch._dynamo")
+    exc_module = getattr(dynamo, "exc", None)
+    return tuple(
+        cls for cls in (getattr(exc_module, name, None) for name in names)
+        if isinstance(cls, type)
+    )
+
+
+def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool:
+    """Report whether ``exc`` came from the compiler instead of traced user code.
+
+    ``torch.compile`` only builds the wrapper; inductor actually compiles on the
+    first invocation, so the construction-time guard cannot observe these. A
+    backend failure is always eligible for the eager fallback:
+    ``torch._dynamo.exc.BackendCompilerFailed``, which also carries the
+    ``RuntimeError: Attempting to use a closed pool`` raised by an inductor
+    compile worker. Capture failures such as ``Unsupported`` are only eligible
+    without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
+    contract and must still fail closed.
+
+    A plain ``RuntimeError`` is only treated as a compiler failure when it
+    carries a dynamo/inductor exception in its cause chain or was raised inside
+    PyTorch's compiler packages. Otherwise it belongs to the traced user code;
+    retrying eagerly would run that code twice and hide the original error.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return False
+    if isinstance(exc, _dynamo_exception("BackendCompilerFailed", "TorchRuntimeError")):
+        return True
+    if fullgraph:
+        return False
+    chain = []
+    current = exc
+    while current is not None and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    if any(isinstance(item, _dynamo_exception("TorchDynamoException")) for item in chain):
+        return True
+    if isinstance(exc, RuntimeError):
+        # Dynamo's own frame sits between the caller and the traced body, so a
+        # "contains a compiler frame" test would also match user code raising
+        # RuntimeError. Only the innermost frame identifies where it came from:
+        # compile workers raise outside the traced frame.
+        frames = traceback.extract_tb(exc.__traceback__)
+        origin = (frames[-1].filename or "") if frames else ""
+        return any(
+            token in origin
+            for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
+        )
+    return False
+
+
+def _compile_label(target) -> str:
+    """Describe the compiled unit in the one warning emitted on fallback."""
+    name = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
+    if name:
+        return str(name)
+    return type(target).__name__
+
+
+def _describe_compile_failure(exc: BaseException) -> str:
+    """Render the outermost and innermost compiler error on one line.
+
+    Dynamo wraps backend errors (``BackendCompilerFailed``) around the real
+    cause, for example ``RuntimeError: Attempting to use a closed pool``. The
+    inner message is the actionable one, so both are reported.
+    """
+    def first_line(error):
+        lines = str(error).strip().splitlines()
+        return lines[0] if lines else ""
+
+    root = exc
+    seen = 0
+    while (root.__cause__ is not None or root.__context__ is not None) and seen < 8:
+        root = root.__cause__ or root.__context__
+        seen += 1
+    outer = f"{type(exc).__name__}: {first_line(exc)}"
+    if root is exc:
+        return outer
+    return f"{outer} | root cause {type(root).__name__}: {first_line(root)}"
+
+
+def _warn_compile_fallback(label: str, exc: BaseException) -> None:
+    log.warn.once(
+        f"`{label}` torch.compile failed at first use; staying on eager execution: "
+        f"{_describe_compile_failure(exc)}"
+    )
+
+
+def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
+    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    label = _compile_label(original)
+    state = {"fallback": False}
+
+    def call(*args, **kwargs):
+        if state["fallback"]:
+            return original(*args, **kwargs)
+        try:
+            return compiled(*args, **kwargs)
+        except Exception as exc:
+            if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                raise
+            state["fallback"] = True
+            _warn_compile_fallback(label, exc)
+            return original(*args, **kwargs)
+
+    functools.update_wrapper(call, original)
+    # Keep the dynamo wrapper chain truthful: this proxy really does forward to
+    # `original`, and `_torchdynamo_wrapper_id` must name this wrapper. Kernels
+    # and the fusion lifecycle use the presence of the chain to know that a
+    # trace may have run.
+    call._torchdynamo_orig_callable = original
+    call._torchdynamo_wrapper_id = id(call)
+    for attr in ("_is_torch_compile", "_isolate_recompiles_id", "aot_compile",
+                 "get_compiler_config"):
+        call.__dict__.pop(attr, None)
+    return call
+
+
+def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgraph: bool):
+    """Install the same fallback on a compiled module's ``forward``.
+
+    ``torch.compile(nn.Module)`` returns an ``OptimizedModule`` that callers keep
+    because it is still an ``nn.Module`` (attribute delegation, ``modules()`` and
+    hooks depend on it). Replacing ``forward`` leaves that identity intact while
+    a deferred compile failure runs the original module instead.
+    """
+    if not isinstance(compiled, torch.nn.Module):
+        # Callers assign the result back to an nn.Module attribute
+        # (``BaseQModel.optimize`` does ``self.model = torch_compile(...)``), so
+        # never return a plain callable for a module input. Keep the eager module
+        # and report the unusable compiled object once.
+        log.warn.once(
+            f"`{_compile_label(module)}` torch.compile returned "
+            f"{type(compiled).__name__} instead of nn.Module; using eager execution."
+        )
+        return module
+    label = _compile_label(module)
+    compiled_forward = compiled.forward
+    state = {"fallback": False}
+
+    def forward(*args, **kwargs):
+        if state["fallback"]:
+            return module(*args, **kwargs)
+        try:
+            return compiled_forward(*args, **kwargs)
+        except Exception as exc:
+            if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                raise
+            state["fallback"] = True
+            _warn_compile_fallback(label, exc)
+            return module(*args, **kwargs)
+
+    compiled.forward = forward
+    return compiled
+
+
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     # requires torch >2.8 for proper torch.compile + Python 3.13.3t (freethreading)
     if has_gil_disabled() and not gte_python_3_13_3():
@@ -239,6 +410,9 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
 
     if not TORCH_HAS_COMPILE:
         return module
+    if torch_compile_disabled():
+        log.info.once("Optimize: torch.compile disabled; using eager execution.")
+        return module
     configure_dynamo_cache(ensure_import=True)
     if HAS_MPS and not TORCH_GTE_28:
         if not torch._dynamo.config.suppress_errors:
@@ -247,10 +421,20 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
             torch._dynamo.config.suppress_errors = True
         return module
     try:
-        return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
+        compiled = torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except Exception as e:
         log.warn.once(f"Failed to compile `{module}`, {e}")
         return module
+    if compiled is module:
+        return module
+    # Inductor compiles on the first call, not here. Keep the eager path
+    # reachable so a compile-worker failure degrades instead of aborting.
+    if isinstance(module, torch.nn.Module):
+        return _install_module_compile_fallback(module, compiled, fullgraph)
+    return _install_callable_compile_fallback(module, compiled, fullgraph)
+
 
 def torch_new_stream():
     global STREAM
