@@ -12,6 +12,7 @@ requiring a GPU or a compiler.
 from __future__ import annotations
 
 from gptqmodel.utils import cpp
+from gptqmodel.utils import awq
 from gptqmodel.utils import hadamard
 from gptqmodel.utils import qqq
 
@@ -52,3 +53,7 @@ def test_hadamard_uses_stable_abi():
 
 def test_qqq_uses_stable_abi():
     _assert_stable(qqq._QQQ_TORCH_OPS_EXTENSION)
+
+
+def test_awq_uses_stable_abi():
+    _assert_stable(awq._AWQ_TORCH_OPS_EXTENSION)

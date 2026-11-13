@@ -26,7 +26,7 @@
 
 #include <cuda_fp16.h>
 #include <stdio.h>
-#include <torch/extension.h>
+#include "torch_stable_compat.h"
 #include "gemv_cuda.h"
 #include "../dequantize.cuh"
 #define PACK_FACTOR 8
@@ -254,12 +254,12 @@ torch::Tensor gemv_forward_cuda_decode(
     std::vector<int64_t> output_shape = _in_feats.sizes().vec();
     output_shape.back() = n;
 
-    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
+    auto in_feats = reinterpret_cast<half*>(_in_feats.mutable_data_ptr<at::Half>());
     auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr());
-    auto zeros = reinterpret_cast<half*>(_zeros.data_ptr<at::Half>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<half*>(_zeros.mutable_data_ptr<at::Half>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
 
-    auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+    auto options = torch::TensorOptions().dtype(_in_feats.scalar_type()).device(_in_feats.device());
     at::Tensor _out_feats = torch::empty(output_shape, options);
     half * out_feats = reinterpret_cast<half *>(_out_feats.data_ptr());
     
