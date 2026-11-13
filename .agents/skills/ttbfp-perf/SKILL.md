@@ -136,7 +136,7 @@ TTBFP_FORCE_SCALAR=1 ...                         # reference path
 
 ```bash
 make -C gptqmodel_ext/ttbfp            # libttbfp.so
-make -C gptqmodel_ext/ttbfp test       # 277 tests, includes bitwise parity
+make -C gptqmodel_ext/ttbfp test       # 283 tests, includes bitwise parity
 make -C gptqmodel_ext/ttbfp bench      # microbenchmarks
 make -C gptqmodel_ext/ttbfp cuda       # optional CUDA library (needs nvcc + GPU)
 ```

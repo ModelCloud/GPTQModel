@@ -58,6 +58,35 @@
 
 namespace {
 
+// The public API's ftz argument is the library's flush control.  Ambient
+// FTZ/DAZ (MXCSR bits 15 and 6) would override it and flush genuinely
+// subnormal weights -- and DAZ would also treat them as zero FMA inputs --
+// even when the caller asked for ftz=False.  Clear both bits for the
+// duration of a call that must preserve subnormals, then restore them.
+// Every OpenMP worker gets its own guard because MXCSR is per-thread.
+#if TTBFP_X86
+struct FtzGuard {
+    unsigned int saved_;
+    bool active_;
+    explicit FtzGuard(bool preserve_subnormals)
+        : saved_(0), active_(preserve_subnormals) {
+        if (active_) {
+            saved_ = _mm_getcsr();
+            _mm_setcsr(saved_ & ~0x8040u);  // clear FTZ (15) and DAZ (6)
+        }
+    }
+    ~FtzGuard() {
+        if (active_) _mm_setcsr(saved_);
+    }
+    FtzGuard(const FtzGuard &) = delete;
+    FtzGuard &operator=(const FtzGuard &) = delete;
+};
+#else
+struct FtzGuard {
+    explicit FtzGuard(bool) {}
+};
+#endif
+
 // The true per-block scale is 2^(e - 126 - magnitude_bits).  For the six
 // smallest exponents that value is subnormal (bf8: e < 7), so a CPU running
 // with FTZ/DAZ enabled would flush it to zero even when the decoded weight
@@ -946,6 +975,7 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
     const int64_t nblk = (int64_t)ttbfp_blocks_per_row(N);
     const int64_t nfull = N / TTBFP_BLOCK;  // complete 16-wide blocks
     const int level = have_avx512() ? 2 : (have_avx2_fma() ? 1 : 0);
+    FtzGuard guard(ftz == 0);
 
     int mrt = mrt_hint;
     int jm = jm_hint;
@@ -965,7 +995,10 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         // One iteration per (row tile, column panel) output block; nothing is
         // reduced across threads, so any thread count gives the same bits.
         // Run with OMP_WAIT_POLICY=passive when benchmarking back-to-back.
-#pragma omp parallel for collapse(2) schedule(static) if (mtiles * jpanels > 1)
+#pragma omp parallel if (mtiles * jpanels > 1)
+        {
+            FtzGuard tguard(ftz == 0);
+#pragma omp for collapse(2) schedule(static)
         for (int64_t mt = 0; mt < mtiles; ++mt) {
             for (int64_t jp = 0; jp < jpanels; ++jp) {
                 const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
@@ -977,6 +1010,7 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
                             e_j, d_j, K, j0, jc, Cp, ldc, ftz, level);
             }
         }
+        }
     }
 
     if (nblk > nfull) {
@@ -985,7 +1019,10 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
         const int64_t n = N - j * TTBFP_BLOCK;
         const uint8_t *ep = exps + j * e_j;
         const uint8_t *dp = data + j * d_j;
-#pragma omp parallel for schedule(static) if (mtiles > 1)
+#pragma omp parallel if (mtiles > 1)
+        {
+            FtzGuard tguard(ftz == 0);
+#pragma omp for schedule(static)
         for (int64_t mt = 0; mt < mtiles; ++mt) {
             const int mr = (int)std::min<int64_t>(mrt, M - mt * mrt);
             float tmp[16 * TTBFP_BLOCK];
@@ -996,6 +1033,7 @@ void matmul_driver(ttbfp_fmt fmt_, const AT *A, int64_t lda,
                 std::memcpy(C + (mt * mrt + r) * ldc + j * TTBFP_BLOCK,
                             tmp + r * TTBFP_BLOCK, (size_t)n * sizeof(float));
             }
+        }
         }
     }
 }
@@ -1043,24 +1081,35 @@ void ttbfp_dequantize(ttbfp_fmt fmt,
                       int64_t rows, int64_t cols,
                       float *dst, int flush_denormals) {
     if (!exps || !data || !dst || rows <= 0 || cols <= 0) return;
+    FtzGuard guard(flush_denormals == 0);
 #if TTBFP_X86
     if (have_avx512()) {
         const int64_t nblk = (int64_t)ttbfp_blocks_per_row(cols);
         const int db = datum_bytes(fmt);
-#pragma omp parallel for schedule(static) if (rows > 1)
-        for (int64_t r = 0; r < rows; ++r) {
-            dequantize_row_avx512(fmt, exps + r * nblk, data + r * nblk * db,
-                                  cols, dst + r * cols, flush_denormals);
+#pragma omp parallel if (rows > 1)
+        {
+            FtzGuard tguard(flush_denormals == 0);
+#pragma omp for schedule(static)
+            for (int64_t r = 0; r < rows; ++r) {
+                dequantize_row_avx512(fmt, exps + r * nblk,
+                                      data + r * nblk * db, cols,
+                                      dst + r * cols, flush_denormals);
+            }
         }
         return;
     }
     if (have_avx2_fma()) {
         const int64_t nblk = (int64_t)ttbfp_blocks_per_row(cols);
         const int db = datum_bytes(fmt);
-#pragma omp parallel for schedule(static) if (rows > 1)
-        for (int64_t r = 0; r < rows; ++r) {
-            dequantize_row_avx2(fmt, exps + r * nblk, data + r * nblk * db,
-                                cols, dst + r * cols, flush_denormals);
+#pragma omp parallel if (rows > 1)
+        {
+            FtzGuard tguard(flush_denormals == 0);
+#pragma omp for schedule(static)
+            for (int64_t r = 0; r < rows; ++r) {
+                dequantize_row_avx2(fmt, exps + r * nblk,
+                                    data + r * nblk * db, cols,
+                                    dst + r * cols, flush_denormals);
+            }
         }
         return;
     }

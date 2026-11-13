@@ -505,3 +505,49 @@ def test_flat_cols_must_preserve_stored_stride():
     c = ttbfp.matmul(a, e, d, ttbfp.BF8_B, cols=17)
     np.testing.assert_allclose(c[:, 0], [1.0, 2.0, 3.0])
     np.testing.assert_allclose(c[:, 16], [11.0, 12.0, 13.0])
+
+
+@pytest.mark.parametrize(
+    "fmt,db,datum", [(ttbfp.BF8_B, 16, 0x20), (ttbfp.BF4_B, 8, 0x02)],
+    ids=["bf8_b", "bf4_b"])
+@pytest.mark.parametrize(
+    "force", ["", "TTBFP_FORCE_SCALAR", "TTBFP_FORCE_AVX2"],
+    ids=["avx512", "scalar", "avx2"])
+def test_ftz_false_preserves_subnormal_weight(fmt, db, datum, force, tmp_path):
+    """ftz=False must survive ambient FTZ/DAZ, including DAZ on FMA inputs.
+
+    bf8_b e=1/mag=32 and bf4_b e=1/mag=2 both decode to 2^-127, a subnormal.
+    With A=2^126 the product is exactly 0.5.  ftz=True must still flush it.
+    """
+    pytest.importorskip("torch")
+    script = """
+import numpy as np, sys, torch, ttbfp
+fmt, db, datum = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+torch.set_flush_denormal(True)
+e = np.array([[1]], np.uint8)
+d = np.zeros((1, db), np.uint8)
+d[0, 0] = datum
+a = np.array([[2.0 ** 126]], np.float32)
+off = ttbfp.matmul(a, e, d, fmt, cols=16, ftz=False)
+on = ttbfp.matmul(a, e, d, fmt, cols=16, ftz=True)
+y = ttbfp.unpack(e, d, fmt, cols=16, ftz=False)
+s8 = np.zeros((1, 16), np.uint8)
+s8[0, 0] = datum
+s8_off = ttbfp.matmul_prepacked_s8(a, e.T.copy(), s8, fmt, cols=16, ftz=False)
+np.savez(sys.argv[4], off=off, on=on, y=y, s8=s8_off)
+"""
+    out = tmp_path / "out.npz"
+    env = dict(os.environ)
+    env.update(PYTHONPATH=str(ROOT / "python"),
+               TTBFP_LIB=str(ROOT / "libttbfp.so"))
+    if force:
+        env[force] = "1"
+    subprocess.run([sys.executable, "-c", script, str(fmt), str(db),
+                    str(datum), str(out)], check=True, env=env, cwd=str(ROOT))
+    z = np.load(out)
+    assert z["off"][0, 0] == np.float32(0.5)
+    assert np.all(z["off"][0, 1:] == 0.0)
+    assert np.all(z["on"] == 0.0)
+    assert z["s8"][0, 0] == np.float32(0.5)
+    assert np.all(z["s8"][0, 1:] == 0.0)
+    assert z["y"].view(np.uint32)[0, 0] == 0x00400000

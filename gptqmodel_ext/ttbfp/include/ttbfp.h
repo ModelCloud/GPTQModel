@@ -127,7 +127,9 @@ void ttbfp_quantize(ttbfp_fmt fmt,
 /*
  * Dequantize `exps` + `data` into a row-major [rows, cols] fp32 tensor.
  * If `flush_denormals` is non-zero, results with |v| < 2^-126 are flushed
- * to zero (matching Tensix FTZ behaviour).
+ * to zero (matching Tensix FTZ behaviour).  If it is zero, subnormal weights
+ * are preserved even when the calling thread has ambient FTZ/DAZ enabled:
+ * the kernel clears MXCSR FTZ/DAZ for the call and restores it on return.
  */
 void ttbfp_dequantize(ttbfp_fmt fmt,
                       const uint8_t *exps, const uint8_t *data,

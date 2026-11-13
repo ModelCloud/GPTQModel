@@ -43,6 +43,12 @@ Two invariants drive every implementation decision:
    accumulate over `k` in the same order.  The test suite asserts this, and
    `bench/ab_compare.py` refuses to report a speedup if two builds disagree.
 
+`ftz=False` is honoured even when the calling thread has ambient FTZ/DAZ
+enabled: the CPU kernels clear MXCSR FTZ/DAZ for the duration of the call
+(per OpenMP worker) and restore it afterwards, so genuinely subnormal weights
+survive both the scaling multiply and the FMA's DAZ input check.  `ftz=True`
+keeps the explicit flush and does not change the ambient mode.
+
 ## Dispatch flow
 
 ```mermaid
