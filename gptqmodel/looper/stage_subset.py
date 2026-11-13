@@ -925,6 +925,12 @@ def _run_single_subset_pass(
                     named_module=named_module,
                     fallback_device=cur_layer_device,
                 )
+                # The layer inventory otherwise keeps the original dense
+                # module alive after AUTO_NF12 replaces it for this forward.
+                # Refresh its reference before the quantizer restores a dense
+                # source for the selected module.
+                if named_module.state.get("auto_dtype_cast_source_spec") is not None:
+                    full[named_module.name] = named_module.module
 
     # Determine MoE block name for hook selection
     moe_block_name = None
@@ -1420,6 +1426,8 @@ def _run_single_subset_pass(
                 named_module=named_module,
                 fallback_device=cur_layer_device,
             )
+            if named_module.state.pop("auto_dtype_cast_was_applied", False):
+                full[name] = named_module.module
         else:
             target_device = get_device(named_module.module)
             if target_device == META:

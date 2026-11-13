@@ -23,6 +23,27 @@ def test_hip_loader_uses_existing_nf12_sources_and_namespace():
     assert "TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m)" in bindings
 
 
+def test_hip_linear_reuses_cached_extension_dispatcher(monkeypatch):
+    from gptqmodel.utils import nf12_hip
+
+    calls = []
+
+    def fake_linear(*args):
+        calls.append(args)
+        return args[0]
+
+    monkeypatch.setattr(nf12_hip, "_EXTENSION_READY", True)
+    monkeypatch.setattr(nf12_hip, "_LINEAR_OP", fake_linear)
+    monkeypatch.setattr(
+        nf12_hip._EXTENSION,
+        "load",
+        lambda: pytest.fail("hot linear calls must not reload the extension"),
+    )
+
+    assert nf12_hip.linear("x", "packed", "escapes", 7, "bias") == "x"
+    assert calls == [("x", "packed", "escapes", 7, "bias")]
+
+
 @pytest.fixture(scope="module")
 def native():
     if torch.version.hip is None or not torch.cuda.is_available():
@@ -74,6 +95,7 @@ def test_bf16t_launcher_uses_shared_split_dispatch():
         (4096, 4096, 16),  # four-way split
         (4096, 4096, 64),  # two-way split
         (2048, 4096, 16),  # eight-way split
+        (2048, 8192, 16),  # long-K eight-way split
     ],
 )
 def test_bf16t_wmma_matches_nf12_split_k_plans(native, n, k, m):

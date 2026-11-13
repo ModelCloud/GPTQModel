@@ -41,6 +41,7 @@ from ..quantization.config import (
     FORMAT,
     METHOD,
     QUANTIZE_BLACK_LIST,
+    AutoDtypeCast,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     GcMode,
@@ -561,6 +562,7 @@ class BaseQModel(nn.Module):
         self.turtle_model = turtle_model
         # Captures forward-role auto-decoder choices for regression tests and debug logs.
         self.auto_module_decoder_events: List[Dict[str, Any]] = []
+        self.auto_dtype_cast_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -3335,6 +3337,53 @@ class BaseQModel(nn.Module):
         setattr(parent, leaf, replacement)
         return replacement
 
+    def _maybe_auto_dtype_cast_forward_module(
+        self,
+        module: nn.Module,
+        *,
+        device: torch.device,
+        named_module: "NamedModule",
+    ) -> nn.Module:
+        """Keep a calibration source packed until its quantizer needs it."""
+
+        qcfg = getattr(self, "quantize_config", None)
+        if qcfg is None or qcfg.auto_dtype_cast != AutoDtypeCast.AUTO_NF12:
+            return module
+        if qcfg.method == METHOD.NF12:
+            return module
+        native_plan = getattr(qcfg, "_native_floatx_forward_plan", None)
+        if isinstance(native_plan, dict) and native_plan.get("mode") == "native":
+            return module
+        from ..utils.auto_dtype_cast import cast_source_module, eligible_source_module
+
+        spec = eligible_source_module(module, device)
+        if spec is None:
+            return module
+        replacement = cast_source_module(module, spec)
+        named_module.state["auto_dtype_cast_source_spec"] = spec
+        named_module.state["auto_dtype_cast_was_applied"] = True
+        replacement = self._replace_live_submodule(module, replacement)
+        source_bias = getattr(module, "bias", None)
+        source_bytes = module.weight.numel() * module.weight.element_size()
+        if isinstance(source_bias, torch.Tensor):
+            source_bytes += source_bias.numel() * source_bias.element_size()
+        event = {
+            "module": named_module.full_name,
+            "device": str(device),
+            "kind": spec.kind,
+            "source_dtype": str(spec.dtype).split(".")[-1],
+            "source_bytes": source_bytes,
+            "packed_bytes": sum(t.numel() * t.element_size() for t in replacement.buffers()),
+        }
+        events = getattr(self, "auto_dtype_cast_events", None)
+        if events is not None:
+            events.append(event)
+        emit_device_telemetry(
+            "auto_dtype_cast_nf12",
+            **event,
+        )
+        return replacement
+
     def _build_decoder_quant_source_module(
         self,
         target_submodule: nn.Module,
@@ -4331,8 +4380,16 @@ class BaseQModel(nn.Module):
     ) -> torch.nn.Module:
         device = as_torch_device(device)
         with self._turtle_lock:
+            if role == "forward" and named_module is not None and named_module.state.get("auto_dtype_cast_source_spec") is not None:
+                return target_submodule
             if role == "quant_source" and named_module is not None:
                 quant_source = named_module.state.get("quant_source_module")
+                if not isinstance(quant_source, nn.Module):
+                    source_spec = named_module.state.get("auto_dtype_cast_source_spec")
+                    if source_spec is not None:
+                        from ..utils.auto_dtype_cast import restore_source_module
+
+                        quant_source = restore_source_module(target_submodule, source_spec, device=device)
                 if not isinstance(quant_source, nn.Module):
                     decoder_plan = named_module.state.get("auto_module_decoder") or {}
                     target_dtype = decoder_plan.get(
@@ -4366,6 +4423,7 @@ class BaseQModel(nn.Module):
                     )
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
+                named_module.state.pop("auto_dtype_cast_source_spec", None)
                 if get_device(module) != device:
                     safe_module_to(module, device)
                 return module
@@ -4413,6 +4471,9 @@ class BaseQModel(nn.Module):
                     target_submodule=module,
                     device=torch.device(device),
                     named_module=named_module,
+                )
+                module = self._maybe_auto_dtype_cast_forward_module(
+                    module, device=torch.device(device), named_module=named_module,
                 )
         return module
 

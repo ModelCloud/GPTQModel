@@ -22,6 +22,8 @@ from .api import (
     linear_staged_b1,
     pack_bf16t,
     prepare_fp32_gate,
+    rowmajor_embedding,
+    rowmajor_pack,
 )
 from .moe import (
     NF12MoEWeight,
@@ -66,4 +68,6 @@ __all__ = [
     "pack_bf16t",
     "pack_bf16t_moe",
     "prepare_fp32_gate",
+    "rowmajor_embedding",
+    "rowmajor_pack",
 ]

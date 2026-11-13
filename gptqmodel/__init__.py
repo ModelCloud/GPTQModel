@@ -396,6 +396,7 @@ from .models import (
 )
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
+    AutoDtypeCast,
     AWQConfig,
     BaseQuantizeConfig,
     FOEMConfig,

@@ -1,5 +1,9 @@
 # Packed row-major NF12 fused repeat4 on GPU1 and GPU3
 
+This page records the repeat4 prototype. Production embedding lookup uses the
+[row-major embedding storage](nf12-row-major-embedding.md) flow; repeat4
+remains a comparison path.
+
 This final bounded prototype combines the [row-major packed
 layout](nf12-rowmajor-layout-prototype-gpu1.md) with a native kernel that
 decodes each selected 64-value row block once and writes four exact BF16
@@ -122,6 +126,6 @@ On another host, set `NF12_TUNED_CHECKOUT` to a checkout of GPTQModel
 PR #3777 before running the command.
 
 Source: [experimental API](../gptqmodel_nf12/experimental_rowmajor.py),
-[native kernel](../gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu),
+[native kernel](../gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu),
 [benchmark](../scripts/bench_nf12_rowmajor_repeat4_sm80.py), and
 [tests](../tests/test_nf12_rowmajor_experimental.py).

@@ -108,10 +108,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // "the small-M kernel splits K inside the CTA (warps summed in part order)").
 //
 // One CTA owns one 16-row output block. Its kWarpsPerBlock warps each walk a
-// contiguous K slice, accumulate in FP32, then a single pass sums the per-warp
-// partials in fixed warp order. Reducing inside the CTA keeps the whole
-// reduction deterministic (SPEC 6.4) and costs one barrier instead of a
-// second kernel launch.
+// contiguous K slice, accumulate in FP32, then a pairwise pass sums the
+// per-warp partials. Reducing inside the CTA keeps the whole reduction
+// deterministic (SPEC 6.4) and costs one barrier instead of a second kernel
+// launch.
 //
 // Why split K at all: with one warp owning the full K span a 4096-row matrix
 // exposes only N/16 = 256 warps, each serialising 64 super-atoms. Splitting K
@@ -281,14 +281,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
   __syncthreads();
 
-  // Sum the warp partials in fixed warp order so the result is deterministic.
+  // Sum the independent warp partials pairwise. The partials have equal K
+  // spans, but their magnitudes can still differ sharply after cancellation.
   const int64_t total = int64_t(kM) * kSuperAtomRows;
   for (int64_t idx = threadIdx.x; idx < total; idx += kThreadsPerBlock) {
     const int64_t mi = idx / kSuperAtomRows;
     const int64_t row = idx % kSuperAtomRows;
-    float sum = 0.0f;
+    float vals[kWarpsPerBlock];
 #pragma unroll
-    for (int w = 0; w < kWarpsPerBlock; ++w) sum += part[w][mi][row];
+    for (int w = 0; w < kWarpsPerBlock; ++w) vals[w] = part[w][mi][row];
+#pragma unroll
+    for (int width = 1; width < kWarpsPerBlock; width *= 2) {
+#pragma unroll
+      for (int w = 0; w + width < kWarpsPerBlock; w += 2 * width)
+        vals[w] += vals[w + width];
+    }
+    float sum = vals[0];
     // Bias joins the FP32 reduction, so the result is rounded to BF16 once.
     // Adding it to the already-rounded BF16 output instead double-rounds:
     // on gfx1201 that measured 1.00 ULP / 1.7e-3 RMS relative error versus

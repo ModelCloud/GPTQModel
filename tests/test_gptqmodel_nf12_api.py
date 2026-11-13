@@ -18,6 +18,12 @@ import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
 from tests.accelerator_gates import nf12_skip_reason
+from tests.nf12_embedding_cases import (
+    OBSERVED_LITE_PREFILL_CASES,
+    assert_embedding_lookup_exact,
+    observed_lite_prefill_case,
+    small_embedding_case,
+)
 
 
 def _cuda():
@@ -73,15 +79,9 @@ def test_native_linear_and_exact_weight_roundtrip(shape):
 
 def test_native_embedding_preserves_row_bits_and_shape():
     device = _cuda()
-    generator = torch.Generator(device=device).manual_seed(121)
-    weight = torch.randn((128, 256), generator=generator, device=device).bfloat16()
-    weight[3, 0] = -0.0
-    ids = torch.tensor([[3, 127], [0, 9]], device=device, dtype=torch.int64)
+    weight, ids = small_embedding_case(device)
     packed = nf12.encode(weight)
-    actual = nf12.embedding(ids, packed)
-    oracle = F.embedding(ids, weight)
-    assert actual.shape == (2, 2, 256)
-    assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
+    actual = assert_embedding_lookup_exact(lambda values: nf12.embedding(values, packed), weight, ids)
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
@@ -136,36 +136,52 @@ def test_native_embedding_repeat4_matches_dense_torch_and_keeps_packed_weight(m,
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
-@pytest.mark.parametrize("m,id_dtype", [
-    (256, torch.int64), (312, torch.int32), (313, torch.int64),
-    (512, torch.int32), (513, torch.int64), (1536, torch.int64),
-    (2048, torch.int32), (2049, torch.int64), (3072, torch.int32),
-    (3072, torch.int64), (4095, torch.int64),
-])
+@pytest.mark.parametrize("m,id_dtype", OBSERVED_LITE_PREFILL_CASES)
 def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
     device = _cuda()
-    generator = torch.Generator(device=device).manual_seed(10101 + m)
-    weight = (torch.randn((512, 5120), generator=generator, device=device) * 0.02).bfloat16()
-    weight[0, 0] = -0.0
-    weight[-1, -1] = 2.0**-20
-    ids = torch.randint(weight.shape[0], (m,), generator=generator, device=device, dtype=id_dtype)
-    ids[0], ids[-1] = 0, weight.shape[0] - 1
+    weight, ids = observed_lite_prefill_case(device, m, id_dtype)
     packed = nf12.encode(weight)
     module = nf12.NF12Embedding.from_weight(packed)
-    oracle = F.embedding(ids, weight)
-    for _ in range(2):
-        actual = module(ids)
-        assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
-    if m == 512:
-        invalid = ids.clone()
-        invalid[1], invalid[2] = -1, weight.shape[0]
-        actual = module(invalid)
-        assert torch.equal(actual[1:3].view(torch.int16), torch.zeros_like(actual[1:3]).view(torch.int16))
-        assert torch.equal(actual[3:].view(torch.int16), oracle[3:].view(torch.int16))
+    assert_embedding_lookup_exact(module, weight, ids, check_invalid=m == 512)
     assert packed.nbytes < weight.nbytes
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
     assert {name for name, _ in module.named_buffers()} == {"nf12_packed", "nf12_escapes"}
     assert all(buffer.dtype != torch.bfloat16 for _, buffer in module.named_buffers())
+
+
+def test_native_rowmajor_embedding_shares_lite_prefill_cases():
+    device = _cuda()
+    weight, ids = observed_lite_prefill_case(device, 256, torch.int64)
+    packed = nf12.encode(weight)
+    row_packed, row_escapes, original, collisions = nf12.rowmajor_pack(packed)
+
+    assert original == packed.num_escapes
+    assert collisions >= 0
+    assert row_escapes.shape == (2 * original + collisions, 4)
+    assert (
+        row_packed.nbytes + row_escapes.nbytes
+        <= packed.nbytes + packed.escapes.nbytes + 8 * collisions
+    )
+    assert_embedding_lookup_exact(
+        lambda values: nf12.rowmajor_embedding(
+            values, row_packed, row_escapes, packed.exp_base
+        ),
+        weight,
+        ids,
+        check_invalid=True,
+    )
+    shaped_ids = (
+        torch.arange(24, device=device, dtype=torch.int32)
+        .remainder(weight.shape[0])
+        .reshape(2, 3, 4)
+        .transpose(0, 2)
+    )
+    assert not shaped_ids.is_contiguous()
+    actual = nf12.rowmajor_embedding(
+        shaped_ids, row_packed, row_escapes, packed.exp_base
+    )
+    assert tuple(actual.shape) == (*shaped_ids.shape, weight.shape[1])
+    assert torch.equal(actual.view(torch.int16), F.embedding(shaped_ids, weight).view(torch.int16))
 
 
 @pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])

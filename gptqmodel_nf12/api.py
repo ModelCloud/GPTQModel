@@ -16,6 +16,7 @@ from ._library import load
 PACKED_KEY = "nf12_packed"
 ESCAPES_KEY = "nf12_escapes"
 EXP_BASE_KEY = "nf12_exp_base"
+_ROWMAJOR_EMBEDDING_OP = None
 
 
 def check_weight_shape(n: int, k: int) -> None:
@@ -221,6 +222,39 @@ def embedding_repeat4(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
         return native(ids, weight.packed, weight.escapes, weight.exp_base)
     single = torch.ops.nf12.embedding(ids, weight.packed, weight.escapes, weight.exp_base)
     return single.unsqueeze(-2).repeat_interleave(4, dim=-2)
+
+
+def rowmajor_pack(
+    weight: NF12Weight,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Convert canonical NF12 to the embedding-only row-major layout.
+
+    The returned packed tensor has the same ``[N, K*3/2]`` byte count, but
+    every 64-column row block is contiguous. The metadata values identify the
+    original escape count and selected-half collision records.
+    """
+    _check_cuda(weight.packed, "weight")
+    load()
+    row_packed, row_escapes, original_escapes, collisions = torch.ops.nf12.rowmajor_pack(
+        weight.packed, weight.escapes, weight.exp_base
+    )
+    return row_packed, row_escapes, int(original_escapes), int(collisions)
+
+
+def rowmajor_embedding(
+    ids: torch.Tensor,
+    row_packed: torch.Tensor,
+    row_escapes: torch.Tensor,
+    exp_base: int,
+) -> torch.Tensor:
+    """Gather exact BF16 rows from the embedding-only row-major layout."""
+    global _ROWMAJOR_EMBEDDING_OP
+    # The native binding validates devices, dtypes, shapes, and alignment.
+    # Keep the hot wrapper to extension loading plus the operator call.
+    load()
+    if _ROWMAJOR_EMBEDDING_OP is None:
+        _ROWMAJOR_EMBEDDING_OP = torch.ops.nf12.rowmajor_embedding
+    return _ROWMAJOR_EMBEDDING_OP(ids, row_packed, row_escapes, exp_base)
 
 
 def pack_bf16t(w: torch.Tensor) -> torch.Tensor:

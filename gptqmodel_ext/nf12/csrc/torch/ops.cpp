@@ -34,6 +34,27 @@
 #include "nf12/nf12.h"
 #include "torch/fused_decode.h"
 
+// Embedding-only row-major transform and lookup. This source is linked into
+// libnf12_torch rather than the canonical matrix C API: matrix kernels keep
+// the interleaved super-atom layout, while embeddings persist one 96-byte
+// record per 64-column row block.
+extern "C" int nf12_rowmajor_count(const uint8_t* source, int64_t n, int64_t k,
+                                   int32_t* counts, cudaStream_t stream);
+extern "C" int nf12_rowmajor_pack(const uint8_t* source,
+                                  const uint4* original_escapes,
+                                  int64_t original_count, int64_t n, int64_t k,
+                                  uint32_t exp_base, const int64_t* prefix,
+                                  uint8_t* dest, uint64_t* dest_escapes,
+                                  int32_t* invalid_escape,
+                                  cudaStream_t stream);
+extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
+                                    const uint64_t* escapes,
+                                    int64_t num_escapes, int64_t n, int64_t k,
+                                    uint32_t exp_base, int64_t num_ids,
+                                    uint64_t* out, int id_bytes, int threads,
+                                    int ids_per_cta, int mode,
+                                    cudaStream_t stream);
+
 namespace {
 
 using torch::headeronly::ScalarType;
@@ -320,6 +341,115 @@ Tensor embedding(const Tensor& ids_in, const Tensor& packed, const Tensor& escap
 
 Tensor embedding_repeat4(const Tensor& ids_in, const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
   return embedding_impl(ids_in, packed, escapes, exp_base, 4);
+}
+
+// Convert canonical NF12 to the embedding-only row-major layout. The result
+// has the same 3K/2 bytes per row, but each 64-column block is contiguous:
+// 32 metadata bytes and 64 low-mantissa bytes. Escape indices are rewritten
+// when selecting one half of a paired canonical group would collide with the
+// zero sentinel. No decoded table or canonical copy is retained by this op.
+std::tuple<Tensor, Tensor, int64_t, int64_t> rowmajor_pack(
+    const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
+  const int32_t device = packed.get_device_index();
+  const torch::stable::accelerator::DeviceGuard guard(device);
+  const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
+  const cudaStream_t stream = current_stream(device);
+  const int64_t tiles = (w.n / 16) * (w.k / 64);
+  STD_TORCH_CHECK(tiles <= INT32_MAX, "nf12.rowmajor_pack: table has too many canonical tiles");
+
+  Tensor counts = torch::stable::new_empty(packed, {tiles}, ScalarType::Int);
+  int status = nf12_rowmajor_count(static_cast<const uint8_t*>(w.packed), w.n, w.k,
+                                   static_cast<int32_t*>(counts.data_ptr()), stream);
+  STD_TORCH_CHECK(status == cudaSuccess, "nf12.rowmajor_pack count failed: ",
+                  cudaGetErrorString(static_cast<cudaError_t>(status)));
+
+  AtenTensorHandle prefix_handle = nullptr;
+  int32_t prefix_dtype = static_cast<int32_t>(ScalarType::Long);
+  TORCH_ERROR_CODE_CHECK(
+      aoti_torch_cuda_cumsum(counts.get(), 0, &prefix_dtype, &prefix_handle));
+  Tensor prefix(prefix_handle);
+  const Tensor total_tensor = torch::stable::select(prefix, 0, tiles - 1);
+  int64_t collisions = 0;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_item_int64(total_tensor.get(), &collisions));
+  STD_TORCH_CHECK(collisions >= 0 && w.num_escapes <= (INT64_MAX - collisions) / 2,
+                  "nf12.rowmajor_pack: escape table overflow");
+  const int64_t total_escapes = 2 * static_cast<int64_t>(w.num_escapes) + collisions;
+  STD_TORCH_CHECK(total_escapes <= UINT32_MAX,
+                  "nf12.rowmajor_pack: escape index exceeds uint32 capacity");
+
+  Tensor row_packed =
+      torch::stable::new_empty(packed, {w.n, w.k * 3 / 2}, ScalarType::Byte);
+  Tensor row_escapes =
+      torch::stable::new_empty(packed, {total_escapes, 4}, ScalarType::Short);
+  Tensor invalid = torch::stable::new_empty(packed, {1}, ScalarType::Int);
+  TORCH_ERROR_CODE_CHECK(
+      aoti_torch_zero_(invalid.get()));
+  status = nf12_rowmajor_pack(
+      static_cast<const uint8_t*>(w.packed),
+      static_cast<const uint4*>(w.escapes), w.num_escapes, w.n, w.k, w.exp_base,
+      static_cast<const int64_t*>(prefix.data_ptr()),
+      static_cast<uint8_t*>(row_packed.data_ptr()),
+      static_cast<uint64_t*>(row_escapes.data_ptr()),
+      static_cast<int32_t*>(invalid.data_ptr()), stream);
+  STD_TORCH_CHECK(status == cudaSuccess, "nf12.rowmajor_pack failed: ",
+                  cudaGetErrorString(static_cast<cudaError_t>(status)));
+  int32_t invalid_escape = 0;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_item_int32(invalid.get(), &invalid_escape));
+  STD_TORCH_CHECK(invalid_escape == 0,
+                  "nf12.rowmajor_pack: canonical escape index out of range");
+  return {row_packed, row_escapes, static_cast<int64_t>(w.num_escapes), collisions};
+}
+
+Tensor rowmajor_embedding(const Tensor& ids_in, const Tensor& packed,
+                          const Tensor& escapes, int64_t exp_base) {
+  const int32_t device = packed.get_device_index();
+  const torch::stable::accelerator::DeviceGuard guard(device);
+  check_cuda_tensor(packed, "row-major packed", device);
+  check_cuda_tensor(escapes, "row-major escapes", device);
+  check_cuda_tensor(ids_in, "ids", device);
+  STD_TORCH_CHECK(packed.scalar_type() == ScalarType::Byte && packed.dim() == 2 &&
+                      packed.is_contiguous() && aligned16(packed.data_ptr()),
+                  "nf12.rowmajor_embedding: packed must be contiguous, 16-byte aligned uint8 [N, 3K/2]");
+  STD_TORCH_CHECK(packed.size(1) % 3 == 0,
+                  "nf12.rowmajor_embedding: packed row length must be K*3/2");
+  const int64_t n = packed.size(0);
+  const int64_t k = packed.size(1) / 3 * 2;
+  check_shape(n, k, "row-major embedding");
+  STD_TORCH_CHECK(escapes.scalar_type() == ScalarType::Short && escapes.dim() == 2 &&
+                      escapes.size(1) == 4 && escapes.is_contiguous() &&
+                      aligned16(escapes.data_ptr()),
+                  "nf12.rowmajor_embedding: escapes must be contiguous, 16-byte aligned int16 [E, 4]");
+  STD_TORCH_CHECK(escapes.size(0) <= UINT32_MAX,
+                  "nf12.rowmajor_embedding: too many escapes");
+  STD_TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
+                  "nf12.rowmajor_embedding: exp_base must be in [0, 120]");
+  const ScalarType id_type = ids_in.scalar_type();
+  STD_TORCH_CHECK(id_type == ScalarType::Int || id_type == ScalarType::Long,
+                  "nf12.rowmajor_embedding: ids must be int32 or int64");
+
+  std::vector<int64_t> out_sizes(ids_in.sizes().begin(), ids_in.sizes().end());
+  out_sizes.push_back(k);
+  Tensor out = torch::stable::new_empty(packed, out_sizes, ScalarType::BFloat16);
+  const int64_t num_ids = ids_in.numel();
+  if (num_ids == 0) return out;
+  const Tensor ids =
+      ids_in.is_contiguous() ? ids_in : torch::stable::contiguous(ids_in);
+  // The native entry point specializes one ID at K <= 2048 to one persistent
+  // CTA. Wider and larger gathers retain the 256-thread, eight-ID layout that
+  // balances launch count against occupancy.
+  int threads = 256;
+  int ids_per_cta = 8;
+  int mode = 2;
+  int status = nf12_rowmajor_lookup(
+      ids.data_ptr(),
+      static_cast<const uint8_t*>(packed.data_ptr()),
+      escapes.size(0) ? static_cast<const uint64_t*>(escapes.data_ptr()) : nullptr,
+      escapes.size(0), n, k, static_cast<uint32_t>(exp_base), num_ids,
+      static_cast<uint64_t*>(out.data_ptr()), ids.element_size(), threads, ids_per_cta, mode,
+      current_stream(device));
+  STD_TORCH_CHECK(status == cudaSuccess, "nf12.rowmajor_embedding failed: ",
+                  cudaGetErrorString(static_cast<cudaError_t>(status)));
+  return out;
 }
 
 // A contiguous 1-D tensor of `dtype` on `device` (copied if strided).
@@ -719,6 +849,9 @@ STABLE_TORCH_LIBRARY(nf12, m) {
   m.def("linear_bf16t(Tensor x, Tensor w_bf16t, Tensor? bias=None) -> Tensor");
   m.def("embedding(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("embedding_repeat4(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("rowmajor_pack(Tensor packed, Tensor escapes, int exp_base) -> "
+        "(Tensor row_packed, Tensor row_escapes, int original_escapes, int collisions)");
+  m.def("rowmajor_embedding(Tensor ids, Tensor row_packed, Tensor row_escapes, int exp_base) -> Tensor");
   m.def("encode_moe(Tensor w) -> (Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base)");
   m.def("moe_align(Tensor topk_ids, int num_experts) -> (Tensor sorted, Tensor expert_offsets)");
   m.def("moe_decode(Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base) -> Tensor");
@@ -746,6 +879,8 @@ STABLE_TORCH_LIBRARY_IMPL(nf12, CUDA, m) {
   m.impl("linear_bf16t", TORCH_BOX(&linear_bf16t));
   m.impl("embedding", TORCH_BOX(&embedding));
   m.impl("embedding_repeat4", TORCH_BOX(&embedding_repeat4));
+  m.impl("rowmajor_pack", TORCH_BOX(&rowmajor_pack));
+  m.impl("rowmajor_embedding", TORCH_BOX(&rowmajor_embedding));
   m.impl("encode_moe", TORCH_BOX(&encode_moe));
   m.impl("moe_align", TORCH_BOX(&moe_align));
   m.impl("moe_decode", TORCH_BOX(&moe_decode));

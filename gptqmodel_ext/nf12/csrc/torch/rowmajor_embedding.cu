@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Experimental packed-only NF12 row-major embedding. Each 64-output row block
-// holds 32 metadata bytes and 64 mantissa bytes; escapes hold four BF16 bits.
+// Packed-only NF12 row-major embedding. Each 64-output row block holds 32
+// metadata bytes and 64 mantissa bytes; escapes hold four BF16 bits.
 #include <cuda_runtime.h>
 #include <cstdint>
 
@@ -103,6 +103,54 @@ __global__ void rowmajor_kernel(const Id* __restrict__ ids,
       store_output<Mode == 2 || Mode == 4 || Mode == 6>(
           dst + 2 * atom_index + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
     }
+  }
+}
+
+// A one-token decode launch has only one ID. Keep one CTA resident and walk
+// the K blocks instead of creating a second grid dimension. The 160-thread
+// geometry is four-lane decode groups with three groups left over for the
+// streaming stores measured on SM89 and SM120.
+template <typename Id>
+__global__ void __launch_bounds__(160) rowmajor_one_kernel(
+    const Id* __restrict__ ids, const uint8_t* __restrict__ packed,
+    const uint64_t* __restrict__ escapes, int64_t num_escapes, uint32_t base,
+    int64_t n, int64_t k_blocks, uint64_t* __restrict__ out) {
+  constexpr int kLanesPerBlock = 4;
+  constexpr int kGroups = 160 / kLanesPerBlock;
+  const int lane = threadIdx.x & (kLanesPerBlock - 1);
+  const int group = threadIdx.x / kLanesPerBlock;
+  const int64_t row = static_cast<int64_t>(ids[0]);
+  const bool valid = row >= 0 && row < n;
+  for (int64_t kb = group; kb < k_blocks; kb += kGroups) {
+    uint2 mm2 = make_uint2(0, 0);
+    uint4 low = make_uint4(0, 0, 0, 0);
+    if (valid) {
+      const uint8_t* src = packed + (row * k_blocks + kb) * 96;
+      mm2 = __ldg(reinterpret_cast<const uint2*>(src) + lane);
+      low = __ldg(reinterpret_cast<const uint4*>(src + 32) + lane);
+    }
+    const uint64_t mm =
+        static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
+    const Pair a = valid
+                       ? decode(static_cast<uint16_t>(mm), low.x, escapes,
+                                num_escapes, base)
+                       : Pair{0, 0};
+    const Pair b = valid
+                       ? decode(static_cast<uint16_t>(mm >> 16), low.y, escapes,
+                                num_escapes, base)
+                       : Pair{0, 0};
+    const Pair c = valid
+                       ? decode(static_cast<uint16_t>(mm >> 32), low.z, escapes,
+                                num_escapes, base)
+                       : Pair{0, 0};
+    const Pair d = valid
+                       ? decode(static_cast<uint16_t>(mm >> 48), low.w, escapes,
+                                num_escapes, base)
+                       : Pair{0, 0};
+    uint4* dst =
+        reinterpret_cast<uint4*>(out + (kb * 64) / 4) + 2 * lane;
+    __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
+    __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
   }
 }
 
@@ -415,6 +463,18 @@ extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
       mode < 0 || mode > 6 || ids_per_cta > threads / (mode == 0 ? 8 : (mode >= 5 ? 2 : 4)))
     return cudaErrorInvalidValue;
   if (m == 0) return cudaSuccess;
+  if (m == 1 && k <= 2048) {
+    if (id_bytes == 4) {
+      rowmajor_one_kernel<int32_t><<<1, 160, 0, stream>>>(
+          static_cast<const int32_t*>(ids), packed, escapes, num_escapes, base,
+          n, k / 64, out);
+    } else {
+      rowmajor_one_kernel<int64_t><<<1, 160, 0, stream>>>(
+          static_cast<const int64_t*>(ids), packed, escapes, num_escapes, base,
+          n, k / 64, out);
+    }
+    return cudaGetLastError();
+  }
 #define DISPATCH_MODE(ID) \
   switch (mode) { \
     case 0: launch_kernel<ID, 0>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
