@@ -1288,7 +1288,7 @@ def save_blockfloat_model(
             bits_per_layer[prefix] = layer_width
             bias = getattr(module, "bias", None)
             if not is_embedding and isinstance(bias, torch.Tensor):
-                tensors[f"{prefix}.bias"] = bias.detach().to(torch.float16).contiguous()
+                tensors[f"{prefix}.bias"] = bias.detach().contiguous()
             continue
         layer_width = embed_bits if is_embedding else _layer_bits(bits, prefix)
         weight = module.weight.detach().to(torch.float32)
@@ -1297,7 +1297,7 @@ def save_blockfloat_model(
         except ValueError:
             # Not on the grid (or not quantized): keep it dense like any other
             # float tensor rather than claiming a format it does not have.
-            tensors[f"{prefix}.weight"] = weight.to(torch.float16).contiguous()
+            tensors[f"{prefix}.weight"] = weight.contiguous()
             continue
         tensors[f"{prefix}.codes"] = _pack_codes(codes, layer_width).contiguous()
         tensors[f"{prefix}.code_shape"] = torch.tensor(
@@ -1306,7 +1306,7 @@ def save_blockfloat_model(
         tensors[f"{prefix}.exponents"] = exponents.to(torch.int8).contiguous()
         bits_per_layer[prefix] = layer_width
         if not is_embedding and getattr(module, "bias", None) is not None:
-            tensors[f"{prefix}.bias"] = module.bias.detach().to(torch.float16).contiguous()
+            tensors[f"{prefix}.bias"] = module.bias.detach().contiguous()
 
     # Everything else is dense: norms, and the head only when it is not tied.
     quantized = set(bits_per_layer)
@@ -1322,7 +1322,11 @@ def save_blockfloat_model(
         # loader reject the checkpoint for having nowhere to put the float one.
         if name.rsplit(".", 1)[0] in quantized:
             continue
-        tensors[name] = param.detach().to(torch.float16).contiguous()
+        # Dense tensors are stored at the model's own precision. Casting them to
+        # float16 saved 0.13 MiB on a 1B model and silently rounded a norm by one
+        # ulp, which broke the "reload is bit-exact" invariant for a cost nobody
+        # would notice either way.
+        tensors[name] = param.detach().contiguous()
 
     if not bits_per_layer:
         # Writing here would produce a dense checkpoint that still declares
@@ -1349,7 +1353,13 @@ def save_blockfloat_model(
     written = _write_shards(tensors, output_dir, max_shard_bytes, safetensors_metadata)
 
     config = model.config.to_dict()
-    config["torch_dtype"] = "float16"
+    # Declare the precision the dense remainder is actually stored at, so a
+    # plain ``from_pretrained`` does not round it on the way in.
+    try:
+        dense_dtype = next(model.parameters()).dtype
+    except StopIteration:  # pragma: no cover - a fully quantized model
+        dense_dtype = torch.float32
+    config["torch_dtype"] = str(dense_dtype).replace("torch.", "")
     # A re-save must not erase where the checkpoint came from. Keep whatever the
     # source recorded and layer explicit updates on top; the format fields below
     # stay authoritative either way.

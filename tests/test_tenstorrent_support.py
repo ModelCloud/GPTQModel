@@ -1478,6 +1478,37 @@ def test_resave_of_a_loaded_checkpoint_keeps_its_packed_weights(tmp_path):
         assert torch.equal(before[name], after[name]), name
 
 
+def test_dense_remainder_is_stored_losslessly(tmp_path):
+    """A norm that is not float16-exact must survive the round trip.
+
+    Casting the dense remainder to float16 saved 0.13 MiB on a 1B model and
+    rounded one norm by a single ulp, which was enough to break the
+    "reload is bit-exact" invariant the checkpoint advertises.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    model = _tiny_llama()
+    awkward = torch.tensor(
+        [0.123456789, 0.987654321, 1.0000001192092896] * 11, dtype=torch.float32
+    )[: model.model.norm.weight.numel()]
+    with torch.no_grad():
+        model.model.norm.weight.copy_(awkward)
+        for name, module in model.named_modules():
+            weight = getattr(module, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
+                continue
+            bits = 8 if name.endswith("embed_tokens") else 4
+            weight.copy_(bq.quantize_blockfloat(weight.detach(), bits)[0])
+
+    out = str(tmp_path / "lossless")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    loaded, _restored = bq.load_blockfloat_model(out)
+    assert torch.equal(loaded.model.norm.weight.detach(), awkward)
+
+
 def test_save_blockfloat_model_rejects_a_model_with_nothing_packed(tmp_path):
     """A dense model must be rejected before anything is written."""
 
