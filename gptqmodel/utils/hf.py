@@ -449,16 +449,15 @@ def _load_gguf_checkpoint_torch_direct(
             continue
 
         if not torch.is_tensor(weights):
-            # GGUF processors return nested sequences or array-likes. Copy
-            # through NumPy when it is available so big-endian dtypes and
-            # negative strides are normalized exactly as before; fall back to
-            # Torch conversion for a NumPy-free install.
-            try:
-                import numpy as np
-            except ModuleNotFoundError:
-                weights = torch.as_tensor(weights).clone().contiguous()
-            else:
-                weights = torch.from_numpy(np.array(weights, copy=True, order="C"))
+            # GGUF processors return nested sequences or array-likes. Normalize
+            # through the array's own API so big-endian dtypes and negative
+            # strides become a native C-contiguous buffer, then let Torch own
+            # the copy. No NumPy import is required.
+            dtype = getattr(weights, "dtype", None)
+            newbyteorder = getattr(dtype, "newbyteorder", None)
+            if newbyteorder is not None:
+                weights = weights.astype(newbyteorder("="), order="C", copy=True)
+            weights = torch.as_tensor(weights).clone().contiguous()
             if target_device is not None:
                 weights = weights.to(device=target_device)
 

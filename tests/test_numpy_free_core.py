@@ -8,6 +8,8 @@ tolerate its absence while remaining byte-identical when it is present.
 
 import ast
 import builtins
+import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -97,14 +99,8 @@ def test_checkpoint_rng_capture_round_trips_when_numpy_is_present() -> None:
 def test_checkpoint_rng_capture_degrades_without_numpy(monkeypatch) -> None:
     from gptqmodel.looper.gptq_checkpoint import _capture_numpy_rng, _restore_numpy_rng
 
-    real_import = builtins.__import__
-
-    def blocked(name, *args, **kwargs):
-        if name == "numpy" or name.startswith("numpy."):
-            raise ModuleNotFoundError("No module named 'numpy'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
+    # The capture only consults sys.modules; it never imports NumPy.
+    monkeypatch.delitem(sys.modules, "numpy", raising=False)
     assert _capture_numpy_rng() is None
     # A checkpoint captured with NumPy cannot be verified without it.
     assert _restore_numpy_rng(("MT19937", [1, 2, 3, 624], 0, 0, 0.0)) is False
@@ -117,9 +113,11 @@ def test_tensor_bytes_matches_numpy_tobytes() -> None:
     tensor = torch.arange(-32, 32, dtype=torch.int16)
     assert tensor_bytes(tensor) == tensor.numpy().tobytes()
     assert tensor_bytes(torch.tensor([], dtype=torch.uint8)) == b""
+    assert tensor_bytes(torch.arange(16)[3:9]) == torch.arange(16)[3:9].numpy().tobytes()
+    assert tensor_bytes(torch.randn(4, 4, dtype=torch.bfloat16)).__len__() == 32
 
 
-def test_tensor_bytes_has_no_numpy_fallback(monkeypatch) -> None:
+def test_tensor_bytes_does_not_import_numpy(monkeypatch) -> None:
     from gptqmodel.utils.tensor import tensor_bytes
 
     real_import = builtins.__import__
@@ -134,18 +132,43 @@ def test_tensor_bytes_has_no_numpy_fallback(monkeypatch) -> None:
     assert tensor_bytes(tensor) == bytes(range(8))
 
 
-def test_rco_dp_torch_path_matches_numpy_path() -> None:
-    """Both DP implementations must decode the same assignment.
+def _reference_dp(gained: torch.Tensor, steps: list[list[int]], budget: int) -> torch.Tensor:
+    """Pure-Python DP used as an independent oracle (no NumPy, no Torch ops)."""
+    n_layers, n_options = gained.shape
+    neg_inf = float("-inf")
+    table = [neg_inf] * (budget + 1)
+    table[0] = 0.0
+    choice = [[0] * (budget + 1) for _ in range(n_layers)]
+    for layer in range(n_layers):
+        updated = [neg_inf] * (budget + 1)
+        for option in range(n_options):
+            step = steps[layer][option]
+            if step > budget:
+                continue
+            gain = float(gained[layer, option])
+            for j in range(step, budget + 1):
+                best = table[j - step] + gain
+                if best > updated[j]:
+                    updated[j] = best
+                    choice[layer][j] = option
+        table = updated
+    if not any(math.isfinite(value) for value in table):
+        raise RuntimeError("RCO rounding found no feasible assignment under the budget")
+    position = max(range(len(table)), key=table.__getitem__)
+    out = [0] * n_layers
+    for layer in range(n_layers - 1, -1, -1):
+        option = choice[layer][position]
+        out[layer] = option
+        position -= steps[layer][option]
+    return torch.tensor(out, dtype=torch.long)
 
-    ``budget_constrained_argmax`` prefers the NumPy DP when NumPy is installed
-    and falls back to the Torch DP otherwise. Running both here keeps them in
-    lockstep, including the tie and saturation cases that the public API only
-    exercises through one of them.
-    """
-    np = pytest.importorskip("numpy")
+
+def test_rco_dp_paths_match_reference() -> None:
+    """The compiled kernel and the Torch fallback must match an independent DP."""
     from gptqmodel.quantization import rco
 
-    for case in range(120):
+    compiled = rco._rco_dp_compiled()
+    for case in range(200):
         generator = torch.Generator().manual_seed(500 + case)
         n_layers = int(torch.randint(1, 7, (1,), generator=generator))
         n_options = int(torch.randint(1, 6, (1,), generator=generator))
@@ -156,22 +179,27 @@ def test_rco_dp_torch_path_matches_numpy_path() -> None:
         if case % 7 == 0:
             scores = scores * 1e3  # saturated
         unit_costs = torch.randint(1, max(2, budget), (n_layers, n_options), generator=generator)
-
-        def run_numpy():
-            return rco._budget_dp_numpy(np, scores, unit_costs, budget, n_layers, n_options)
-
-        def run_torch():
-            return rco._budget_dp_torch(scores, unit_costs.tolist(), budget, n_layers, n_options)
+        steps = unit_costs.tolist()
 
         try:
-            numpy_result = run_numpy()
+            expected = _reference_dp(scores, steps, budget)
         except RuntimeError as exc:
             # Both paths must agree that the budget is infeasible.
             with pytest.raises(RuntimeError, match=str(exc)):
-                run_torch()
+                rco._budget_dp_torch(scores, steps, budget, n_layers, n_options)
+            if compiled is not None:
+                with pytest.raises(RuntimeError, match=str(exc)):
+                    compiled(scores, unit_costs, budget)
             continue
+        assert torch.equal(
+            rco._budget_dp_torch(scores, steps, budget, n_layers, n_options), expected
+        ), f"torch case {case}"
+        if compiled is not None:
+            assert torch.equal(compiled(scores, unit_costs, budget), expected), f"compiled case {case}"
 
-        torch_result = run_torch()
-        assert torch.equal(numpy_result, torch_result), (
-            f"case {case}: numpy={numpy_result.tolist()} torch={torch_result.tolist()}"
-        )
+    # A non-contiguous input must still hit the kernel's raw pointers correctly.
+    noncontiguous = torch.randn(7, 4, dtype=torch.float64).t()
+    costs = torch.randint(1, 40, (4, 7))
+    steps = costs.tolist()
+    expected = _reference_dp(noncontiguous, steps, 120)
+    assert torch.equal(rco._budget_dp(noncontiguous, costs, 120, 4, 7), expected)

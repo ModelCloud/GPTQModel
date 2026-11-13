@@ -31,6 +31,7 @@ Riemannian Manifolds", arXiv 2605.00649, Secs. 2-3 (Prop. 1-3) and App. A.5.
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -173,65 +174,131 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
     gained = scores.detach().to(device="cpu", dtype=torch.float64)
 
-    # The DP is a few hundred tiny host-side reductions. NumPy's ufunc loop is
-    # several times faster than Torch's CPU dispatch for this shape, so it is
-    # used when available; ``_budget_dp_torch`` is the exact NumPy-free
-    # equivalent and both are covered by the same oracle tests.
-    try:
-        import numpy as np
-    except ModuleNotFoundError:
-        # Read the step matrix once: the inner loop must not touch tensor scalars.
-        steps = unit_costs.detach().to(device="cpu", dtype=torch.long).tolist()
-        assignment = _budget_dp_torch(gained, steps, budget, n_layers, n_options)
-    else:
-        assignment = _budget_dp_numpy(
-            np, gained, unit_costs.detach().to(device="cpu", dtype=torch.long), budget, n_layers, n_options
-        )
+    # The DP is a few hundred tiny host-side reductions, where Torch's CPU
+    # dispatch and thread-pool overhead dominate. A compiled kernel runs the
+    # whole table in one call; ``_budget_dp_torch`` is the exact fallback when
+    # no C++ toolchain is available.
+    assignment = _budget_dp(
+        gained,
+        unit_costs.detach().to(device="cpu", dtype=torch.long),
+        budget,
+        n_layers,
+        n_options,
+    )
     # Return on the caller's device: the search indexes this alongside the
     # probability tensors it keeps on the accelerator.
     return assignment.to(scores.device)
 
 
-def _budget_dp_numpy(np, gained, unit_costs, budget, n_layers, n_options):
-    """NumPy DP over the discretized budget (fast path)."""
-    gained = gained.numpy()
-    steps = unit_costs.numpy()
+_RCO_DP_SOURCE = r"""
+#include <torch/extension.h>
 
-    table = np.full(budget + 1, -np.inf, dtype=np.float64)
-    table[0] = 0.0
-    choice = np.zeros((n_layers, budget + 1), dtype=np.int64)
-    for layer in range(n_layers):
-        updated = np.full(budget + 1, -np.inf, dtype=np.float64)
-        for option in range(n_options):
-            step = int(steps[layer, option])
-            if step > budget:
-                continue
-            # ``best[j]`` is the score of arriving at budget ``j`` via this
-            # option; a single vectorized shift replaces the inner loop.
-            best = np.full(budget + 1, -np.inf, dtype=np.float64)
-            if step == 0:
-                best = table + gained[layer, option]
-            else:
-                best[step:] = table[:budget + 1 - step] + gained[layer, option]
-            improved = best > updated
-            improved &= np.isfinite(best)
-            updated[improved] = best[improved]
-            choice[layer, improved] = option
-        table = updated
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
 
-    # Select the best objective over every feasible budget, not the largest
-    # feasible budget: the table entry is the total score, and a
-    # lower-cost assignment can score better. Matches the reference solver.
-    if not np.isfinite(table).any():
-        raise RuntimeError('RCO rounding found no feasible assignment under the budget')
-    position = int(np.argmax(table))
+torch::Tensor rco_dp(torch::Tensor gained, torch::Tensor steps, int64_t budget) {
+    TORCH_CHECK(gained.device().is_cpu() && gained.scalar_type() == torch::kFloat64,
+                "gained must be float64 CPU");
+    TORCH_CHECK(steps.device().is_cpu() && steps.scalar_type() == torch::kInt64,
+                "steps must be int64 CPU");
+    TORCH_CHECK(gained.dim() == 2 && steps.sizes() == gained.sizes(),
+                "gained and steps must be matching [layers, options]");
 
-    assignment = torch.zeros(n_layers, dtype=torch.long)
-    for layer in range(n_layers - 1, -1, -1):
-        option = int(choice[layer, position])
-        assignment[layer] = option
-        position -= int(steps[layer, option])
-    return assignment
+    const int64_t n_layers = gained.size(0);
+    const int64_t n_options = gained.size(1);
+    const int64_t width = budget + 1;
+    const double* g = gained.data_ptr<double>();
+    const int64_t* s = steps.data_ptr<int64_t>();
+    const double neg_inf = -std::numeric_limits<double>::infinity();
+
+    std::vector<double> table(width, neg_inf);
+    std::vector<double> updated(width, neg_inf);
+    std::vector<int64_t> choice(n_layers * width, 0);
+    table[0] = 0.0;
+
+    for (int64_t layer = 0; layer < n_layers; ++layer) {
+        std::fill(updated.begin(), updated.end(), neg_inf);
+        int64_t* row = choice.data() + layer * width;
+        for (int64_t option = 0; option < n_options; ++option) {
+            const int64_t step = s[layer * n_options + option];
+            if (step > budget) {
+                continue;
+            }
+            const double gain = g[layer * n_options + option];
+            for (int64_t j = step; j < width; ++j) {
+                const double best = table[j - step] + gain;
+                if (best > updated[j]) {
+                    updated[j] = best;
+                    row[j] = option;
+                }
+            }
+        }
+        table.swap(updated);
+    }
+
+    // Pick the best objective over every feasible budget, matching argmax's
+    // first-maximum tie-break.
+    double best = neg_inf;
+    int64_t position = -1;
+    for (int64_t j = 0; j < width; ++j) {
+        if (table[j] > best) {
+            best = table[j];
+            position = j;
+        }
+    }
+    TORCH_CHECK(position >= 0 && std::isfinite(best),
+                "RCO rounding found no feasible assignment under the budget");
+
+    auto out = torch::zeros({n_layers}, torch::dtype(torch::kInt64));
+    int64_t* o = out.data_ptr<int64_t>();
+    for (int64_t layer = n_layers - 1; layer >= 0; --layer) {
+        const int64_t option = choice[layer * width + position];
+        o[layer] = option;
+        position -= s[layer * n_options + option];
+    }
+    return out;
+}
+"""
+
+
+@lru_cache(maxsize=1)
+def _rco_dp_compiled():
+    """Compile the DP once; return ``None`` when no C++ toolchain is available."""
+    try:
+        from torch.utils.cpp_extension import load_inline
+
+        module = load_inline(
+            name="gptqmodel_rco_dp",
+            cpp_sources=_RCO_DP_SOURCE,
+            functions=["rco_dp"],
+            extra_cflags=["-O3"],
+            verbose=False,
+        )
+    except Exception:
+        return None
+    return module.rco_dp
+
+
+def _budget_dp(gained, unit_costs, budget, n_layers, n_options):
+    """Solve the budget DP with the compiled kernel, else single-threaded Torch."""
+    kernel = _rco_dp_compiled()
+    if kernel is not None:
+        try:
+            # The kernel reads raw pointers, so hand it contiguous storage.
+            return kernel(gained.contiguous(), unit_costs.contiguous(), budget)
+        except Exception:
+            pass
+    steps = unit_costs.tolist()
+    try:
+        from threadpoolctl import threadpool_limits
+    except Exception:
+        return _budget_dp_torch(gained, steps, budget, n_layers, n_options)
+    # Tiny tensors are dominated by thread-pool wake-ups; one thread is several
+    # times faster here and preserves the compiled kernel's option ordering.
+    with threadpool_limits(limits=1):
+        return _budget_dp_torch(gained, steps, budget, n_layers, n_options)
 
 
 def _budget_dp_torch(gained, steps, budget, n_layers, n_options):

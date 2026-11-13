@@ -8,48 +8,48 @@ organization. NumPy is the first target because the engine stack
 (`torch`, `transformers`) installs it anyway, so a direct pin buys nothing while
 forcing every downstream consumer to keep it.
 
-Two decisions make NumPy optional rather than required. Both are **fail-open**:
-the NumPy path is used when it is importable, and a slower pure-Torch path runs
-when it is not. Neither decision is allowed to change results, so every
-substitution below is verified bit-for-bit against the NumPy implementation it
-replaced.
+The byte-extraction and packing paths are fully NumPy-free. The one remaining
+optional integration is the checkpoint RNG snapshot, which can only exist when
+the process already loaded NumPy. No module imports NumPy to provide a fast
+path, and every substitution below is verified bit-for-bit against the
+implementation it replaced.
 
 ## Byte extraction (`gptqmodel.utils.tensor.tensor_bytes`)
 
-`tensor_bytes` (`gptqmodel/utils/tensor.py:11`) replaced eight ad-hoc
-`tensor.numpy().tobytes()` / `memoryview(tensor.numpy())` call sites. The
-payload is always the contiguous raw byte view, so shape and dtype stay in the
-caller's identity record instead of the byte stream.
+`tensor_bytes` replaced ten ad-hoc `tensor.numpy().tobytes()` /
+`memoryview(tensor.numpy())` call sites. It copies the contiguous CPU buffer
+with a single `ctypes.string_at` call (a C memcpy), so it needs no NumPy and no
+Python-level element loop. Shape and dtype stay in the caller's identity record
+instead of the byte stream.
 
 ```mermaid
 flowchart TD
-    A["tensor_bytes(tensor)"] --> B["detach -> cpu -> contiguous -> reshape(-1)"]
-    B --> C["view(torch.uint8)"]
-    C --> D{"import numpy"}
-    D -->|"ModuleNotFoundError"| E["bytes(view.tolist())"]
-    D -->|"available"| F["np.asarray(view).tobytes()"]
-    E --> G["identical payload bytes"]
-    F --> G
+    A["tensor_bytes(tensor)"] --> B["detach, resolve conj/neg"]
+    B --> C["to(cpu) -> contiguous -> reshape(-1)"]
+    C --> D{"nbytes == 0"}
+    D -->|"yes"| E["b''"]
+    D -->|"no"| F["ctypes.string_at(data_ptr, nbytes)"]
+    F --> G["identical payload bytes"]
 ```
 
-The `except ModuleNotFoundError` branch is the only place NumPy may be imported
-outside a module header, and `tests/test_numpy_free_core.py` enforces that any
-function-local NumPy import sits behind that guard.
+`ctypes.string_at` measures within ~2% of `Tensor.numpy().tobytes()` on a
+256 MiB tensor (1.02x) and about 280x faster than `bytes(tolist())`.
 
 ## Checkpoint RNG capture (`gptqmodel.looper.gptq_checkpoint`)
 
 The continuation checkpoint records the Python, Torch, CUDA and NumPy global RNG
-states. NumPy's state is now probed rather than assumed
-(`_capture_numpy_rng`, `gptqmodel/looper/gptq_checkpoint.py:47`). A checkpoint
-captured with NumPy present still stores the exact
+states. NumPy's state is read from `sys.modules` only when the process already
+loaded NumPy (`_loaded_numpy`, `gptqmodel/looper/gptq_checkpoint.py`); the
+checkpoint code never imports it. A checkpoint captured with NumPy present still
+stores the exact
 `(algorithm, key_array.tolist(), pos, has_gauss, cached_gaussian)` payload, so
 existing checkpoints restore unchanged.
 
 ```mermaid
 flowchart TD
     S["QuantizationCheckpointAdapter.capture"] --> P{"_capture_numpy_rng()"}
-    P -->|"numpy importable"| Q["store full NumPy RNG state"]
-    P -->|"ModuleNotFoundError"| R["store null"]
+    P -->|"numpy in sys.modules"| Q["store full NumPy RNG state"]
+    P -->|"not loaded"| R["store null"]
     Q --> T["state['numpy_rng']"]
     R --> T
     T --> U["restore: _restore_numpy_rng(state['numpy_rng'])"]
@@ -72,7 +72,7 @@ a match would hide a real divergence.
 | `np.array` + reshape/ravel permutations | `qlinear/qqq.py`, `qlinear/marlin.py` | list comprehension into `torch.tensor` |
 | `numpy.uint32` pack/unpack, `np.argsort` | `utils/marlin.py` | int64 Torch words, final int32 narrow, `sorted` |
 | `pack_np_dtype` / `pack_np_math_dtype` packing | `qlinear/__init__.py` | Torch int32 packing (signed wrap matches `uint32`) |
-| NumPy DP table | `quantization/rco.py` | Torch float64 DP table |
+| NumPy DP table | `quantization/rco.py` | compiled C++ DP (Torch fallback) |
 | module-scope `import numpy`, `np.random.get_state()` | `looper/gptq_checkpoint.py` | guarded lazy probe + `tensor_bytes` |
 | `tensor.numpy().tobytes()` hashing | `utils/model.py`, `utils/offload.py`, `utils/exl3_projection_checkpoint.py`, `looper/gsq_training_model.py` | `tensor_bytes` |
 | `tensor.cpu().numpy().tolist()` | `utils/calibration.py` | `tensor.cpu().tolist()` |
@@ -91,10 +91,10 @@ run the Python packer, which is the only packer:
 | Marlin + QQQ permutation tables, RCO assignment, `tensor_parameters` | 17 values, identical |
 | safetensors payload digests (f32/f16/bf16/int8/fp8/empty/scalar) | 7/7 identical |
 | RCO DP, 400 randomized configurations (ties, saturation, infeasible) | 400/400 identical |
-| `_budget_dp_numpy` vs `_budget_dp_torch`, 120 randomized cases | identical |
+| compiled DP vs Torch fallback vs pure-Python oracle, 200 randomized cases | identical |
 
 Surface after this change: module-scope NumPy importers in `gptqmodel/` went
-from 22 to 12, and `.numpy()` occurrences from 80 to 63.
+from 22 to 12, and `.numpy()` occurrences from 80 to 61.
 
 ## Performance
 
@@ -113,7 +113,7 @@ and taking the minimum of 3-9 samples on a 4096x4096 layer with
 | `pack_original`, int8/int16 storage | 476-501 ms | 448-492 ms | 0.91-0.98x |
 | `marlin.pack_cols` (4-bit) | 5.0 ms | 0.4 ms | 0.07x |
 | `marlin.unpack_cols` (4-bit) | 5.1 ms | 0.3-3.4 ms | 0.06-0.67x |
-| `budget_constrained_argmax` DP | 2.87 ms | 2.90 ms | 1.01x |
+| `budget_constrained_argmax` DP (28 layers, budget 1751) | 2.82 ms | 0.26 ms | 0.09x |
 | `tensor_bytes` on 256 MiB | 14.5 ms | 14.6 ms | 1.01x |
 
 Three findings drove the implementation:
@@ -130,12 +130,14 @@ Three findings drove the implementation:
    process whole chunks per step, which is both exact and faster than the NumPy
    loop for `marlin.pack_cols` and `marlin.unpack_cols`. The `pack_factor == 1`
    case is the identity and skips packing entirely.
-3. **The RCO DP keeps a guarded NumPy fast path.** Its inner step is a tiny
-   float64 reduction, and Torch's indexed `max(dim=0)` is a pathological path
-   there: 17.6 ms on a `[5, 1751]` float64 tensor versus 0.007 ms for `amax`
-   and 0.28 ms for `argmax`. `_budget_dp_numpy` and `_budget_dp_torch` are
-   therefore both shipped, selected by the same `ModuleNotFoundError` probe, and
-   a test asserts they decode identical assignments on 120 randomized cases
+3. **The RCO DP is compiled, not a NumPy fast path.** The inner step is a few
+   hundred tiny float64 reductions where Torch's CPU dispatch and thread-pool
+   overhead dominate (a 128-thread default made `max(dim=0)` up to 150x slower
+   than NumPy). `_RCO_DP_SOURCE` compiles a single C++ kernel with
+   `load_inline` on first use; it runs the whole table in one call, is 6-30x
+   faster than the NumPy loop, and falls back to `_budget_dp_torch` under
+   `threadpool_limits(1)` when no C++ toolchain is available. A test asserts
+   both paths match an independent pure-Python DP on 200 randomized cases
    (including ties and saturation).
 
 ## Not in scope / follow-up

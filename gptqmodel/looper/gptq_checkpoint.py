@@ -7,6 +7,7 @@ import json
 import math
 import random
 import signal
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -44,17 +45,20 @@ _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
 }
 
 
-def _capture_numpy_rng():
-    """Snapshot NumPy's global RNG, if NumPy is installed.
+def _loaded_numpy():
+    """Return NumPy only if the process already imported it.
 
-    NumPy is not a GPT-QModel dependency in its own right: Torch and the
-    Transformers stack may provide it. Keeping this probe lazy lets a NumPy-free
-    install import and use the checkpoint machinery; when NumPy is present the
-    snapshot is byte-for-byte the old ``np.random.get_state()`` payload.
+    Importing NumPy here would make GPT-QModel pull it in. A process only has a
+    global NumPy RNG worth checkpointing if it already uses NumPy, so consult
+    ``sys.modules`` instead of importing.
     """
-    try:
-        import numpy as np
-    except ModuleNotFoundError:
+    return sys.modules.get("numpy")
+
+
+def _capture_numpy_rng():
+    """Snapshot the already-loaded NumPy global RNG, if there is one."""
+    np = _loaded_numpy()
+    if np is None:
         return None
     algorithm, keys, *rest = np.random.get_state()
     return (algorithm, keys.tolist(), *rest)
@@ -64,9 +68,8 @@ def _restore_numpy_rng(saved) -> bool:
     """Restore and verify a snapshot from :func:`_capture_numpy_rng`."""
     if saved is None:
         return True
-    try:
-        import numpy as np
-    except ModuleNotFoundError:
+    np = _loaded_numpy()
+    if np is None:
         return False
     algorithm, keys, *rest = saved
     np.random.set_state((algorithm, np.asarray(keys, dtype=np.uint32), *rest))

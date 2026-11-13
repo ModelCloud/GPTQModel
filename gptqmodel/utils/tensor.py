@@ -3,27 +3,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import ctypes
 import math
 
 import torch
 
 
 def tensor_bytes(tensor: torch.Tensor) -> bytes:
-    """Return a tensor's logical payload as raw bytes.
+    """Return a tensor's logical payload as raw bytes, without NumPy.
 
-    NumPy is used when it is importable because its buffer bridge is the fast
-    path for multi-hundred-MiB weight hashing; when it is absent the same bytes
-    are produced from a Torch copy. GPT-QModel does not depend on NumPy, so this
-    must not fail in a NumPy-free install.
+    ``ctypes.string_at`` copies the contiguous CPU buffer in one C call, which
+    matches ``Tensor.numpy().tobytes()`` throughput (it is the same memcpy) and
+    avoids both a NumPy import and the very slow ``tolist()`` fallback.
     """
-    view = tensor.detach().to(device="cpu").contiguous().reshape(-1).view(torch.uint8)
-    try:
-        import numpy  # noqa: F401  # presence probe only; the bridge below is Torch's
-    except ModuleNotFoundError:
-        return bytes(view.tolist())
-    # ``Tensor.numpy`` is a zero-copy bridge; copying once through it is the
-    # fastest NumPy-free-agnostic path and matches the old call sites exactly.
-    return view.numpy().tobytes()
+    view = tensor.detach()
+    if view.is_conj() or view.is_neg():
+        view = view.resolve_conj().resolve_neg()
+    view = view.to(device="cpu").contiguous().reshape(-1)
+    nbytes = view.nbytes
+    if nbytes == 0:
+        return b""
+    return ctypes.string_at(view.data_ptr(), nbytes)
 
 
 # helper method to get accurate parameter count for a gptq model
