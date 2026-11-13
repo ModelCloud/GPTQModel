@@ -1667,34 +1667,3 @@ TritonPatch.apply()
 ## License 📜
 
 GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.
-
-## Proposed feature reference pages
-
-The following reference pages document features proposed from the working fork.
-
-- [preserve Hessian conditioning and projection diagnostics](docs/exl3-numerical-diagnostics.md)
-- [retain restart-idempotent projection and route ledgers](docs/exl3-error-ledgers.md)
-- [checkpoint completed projections atomically](docs/exl3-projection-checkpoints.md)
-- [persist authenticated capture frontiers](docs/exl3-capture-frontiers.md)
-- [resume capture at calibration-batch boundaries](docs/exl3-capture-batch-spool.md)
-- [expose ranked router candidates for route recovery](docs/exl3-router-recovery.md)
-- [persist deterministic adjacent mixed-tier plans](docs/exl3-inline-mixed-tiers.md)
-- [dispatch authenticated projections to pipelined workers](docs/exl3-remote-workers.md)
-- [preserve lazy native sources across replay and export](docs/lazy-source-replay-contracts.md)
-- [carry causal replay and durable recovery callbacks](docs/looper-causal-replay.md)
-- [integrate resumable distributed and mixed-tier execution](docs/exl3-durable-execution.md)
-- [compose native checkpoint passthrough and save overlays](docs/native-checkpoint-export.md)
-- [carry bounded V4 target and MTP calibration replay](docs/deepseek-v4-mtp-replay.md)
-- [integrate Flash target and MTP recovery and export](docs/glm-integrated-mtp.md)
-- [expose Dots3 Note routed experts individually](docs/dots3-separate-experts.md)
-- [add bounded K3 source and explicit AttnRes model contracts](docs/kimi-k3-native-source.md)
-- [carry causal core calibration and padded EXL3 source storage](docs/kimi-core-calibration.md)
-- [carry K3.1 source and bounded calibration adapters](docs/kimi-k31-calibration.md)
-- [add bounded native core calibration and EXL3 sources](docs/glm-core-calibration.md)
-- [carry native full-MTP alignment and source loading](docs/glm-native-mtp.md)
-- [carry Flash core and MTP calibration adapters](docs/glm-flash-native-calibration.md)
-- [carry bounded native core and MTP calibration](docs/step5-native-calibration.md)
-- [carry V4.1 native source and mapped PLE replay](docs/v41-native-source.md)
-- [carry V4.1 routed capture and adjacent recovery](docs/v41-routed-calibration.md)
-- [persist authenticated typed V4.1 frontiers](docs/v41-durable-frontiers.md)
-- [carry V4.1 main-input and dSpark replay adapters](docs/v41-dspark-replay.md)
