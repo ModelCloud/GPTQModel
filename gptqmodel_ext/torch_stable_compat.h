@@ -67,6 +67,8 @@ using MemoryFormat = torch::headeronly::MemoryFormat;
 using Device = torch::stable::Device;
 using StreamId = torch::stable::accelerator::StreamId;
 using DeviceIndex = int32_t;
+using Half = torch::headeronly::Half;
+using BFloat16 = torch::headeronly::BFloat16;
 
 template <class T>
 using optional = std::optional<T>;
@@ -350,6 +352,15 @@ inline Tensor t(const Tensor& self) {
   std::array<StableIValue, 1> stack{torch::stable::detail::from(self)};
   STABLE_TORCH_ERROR_CODE_CHECK(
       torch_call_dispatcher("aten::t", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor view(const Tensor& self, IntHeaderOnlyArrayRef sizes) {
+  std::array<StableIValue, 2> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(sizes)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::view", "", stack.data(), TORCH_ABI_VERSION));
   return torch::stable::detail::to<Tensor>(stack[0]);
 }
 
