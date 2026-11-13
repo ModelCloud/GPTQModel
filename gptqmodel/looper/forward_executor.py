@@ -231,6 +231,11 @@ class ForwardExecutor:
         # device it was meant to avoid.
         devices = self._filter_forward_devices(devices)
         if len(devices) <= 1:
+            # `select_forward_devices` expands the device family and the
+            # compute filter may have removed the original base device. The
+            # serial fallback must stage inputs and rehome the module on the
+            # surviving device instead of the pre-filter `cur_layer_device`.
+            single_device = devices[0] if devices else cur_layer_device
             return self.run_single(
                 module=module,
                 processor=processor,
@@ -240,7 +245,7 @@ class ForwardExecutor:
                 layer_input_kwargs=layer_input_kwargs,
                 position_ids=position_ids,
                 attention_masks=attention_masks,
-                cur_layer_device=cur_layer_device,
+                cur_layer_device=single_device,
                 is_lm_head_module=is_lm_head_module,
                 shared_kv_cache_dict=shared_kv_cache_dict,
                 layer_index=layer_index,
