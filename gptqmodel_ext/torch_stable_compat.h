@@ -36,6 +36,7 @@
 #include <torch/headeronly/util/Half.h>
 
 #if defined(USE_CUDA) || defined(__CUDACC__)
+#include <torch/csrc/inductor/aoti_torch/generated/c_shim_cuda.h>
 #include <cuda_runtime.h>
 #endif
 
@@ -75,6 +76,13 @@ using DeviceType = torch::headeronly::DeviceType;
 using Layout = torch::headeronly::Layout;
 using IntArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
 using IntHeaderOnlyArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
+using Half = torch::headeronly::Half;
+using BFloat16 = torch::headeronly::BFloat16;
+using Float8_e4m3fn = torch::headeronly::Float8_e4m3fn;
+using Float8_e4m3fnuz = torch::headeronly::Float8_e4m3fnuz;
+using Float8_e5m2 = torch::headeronly::Float8_e5m2;
+using Float8_e5m2fnuz = torch::headeronly::Float8_e5m2fnuz;
+using Float8_e8m0fnu = torch::headeronly::Float8_e8m0fnu;
 
 inline constexpr ScalarType kByte = ScalarType::Byte;
 inline constexpr ScalarType kChar = ScalarType::Char;
@@ -262,6 +270,7 @@ namespace torch {
 using Tensor = torch::stable::Tensor;
 using TensorOptions = at::TensorOptions;
 using ScalarType = torch::headeronly::ScalarType;
+using IntArrayRef = torch::headeronly::IntHeaderOnlyArrayRef;
 
 using at::empty;
 using at::empty_like;
@@ -285,6 +294,7 @@ using CUDAStream = at::cuda::CompatibleCUDAStream;
 // ---------------------------------------------------------------------------
 #define TORCH_CHECK(...) STD_TORCH_CHECK(__VA_ARGS__)
 #define TORCH_INTERNAL_ASSERT(...) STD_TORCH_CHECK(__VA_ARGS__)
+#define AT_ERROR(...) STD_TORCH_CHECK(false, __VA_ARGS__)
 #define TORCH_WARN(...) \
   do {                  \
   } while (0)
