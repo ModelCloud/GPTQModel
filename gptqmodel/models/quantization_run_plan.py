@@ -10,7 +10,12 @@ from enum import Enum
 from importlib import import_module
 from typing import Optional
 
-from ..quantization.config import FORMAT, METHOD, BaseQuantizeConfig
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    QUANTIZE_BLACK_LIST,
+    BaseQuantizeConfig,
+)
 from ..utils.backend import BACKEND, normalize_backend
 
 
@@ -107,6 +112,15 @@ class QuantizationRunPlan:
         batch_size: int,
         needs_lora: bool,
     ) -> "QuantizationRunPlan":
+        # Inference-only formats declare no packing lifecycle. Refuse them here
+        # as well as in `BaseQModel.quantize` so a caller that builds a plan
+        # directly cannot get a weight-only chain with no implementation behind
+        # it. Both entry points use one message.
+        if config.method in QUANTIZE_BLACK_LIST:
+            raise ValueError(
+                f"Unsupported quantization operation for quant method: {config.method}"
+            )
+
         has_gptaq = getattr(config, "gptaq", None) is not None
         has_foem = getattr(config, "foem", None) is not None
         weight_only = getattr(config, "uses_weight_only_lifecycle", lambda: False)()

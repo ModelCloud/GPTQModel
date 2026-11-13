@@ -1675,6 +1675,42 @@ def test_native_checkpoint_records_its_source_model(tmp_path):
     assert meta["block"] == 16
 
 
+def test_blockfloat_is_inference_only_in_the_lifecycle_contract():
+    """``tt-blockfloat`` describes a checkpoint; it cannot pack a dense model.
+
+    The grid solve lives in ``scripts/tt_quantize_blockfloat.py`` and writes
+    codes directly, so there is no looper processor behind this method. Both
+    entry points that can start a quantization run must refuse it with the same
+    message, or a caller would get a weight-only plan with nothing implementing
+    it.
+    """
+
+    from gptqmodel.models.quantization_run_plan import QuantizationRunPlan
+    from gptqmodel.quantization.config import (
+        FORMAT,
+        METHOD,
+        QUANTIZE_BLACK_LIST,
+        QuantizeConfig,
+    )
+
+    assert METHOD.TT_BLOCKFLOAT in QUANTIZE_BLACK_LIST
+
+    config = QuantizeConfig(method=METHOD.TT_BLOCKFLOAT, bits=4, block=16, embed_bits=8)
+    assert config.uses_weight_only_lifecycle() is True
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported quantization operation"):
+        QuantizationRunPlan.build(
+            config,
+            format_code=FORMAT.TT_BLOCKFLOAT,
+            pack_backend=None,
+            loop_backend=None,
+            batch_size=1,
+            needs_lora=False,
+        )
+
+
 def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
     """``GPTQModel.load`` must consume a native checkpoint, not just the helper.
 
@@ -1725,6 +1761,14 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         logits = loaded.model(ids).logits
     assert torch.isfinite(logits).all()
     assert logits.shape[-1] == 64
+
+    # A placement request must not be accepted and then ignored: the block-float
+    # kernel runs on CPU, and reporting a device the model is not on is worse
+    # than refusing.
+    import pytest
+
+    with pytest.raises(NotImplementedError, match="load on CPU"):
+        GPTQModel.load(out, device="xla:0")
 
 
 def test_blockfloat_exponent_search_beats_floor_log2():

@@ -2325,7 +2325,15 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
 }
 
 # inference only methods should go here
-QUANTIZE_BLACK_LIST = {}
+QUANTIZE_BLACK_LIST = {
+    # Tenstorrent block-float is a checkpoint format, not a quantization pass.
+    # The grid solve runs in `scripts/tt_quantize_blockfloat.py`, which writes
+    # codes directly; there is no looper processor that can pack a dense model
+    # into it, so asking `quantize()` for it must fail with the documented
+    # message instead of producing a weight-only plan with no implementation
+    # behind it.
+    METHOD.TT_BLOCKFLOAT: "inference-only: use scripts/tt_quantize_blockfloat.py",
+}
 
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
@@ -5873,6 +5881,12 @@ class TTBlockfloatConfig(PreProcessorConfig):
     input embedding / output head, which uses the wider 8-bit format because a
     vocabulary-sized matrix tolerates far less relative error than a decoder
     projection.
+
+    This is an **inference-only** format. The grid solve that produces it runs
+    in ``scripts/tt_quantize_blockfloat.py`` and writes codes directly, so there
+    is no looper processor that can pack a dense model into it; the method is
+    listed in ``QUANTIZE_BLACK_LIST`` and ``quantize()`` refuses it. What this
+    config exists for is describing a checkpoint to the loader.
     """
 
     bits: int = field(default=4, metadata={"choices": [4, 8]})
@@ -5929,6 +5943,9 @@ class TTBlockfloatConfig(PreProcessorConfig):
         self.sym = True
 
     def uses_weight_only_lifecycle(self) -> bool:
+        # Describes the storage family (weights only, no activation
+        # quantization), not an admission to run a packing chain: the method is
+        # blacklisted from quantization, so no run plan is ever built for it.
         return True
 
 

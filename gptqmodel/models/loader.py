@@ -1632,6 +1632,9 @@ def ModelLoader(cls):
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+        # Kept for the block-float route, which builds on CPU and must not
+        # silently ignore a placement request the caller made.
+        requested_device = device
 
         if requested_device_map is None:
             explicit_device = None
@@ -1658,20 +1661,6 @@ def ModelLoader(cls):
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
         native_support = has_native_transformers_causallm_support(model_local_path)
 
-        # A native block-float checkpoint carries none of the GPTQ keys this
-        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
-        # codes plus one exponent per block of 16 values. Route it before any
-        # GPTQ parsing, otherwise every decoder layer reads as missing.
-        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
-
-        if is_tt_blockfloat_checkpoint(model_local_path):
-            return _load_tt_blockfloat_model(
-                cls,
-                model_local_path=model_local_path,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
-            )
-
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
@@ -1679,6 +1668,36 @@ def ModelLoader(cls):
             )
 
         check_versions(cls, cls.require_pkgs)
+
+        # A native block-float checkpoint carries none of the GPTQ keys this
+        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
+        # codes plus one exponent per block of 16 values. Route it before any
+        # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # guards above still apply -- this path builds the model through
+        # transformers like any other, so the same version and
+        # trust_remote_code rules hold.
+        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
+
+        if is_tt_blockfloat_checkpoint(model_local_path):
+            if requested_device_map is not None or (
+                requested_device is not None
+                and str(requested_device).split(":")[0].lower() != "cpu"
+            ):
+                # The block-float kernel is the portable correctness reference,
+                # not the device path. Accepting a placement request here and
+                # ignoring it would report a device the model is not on.
+                raise NotImplementedError(
+                    "tt-blockfloat checkpoints load on CPU; the block-float "
+                    "kernel is a correctness reference and device placement is "
+                    "the caller's dispatch step. Omit device/device_map, or pass "
+                    "device='cpu'."
+                )
+            return _load_tt_blockfloat_model(
+                cls,
+                model_local_path=model_local_path,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs_without_internal.pop("cache_dir", None)
