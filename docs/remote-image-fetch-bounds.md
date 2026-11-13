@@ -21,7 +21,7 @@ small scheduling/reaping interval after the network deadline.
 flowchart TD
     A["load_image_from_url: compute absolute deadline"] --> B{"Budget remains?"}
     B -- no --> Z["ImageFetchError: total time limit"]
-    B -- yes --> C["_download_image_bytes: launch isolated interpreter"]
+    B -- yes --> C["_download_image_bytes: launch fresh interpreter"]
     C --> D["_image_fetch_worker: read JSON options"]
     D --> E["_download_image_bytes_in_worker: requests.get and bounded body read"]
     E --> F["Return image bytes or JSON failure; exit"]
@@ -63,9 +63,11 @@ References in the before column are to `gptqmodel/utils/image.py` at
   DNS, TLS or header parsing never returned a `requests.Response`.
 - A child handles one attempt and retains no connection pool for the next.
   Startup costs apply to each attempt and count against `total_timeout`.
-- The child executes this installed Python file directly with `-I`; it imports
-  requests and Pillow, not the GPT-QModel model registry. It does not fork the
-  running model interpreter or initialize its accelerator state.
+- The child executes this installed Python file with `runpy.run_path`; it
+  imports requests and Pillow, not the GPT-QModel model registry. User-site
+  and `PYTHONPATH` dependency discovery are preserved without placing the
+  utility directory (which contains `inspect.py`) on the import path. The
+  worker does not reuse the model interpreter or initialize accelerator state.
 - URL and options travel on stdin, not the command line. Image bytes and JSON
   errors travel on stdout; no pickle or checkpoint files are involved.
 - The existing byte limit is enforced while streaming and the pixel limit

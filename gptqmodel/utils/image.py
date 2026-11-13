@@ -268,7 +268,11 @@ def _download_image_bytes(
     }).encode("utf-8")
     try:
         with subprocess.Popen(
-            [sys.executable, "-I", str(Path(__file__).resolve()), "--image-fetch-worker"],
+            # run_path avoids putting utils/ (which contains inspect.py) on
+            # sys.path, while retaining user-site/PYTHONPATH dependencies.
+            [sys.executable, "-c",
+             "import runpy, sys; runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+             str(Path(__file__).resolve()), "--image-fetch-worker"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
