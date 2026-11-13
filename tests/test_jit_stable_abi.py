@@ -22,6 +22,7 @@ from gptqmodel.utils import machete
 from gptqmodel.utils import marlin
 from gptqmodel.utils import paroquant
 from gptqmodel.utils import qqq
+from gptqmodel.utils import rco_cpp
 from gptqmodel.utils import tt_blockfloat_cuda
 from gptqmodel.utils import vptq_cuda
 
@@ -110,3 +111,7 @@ def test_tt_blockfloat_cuda_uses_stable_abi():
 
 def test_vptq_cuda_uses_stable_abi():
     _assert_stable(vptq_cuda._VPTQ_TORCH_OPS_EXTENSION)
+
+
+def test_rco_dp_uses_stable_abi():
+    _assert_stable(rco_cpp._RCO_DP_EXTENSION)
