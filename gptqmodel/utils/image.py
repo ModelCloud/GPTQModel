@@ -4,12 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import base64
+import json
 import os
-import socket
-import threading
+import subprocess
+import sys
 import time
 import warnings
 from io import BytesIO
+from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import requests
@@ -64,35 +66,6 @@ def _shorten_url(url: str, limit: int = 200) -> str:
     if len(url) <= limit:
         return url
     return f"{url[:limit]}..."
-
-
-def _abort_response(response: requests.Response) -> None:
-    """Best-effort shutdown of the response socket from the watchdog thread.
-
-    Calling ``response.close()`` while another thread reads is not safe (it
-    mutates ``http.client`` state mid-read), so only shut the socket down: that
-    makes the pending read fail immediately without corrupting the reader.
-    """
-
-    sockets = []
-    raw = getattr(response, "raw", None)
-    connection = getattr(raw, "_connection", None)
-    sockets.append(getattr(connection, "sock", None))
-    try:
-        sockets.append(response.raw._fp.fp.raw._sock)
-    except Exception:
-        # Response backends need not expose this private path; the socket from
-        # ``raw._connection`` above is still tried.
-        pass
-    for sock in sockets:
-        if sock is None:
-            continue
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            # Best effort: the socket may already be closed or racing another
-            # thread's teardown; aborting is only an optimization.
-            pass
 
 
 class _FetchFailure(Exception):
@@ -156,62 +129,7 @@ def _clamp_timeout(
     return min(timeout, remaining)
 
 
-def _get_response(
-    url: str,
-    *,
-    timeout: Union[float, Tuple[float, float]],
-    deadline: float,
-    total_timeout: float,
-) -> requests.Response:
-    """Issue the request without letting headers or redirects escape the budget.
-
-    requests applies the timeout to individual socket reads, so a server that
-    trickles response headers (or a chain of individually fast redirects) can
-    keep requests.get busy long after total_timeout has elapsed.  Run the
-    blocking call on a helper thread and stop waiting at the deadline.
-    """
-
-    outcome: dict[str, object] = {}
-    finished = threading.Event()
-    cancelled = threading.Event()
-
-    def _run() -> None:
-        try:
-            response = requests.get(url, stream=True, timeout=timeout)
-        except BaseException as exc:  # re-raised on the calling thread
-            outcome["error"] = exc
-        else:
-            if cancelled.is_set():
-                # The caller already gave up; release the socket immediately
-                # instead of leaving the abandoned request open.
-                response.close()
-            else:
-                outcome["response"] = response
-        finally:
-            finished.set()
-
-    worker = threading.Thread(target=_run, name="gptqmodel-image-fetch", daemon=True)
-    worker.start()
-    remaining = deadline - time.monotonic()
-    if remaining <= 0 or not finished.wait(remaining):
-        cancelled.set()
-        response = outcome.get("response")
-        if isinstance(response, requests.Response):
-            _abort_response(response)
-        raise _FetchFailure(
-            f"request exceeded the {total_timeout} second total time limit",
-            retryable=False,
-        )
-    error = outcome.get("error")
-    if isinstance(error, BaseException):
-        raise error
-    response = outcome.get("response")
-    if not isinstance(response, requests.Response):
-        raise _FetchFailure("request finished without a response", retryable=False)
-    return response
-
-
-def _download_image_bytes(
+def _download_image_bytes_in_worker(
     url: str,
     *,
     timeout: Union[float, Tuple[float, float]],
@@ -226,12 +144,7 @@ def _download_image_bytes(
             retryable=False,
         )
     try:
-        response = _get_response(
-            url,
-            timeout=_clamp_timeout(timeout, remaining),
-            deadline=deadline,
-            total_timeout=total_timeout,
-        )
+        response = requests.get(url, stream=True, timeout=_clamp_timeout(timeout, remaining))
     except requests.Timeout as exc:
         if time.monotonic() > deadline:
             raise _FetchFailure(
@@ -273,14 +186,6 @@ def _download_image_bytes(
 
         buffer = BytesIO()
         received = 0
-        # A per-read timeout alone lets a server keep a download alive forever
-        # by trickling a byte at a time.  A watchdog closes the socket when the
-        # whole download exceeds the wall-clock budget.
-        watchdog = threading.Timer(
-            max(0.0, deadline - time.monotonic()), _abort_response, args=(response,)
-        )
-        watchdog.daemon = True
-        watchdog.start()
         try:
             for chunk in response.iter_content(chunk_size=64 * 1024):
                 if not chunk:
@@ -317,16 +222,13 @@ def _download_image_bytes(
                 ) from exc
             raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
         except (OSError, ValueError, AttributeError) as exc:
-            # Aborting the socket from the watchdog surfaces as a socket or
-            # file-object error, not a requests exception.
+            # Some response backends expose socket/file-object errors directly.
             if time.monotonic() >= deadline:
                 raise _FetchFailure(
                     f"download exceeded the {total_timeout} second total time limit",
                     retryable=False,
                 ) from exc
             raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
-        finally:
-            watchdog.cancel()
 
     data = buffer.getvalue()
     if not data:
@@ -334,6 +236,87 @@ def _download_image_bytes(
         # (legitimate 204/304 responses land here too).
         raise _FetchFailure("empty response body", retryable=False)
     return data
+
+
+def _download_image_bytes(
+    url: str,
+    *,
+    timeout: Union[float, Tuple[float, float]],
+    max_bytes: int,
+    deadline: float,
+    total_timeout: float,
+) -> bytes:
+    """Own and reap one network attempt, including DNS, TLS and header reads.
+
+    A requests worker thread cannot be cancelled before it exposes a Response.
+    Execute this file directly in a fresh interpreter instead of forking the
+    model process (which may already own accelerator contexts and threads).
+    Only bounded image bytes or a JSON failure cross the process boundary.
+    """
+
+    if time.monotonic() >= deadline:
+        raise _FetchFailure(
+            f"download exceeded the {total_timeout} second total time limit",
+            retryable=False,
+        )
+    payload = json.dumps({
+        "url": url,
+        "timeout": timeout,
+        "max_bytes": max_bytes,
+        "deadline": deadline,
+        "total_timeout": total_timeout,
+    }).encode("utf-8")
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-I", str(Path(__file__).resolve()), "--image-fetch-worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as worker:
+            completed = False
+            try:
+                output, error = worker.communicate(
+                    payload, timeout=max(0.0, deadline - time.monotonic())
+                )
+                completed = True
+            except subprocess.TimeoutExpired as exc:
+                raise _FetchFailure(
+                    f"download exceeded the {total_timeout} second total time limit",
+                    retryable=False,
+                ) from exc
+            finally:
+                # Also clean up on caller cancellation (e.g. KeyboardInterrupt).
+                # Reap before returning so neither a child nor its sockets can
+                # survive an expired attempt. communicate drains pipe readers.
+                if not completed:
+                    worker.kill()
+                    worker.communicate()
+            if worker.returncode == 0:
+                return output
+            if worker.returncode == 2:
+                failure = json.loads(output)
+                raise _FetchFailure(failure["reason"], retryable=failure["retryable"])
+            raise _FetchFailure(
+                f"image fetch worker exited with code {worker.returncode}: "
+                f"{error.decode('utf-8', errors='replace')[-1000:]}",
+                retryable=False,
+            )
+    except OSError as exc:
+        raise _FetchFailure(f"could not start image fetch worker ({exc})", retryable=False) from exc
+
+
+def _image_fetch_worker() -> int:
+    """Private subprocess entry point; never imports the model package."""
+
+    options = json.load(sys.stdin)
+    options["timeout"] = _resolve_timeout(options["timeout"])
+    try:
+        data = _download_image_bytes_in_worker(**options)
+    except _FetchFailure as failure:
+        sys.stdout.write(json.dumps({"reason": failure.reason, "retryable": failure.retryable}))
+        return 2
+    sys.stdout.buffer.write(data)
+    return 0
 
 
 def load_image_from_url(
@@ -490,3 +473,9 @@ def fetch_image(
     if image_obj is None:
         raise ValueError(f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}")
     return image_obj
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] != ["--image-fetch-worker"]:
+        raise SystemExit("This module is only executable as an image fetch worker")
+    raise SystemExit(_image_fetch_worker())
