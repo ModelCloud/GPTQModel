@@ -448,6 +448,45 @@ def test_hf_pack_method_matches_module_level_api():
     _assert_packed_equal(method_module, function_module)
 
 
+def test_hf_pack_layer_dispatches_allspark_awq():
+    """A declared AWQ kernel must not be rejected for lacking `pack_original`.
+
+    AllSpark labels its backend `QUANT_TYPE="allspark"` while declaring
+    `METHOD.AWQ`; the common helper must route it to its AWQ `pack()`.
+    """
+    from unittest.mock import patch
+
+    allspark = pytest.importorskip("gptqmodel.nn_modules.qlinear.allspark_awq")
+    AllSparkAwqLinear = allspark.AllSparkAwqLinear
+
+    def _make_allspark():
+        with patch.object(AllSparkAwqLinear, "cached_validate_once", return_value=(True, None)):
+            return AllSparkAwqLinear(
+                bits=8,
+                group_size=-1,
+                desc_act=False,
+                sym=False,
+                in_features=128,
+                out_features=128,
+                bias=False,
+                register_buffers=True,
+            )
+
+    linear = nn.Linear(128, 128, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+    scales = torch.ones(128, 1)
+    zeros = torch.full((128, 1), 128, dtype=torch.int32)
+
+    module = _make_allspark()
+    hf_pack_layer(module, linear, scales, zeros, post_init=False)
+
+    reference = _make_allspark()
+    reference.pack(linear, scales, zeros)
+
+    _assert_packed_equal(module, reference)
+
+
 def test_hf_post_init_initializes_single_layer(monkeypatch):
     module = _make_gptq_module()
     calls = []
@@ -514,6 +553,95 @@ def test_hf_repack_layer_between_compatible_kernels():
     x = torch.randn(3, 128)
     with torch.no_grad():
         torch.testing.assert_close(target(x), reference(x))
+
+
+def test_hf_repack_layer_preserves_awq_bfloat16_checkpoint_buffers():
+    """`dtype` selects the activation dtype, not checkpoint storage width.
+
+    A finite BF16 bias outside the FP16 range must survive the repack; copying
+    it into an FP16 allocation turns it into infinity.
+    """
+    if not _torch_aten_available():
+        pytest.skip("torch aten int4 CPU ops are unavailable in this build")
+
+    linear = nn.Linear(128, 64, bias=True, dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.zero_()
+        linear.bias.fill_(65536.0)
+
+    source = AwqTorchLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=True,
+        backend=BACKEND.AWQ_TORCH,
+        register_buffers=True,
+    )
+    hf_pack_layer(
+        source,
+        linear,
+        torch.ones(64, 4, dtype=torch.bfloat16),
+        torch.full((64, 4), 8, dtype=torch.int32),
+        post_init=True,
+    )
+
+    target = hf_repack_layer(
+        source, BACKEND.AWQ_TORCH_ATEN, device="cpu", dtype=torch.bfloat16
+    )
+
+    assert target.bias.dtype == torch.bfloat16
+    assert target.scales.dtype == torch.bfloat16
+    assert torch.equal(target.bias, source.bias)
+    x = torch.ones(1, 128, dtype=torch.bfloat16)
+    with torch.no_grad():
+        target_out = target(x)
+        source_out = source(x)
+    assert torch.isfinite(target_out).all()
+    # Zero weights, so the projection returns the bias exactly.
+    assert torch.equal(target_out, torch.full_like(target_out, 65536.0))
+    assert torch.equal(target_out, source_out)
+
+
+def test_hf_repack_layer_preserves_awq_fp32_checkpoint_scales():
+    """A tiny FP32 scale must not be narrowed to zero during a repack."""
+    if not _torch_aten_available():
+        pytest.skip("torch aten int4 CPU ops are unavailable in this build")
+
+    torch.manual_seed(0)
+    linear = nn.Linear(128, 64, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.normal_(0.0, 0.1)
+
+    scales = torch.full((64, 4), 2.0 ** -30, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+    source = AwqTorchLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        backend=BACKEND.AWQ_TORCH,
+        register_buffers=True,
+    )
+    hf_pack_layer(source, linear, scales, zeros, post_init=True)
+    assert source.scales.dtype == torch.float32
+
+    target = hf_repack_layer(source, BACKEND.AWQ_TORCH_ATEN, device="cpu")
+    assert target.scales.dtype == torch.float32
+    assert torch.equal(target.scales, source.scales)
+    # FP16 cannot represent 2 ** -30; the copy must not underflow it to zero.
+    assert source.scales.abs().max() < torch.finfo(torch.float16).tiny
+    assert (target.scales != 0).all()
+
+    x = torch.randn(2, 128)
+    with torch.no_grad():
+        target_out = target(x)
+    assert (target_out != 0).any()
 
 
 def test_hf_repack_layer_rejects_unsupported_target():
@@ -668,6 +796,41 @@ def test_hf_pack_layer_post_init_restores_v2_runtime_layout():
     x = torch.randn(2, 128)
     # Zero weights: codes equal the zero point, so output must be exactly 0;
     # decoding zp-1 words raw would return +scale instead.
+    assert torch.equal(module(x), torch.zeros(2, 64))
+
+
+@pytest.mark.parametrize("container", [False, True])
+def test_hf_post_init_restores_gptq_v2_runtime_layout(container):
+    """The split pack/initialize lifecycle must match `post_init=True`.
+
+    `hf_pack_layer(..., post_init=False)` leaves the v1 export layout.  The
+    standalone `hf_post_init` helper must restore the v2 runtime zero points
+    before calling `post_init()`, otherwise every weight decodes one scale high.
+    """
+    module = _make_gptq_module(bits=4, sym=True)
+    linear = nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+
+    g_idx = torch.arange(128, dtype=torch.int32) // 32
+    scales = torch.ones(64, 4, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+
+    hf_pack_layer(
+        module,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ,
+        post_init=False,
+    )
+    assert module.qzero_format() == 1
+
+    hf_post_init(nn.Sequential(module) if container else module)
+    assert module.qzero_format() == 2
+
+    x = torch.randn(2, 128)
     assert torch.equal(module(x), torch.zeros(2, 64))
 
 
