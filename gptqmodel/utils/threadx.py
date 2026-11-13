@@ -911,7 +911,17 @@ class DeviceThreadPool:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
                 continue
             for worker in self._worker_groups.get(key, ()):
-                worker.submit(_noop)
+                # The no-op runs through the worker's normal completion path,
+                # which calls _on_task_finished() -> _mark_finished(). Account
+                # for it exactly like submit() does; otherwise its completion
+                # decrements in-flight work that is still running and wait()
+                # can return before that work finishes.
+                self._mark_scheduled(key)
+                try:
+                    worker.submit(_noop)
+                except BaseException:
+                    self._mark_finished(key)
+                    raise
 
     def _resolve_device_key(self, device: DeviceLike | str) -> str:
         if hasattr(device, "to_torch_device"):
