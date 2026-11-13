@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_stable_compat.h"
 #include <cuda_runtime.h>
 
 namespace gptqmodel_gptq_block {
@@ -92,11 +90,11 @@ void block_update_cuda(
     c10::cuda::CUDAGuard guard(device);
     auto stream = at::cuda::getCurrentCUDAStream(device.index());
     block_update_kernel<<<rows, kWidth, 0, stream>>>(
-        work.data_ptr<float>(), hinv.const_data_ptr<float>(),
+        work.mutable_data_ptr<float>(), hinv.const_data_ptr<float>(),
         scale.const_data_ptr<float>(), zero.const_data_ptr<float>(),
         column_group.const_data_ptr<int32_t>(),
-        quantized.data_ptr<float>(), errors.data_ptr<float>(),
-        losses.data_ptr<float>(), rows, work.stride(0), hinv.stride(0), hinv.stride(1),
+        quantized.mutable_data_ptr<float>(), errors.mutable_data_ptr<float>(),
+        losses.mutable_data_ptr<float>(), rows, work.stride(0), hinv.stride(0), hinv.stride(1),
         scale.stride(0), zero.stride(0), column_group.stride(0),
         quantized.stride(0), errors.stride(0),
         losses.stride(0), static_cast<float>(maxq));
