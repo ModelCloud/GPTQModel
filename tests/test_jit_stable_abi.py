@@ -12,6 +12,7 @@ requiring a GPU or a compiler.
 from __future__ import annotations
 
 from gptqmodel.utils import cpp
+from gptqmodel.utils import hadamard
 
 
 def _assert_stable(loader) -> None:
@@ -42,3 +43,7 @@ def test_pack_block_cpu_uses_stable_abi():
 
 def test_floatx_cpu_uses_stable_abi():
     _assert_stable(cpp._floatx_cpu_extension())
+
+
+def test_hadamard_uses_stable_abi():
+    _assert_stable(hadamard._HADAMARD_TORCH_OPS_EXTENSION)

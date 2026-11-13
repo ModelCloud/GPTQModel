@@ -5,13 +5,7 @@
  * Adapted for GPT-QModel as a torch.ops JIT extension.
  ******************************************************************************/
 
-#include <torch/extension.h>
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-#include <c10/core/DeviceGuard.h>
-#else
-#include <c10/cuda/CUDAGuard.h>
-#endif
-#include <c10/cuda/CUDAStream.h>
+#include "../torch_stable_compat.h"
 #include <vector>
 
 #include "fast_hadamard_transform.h"
@@ -77,10 +71,10 @@ torch::Tensor fast_hadamard_transform(torch::Tensor x, double scale) {
 
     TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform expects a CUDA tensor");
 
-    const auto shapes_og = x.sizes();
+    const std::vector<int64_t> shapes_og(x.sizes().begin(), x.sizes().end());
     const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    x = torch::stable::reshape(x, {-1, dim_og});
+    if (x.stride(-1) != 1) { x = at::contiguous(x); }
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
 
@@ -88,31 +82,27 @@ torch::Tensor fast_hadamard_transform(torch::Tensor x, double scale) {
     TORCH_CHECK(x.stride(1) == 1);
 
     if (dim_og % 8 != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, 8 - dim_og % 8}));
+        x = torch::stable::pad(x, {0, 8 - dim_og % 8});
     }
     const int dim = x.size(1);
 
     TORCH_CHECK(dim % 8 == 0, "fast_hadamard_transform only supports hidden dimension divisible by 8 for now");
     TORCH_CHECK(dim <= 32768, "fast_hadamard_transform only supports hidden dimension at most 32768 for now");
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = at::empty_like(x);
 
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 1, x, out, scale);
 
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-    c10::DeviceGuard device_guard(x.device());
-#else
     at::cuda::CUDAGuard device_guard{x.device()};
-#endif
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "fast_hadamard_transform", [&] {
         fast_hadamard_transform_cuda<input_t>(params, stream);
     });
     if (dim_og % 8 != 0) {
-        out = out.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, dim_og)});
+        out = torch::stable::narrow(out, 1, 0, dim_og);
     }
-    return out.reshape(shapes_og);
+    return torch::stable::reshape(out, shapes_og);
 }
 
 torch::Tensor fast_hadamard_transform_12N(torch::Tensor x, double scale) {
@@ -121,10 +111,10 @@ torch::Tensor fast_hadamard_transform_12N(torch::Tensor x, double scale) {
 
     TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform_12N expects a CUDA tensor");
 
-    const auto shapes_og = x.sizes();
+    const std::vector<int64_t> shapes_og(x.sizes().begin(), x.sizes().end());
     const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    x = torch::stable::reshape(x, {-1, dim_og});
+    if (x.stride(-1) != 1) { x = at::contiguous(x); }
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
 
@@ -132,31 +122,27 @@ torch::Tensor fast_hadamard_transform_12N(torch::Tensor x, double scale) {
     TORCH_CHECK(x.stride(1) == 1);
 
     if (dim_og % (4 * 12) != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, (4 * 12) - dim_og % (4 * 12)}));
+        x = torch::stable::pad(x, {0, (4 * 12) - dim_og % (4 * 12)});
     }
     const int dim = x.size(1);
 
     TORCH_CHECK(dim % (4 * 12) == 0, "fast_hadamard_transform_12N only supports hidden dimension divisible by 48 for now");
     TORCH_CHECK(dim <= 12 * 1024, "fast_hadamard_transform_12N only supports hidden dimension at most 12288 for now");
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = at::empty_like(x);
 
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 12, x, out, scale);
 
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-    c10::DeviceGuard device_guard(x.device());
-#else
     at::cuda::CUDAGuard device_guard{x.device()};
-#endif
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "fast_hadamard_transform", [&] {
         fast_hadamard_transform_12N_cuda<input_t>(params, stream);
     });
     if (dim_og % (4 * 12) != 0) {
-        out = out.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, dim_og)});
+        out = torch::stable::narrow(out, 1, 0, dim_og);
     }
-    return out.reshape(shapes_og);
+    return torch::stable::reshape(out, shapes_og);
 }
 
 torch::Tensor fast_hadamard_transform_20N(torch::Tensor x, double scale) {
@@ -165,10 +151,10 @@ torch::Tensor fast_hadamard_transform_20N(torch::Tensor x, double scale) {
 
     TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform_20N expects a CUDA tensor");
 
-    const auto shapes_og = x.sizes();
+    const std::vector<int64_t> shapes_og(x.sizes().begin(), x.sizes().end());
     const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    x = torch::stable::reshape(x, {-1, dim_og});
+    if (x.stride(-1) != 1) { x = at::contiguous(x); }
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
 
@@ -176,31 +162,27 @@ torch::Tensor fast_hadamard_transform_20N(torch::Tensor x, double scale) {
     TORCH_CHECK(x.stride(1) == 1);
 
     if (dim_og % (4 * 20) != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, (4 * 20) - dim_og % (4 * 20)}));
+        x = torch::stable::pad(x, {0, (4 * 20) - dim_og % (4 * 20)});
     }
     const int dim = x.size(1);
 
     TORCH_CHECK(dim % (4 * 20) == 0, "fast_hadamard_transform_20N only supports hidden dimension divisible by 80 for now");
     TORCH_CHECK(dim <= 20 * 1024, "fast_hadamard_transform_20N only supports hidden dimension at most 20480 for now");
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = at::empty_like(x);
 
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 20, x, out, scale);
 
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-    c10::DeviceGuard device_guard(x.device());
-#else
     at::cuda::CUDAGuard device_guard{x.device()};
-#endif
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "fast_hadamard_transform", [&] {
         fast_hadamard_transform_20N_cuda<input_t>(params, stream);
     });
     if (dim_og % (4 * 20) != 0) {
-        out = out.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, dim_og)});
+        out = torch::stable::narrow(out, 1, 0, dim_og);
     }
-    return out.reshape(shapes_og);
+    return torch::stable::reshape(out, shapes_og);
 }
 
 torch::Tensor fast_hadamard_transform_28N(torch::Tensor x, double scale) {
@@ -209,10 +191,10 @@ torch::Tensor fast_hadamard_transform_28N(torch::Tensor x, double scale) {
 
     TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform_28N expects a CUDA tensor");
 
-    const auto shapes_og = x.sizes();
+    const std::vector<int64_t> shapes_og(x.sizes().begin(), x.sizes().end());
     const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    x = torch::stable::reshape(x, {-1, dim_og});
+    if (x.stride(-1) != 1) { x = at::contiguous(x); }
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
 
@@ -220,31 +202,27 @@ torch::Tensor fast_hadamard_transform_28N(torch::Tensor x, double scale) {
     TORCH_CHECK(x.stride(1) == 1);
 
     if (dim_og % (4 * 28) != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, (4 * 28) - dim_og % (4 * 28)}));
+        x = torch::stable::pad(x, {0, (4 * 28) - dim_og % (4 * 28)});
     }
     const int dim = x.size(1);
 
     TORCH_CHECK(dim % (4 * 28) == 0, "fast_hadamard_transform_28N only supports hidden dimension divisible by 112 for now");
     TORCH_CHECK(dim <= 28 * 1024, "fast_hadamard_transform_28N only supports hidden dimension at most 28672 for now");
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = at::empty_like(x);
 
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 28, x, out, scale);
 
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-    c10::DeviceGuard device_guard(x.device());
-#else
     at::cuda::CUDAGuard device_guard{x.device()};
-#endif
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "fast_hadamard_transform", [&] {
         fast_hadamard_transform_28N_cuda<input_t>(params, stream);
     });
     if (dim_og % (8 * 28) != 0) {
-        out = out.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, dim_og)});
+        out = torch::stable::narrow(out, 1, 0, dim_og);
     }
-    return out.reshape(shapes_og);
+    return torch::stable::reshape(out, shapes_og);
 }
 
 torch::Tensor fast_hadamard_transform_40N(torch::Tensor x, double scale) {
@@ -253,10 +231,10 @@ torch::Tensor fast_hadamard_transform_40N(torch::Tensor x, double scale) {
 
     TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform_40N expects a CUDA tensor");
 
-    const auto shapes_og = x.sizes();
+    const std::vector<int64_t> shapes_og(x.sizes().begin(), x.sizes().end());
     const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    x = torch::stable::reshape(x, {-1, dim_og});
+    if (x.stride(-1) != 1) { x = at::contiguous(x); }
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
 
@@ -264,36 +242,32 @@ torch::Tensor fast_hadamard_transform_40N(torch::Tensor x, double scale) {
     TORCH_CHECK(x.stride(1) == 1);
 
     if (dim_og % (4 * 40) != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, (4 * 40) - dim_og % (4 * 40)}));
+        x = torch::stable::pad(x, {0, (4 * 40) - dim_og % (4 * 40)});
     }
     const int dim = x.size(1);
 
     TORCH_CHECK(dim % (4 * 40) == 0, "fast_hadamard_transform_40N only supports hidden dimension divisible by 160 for now");
     TORCH_CHECK(dim <= 40 * 1024, "fast_hadamard_transform_40N only supports hidden dimension at most 40960 for now");
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = at::empty_like(x);
 
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 40, x, out, scale);
 
-#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
-    c10::DeviceGuard device_guard(x.device());
-#else
     at::cuda::CUDAGuard device_guard{x.device()};
-#endif
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "fast_hadamard_transform", [&] {
         fast_hadamard_transform_40N_cuda<input_t>(params, stream);
     });
     if (dim_og % (8 * 40) != 0) {
-        out = out.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, dim_og)});
+        out = torch::stable::narrow(out, 1, 0, dim_og);
     }
-    return out.reshape(shapes_og);
+    return torch::stable::reshape(out, shapes_og);
 }
 
 } // namespace gptqmodel_hadamard
 
-TORCH_LIBRARY(gptqmodel_hadamard, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_hadamard, m) {
     m.def("fast_hadamard_transform(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_12N(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_20N(Tensor x, float scale) -> Tensor");
@@ -301,10 +275,10 @@ TORCH_LIBRARY(gptqmodel_hadamard, m) {
     m.def("fast_hadamard_transform_40N(Tensor x, float scale) -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_hadamard, CUDA, m) {
-    m.impl("fast_hadamard_transform", &gptqmodel_hadamard::fast_hadamard_transform);
-    m.impl("fast_hadamard_transform_12N", &gptqmodel_hadamard::fast_hadamard_transform_12N);
-    m.impl("fast_hadamard_transform_20N", &gptqmodel_hadamard::fast_hadamard_transform_20N);
-    m.impl("fast_hadamard_transform_28N", &gptqmodel_hadamard::fast_hadamard_transform_28N);
-    m.impl("fast_hadamard_transform_40N", &gptqmodel_hadamard::fast_hadamard_transform_40N);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_hadamard, CUDA, m) {
+    m.impl("fast_hadamard_transform", TORCH_BOX(&gptqmodel_hadamard::fast_hadamard_transform));
+    m.impl("fast_hadamard_transform_12N", TORCH_BOX(&gptqmodel_hadamard::fast_hadamard_transform_12N));
+    m.impl("fast_hadamard_transform_20N", TORCH_BOX(&gptqmodel_hadamard::fast_hadamard_transform_20N));
+    m.impl("fast_hadamard_transform_28N", TORCH_BOX(&gptqmodel_hadamard::fast_hadamard_transform_28N));
+    m.impl("fast_hadamard_transform_40N", TORCH_BOX(&gptqmodel_hadamard::fast_hadamard_transform_40N));
 }

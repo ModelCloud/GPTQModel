@@ -1220,6 +1220,10 @@ class TorchOpsJitExtension:
     def _resolved_extra_cuda_cflags(self) -> list[str]:
         flags = self._with_stable_abi_target(self._resolve_sequence(self.extra_cuda_cflags))
         if self.requires_cuda:
+            if self.torch_stable_abi_target is not None and not any(
+                flag == "-DUSE_CUDA" for flag in flags
+            ):
+                flags.append("-DUSE_CUDA")
             for flag in rocm_supplemental_device_lib_flags():
                 if flag not in flags:
                     flags.append(flag)
