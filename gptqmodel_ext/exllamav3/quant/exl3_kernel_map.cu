@@ -1,6 +1,6 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 
-#include <c10/util/Exception.h>
 #include <cstdint>
 #include <map>
 

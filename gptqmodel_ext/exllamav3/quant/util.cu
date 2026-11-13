@@ -1,7 +1,6 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "util.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
 #include "../util.cuh"
 
@@ -105,14 +104,14 @@ void count_inf_nan
     uint64_cu numel = x.numel();
     uint64_cu num_blocks = CEIL_DIVIDE(numel, BLOCK_SIZE);
 
-    if (x.dtype() == at::kHalf)
+    if (x.scalar_type() == at::kHalf)
         count_inf_nan_kernel<half><<<num_blocks, NUM_THREADS, 0, stream>>>
         (
             (const half*) x.data_ptr(),
             (uint64_cu*) y.data_ptr(),
             numel
         );
-    else if (x.dtype() == at::kFloat)
+    else if (x.scalar_type() == at::kFloat)
         count_inf_nan_kernel<float><<<num_blocks, NUM_THREADS, 0, stream>>>
         (
             (const float*) x.data_ptr(),

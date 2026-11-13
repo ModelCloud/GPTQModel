@@ -1,8 +1,7 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
 #include "../util.cuh"
 #include "exl3_kernel_map.cuh"
@@ -51,7 +50,7 @@ int exl3_gemm
     // TORCH_CHECK_SHAPES(A, 0, C, 0, 1);
     TORCH_CHECK_DTYPE(A, kHalf);
     TORCH_CHECK_DTYPE(B, kShort);
-    bool c_fp32 = C.dtype() == at::kFloat;
+    bool c_fp32 = C.scalar_type() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
 
     // Get SU, optionally
