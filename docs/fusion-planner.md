@@ -225,7 +225,7 @@ flowchart TD
 | AWQ fast GEMV/LLM-AWQ | Complete interleaved N4/K64 packed blocks; matching native scale/offset columns. |
 | ExLlamaV2 GPTQ/AWQ | Finalized shuffled columns; clone borrowed-pointer descriptors without rerunning the destructive shuffle. Direct source views use transient compact descriptors; unfusing restores independent descriptors. Canonical input order is required. |
 | AllSpark GPTQ/AWQ | Native eight-bit N32K16 blocks viewed as output rows; complete unpadded N32 tiles and native per-channel metadata. Scratch is allocated per call by the backend. |
-| CPU native INT8 | Output rows of native eight-bit codes and per-channel scales; rebuild the `Int8PackedModule` binding. Lower-bit expansion is prohibited. |
+| CPU native INT8 | Output rows of group-preserving eight-bit codes with per-group scales, optional residual offsets, and a shared activation-order permutation; rebuild the `Int8PackedModule` binding. Lower-bit expansion is prohibited. |
 | GPTQ W4AFP8 | Native INT4 columns; temporary E4M3 staging per call. Plain tensor inputs qualify; encoded W4A streams require a separate parent executor and are rejected. |
 
 All sibling settings, including AWQ reduction/scheduler options, must match.

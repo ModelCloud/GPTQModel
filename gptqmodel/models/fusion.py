@@ -360,6 +360,15 @@ def _incompatible(modules):
             reason = spec.shape_error(module)
             if reason:
                 return reason
+            if spec.layout == "int8":
+                # Every source stores activations in its own group order; a
+                # fused executor permutes once, so all sources must agree.
+                if not torch.equal(module.int8_input_perm, first.int8_input_perm):
+                    return "CPU INT8 activation-order permutations differ"
+                # Hybrid symmetric/asymmetric checkpoints cannot share one
+                # concatenated offset operand.
+                if (module.int8_group_offset is None) != (first.int8_group_offset is None):
+                    return "CPU INT8 group offset presence differs"
             if spec.gptq and spec.layout not in ("allspark", "int8") and (
                     module.g_idx.shape != first.g_idx.shape or not torch.equal(module.g_idx, first.g_idx)):
                 return "activation-order group indices differ"
