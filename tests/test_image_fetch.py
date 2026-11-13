@@ -89,6 +89,39 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 # The client aborts once its deadline expires; expected here.
                 pass
+        elif path == "/slow-headers":
+            # Delay the response headers themselves; the per-read timeout only
+            # starts once a read begins, so only a total budget can stop this.
+            self.server.release_hang.wait(0.4)
+            self._send(200, PNG, {"Content-Length": str(len(PNG))})
+        elif path.startswith("/redirect/"):
+            # A chain of individually responsive redirects that together
+            # outlive the wall-clock budget.
+            remaining = int(path.rsplit("/", 1)[1])
+            self.server.release_hang.wait(0.1)
+            target = f"/redirect/{remaining - 1}" if remaining else "/ok"
+            self._send(302, headers={"Location": target, "Content-Length": "0"})
+        elif path == "/header-drip":
+            # Trickle header bytes below the per-read timeout so the read
+            # timeout keeps resetting and only the budget can stop the request.
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Drip: ")
+            self.wfile.flush()
+            try:
+                for _ in range(12):
+                    if self.server.release_hang.wait(0.03):
+                        break
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                self.wfile.write(
+                    b"\r\nContent-Length: "
+                    + str(len(PNG)).encode()
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + PNG
+                )
+                self.wfile.flush()
+            except OSError:
+                # The client gave up at its deadline; expected here.
+                pass
         elif path == "/huge-dimensions":
             # Tiny compressed payload that expands to a huge bitmap.
             buffer = BytesIO()
@@ -244,6 +277,64 @@ def test_slow_drip_body_is_bounded_by_total_timeout(image_server):
             attempts=1,
         )
     assert "total time limit" in str(excinfo.value)
+
+
+def test_slow_headers_are_bounded_by_total_timeout(image_server):
+    base, _ = image_server
+    started = time.monotonic()
+    with pytest.raises(ImageFetchError) as excinfo:
+        load_image_from_url(
+            f"{base}/slow-headers",
+            timeout=(1.0, 1.0),
+            total_timeout=0.2,
+            attempts=1,
+        )
+    assert "total time limit" in str(excinfo.value)
+    assert time.monotonic() - started < 0.8
+
+
+def test_redirect_chain_is_bounded_by_total_timeout(image_server):
+    base, _ = image_server
+    started = time.monotonic()
+    with pytest.raises(ImageFetchError) as excinfo:
+        load_image_from_url(
+            f"{base}/redirect/3",
+            timeout=(1.0, 1.0),
+            total_timeout=0.2,
+            attempts=1,
+        )
+    assert "total time limit" in str(excinfo.value)
+    assert time.monotonic() - started < 0.8
+
+
+def test_header_drip_is_bounded_by_total_timeout(image_server):
+    base, _ = image_server
+    started = time.monotonic()
+    with pytest.raises(ImageFetchError) as excinfo:
+        load_image_from_url(
+            f"{base}/header-drip",
+            timeout=(0.1, 0.1),
+            total_timeout=0.2,
+            attempts=1,
+        )
+    assert "total time limit" in str(excinfo.value)
+    assert time.monotonic() - started < 0.8
+
+
+def test_decode_time_is_bounded_by_total_timeout(image_server, monkeypatch):
+    base, _ = image_server
+    original_open = image_utils.Image.open
+
+    def slow_open(*args, **kwargs):
+        time.sleep(0.4)
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(image_utils.Image, "open", slow_open)
+    started = time.monotonic()
+    with pytest.raises(ImageFetchError) as excinfo:
+        load_image_from_url(f"{base}/ok", total_timeout=0.2, attempts=1)
+    assert "total time limit" in str(excinfo.value)
+    assert time.monotonic() - started < 0.8
 
 
 def test_pixel_bomb_is_rejected_before_decode(image_server):
