@@ -161,6 +161,49 @@ flowchart LR
 A checkpoint whose architecture cannot be resolved fails at save time instead
 of writing an entry point that only loads Llama.
 
+## Block-float kernel dispatch
+
+`TTBlockfloatEmbedding` accepts a wider `block` than the hardware format so a
+converted table can still be exercised on CPU. The native block-float kernels,
+however, bind exactly one exponent per 16 values: `check_exponents()` requires
+`exponents.numel() == rows * (k / 16)`. A wider-block table therefore has no
+native geometry and must stay on the Torch reference path on every device.
+
+```mermaid
+flowchart TD
+    A["TTBlockfloatEmbedding._kernel_embedding"] --> B{"hip_dispatch(ids)"}
+    C["TTBlockfloatTiedHead.forward<br/>embedding._kernel_linear(hidden)"] --> D{"hip_dispatch(hidden)"}
+    B -- "yes: block == 16 and HIP ready" --> E["tt_blockfloat_hip.embedding"]
+    D -- "yes: block == 16 and HIP ready" --> F["tt_blockfloat_hip.linear"]
+    B -- no --> G{"cuda_dispatch(ids)"}
+    D -- no --> H{"cuda_dispatch(hidden)"}
+    G -- "yes: block == 16 and CUDA ready" --> I["tt_blockfloat_cuda.embedding"]
+    H -- "yes: block == 16 and CUDA ready" --> J["tt_blockfloat_cuda.linear"]
+    G -- "no: block != 16" --> K["dequantize + F.embedding"]:::fallback
+    H -- "no: block != 16" --> L["dequantize + F.linear"]:::fallback
+    G -- "no: other unsupported condition" --> K
+    H -- "no: other unsupported condition" --> L
+
+    classDef fallback fill:#fef3c7,stroke:#b45309,color:#78350f;
+```
+
+`cuda_dispatch()` is the CUDA counterpart of the existing `hip_dispatch()`: it
+checks the device, the storage bits, `block == 16`, and only then calls
+`tt_blockfloat_cuda.ready(device)`. The block check runs before readiness so a
+wider block never builds or enters the extension.
+
+| Old mechanism | New mechanism | Evidence |
+| --- | --- | --- |
+| `_kernel_embedding()` checked device, bits, dtype and `ready()`, but not `block` | `cuda_dispatch()` rejects `block != 16` before `ready()` and the native call | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:120-138`, `:454` |
+| `_kernel_linear()` had the same missing gate for the tied head | the same predicate covers the linear path | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:247` |
+| HIP already required `block == 16` | unchanged | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:102-118` |
+
+The failure path the guard removes: with `block=32`, the table stores
+`in_features // 32` exponents per row, so the native embedding validation
+raises `RuntimeError: exponents must be [rows, k / 16]` instead of returning a
+result. Before this change, the CUDA branch admitted that geometry; the
+Torch fallback is now selected before the native entry point is reached.
+
 ## Native TTNN execution path
 
 `TTNNLinear` removes StableHLO and PJRT from the inference path. It opens a
