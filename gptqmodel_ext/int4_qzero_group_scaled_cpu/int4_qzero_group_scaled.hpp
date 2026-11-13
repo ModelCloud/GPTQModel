@@ -7,10 +7,9 @@
 
 #include "cpu_features.hpp"
 #include "int4_qzero_group_scaled_avx512.hpp"
-#include <torch/all.h>
+#include "../torch_stable_compat.h"
 #include <optional>
 #include <stdexcept>
-#include <ATen/ATen.h>
 
 namespace int4_qzero_group_scaled_cpu
 {

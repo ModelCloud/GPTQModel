@@ -120,6 +120,9 @@ inline const Device kCUDA = Device(DeviceType::CUDA);
 using torch::stable::get_num_threads;
 using torch::stable::parallel_for;
 using torch::stable::sum;
+using torch::stable::matmul;
+using torch::stable::reshape;
+using torch::stable::transpose;
 
 /// A minimal TensorOptions replacement. The stable API takes individual
 /// dtype/device/layout arguments, so kernels keep the familiar builder style
@@ -297,6 +300,11 @@ inline Tensor empty_like_contiguous(const Tensor& self) {
       self.sizes(), self.scalar_type(), std::nullopt, self.device());
 }
 
+/// The dtype/device options of an existing tensor.
+inline TensorOptions options(const Tensor& self) {
+  return TensorOptions().dtype(self.scalar_type()).device(self.device());
+}
+
 inline Tensor zeros_like(const Tensor& self) {
   Tensor out = torch::stable::empty_like(self);
   return torch::stable::zero_(out);
@@ -364,6 +372,92 @@ inline Tensor view(const Tensor& self, IntHeaderOnlyArrayRef sizes) {
   STABLE_TORCH_ERROR_CODE_CHECK(
       torch_call_dispatcher("aten::view", "", stack.data(), TORCH_ABI_VERSION));
   return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor neg(const Tensor& self) {
+  std::array<StableIValue, 1> stack{torch::stable::detail::from(self)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::neg", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor bitwise_and(const Tensor& lhs, const Tensor& rhs) {
+  std::array<StableIValue, 2> stack{
+      torch::stable::detail::from(lhs), torch::stable::detail::from(rhs)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::bitwise_and", "Tensor", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor bitwise_right_shift(const Tensor& lhs, const Tensor& rhs) {
+  std::array<StableIValue, 2> stack{
+      torch::stable::detail::from(lhs), torch::stable::detail::from(rhs)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::bitwise_right_shift", "Tensor", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor cat(const std::vector<Tensor>& tensors, int64_t dim) {
+  std::array<StableIValue, 2> stack{
+      torch::stable::detail::from(tensors),
+      torch::stable::detail::from(dim)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::cat", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+/// aten::repeat_interleave.self_int takes a SymInt repeats argument, which the
+/// stable IValue bridge cannot marshal. The CPU callers only need dim 1 on
+/// float/byte group scales, so expand those directly.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("no-tree-vectorize")))
+#endif
+inline Tensor repeat_interleave(
+    const Tensor& self,
+    int64_t repeats,
+    int64_t dim) {
+  STD_TORCH_CHECK(
+      self.device().is_cpu() && dim == 1 && self.dim() == 2,
+      "repeat_interleave compat supports CPU 2-D dim=1 tensors");
+  const int64_t rows = self.size(0);
+  const int64_t groups = self.size(dim);
+  const int64_t width = groups * repeats;
+  Tensor out = at::empty({rows, width}, at::options(self));
+  const ScalarType dtype = self.scalar_type();
+  if (dtype == ScalarType::Float) {
+    const float* src = self.const_data_ptr<float>();
+    float* dst = out.mutable_data_ptr<float>();
+    for (int64_t row = 0; row < rows; ++row) {
+      for (int64_t group = 0; group < groups; ++group) {
+        const float value = src[row * groups + group];
+        for (int64_t repeat = 0; repeat < repeats; ++repeat) {
+          dst[row * width + group * repeats + repeat] = value;
+        }
+      }
+    }
+  } else if (dtype == ScalarType::Byte) {
+    const uint8_t* src = self.const_data_ptr<uint8_t>();
+    uint8_t* dst = out.mutable_data_ptr<uint8_t>();
+    for (int64_t row = 0; row < rows; ++row) {
+      for (int64_t group = 0; group < groups; ++group) {
+        const uint8_t value = src[row * groups + group];
+        for (int64_t repeat = 0; repeat < repeats; ++repeat) {
+          dst[row * width + group * repeats + repeat] = value;
+        }
+      }
+    }
+  } else {
+    STD_TORCH_CHECK(false, "repeat_interleave compat: unsupported dtype");
+  }
+  return out;
+}
+
+inline Tensor full(
+    IntHeaderOnlyArrayRef size,
+    double value,
+    ScalarType dtype) {
+  return torch::stable::full(
+      size, value, dtype, std::nullopt, std::nullopt, std::nullopt);
 }
 
 #if defined(USE_CUDA) || defined(__CUDACC__)
