@@ -12,6 +12,7 @@ import torch
 
 from ..quantization.gsq_training import LLAMA_STAGED_PROJECTIONS as STAGED_PROJECTIONS
 from ..quantization.gsq_training_config import GSQTrainingConfig
+from ..utils.tensor import tensor_bytes
 from .gsq_training_capture import advance_llama_gsq_inputs, capture_llama_gsq_inputs, quantize_llama_gsq_capture
 
 
@@ -27,7 +28,7 @@ def _checkpoint_documents_digest(documents):
             raise ValueError("GSQ checkpointing requires rank-1 integer input_ids")
         ids = ids.to(torch.int64).contiguous()
         digest.update(ids.numel().to_bytes(8, "little"))
-        digest.update(ids.numpy().tobytes())
+        digest.update(tensor_bytes(ids))
         for name in ("attention_mask", "position_ids"):
             digest.update(name.encode("ascii"))
             if name not in document:
@@ -37,7 +38,7 @@ def _checkpoint_documents_digest(documents):
             value = torch.as_tensor(document[name], device="cpu").detach().contiguous()
             digest.update(str(value.dtype).encode("ascii"))
             digest.update(repr(tuple(value.shape)).encode("ascii"))
-            digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+            digest.update(tensor_bytes(value))
     return digest.hexdigest()
 
 
@@ -55,7 +56,7 @@ def _checkpoint_state_digest(state):
         digest.update(name.encode('utf-8'))
         digest.update(str(value.dtype).encode('ascii'))
         digest.update(repr(tuple(value.shape)).encode('ascii'))
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+        digest.update(tensor_bytes(value))
     return digest.hexdigest()
 
 

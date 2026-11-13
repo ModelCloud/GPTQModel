@@ -12,6 +12,26 @@ release titles/notes. Keep `gptqmodel` for the package/import name and
 `GPTQModel` for the Python API class. Preserve actual identifiers, filenames,
 repository names, and URLs when editing display text.
 
+## No environment-variable behaviour switches
+
+Runtime behaviour is selected by the config object or an explicit API argument.
+Never by an environment variable.
+
+- Do not add `GPTQMODEL_*` switches that change which code path runs, how many
+  threads are used, or which backend is picked. Extend `BaseQuantizeConfig` /
+  `QuantizeConfig`, or add a keyword argument on the call that owns the choice.
+- When you find such a switch, delete it and route the decision through the
+  config object. Do not keep it "for compatibility": a default that can never be
+  overridden is dead code, and a default that can be overridden is an
+  unreviewed behaviour change in production.
+- Tests must exercise the API argument directly. Do not use
+  `monkeypatch.setenv`/`patch.dict(os.environ, ...)` to select a code path; that
+  hides the real control surface and leaves the production default untested.
+- `GPTQMODEL_DISABLE_PACK_EXT`, `GPTQMODEL_FORCE_PACK_EXT`,
+  `GPTQMODEL_PACK_THREADS` and `GPTQMODEL_PACK_PY_THREADS` were removed for
+  exactly this reason. `pack_block(..., workers=...)` is the only thread-count
+  control, and the Python packer is the only packer.
+
 ## Explicit accelerator families
 
 For device selection, model loading/placement, accelerator checks, or kernel

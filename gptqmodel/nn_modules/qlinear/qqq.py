@@ -8,7 +8,6 @@
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -244,13 +243,16 @@ class QQQLinear(GroupedQuantLinear):
             for j in range(4):
                 perm.extend([p + 256 * j for p in perm1])
 
-        perm = np.array(perm)
         if self.group_size == self.in_features:
-            interleave = np.array([4, 0, 5, 1, 6, 2, 7, 3])
+            interleave = [4, 0, 5, 1, 6, 2, 7, 3]
         else:
-            interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-        perm = perm.reshape((-1, 8))[:, interleave].ravel()
-        perm = torch.from_numpy(perm)
+            interleave = [0, 2, 4, 6, 1, 3, 5, 7]
+        perm = [
+            perm[row * 8 + column]
+            for row in range(len(perm) // 8)
+            for column in interleave
+        ]
+        perm = torch.tensor(perm, dtype=torch.long)
         perm_i = _invert_permutation(perm.tolist())
         scale_perm = []
         for i in range(8):

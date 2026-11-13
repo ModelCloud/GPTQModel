@@ -24,6 +24,7 @@ from torch import nn
 from ..looper.named_module import NamedModule
 from .device import get_device
 from .module_locks import parent_module_lock
+from .tensor import tensor_bytes
 from .torch import CPU, META
 
 
@@ -269,16 +270,7 @@ def offload_to_safetensors_reference(
             "safetensors_file": source,
             "weight_name": key,
             "data_offsets": [data_base + start, data_base + end],
-            "sha256": hashlib.sha256(
-                memoryview(
-                    tensor.detach()
-                    .to(device="cpu")
-                    .contiguous()
-                    .reshape(-1)
-                    .view(torch.uint8)
-                    .numpy()
-                )
-            ).hexdigest(),
+            "sha256": hashlib.sha256(tensor_bytes(tensor)).hexdigest(),
         }
     ordered_ranges = sorted(ranges)
     if (

@@ -3,10 +3,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
-import os
 import time
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -195,7 +193,7 @@ class TestPackAccuracy(unittest.TestCase):
                 g_idx = torch.zeros(in_features, dtype=torch.int32)
                 expected = (raw_codes.clamp(0, max_q) - zero).to(torch.float16)
 
-                implementations = ["original", "pack_block", "pack_block_python"]
+                implementations = ["original", "pack_block"]
                 if torch.cuda.is_available():
                     implementations.append("gpu")
 
@@ -218,9 +216,6 @@ class TestPackAccuracy(unittest.TestCase):
                         qlinear.pack_original(linear, scales_t, zeros_t, g_idx=g_idx)
                     elif implementation == "pack_block":
                         qlinear.pack_block(linear, scales_t, zeros_t, g_idx=g_idx)
-                    elif implementation == "pack_block_python":
-                        with patch.dict(os.environ, {"GPTQMODEL_DISABLE_PACK_EXT": "1"}):
-                            qlinear.pack_block(linear, scales_t, zeros_t, g_idx=g_idx)
                     else:
                         qlinear.pack_gpu(linear, scales_t, zeros_t, g_idx=g_idx)
                     qlinear.post_init()

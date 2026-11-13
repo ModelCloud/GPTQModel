@@ -19,6 +19,8 @@ import torch
 from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
 
+from .tensor import tensor_bytes
+
 
 CHECKPOINT_SCHEMA = "ds4rt.exl3-projection-checkpoint"
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -92,8 +94,7 @@ def tensor_identity(tensor: torch.Tensor) -> dict[str, Any]:
     if not isinstance(tensor, torch.Tensor):
         raise TypeError("EXL3 checkpoint identities require torch tensors")
     host = tensor.detach().contiguous().to(device="cpu")
-    byte_view = host.reshape(-1).view(torch.uint8).numpy()
-    digest = hashlib.sha256(memoryview(byte_view)).hexdigest()
+    digest = hashlib.sha256(tensor_bytes(host)).hexdigest()
     return {
         "shape": list(host.shape),
         "dtype": str(host.dtype),

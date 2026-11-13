@@ -24,7 +24,6 @@ def test_packed_gptq_cpu_bias_cancels_before_output_rounding(
     monkeypatch, dtype, weight_value, bias_value, last_zero, wide_bias, expected_value,
     autocast,
 ):
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "1")
     source = torch.nn.Linear(512, 32, bias=True, dtype=dtype)
     with torch.no_grad():
         source.weight.fill_(weight_value)
@@ -79,7 +78,6 @@ def test_packed_gptq_cpu_bias_cancels_before_output_rounding(
 
 
 def test_packed_gptq_cpu_fused_bias_keeps_input_gradient(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_DISABLE_PACK_EXT", "1")
     source = torch.nn.Linear(32, 32, bias=True, dtype=torch.float16)
     with torch.no_grad():
         source.weight.fill_(1)

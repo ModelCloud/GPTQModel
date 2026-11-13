@@ -18,7 +18,6 @@
 
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -503,10 +502,13 @@ def _get_perms():
         for j in range(4):
             perm.extend([p + 256 * j for p in perm1])
 
-    perm = np.array(perm)
-    interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel()
-    perm = torch.from_numpy(perm)
+    interleave = [0, 2, 4, 6, 1, 3, 5, 7]
+    perm = [
+        perm[row * 8 + column]
+        for row in range(len(perm) // 8)
+        for column in interleave
+    ]
+    perm = torch.tensor(perm, dtype=torch.long)
     scale_perm = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])

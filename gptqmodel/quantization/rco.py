@@ -33,7 +33,6 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 
 
@@ -172,8 +171,31 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     # table on the host: the search calls this once per Gumbel draw, so a Python
     # loop over positions here would dominate the step time.
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
-    gained = scores.detach().cpu().double().numpy()
-    steps = unit_costs.detach().cpu().numpy()
+    gained = scores.detach().to(device="cpu", dtype=torch.float64)
+
+    # The DP is a few hundred tiny host-side reductions. NumPy's ufunc loop is
+    # several times faster than Torch's CPU dispatch for this shape, so it is
+    # used when available; ``_budget_dp_torch`` is the exact NumPy-free
+    # equivalent and both are covered by the same oracle tests.
+    try:
+        import numpy as np
+    except ModuleNotFoundError:
+        # Read the step matrix once: the inner loop must not touch tensor scalars.
+        steps = unit_costs.detach().to(device="cpu", dtype=torch.long).tolist()
+        assignment = _budget_dp_torch(gained, steps, budget, n_layers, n_options)
+    else:
+        assignment = _budget_dp_numpy(
+            np, gained, unit_costs.detach().to(device="cpu", dtype=torch.long), budget, n_layers, n_options
+        )
+    # Return on the caller's device: the search indexes this alongside the
+    # probability tensors it keeps on the accelerator.
+    return assignment.to(scores.device)
+
+
+def _budget_dp_numpy(np, gained, unit_costs, budget, n_layers, n_options):
+    """NumPy DP over the discretized budget (fast path)."""
+    gained = gained.numpy()
+    steps = unit_costs.numpy()
 
     table = np.full(budget + 1, -np.inf, dtype=np.float64)
     table[0] = 0.0
@@ -209,9 +231,54 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
         option = int(choice[layer, position])
         assignment[layer] = option
         position -= int(steps[layer, option])
-    # Return on the caller's device: the search indexes this alongside the
-    # probability tensors it keeps on the accelerator.
-    return assignment.to(scores.device)
+    return assignment
+
+
+def _budget_dp_torch(gained, steps, budget, n_layers, n_options):
+    """Torch DP over the discretized budget (NumPy-free path).
+
+    ``max(dim=0)`` returns the first maximal index, matching the NumPy loop
+    where the earliest option wins a tie.
+    """
+    table = torch.full((budget + 1,), float("-inf"), dtype=torch.float64)
+    table[0] = 0.0
+    choice = torch.zeros((n_layers, budget + 1), dtype=torch.long)
+    # One reused [options, budget] buffer: the per-option rows are written in
+    # place, then a single ``max`` picks the best option per budget.
+    candidates = torch.full((n_options, budget + 1), float("-inf"), dtype=torch.float64)
+    for layer in range(n_layers):
+        candidates.fill_(float("-inf"))
+        for option in range(n_options):
+            step = steps[layer][option]
+            if step > budget:
+                continue
+            if step == 0:
+                candidates[option] = table + gained[layer, option]
+            else:
+                # ``candidates[k, j]`` is the score of arriving at budget ``j``
+                # through option ``k``. Infeasible entries stay -inf.
+                candidates[option, step:] = table[:budget + 1 - step] + gained[layer, option]
+        updated, best_option = candidates.max(dim=0)
+        # ``choice`` records whichever option reaches the position at all, even
+        # when that value is worse than the previous layer's entry. Only a layer
+        # where no option lands keeps the initial ``0``.
+        reached = torch.isfinite(updated)
+        # Replace the table wholesale: a budget position that no option reaches
+        # this layer must become infeasible, not keep an earlier value
+        # (including the ``table[0] = 0`` seed).
+        table = updated
+        choice[layer] = torch.where(reached, best_option, choice[layer])
+
+    if not torch.isfinite(table).any():
+        raise RuntimeError('RCO rounding found no feasible assignment under the budget')
+    position = int(torch.argmax(table))
+
+    assignment = torch.zeros(n_layers, dtype=torch.long)
+    for layer in range(n_layers - 1, -1, -1):
+        option = int(choice[layer, position])
+        assignment[layer] = option
+        position -= steps[layer][option]
+    return assignment
 
 
 def achieved_bits(assignment, weights, costs):

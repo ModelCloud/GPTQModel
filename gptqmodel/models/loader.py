@@ -18,7 +18,6 @@ from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Sequence, Union
 
-import numpy as np
 import torch
 import transformers
 
@@ -1050,7 +1049,14 @@ def _load_quantized_gguf_checkpoint_into_model(
 
         if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             resolved_target_name = f"{module_name}.qweight" if module_name else "qweight"
-            packed = torch.from_numpy(np.array(tensor.data, dtype=np.uint8, copy=True, order="C"))
+            # ``astype`` is the array's own copy-and-cast, so it keeps the old
+            # ``np.array(..., dtype=uint8, copy=True, order="C")`` semantics
+            # (by-value cast, C-order, native byte order) without importing
+            # NumPy into this module. ``as_tensor`` rejects big-endian dtypes
+            # and negative strides, both of which the raw memmap view can carry.
+            packed = torch.as_tensor(
+                tensor.data.astype("uint8", copy=True), dtype=torch.uint8
+            )
             expected = _lookup_model_slot_tensor(model, resolved_target_name)
             if tuple(packed.shape) != tuple(expected.shape):
                 raise RuntimeError(

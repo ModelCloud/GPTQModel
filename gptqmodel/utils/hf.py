@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
-import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
@@ -450,7 +449,16 @@ def _load_gguf_checkpoint_torch_direct(
             continue
 
         if not torch.is_tensor(weights):
-            weights = torch.from_numpy(np.array(weights, copy=True, order="C"))
+            # GGUF processors return nested sequences or array-likes. Copy
+            # through NumPy when it is available so big-endian dtypes and
+            # negative strides are normalized exactly as before; fall back to
+            # Torch conversion for a NumPy-free install.
+            try:
+                import numpy as np
+            except ModuleNotFoundError:
+                weights = torch.as_tensor(weights).clone().contiguous()
+            else:
+                weights = torch.from_numpy(np.array(weights, copy=True, order="C"))
             if target_device is not None:
                 weights = weights.to(device=target_device)
 
