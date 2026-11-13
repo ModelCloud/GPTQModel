@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from gptqmodel.utils import cpp
 from gptqmodel.utils import hadamard
+from gptqmodel.utils import qqq
 
 
 def _assert_stable(loader) -> None:
@@ -47,3 +48,7 @@ def test_floatx_cpu_uses_stable_abi():
 
 def test_hadamard_uses_stable_abi():
     _assert_stable(hadamard._HADAMARD_TORCH_OPS_EXTENSION)
+
+
+def test_qqq_uses_stable_abi():
+    _assert_stable(qqq._QQQ_TORCH_OPS_EXTENSION)
