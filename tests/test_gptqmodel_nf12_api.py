@@ -224,7 +224,87 @@ def test_native_full_vocabulary_head_matches_dense_torch():
                        F.embedding(ids, weight).view(torch.int16))
 
 
-@pytest.mark.parametrize("n,k", [(384, 5120), (512, 5120), (5120, 5120), (129280, 5120)])
+_CUDA_SYNC_SHAPES = [
+    (1, 128, 2048),   # SM103 one-row GEMV
+    (1, 512, 512),    # SM103 four-row GEMV
+    (2, 512, 64),     # direct, minimum K
+    (8, 512, 192),    # direct, non-256-aligned K
+    (6, 128, 7168),   # clustered direct
+    (2, 4096, 768),   # asynchronous, three stages
+    (8, 3072, 4096),  # asynchronous, eight stages
+    (8, 6144, 4096),  # escape staging when three CTAs per SM fit
+    (9, 512, 512),    # outside specialized M range
+]
+
+
+@pytest.mark.parametrize("m,n,k", _CUDA_SYNC_SHAPES)
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_cuda_sync_linear_matches_twin_and_torch(m, n, k, static_weights):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(20261113 + m + n + k)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0], dense[-1, -1] = -0.0, 2.0**-20
+    packed = nf12.encode(dense)
+    assert packed.num_escapes > 0
+    assert torch.equal(nf12.decode(packed).view(torch.int16), dense.view(torch.int16))
+    x = (torch.randn((m, k), generator=generator, device=device) * 0.05).bfloat16()
+    bias = (torch.randn((n,), generator=generator, device=device) * 0.01).bfloat16()
+    actual = nf12.linear(x, packed, bias, static_weights=static_weights)
+    twin = torch.ops.nf12.linear_bf16t(x, nf12.pack_bf16t(dense), bias)
+    assert actual.dtype == x.dtype
+    assert torch.equal(actual.view(torch.int16), twin.view(torch.int16))
+    oracle = F.linear(x.double(), dense.double(), bias.double())
+    torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
+    assert torch.equal(nf12.linear(x, packed, bias, static_weights=static_weights), actual)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_cuda_sync_short_k_prefill_matches_torch(static_weights):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(20261115)
+    dense = (torch.randn((512, 128), generator=generator, device=device) * 0.02).bfloat16()
+    packed = nf12.encode(dense)
+    x = (torch.randn((64, 128), generator=generator, device=device) * 0.05).bfloat16()
+    actual = nf12.linear(x, packed, static_weights=static_weights)
+    oracle = F.linear(x.double(), dense.double())
+    torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
+    if torch.cuda.get_device_capability(device) == (10, 3):
+        assert torch.equal(actual.view(torch.int16), F.linear(x, dense).view(torch.int16))
+
+
+@pytest.mark.parametrize("m,n,k", [(1, 128, 2048), (2, 512, 192), (2, 4096, 768)])
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_cuda_sync_graph_replays_changed_inputs(m, n, k, static_weights):
+    device = _cuda()
+    generator = torch.Generator(device=device).manual_seed(20261114 + m + n + k)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[-1, -1] = 2.0**-20
+    packed = nf12.encode(dense)
+    x = (torch.randn((m, k), generator=generator, device=device) * 0.05).bfloat16()
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            nf12.linear(x, packed, static_weights=static_weights)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual = nf12.linear(x, packed, static_weights=static_weights)
+    torch.cuda.current_stream(device).wait_stream(stream)
+    for _ in range(3):
+        x.neg_()
+        graph.replay()
+        oracle = F.linear(x.double(), dense.double())
+        torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
+    module = nf12.NF12Linear.from_weight(packed)
+    module(x)
+    module(x)
+    assert {name for name, _ in module.named_buffers()} == {"nf12_packed", "nf12_escapes"}
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("n,k", [(384, 5120), (512, 5120), (5120, 5120), (129280, 5120), (128, 2048)])
 def test_staged_b1_matches_independent_rows_and_torch(n, k):
     device = _cuda()
     if n >= 129280 and torch.cuda.mem_get_info(device)[0] < 4_000_000_000:

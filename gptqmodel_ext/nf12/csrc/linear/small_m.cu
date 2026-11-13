@@ -51,6 +51,7 @@ struct SmallMParams {
   __nv_bfloat16* y;
   int64_t ldy;
   float* partials;  // below SM90 with kc > 1: FP32 partials [kc][m][nb * 16]
+  bool weights_ready;
 };
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
@@ -59,11 +60,18 @@ constexpr bool kDeviceHasClusters = true;
 constexpr bool kDeviceHasClusters = false;
 #endif
 
-template <WeightSource S, int MT, int WARPS, int kStages, int KP, bool Retain = false>
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+constexpr bool kDeviceIsSM103 = true;
+#else
+constexpr bool kDeviceIsSM103 = false;
+#endif
+constexpr bool kDeviceHasKParts = !kDeviceHasClusters || kDeviceIsSM103;
+
+template <WeightSource S, int MT, int WARPS, int kStages, int KP, bool Retain = false, bool SingleCTA = false>
 __global__ void __launch_bounds__(WARPS * 32) small_m_kernel(const SmallMParams p) {
-  // SM8x-only K parts and 16-warp CTAs have no code in SM90+ images and are
-  // rejected by small_m_config_supported().
-  if constexpr ((KP > 1 || WARPS > 8) && kDeviceHasClusters) {
+  // Intra-CTA K splitting is supported on SM8x and SM103.
+  if constexpr ((SingleCTA && !kDeviceIsSM103) ||
+                (KP > 1 && !kDeviceHasKParts) || (WARPS > 8 && kDeviceHasClusters)) {
     __trap();
   } else {
   using T = WeightTraits<S>;
@@ -86,11 +94,15 @@ __global__ void __launch_bounds__(WARPS * 32) small_m_kernel(const SmallMParams 
   const int nb = min(group * RW + (KP == 1 ? warp : warp % RW), p.nb - 1);
   const uint8_t* wp = p.w + (static_cast<size_t>(nb) * p.kb + kb0 + kpart) * T::kSuperAtomBytes + lane * 16;
 
-  // PDL may overlap prologues, but all global loads must wait for the prior
-  // kernel, which may still be writing the weights (dispatch.cu contract).
+  // Static weights may be staged before the activation producer completes.
+  // Other callers wait before reading weights or escapes.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
-  asm volatile("griddepcontrol.wait;" ::: "memory");
+  if constexpr (kDeviceIsSM103) {
+    if (!p.weights_ready) asm volatile("griddepcontrol.wait;" ::: "memory");
+  } else {
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+  }
 #endif
   const __nv_bfloat16* x0 = p.x + static_cast<size_t>(kb0) * 64;
   const int n0 = group * RW * 16;
@@ -98,9 +110,14 @@ __global__ void __launch_bounds__(WARPS * 32) small_m_kernel(const SmallMParams 
   // finalizes all of its outputs (as a 1-rank cluster) into the workspace.
   const int core_kc = kDeviceHasClusters ? kc : 1;
   const int core_rank = kDeviceHasClusters ? rank : 0;
-  small_m_core<S, MT, WARPS, kStages, KP, Retain>(
+  small_m_core<S, MT, WARPS, kStages, KP, Retain, kDeviceIsSM103, SingleCTA>(
       smem + kRingBytes, smem, wp, cnt, p.base_x4, p.escapes, p.m, p.slice, p.xstride, core_kc, core_rank,
-      [&](int r) { return x0 + r * p.ldx; }, [] {},
+      [&](int r) { return x0 + r * p.ldx; },
+      [&] {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        if (p.weights_ready) asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+      },
       [&](int tok, int rp, float2 s) {
         const int n = n0 + 2 * rp;
         if (n >= p.nb * 16) return;
@@ -186,29 +203,28 @@ Plan make_plan(const SmallMConfig& cfg, int64_t m, int64_t k, int stages, Weight
 
 using KernelFn = void (*)(SmallMParams);
 
-// 4- and 8-warp CTAs; below SM90 also K parts (kp > 1, register ring only:
-// 16-warp CTAs of 8 / 4 / 2 row blocks, 8-warp of 4 / 2 / 1, 4-warp of 2 / 1)
-// and 16-warp CTAs of 16 row blocks.
-template <WeightSource S, int MT, int kStages, bool Retain = false>
+// Four- and eight-warp CTAs support K parts on SM8x and SM103.
+// SM8x also supports sixteen-warp CTAs.
+template <WeightSource S, int MT, int kStages, bool Retain = false, bool SingleCTA = false>
 KernelFn kernel_warps(int warps, int kp) {
   if (kp == 1) {
     switch (warps) {
-      case 4: return small_m_kernel<S, MT, 4, kStages, 1, Retain>;
-      case 8: return small_m_kernel<S, MT, 8, kStages, 1, Retain>;
+      case 4: return small_m_kernel<S, MT, 4, kStages, 1, Retain, SingleCTA>;
+      case 8: return small_m_kernel<S, MT, 8, kStages, 1, Retain, SingleCTA>;
       default: break;
     }
   }
   if constexpr (kStages == 0) {
     switch (warps * 16 + kp) {
-      case 4 * 16 + 2: return small_m_kernel<S, MT, 4, 0, 2, Retain>;
-      case 4 * 16 + 4: return small_m_kernel<S, MT, 4, 0, 4, Retain>;
-      case 8 * 16 + 2: return small_m_kernel<S, MT, 8, 0, 2, Retain>;
-      case 8 * 16 + 4: return small_m_kernel<S, MT, 8, 0, 4, Retain>;
-      case 8 * 16 + 8: return small_m_kernel<S, MT, 8, 0, 8, Retain>;
-      case 16 * 16 + 1: return small_m_kernel<S, MT, 16, 0, 1, Retain>;
-      case 16 * 16 + 2: return small_m_kernel<S, MT, 16, 0, 2, Retain>;
-      case 16 * 16 + 4: return small_m_kernel<S, MT, 16, 0, 4, Retain>;
-      case 16 * 16 + 8: return small_m_kernel<S, MT, 16, 0, 8, Retain>;
+      case 4 * 16 + 2: return small_m_kernel<S, MT, 4, 0, 2, Retain, SingleCTA>;
+      case 4 * 16 + 4: return small_m_kernel<S, MT, 4, 0, 4, Retain, SingleCTA>;
+      case 8 * 16 + 2: return small_m_kernel<S, MT, 8, 0, 2, Retain, SingleCTA>;
+      case 8 * 16 + 4: return small_m_kernel<S, MT, 8, 0, 4, Retain, SingleCTA>;
+      case 8 * 16 + 8: return small_m_kernel<S, MT, 8, 0, 8, Retain, SingleCTA>;
+      case 16 * 16 + 1: return small_m_kernel<S, MT, 16, 0, 1, Retain, SingleCTA>;
+      case 16 * 16 + 2: return small_m_kernel<S, MT, 16, 0, 2, Retain, SingleCTA>;
+      case 16 * 16 + 4: return small_m_kernel<S, MT, 16, 0, 4, Retain, SingleCTA>;
+      case 16 * 16 + 8: return small_m_kernel<S, MT, 16, 0, 8, Retain, SingleCTA>;
       default: return nullptr;
     }
   }
@@ -235,7 +251,16 @@ KernelFn kernel_stages(const SmallMConfig& cfg, int stages) {
   }
 }
 
-KernelFn kernel_for(WeightSource s, const SmallMConfig& cfg, int stages, bool retain = false) {
+KernelFn kernel_for(WeightSource s, const SmallMConfig& cfg, int stages, const DeviceInfo& dev, bool retain = false) {
+  if (dev.sm_arch == 103 && cfg.mt == 1 && cfg.kc == 1) {
+    if (stages == 0)
+      return s == WeightSource::kNF12 ? kernel_warps<WeightSource::kNF12, 1, 0, false, true>(cfg.warps, cfg.kp)
+                                      : kernel_warps<WeightSource::kBF16T, 1, 0, false, true>(cfg.warps, cfg.kp);
+    if (stages == kSmallMBulkStages)
+      return s == WeightSource::kNF12
+                 ? kernel_warps<WeightSource::kNF12, 1, kSmallMBulkStages, false, true>(cfg.warps, cfg.kp)
+                 : kernel_warps<WeightSource::kBF16T, 1, kSmallMBulkStages, false, true>(cfg.warps, cfg.kp);
+  }
   if (retain && stages == 0)
     return s == WeightSource::kNF12 ? kernel_mt<WeightSource::kNF12, 0, true>(cfg)
                                     : kernel_mt<WeightSource::kBF16T, 0, true>(cfg);
@@ -297,6 +322,8 @@ int small_m_bulk_stages(const DeviceInfo& dev) {
 
 // With enough row groups, MT = 1 can fill SM90 without the bulk ring.
 int small_m_stages(const SmallMConfig& cfg, int64_t n, int64_t k, const DeviceInfo& dev) {
+  if (dev.sm_arch == 103)
+    return cfg.kp == 1 && k >= 4096 && (cfg.mt > 1 || n >= 4096) ? kSmallMBulkStages : 0;
   if (dev.sm_arch == 90 && cfg.mt == 1 && n >= std::max<int64_t>(k, 8192)) return 0;
   return small_m_bulk_stages(dev);
 }
@@ -304,9 +331,10 @@ int small_m_stages(const SmallMConfig& cfg, int64_t n, int64_t k, const DeviceIn
 bool small_m_config_supported(const SmallMConfig& cfg, int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   if (m < 1 || m > 8 * cfg.mt || m > kSmallMMaxM) return false;
   const int stages = small_m_stages(cfg, n, k, dev);
-  if (kernel_for(WeightSource::kNF12, cfg, stages) == nullptr) return false;
+  if (kernel_for(WeightSource::kNF12, cfg, stages, dev) == nullptr) return false;
   if (cfg.kc < 1 || cfg.kc > 8 || cfg.kc > k / 64) return false;
-  if ((cfg.kp > 1 || cfg.warps > 8) && dev.sm_arch >= 90) return false;
+  if (cfg.warps > 8 && dev.sm_arch >= 90) return false;
+  if (cfg.kp > 1 && dev.sm_arch >= 90 && dev.sm_arch != 103) return false;
   if (cfg.slice < 0 || cfg.slice % slice_step(cfg, stages) != 0) return false;
   // The bf16t twin runs the same config with larger super-atoms.
   return make_plan(cfg, m, k, stages, WeightSource::kBF16T).smem <= dev.smem_optin_bytes;
@@ -318,7 +346,7 @@ size_t small_m_workspace_bytes(const SmallMConfig& cfg, int64_t m, int64_t n, co
 
 int small_m_resident_ctas(const SmallMConfig& cfg, int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   const int stages = small_m_stages(cfg, n, k, dev);
-  const KernelFn fn = kernel_for(WeightSource::kNF12, cfg, stages, retain_weights(n, k, dev));
+  const KernelFn fn = kernel_for(WeightSource::kNF12, cfg, stages, dev, retain_weights(n, k, dev));
   if (fn == nullptr) return 0;
   const Plan pl = make_plan(cfg, m, k, stages, WeightSource::kNF12);
   return pl.smem > dev.smem_optin_bytes
@@ -328,7 +356,7 @@ int small_m_resident_ctas(const SmallMConfig& cfg, int64_t m, int64_t n, int64_t
 
 cudaError_t linear_small_m(const LinearArgs& a, const SmallMConfig& cfg) {
   const int stages = small_m_stages(cfg, a.n, a.k, *a.dev);
-  const KernelFn fn = kernel_for(a.source, cfg, stages, retain_weights(a.n, a.k, *a.dev));
+  const KernelFn fn = kernel_for(a.source, cfg, stages, *a.dev, retain_weights(a.n, a.k, *a.dev));
   if (fn == nullptr) return cudaErrorInvalidValue;
   const Plan pl = make_plan(cfg, a.m, a.k, stages, a.source);
   if (pl.smem > a.dev->smem_optin_bytes) return cudaErrorInvalidValue;
@@ -353,6 +381,7 @@ cudaError_t linear_small_m(const LinearArgs& a, const SmallMConfig& cfg) {
   p.y = a.y;
   p.ldy = a.ldy;
   p.partials = ws > 0 ? static_cast<float*>(a.workspace) : nullptr;
+  p.weights_ready = a.source == WeightSource::kNF12 && a.weights_ready && a.dev->sm_arch == 103;
 
   cudaLaunchConfig_t lc{};
   lc.gridDim = dim3(static_cast<unsigned>(cfg.kc * ((p.nb + cfg.warps / cfg.kp - 1) / (cfg.warps / cfg.kp))), 1, 1);
@@ -386,8 +415,8 @@ cudaError_t linear_small_m(const LinearArgs& a, const SmallMConfig& cfg) {
 
 // Model time in super-atoms streamed at the saturated device rate. Each wave
 // pays pipeline ramp/drain and ragged-tail costs. K splitting adds restaging
-// and reduction costs. SM8x also accounts for x traffic, slice barriers,
-// workspace reduction and the register ring's dependent-load latency.
+// and reduction costs. Register-ring fits also account for x traffic.
+// SM8x includes workspace reduction and dependent-load latency.
 namespace {
 
 struct SmallMModel {
@@ -398,10 +427,10 @@ struct SmallMModel {
   double split_cost;  // per token and extra cluster rank or K part: x restaging + reduction
   double cta_cost;    // super-atoms per CTA
   double locality;    // DRAM page locality: a CTA's kp parts read kp adjacent super-atoms per step
-  double x_cost = 0.0;       // per staged x byte, relative to a weight byte (below SM90)
+  double x_cost = 0.0;       // per staged x byte, relative to a weight byte
   double slice_cost = 0.0;   // super-atoms per SM per x slice of a wave (below SM90)
   double reduce_cost = 0.0;  // super-atoms per SM for the reduce launch of kc > 1 (below SM90)
-  double warp_cost = 0.0;    // super-atoms per CTA and warp: start-up, x staging and partials sums (below SM90)
+  double warp_cost = 0.0;    // super-atoms per CTA and warp: start-up, x staging and partials sums
   // Below SM90: a wave lasts at least chain_cost super-atoms per SM for each
   // super-atom a warp streams in sequence (DRAM latency of the register ring).
   double chain_cost = 0.0;
@@ -417,6 +446,7 @@ constexpr SmallMModel kSm89Model{6.0, 0.0, 0.0, 0.85, 0.0, 16.0, 0.2, 2.0, 0.25,
 constexpr SmallMModel kSm90Model{2.25, 0.5, 0.0, 0.75, 0.1, 6.0, 0.0};
 constexpr SmallMModel kSm90RegisterModel{3.0, 0.0, 0.0, 0.5, 0.05, 0.0, 0.0};
 constexpr SmallMModel kSm100Model{3.0, 16.0, 0.0, 1.0, 0.1, 16.0, 0.0};
+constexpr SmallMModel kSm103BulkModel{2.25, 16.0, 0.0, 1.0, 0.1, 2.0, 0.0};
 
 const SmallMModel& small_m_model(const DeviceInfo& dev, int stages) {
   switch (dev.sm_arch) {
@@ -425,6 +455,7 @@ const SmallMModel& small_m_model(const DeviceInfo& dev, int stages) {
     case 89: return kSm89Model;
     case 90: return stages > 0 ? kSm90Model : kSm90RegisterModel;
     case 100: return kSm100Model;
+    case 103: return stages > 0 ? kSm103BulkModel : kSm100Model;
     default: return kDefaultModel;
   }
 }
@@ -438,7 +469,8 @@ int heuristic_slice(SmallMConfig cfg, int64_t m, int64_t n, int64_t k, const Dev
   const int step = slice_step(cfg, stages);
   const int64_t cnt = (k / 64 + cfg.kc - 1) / cfg.kc;
   if (dev.sm_arch >= 90) {
-    cfg.slice = m * (cnt * 128 + 16) <= 8 * 1024 ? 0 : step;
+    const int64_t x_limit = dev.sm_arch == 103 ? 32 * 1024 : 8 * 1024;
+    cfg.slice = m * (cnt * 128 + 16) <= x_limit ? 0 : step;
     return small_m_resident_ctas(cfg, m, n, k, dev) > 0 ? cfg.slice : -1;
   }
   cfg.slice = step;
@@ -460,12 +492,25 @@ SmallMConfig choose_small_m(int64_t m, int64_t n, int64_t k, const DeviceInfo& d
   double best_t = 0;
   const int64_t kb = k / 64;
   const int64_t nb = n / 16;
+  // Short single-token reductions can finalize within one CTA. Limit the
+  // register chain to three super-atoms per warp and keep the grid in one
+  // resident wave; longer chains also need nearly full SM coverage.
+  if (dev.sm_arch == 103 && m == 1 && k > 128 && k <= 1536) {
+    for (const int warps : {kb <= 8 ? 4 : 8, kb <= 8 ? 8 : 4}) {
+      if (kb > 3 * warps || (kb > 2 * warps && nb * 8 < dev.num_sms * 7)) continue;
+      const SmallMConfig cfg{1, warps, 1, 0, warps};
+      const int occ = small_m_resident_ctas(cfg, m, n, k, dev);
+      if (occ > 0 && nb <= int64_t{occ} * dev.num_sms) return cfg;
+    }
+  }
   const bool sm8x = dev.sm_arch < 90;
-  // K splits: across CTAs (kc; clusters from SM90, the workspace below) and,
-  // below SM90, inside the CTA (kp).
-  const int max_kc = static_cast<int>(std::min<int64_t>(8, kb));
-  const int max_kp = sm8x ? 8 : 1;
+  // K splits span CTAs (kc) and, on SM8x and SM103, warps within a CTA (kp).
+  const bool short_k = dev.sm_arch == 103 && k <= 128;
+  const int max_kc = short_k ? 1 : static_cast<int>(std::min<int64_t>(8, kb));
+  const bool sm103_parts = dev.sm_arch == 103 && m <= 8 && (n < 4096 || k < 4096);
+  const int max_kp = sm8x || sm103_parts ? 8 : 1;
   for (const int warps : {16, 8, 4}) {
+    if (short_k && warps != 4) continue;
     // Avoid 16-warp CTAs when there are fewer than 16 row blocks.
     if (warps == 16 && (!sm8x || nb < 16)) continue;
     for (int kp = 1; kp <= std::min(max_kp, warps); kp *= 2) {
@@ -488,7 +533,8 @@ SmallMConfig choose_small_m(int64_t m, int64_t n, int64_t k, const DeviceInfo& d
       if (occ <= 0) continue;
       const int64_t capacity = int64_t{occ} * dev.num_sms;
       const int64_t total = (nb + rows - 1) / rows * kc;
-      const double per_cta = static_cast<double>(nb * kb) / total;
+      const int64_t streamed_nb = dev.sm_arch == 103 ? (nb + rows - 1) / rows * rows : nb;
+      const double per_cta = static_cast<double>(streamed_nb * kb) / total;
       const int64_t slices = cfg.slice == 0 ? 1 : (cnt + cfg.slice - 1) / cfg.slice;
       // Warps that stream: K parts past a CTA's cnt super-atoms idle.
       const double warps_busy = warps * std::min(1.0, static_cast<double>(cnt) / kp);

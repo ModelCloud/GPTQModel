@@ -62,10 +62,19 @@ specification.
 
 ## Local modifications
 
-The kernel sources and `reference.py` are copied verbatim from upstream commit
-`cf66cbb` (2026-11) apart from the attribution header added to every source
-file. `docs/SPEC.md` is the upstream specification. GPT-QModel changes live
-outside this directory:
+The CUDA sources track [dphnAI/nf12 commit `606f882`](https://github.com/dphnAI/nf12/commit/606f8823e182f65d6f2ead368aa9e5ba965c057c),
+including the volatile `movmatrix` deadlock fix, SM103 build target, and
+Blackwell GEMV/direct/asynchronous small-M kernels. `reference.py` remains
+at `cf66cbb`; the packed format is unchanged. `docs/SPEC.md` includes the
+upstream static-weight readiness contract and GPT-QModel's elementwise error
+gate. Original attribution headers are retained.
+
+Local CUDA adaptations preserve staged-B1 projection, four-copy embedding,
+and the SM80 decode/prefill tuning. Staged-B1 uses one GEMV launch per row
+when ordinary B1 selects GEMV, preserving the same arithmetic. The separate
+`gptqmodel_ext/nf12_hip` backend is not replaced by the upstream HIP build/ABI
+refactor. See [CUDA dispatch and weight readiness](../../docs/nf12-cuda-dispatch.md).
+The integration also includes:
 
 * `gptqmodel/utils/nf12_codec.py` is an independent pure-Torch port of the
   upstream reference codec. It is used for quantization on every device and

@@ -84,12 +84,28 @@ __device__ __forceinline__ void decode_group(const Group& g, uint32_t base_x4, c
   }
 }
 
+// Mutable PDL inputs require coherent loads after the dependency wait.
+template <bool Coherent = false>
+__device__ __forceinline__ uint4 load_global_u4(const uint4* p) {
+  if constexpr (Coherent) {
+    uint4 v;
+    asm volatile("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                 : "l"(p)
+                 : "memory");
+    return v;
+  } else {
+    return __ldg(p);
+  }
+}
+
 // Tail-safe decode without a full-warp participation requirement.
+template <bool Coherent = false>
 __device__ __forceinline__ void decode_group_any_lane(const Group& g, uint32_t base_x4,
                                                       const uint4* __restrict__ escapes, uint32_t (&r)[4]) {
   decode_bulk(g, base_x4, r);
   if (g.meta == 0u) {
-    const uint4 v = __ldg(escapes + g.lo0);
+    const uint4 v = load_global_u4<Coherent>(escapes + g.lo0);
     r[0] = v.x;
     r[1] = v.y;
     r[2] = v.z;

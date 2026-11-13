@@ -66,7 +66,7 @@ __device__ __forceinline__ void ldg128_if(uint32_t (&a)[4], const void* ptr, uin
 
 __device__ __forceinline__ uint32_t movmatrix_trans(uint32_t v) {
   uint32_t r;
-  asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(r) : "r"(v));
+  asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(r) : "r"(v));
   return r;
 }
 

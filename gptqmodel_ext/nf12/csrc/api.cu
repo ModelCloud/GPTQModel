@@ -75,7 +75,7 @@ nf12_status_t current_device(const DeviceInfo** dev) {
 nf12_status_t run_linear(const void* x, int64_t m, int64_t ldx, nf12::detail::WeightSource source, const void* weight,
                          const void* escapes, uint32_t num_escapes, uint32_t exp_base, int64_t n, int64_t k,
                          const void* bias, void* y, int64_t ldy, void* workspace, size_t workspace_bytes,
-                         cudaStream_t stream, bool staged_b1 = false) {
+                         cudaStream_t stream, bool staged_b1 = false, bool weights_ready = false) {
   if (m < 0 || (bias != nullptr && !aligned16(bias)) || !valid_workspace(workspace, workspace_bytes)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
@@ -105,6 +105,7 @@ nf12_status_t run_linear(const void* x, int64_t m, int64_t ldx, nf12::detail::We
   args.workspace_bytes = workspace_bytes;
   args.stream = stream;
   args.dev = dev;
+  args.weights_ready = weights_ready;
   return from_cuda(staged_b1 ? nf12::detail::linear_staged_b1(args) : nf12::detail::linear(args));
 }
 
@@ -299,6 +300,14 @@ nf12_status_t nf12_linear_staged_b1(const void* x_bf16, int64_t m, int64_t ldx, 
   if (!valid_weight(w) || m < 1 || m > 8) return NF12_ERROR_INVALID_ARGUMENT;
   return run_linear(x_bf16, m, ldx, nf12::detail::WeightSource::kNF12, w->packed, w->escapes, w->num_escapes,
                     w->exp_base, w->n, w->k, bias_bf16, y_bf16, ldy, workspace, workspace_bytes, stream, true);
+}
+
+nf12_status_t nf12_linear_static_weights(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
+                                         const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace,
+                                         size_t workspace_bytes, cudaStream_t stream) {
+  if (!valid_weight(w)) return NF12_ERROR_INVALID_ARGUMENT;
+  return run_linear(x_bf16, m, ldx, nf12::detail::WeightSource::kNF12, w->packed, w->escapes, w->num_escapes,
+                    w->exp_base, w->n, w->k, bias_bf16, y_bf16, ldy, workspace, workspace_bytes, stream, false, true);
 }
 
 nf12_status_t nf12_pack_bf16t(const void* w_bf16, int64_t n, int64_t k, int64_t ldw, void* out, cudaStream_t stream) {

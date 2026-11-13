@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define NF12_VERSION_MAJOR 1
-#define NF12_VERSION_MINOR 0
+#define NF12_VERSION_MINOR 1
 
 typedef enum nf12_status {
   NF12_OK = 0,
@@ -84,13 +84,24 @@ size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device);
 nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w, const void* bias_bf16,
                           void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream);
 
-/* Fuse 1..8 independent B1 projections into one packed-weight traversal while
- * preserving the one-row small-M kernel configuration and row arithmetic.
+/* Compute 1..8 independent B1 projections, preserving the one-row kernel
+ * configuration and row arithmetic. Small-M MMA fuses the weight traversal;
+ * a GEMV B1 route launches once per row.
  * Unsupported one-row dispatches return NF12_ERROR_UNSUPPORTED. */
 size_t nf12_linear_staged_b1_workspace_bytes(int64_t m, int64_t n, int64_t k, int device);
 nf12_status_t nf12_linear_staged_b1(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
                                     const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace,
                                     size_t workspace_bytes, cudaStream_t stream);
+
+/* Opt in to staging packed weights and escapes before a preceding PDL kernel
+ * completes. Both buffers must already be ready when that kernel releases its
+ * dependents and remain unchanged until GPU work finishes. Ordinary stream
+ * ordering alone does not establish readiness for a preceding PDL producer.
+ * Activations, bias and output retain their dependency waits. Other dispatch
+ * paths may ignore this optimization. nf12_linear retains the safe default. */
+nf12_status_t nf12_linear_static_weights(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
+                                         const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace,
+                                         size_t workspace_bytes, cudaStream_t stream);
 
 /* Heuristic N-slice height for decode + external BF16 GEMM (SPEC.md 6, 8.1).
  * Returns a multiple of 16, or 0 to retain nf12_linear or reject invalid arguments.

@@ -74,7 +74,7 @@ __device__ __forceinline__ void mma_16816(float (&d)[4], const uint32_t (&a)[4],
 
 __device__ __forceinline__ uint32_t movmatrix_trans(uint32_t v) {
   uint32_t r;
-  asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(r) : "r"(v));
+  asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(r) : "r"(v));
   return r;
 }
 

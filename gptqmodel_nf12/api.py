@@ -128,20 +128,31 @@ def _check_input(x: torch.Tensor, k: int) -> None:
         raise ValueError(f"nf12: x must have shape [..., {k}], got {tuple(x.shape)}")
 
 
-def linear(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None) -> torch.Tensor:
+def linear(
+    x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None, *, static_weights: bool = False
+) -> torch.Tensor:
     """``y = x @ W.T (+ bias)`` maps bf16 ``x`` of shape ``[..., K]`` to ``[..., N]``.
 
     At the per-architecture M threshold (SPEC.md 6.5), row slices are decoded
     and multiplied by cuBLAS, matching the same calls on :func:`decode`.
-    Below that threshold the C API ``nf12_linear`` runs."""
+    Below that threshold the C API ``nf12_linear`` runs.
+
+    ``static_weights=True`` permits early reads of packed weights and escapes
+    before a preceding programmatically dependent kernel finishes. Both buffers
+    must already be ready when that kernel releases dependents and remain
+    unchanged until this operation completes. Activations, bias and output still
+    wait. Ordinary stream ordering alone does not establish weight readiness.
+    """
     _check_input(x, weight.shape[1])
     load()
-    return torch.ops.nf12.linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
+    kwargs = {"static_weights": True} if static_weights else {}
+    return torch.ops.nf12.linear(x, weight.packed, weight.escapes, weight.exp_base, bias, **kwargs)
 
 
 def linear_staged_b1(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None) -> torch.Tensor:
-    """Fuse 1..8 staged BF16 rows with the ordinary B1 kernel configuration.
+    """Project 1..8 staged BF16 rows with the ordinary B1 kernel configuration.
 
+    Small-M fuses the weight traversal; GEMV launches once per row.
     The route is intended for speculative verification whose row outputs must
     match separate one-row calls. Unsupported one-row dispatches fail closed.
     """

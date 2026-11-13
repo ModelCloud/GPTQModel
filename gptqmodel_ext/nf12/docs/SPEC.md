@@ -163,12 +163,12 @@ For a weight named `W`:
      `nf12_linear_bf16t` takes the same slices from the twin, so item 2 holds.
      NF12 is identical to the twin.
    - The torch op `nf12.linear`: where `nf12_linear_decode_gemm_rows(m, n, k,
-     device)` is non-zero (from a per-architecture M; on some architectures
-     also for router-gate-sized weights, N <= 128, from a smaller M), each
-     slice is decoded with `nf12_decode` into a
-     caching-allocator buffer and multiplied by cuBLAS (`addmm` with the bias
-     slice, else `mm`) into its columns of `y`. The output is identical to
-     issuing the same calls on `decode(W)`, and not, in general, to the twin.
+     device)` is non-zero (from a per-architecture M, with lower thresholds
+     for some narrow outputs or short reductions), each slice is decoded with
+     `nf12_decode` into a caching-allocator buffer and multiplied by cuBLAS
+     (`addmm` with the bias slice, else `mm`) into its columns of `y`.
+     The output is identical to issuing the same calls on `decode(W)`, and
+     not, in general, to the twin.
    Routing depends only on (m, n, k, architecture), never on weight values,
    and is deterministic, CUDA-graph capturable and host-sync free.
 
@@ -185,6 +185,14 @@ For a weight named `W`:
   clusters, the small-M kernel splits K inside the CTA (warps summed in part
   order) and across CTAs (FP32 partials in the workspace, summed in rank
   order by a second kernel).
+  SM103 (B300) uses SIMT kernels for selected single-token shapes, multiplying
+  BF16 operands with FP32 fused multiply-add accumulation. Selected shapes
+  with 2–8 tokens use MMA kernels that load activations directly or stage
+  packed weights asynchronously. Longer reductions can prefetch escapes into
+  shared memory. These paths finalize within a CTA or an eight-CTA cluster,
+  without workspace.
+  Remaining small-M shapes use tensor cores with intra-CTA or cluster K splits.
+  The row-major decoder uses two-warp CTAs on SM103.
 
 ## 8. Public API
 
@@ -200,6 +208,13 @@ the GEMM's own workspace) and, below SM90, the small-M split-K partials.
 `nf12_linear_decode_gemm_rows` recommends a slice height for callers with
 their own BF16 GEMM (cuBLAS), using slices of at most 256 MiB of BF16.
 A return of 0 recommends the fused route. Performance depends on the caller's GEMM.
+
+`nf12_linear_static_weights` accepts the same arguments as `nf12_linear` and
+permits early weight reads during programmatic dependent launch (PDL).
+The packed weights and escape buffer must be ready before the preceding
+kernel releases its dependents and remain unchanged until the GPU operation
+finishes. Activation and bias reads and output writes retain their dependency
+waits. Use `nf12_linear` when a preceding PDL kernel produces the weights.
 
 ### 8.2 Python (`import nf12`)
 
@@ -220,6 +235,9 @@ sorted_ids, offsets = nf12.moe_align(topk_ids, E)  # plus moe_linear / moe_combi
 
 The ops are registered as `torch.ops.nf12.*` (torch stable ABI), with fake
 implementations, so they work under `torch.compile` and CUDA graphs.
+
+`nf12.linear(..., static_weights=True)` opts into the weight-readiness contract
+in section 8.1. The default is `False`.
 
 ## 9. Mixture-of-experts
 
