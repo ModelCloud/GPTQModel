@@ -3,9 +3,10 @@
 
 """Best-effort GPU peer-access (P2P) detection, enablement and safe copies.
 
-Native expandable allocators manage peer mappings through PyTorch's copy
-path on CUDA and ROCm. Other native layouts use ``ctypes`` enablement:
-``hipDeviceEnablePeerAccess`` on ROCm and ``cuCtxEnablePeerAccess`` on CUDA.
+Native allocators manage peer mappings through PyTorch's copy path on CUDA
+and ROCm, independently of their current expandable-segment setting. Non-native
+ROCm allocators stage through host memory. Other known CUDA backends retain
+``ctypes`` enablement through ``cuCtxEnablePeerAccess``.
 ``hipErrorPeerAccessAlreadyEnabled`` /
 ``CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED`` (704) is treated as success, which
 makes repeated calls idempotent.
@@ -120,41 +121,8 @@ _PYTORCH_ENABLEMENT_WARNED = False
 #: Allocator guard: a non-native backend makes even the PyTorch copy path
 #: unreliable, so every directed pair is degraded and moves stage through host.
 REASON_ROCM_VMM = "rocm_vmm_allocator"
-#: Native expandable allocators on CUDA and ROCm must own peer enablement.
+#: Native allocators on CUDA and ROCm must own peer enablement.
 REASON_PYTORCH_ENABLEMENT = "pytorch_allocator_enablement"
-
-
-def _runtime_alloc_conf_value() -> str | None:
-    """Return Torch's parsed settings, distinguishing empty from unavailable.
-
-    An empty string is a valid native allocator configuration. Environment
-    strings can change after Torch parses them, so they are not a fallback.
-    """
-
-    getter = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
-    if getter is None:
-        return None
-    try:
-        value = getter()
-        return None if value is None else str(value)
-    except Exception:  # pragma: no cover - older/limited builds
-        return None
-
-
-def _parse_alloc_conf(value: str) -> tuple[str, bool]:
-    """Parse ``(backend, expandable_segments)`` out of an allocator setting."""
-
-    backend = ""
-    expandable = False
-    for token in value.replace(";", ",").split(","):
-        key, _, raw = token.partition(":")
-        key = key.strip().lower()
-        raw = raw.strip().lower()
-        if key == "backend":
-            backend = raw
-        elif key == "expandable_segments":
-            expandable = raw not in _OFF_VALUES
-    return backend, expandable
 
 
 def _runtime_allocator_backend() -> str | None:
@@ -176,38 +144,23 @@ def _allocator_is_native() -> bool:
     return _runtime_allocator_backend() == "native"
 
 
-def _allocator_forces_vmm() -> bool:
-    """Treat unavailable settings conservatively without disabling native P2P.
-
-    A native allocator with unknown settings delegates enablement to PyTorch
-    and withholds raw copies, just like an expandable allocator. Known empty
-    settings mean expandable segments are off.
-    """
-
-    if not _allocator_is_native():
-        return True
-    value = _runtime_alloc_conf_value()
-    if value is None:
-        return True
-    _backend, expandable = _parse_alloc_conf(value)
-    return expandable
-
-
 def _pytorch_owns_peer_enablement() -> bool:
-    """Let the native allocator manage peer mappings for expandable segments.
+    """Keep native allocator peer mappings under PyTorch's ownership.
 
-    This applies to both CUDA and ROCm: direct runtime enablement does not
-    update the allocator's peer metadata for future VMM reservations. Native
-    allocators with unreadable settings take the same conservative path.
+    The last parsed settings string is not the live allocator state: partial
+    updates can leave expandable segments enabled, and disabling them does not
+    remove existing VMM allocations. Pre-enabling peers also bypasses mappings
+    for segments allocated after a later settings change. Always delegate for
+    native allocators, and conservatively delegate when the backend is unknown.
     """
 
-    return _allocator_is_native() and _allocator_forces_vmm()
+    return _runtime_allocator_backend() in ("native", None)
 
 
 def _raw_peer_copy_unsafe() -> bool:
     """Withhold raw runtime copies when allocator-managed mappings are needed.
 
-    Native expandable allocators on CUDA and ROCm use PyTorch's direct copy
+    Native allocators on CUDA and ROCm use PyTorch's direct copy
     path. Non-native ROCm allocators additionally require host staging.
     """
 
@@ -260,7 +213,7 @@ def _warn_pytorch_enablement_once() -> None:
             return
         _PYTORCH_ENABLEMENT_WARNED = True
     log.info(
-        "Peer access is enabled by PyTorch so the native allocator tracks "
+        "Peer access is enabled by PyTorch so its allocator tracks "
         "peer mappings for existing and future expandable segments. Direct "
         "P2P stays enabled; raw runtime peer copies are withheld."
     )
@@ -1031,7 +984,7 @@ def _copy_payloads_like_movers(sources, targets, dst: int) -> bool:
 
     The probe must exercise the same path the movers use, or it validates a
     copy that never runs. When the raw ctypes runtime call is withheld (a
-    native expandable allocator) the movers fall back to
+    native allocator) the movers fall back to
     ``Tensor.copy_``, so the probe validates that instead. Validating the raw
     call there would demote a healthy link for a copy nothing depends on.
     """
@@ -1211,7 +1164,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     ``unsupported`` - capability is false or enablement failed.
     ``degraded``  - the link is not usable. A non-native ROCm allocator reports
     every pair this way without enablement or probing; ``reason_code`` is
-    ``REASON_ROCM_VMM``. A native expandable allocator instead delegates
+    ``REASON_ROCM_VMM``. A native allocator instead delegates
     enablement to PyTorch and validates its direct ``Tensor.copy_`` path.
 
     When ``P2PConfig.probe`` is set a measured copy additionally downgrades a

@@ -33,7 +33,7 @@ Manual findings that a probe cannot express go in
    segfaulted. Use
    `gptqmodel.utils.p2p.peer_copy_batch`, which calls
    `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` and releases the
-   GIL for the enqueue when the allocator permits raw copies. Native expandable
+   GIL for the enqueue when the allocator permits raw copies. Native
    allocators on CUDA and ROCm instead return `False` so movers use PyTorch's
    direct `Tensor.copy_`/`Tensor.to` path and its allocator-managed mappings.
 2. **`torch.cuda.set_device` is thread-local.** Set it at the top of every
@@ -309,15 +309,23 @@ for an inaccessible VMM operand. It failed once in the combined regression run
 and again in an independent repeat. A control delegating enablement and
 withholding raw copies passed three independent processes. `_enable_one` now
 uses `_pytorch_owns_peer_enablement` before either vendor's runtime enablement
-call, and `_raw_peer_copy_unsafe` withholds raw copies on native expandable
+call, and `_raw_peer_copy_unsafe` withholds raw copies on native
 allocators for both hardware families.
 
 Allocator metadata must come from the active backend, not just the last parsed
 setting. A real rejected `_accelerator_setAllocatorSettings` backend change left
 `backend:cudaMallocAsync` as the parsed string while the live backend was still
-`native`. `_allocator_is_native` now trusts only the live backend. A known empty
-settings string keeps the native raw path; unavailable native settings delegate
-to PyTorch. No environment fallback can override either verdict.
+`native`. `_allocator_is_native` trusts only the live backend. Native allocators
+always delegate to PyTorch, independently of the parsed settings string.
+
+A follow-up regression retained VMM tensors while changing allocator settings.
+A partial or empty update omitted `expandable_segments` from the reported string
+while the live setting remained true. Explicitly disabling expandable segments
+left existing VMM allocations alive. A rejected update likewise could not prove
+those allocations safe for raw copies. The four ownership assertions failed at
+`f9707a0eb`; the corrected regression passes all four cases on CUDA and ROCm. `_pytorch_owns_peer_enablement` now delegates every native allocator
+and unknown backend, so settings changes never reauthorize raw copies. This also
+protects segments created after a later enablement of expandable allocation.
 
 A non-native ROCm backend (`cudaMallocAsync`) is different: `Tensor.copy_` returned
 mismatched bytes, and so did a plain same-device copy, so that configuration
@@ -332,13 +340,14 @@ wordings, and the mixed-batch ordering.
 
 Cross-device raw-copy attempts and `enable_peer_access` consult the allocator
 guards, so they run on free-threaded workers on both CUDA and ROCm. The guards
-only read allocator metadata (`torch._C._accelerator_getAllocatorSettings` and
-`torch.cuda.get_allocator_backend`) and never issue the raw peer copies they
-suppress.
+only read the active backend (`torch.cuda.get_allocator_backend`) and the P2P
+config. They never issue the raw peer copies they suppress. The settings-string
+reader (`torch._C._accelerator_getAllocatorSettings`) has been removed from the
+threaded path because it cannot describe the lifecycle of existing allocations.
 
 | API | Result | Where we use it | Notes / workaround |
 |---|---|---|---|
-| `gptqmodel.p2p.allocator_guard` (`_allocator_is_native`, `_raw_peer_copy_unsafe`, `_rocm_peer_link_unusable`, `_pytorch_owns_peer_enablement`, `_rocm_nested_peer_disabled`) | SAFE (concurrent), metadata only | raw-copy attempts, `enable_peer_access` and `_enable_one` | The probe now reads metadata on both CUDA and ROCm, including the explicit nested-copy policy. It compares all four guard verdicts across 8 threads x 4 iterations. It never issues a peer copy or pre-enables runtime peer access. On 2026-11-13, the updated probe passed 3/3 independent processes on each of CUDA and ROCm with `PYTHON_GIL=0`. The mover fallback test separately passed 3/3 independent processes per backend, each with 8 workers and 32 bidirectional tasks on per-thread streams. Raw-copy coverage with expandable segments disabled passed on both backends, including the explicit nested-copy opt-in. |
+| `gptqmodel.p2p.allocator_guard` (`_allocator_is_native`, `_raw_peer_copy_unsafe`, `_rocm_peer_link_unusable`, `_pytorch_owns_peer_enablement`, `_rocm_nested_peer_disabled`) | SAFE (concurrent), metadata only | raw-copy attempts, `enable_peer_access` and `_enable_one` | The probe now reads metadata on both CUDA and ROCm, including the explicit nested-copy policy. It compares all four guard verdicts across 8 threads x 4 iterations. It never issues a peer copy or pre-enables runtime peer access. On 2026-11-13, after removing settings-string authorization, the updated probe passed 3/3 independent processes on each of CUDA and ROCm with `PYTHON_GIL=0`. The mover fallback test separately passed 3/3 independent processes per backend, each with 8 workers and 32 bidirectional tasks on per-thread streams. Native raw copies are now withheld even with expandable segments disabled; the nested-copy opt-in cannot override this guard. |
 
 ## Adding a probe
 

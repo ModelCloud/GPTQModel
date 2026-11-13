@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 import torch
 
@@ -10,7 +14,6 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.utils import p2p
 
 
-_REAL_ALLOCATOR_FORCES_VMM = p2p._allocator_forces_vmm
 _REAL_RAW_PEER_COPY_UNSAFE = p2p._raw_peer_copy_unsafe
 _REAL_ROCM_PEER_LINK_UNUSABLE = p2p._rocm_peer_link_unusable
 _REAL_PYTORCH_OWNS_ENABLEMENT = p2p._pytorch_owns_peer_enablement
@@ -805,46 +808,30 @@ def _activate_pytorch_enablement(monkeypatch):
     p2p.clear_p2p_cache()
 
 
-@pytest.mark.parametrize(
-    ("backend", "conf", "forces_vmm", "native"),
-    [
-        ("native", "expandable_segments:True", True, True),
-        ("native", "max_split_size_mb:256,expandable_segments:True", True, True),
-        ("native", "expandable_segments:False", False, True),
-        ("native", "expandable_segments:0", False, True),
-        ("native", "max_split_size_mb:256", False, True),
-        ("cudaMallocAsync", "expandable_segments:True", True, False),
-        ("cudaMallocAsync", "backend:cudaMallocAsync", True, False),
-    ],
-)
-def test_allocator_classification(monkeypatch, backend, conf, forces_vmm, native):
-    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: conf)
-    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: backend)
-
-    assert _REAL_ALLOCATOR_FORCES_VMM() is forces_vmm
-    assert p2p._allocator_is_native() is native
-
-
-@pytest.mark.parametrize("settings", ["", "expandable_segments:False", "max_split_size_mb:256"])
+@pytest.mark.parametrize("backend", ["native", "cudaMallocAsync", None])
 @pytest.mark.parametrize("hip", [None, "test"])
-def test_known_native_settings_allow_raw_copy(monkeypatch, settings, hip):
+def test_allocator_guards_use_active_backend(monkeypatch, backend, hip):
     monkeypatch.setattr(torch.version, "hip", hip)
-    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: settings)
+    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: backend)
+    owns_enablement = backend in ("native", None)
+    unusable = hip is not None and backend != "native"
+
+    assert p2p._allocator_is_native() is (backend == "native")
+    assert _REAL_RAW_PEER_COPY_UNSAFE() is (owns_enablement or unusable)
+    assert _REAL_ROCM_PEER_LINK_UNUSABLE() is unusable
+    assert _REAL_PYTORCH_OWNS_ENABLEMENT() is owns_enablement
+
+
+@pytest.mark.parametrize("settings", ["", "expandable_segments:False", "max_split_size_mb:256", None])
+@pytest.mark.parametrize("hip", [None, "test"])
+def test_native_allocator_settings_never_authorize_raw_copy(monkeypatch, settings, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch._C, "_accelerator_getAllocatorSettings", lambda: settings, raising=False)
     monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: "native")
 
-    assert _REAL_ALLOCATOR_FORCES_VMM() is False
-    assert _REAL_RAW_PEER_COPY_UNSAFE() is False
-    assert _REAL_PYTORCH_OWNS_ENABLEMENT() is False
-
-
-def test_non_native_allocator_restriction_is_rocm_only(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setattr(p2p, "_allocator_forces_vmm", lambda: True)
-    monkeypatch.setattr(p2p, "_allocator_is_native", lambda: False)
-
-    assert _REAL_RAW_PEER_COPY_UNSAFE() is False
+    assert _REAL_RAW_PEER_COPY_UNSAFE() is True
+    assert _REAL_PYTORCH_OWNS_ENABLEMENT() is True
     assert _REAL_ROCM_PEER_LINK_UNUSABLE() is False
-    assert _REAL_PYTORCH_OWNS_ENABLEMENT() is False
 
 
 def test_rocm_native_expandable_keeps_p2p_direct(monkeypatch):
@@ -1042,29 +1029,6 @@ def test_peer_copy_batch_rejects_mixed_group_before_probing(monkeypatch):
     ) is False
 
 
-@pytest.mark.parametrize(
-    ("settings", "backend", "native", "raw_unsafe", "owns_enablement"),
-    [
-        ("backend:native,expandable_segments:False", "cudaMallocAsync", False, True, False),
-        ("backend:cudaMallocAsync,expandable_segments:True", "native", True, True, True),
-        ("backend:native,expandable_segments:False", None, False, True, False),
-        (None, "native", True, True, True),
-    ],
-)
-@pytest.mark.parametrize("hip", [None, "test"])
-def test_allocator_guards_use_active_backend(
-    monkeypatch, settings, backend, native, raw_unsafe, owns_enablement, hip
-):
-    monkeypatch.setattr(torch.version, "hip", hip)
-    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: settings)
-    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: backend)
-
-    assert p2p._allocator_is_native() is native
-    assert _REAL_RAW_PEER_COPY_UNSAFE() is (raw_unsafe if hip is not None else owns_enablement)
-    assert _REAL_ROCM_PEER_LINK_UNUSABLE() is (hip is not None and not native)
-    assert _REAL_PYTORCH_OWNS_ENABLEMENT() is owns_enablement
-
-
 @pytest.mark.parametrize("failure_at", [1, 9, 10])
 def test_bandwidth_measurement_rejects_failed_copy(monkeypatch, failure_at):
     monkeypatch.setattr(torch.cuda, "synchronize", lambda device: None)
@@ -1078,18 +1042,13 @@ def test_bandwidth_measurement_rejects_failed_copy(monkeypatch, failure_at):
     assert len(calls) == failure_at
 
 
-@pytest.mark.parametrize("settings", ["", None])
-def test_runtime_allocator_settings_preserve_empty_and_unavailable(monkeypatch, settings):
-    monkeypatch.setattr(torch._C, "_accelerator_getAllocatorSettings", lambda: settings, raising=False)
-    assert p2p._runtime_alloc_conf_value() == settings
-
-
-def test_unknown_native_settings_delegate_without_loading_hip(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", "test")
-    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: "native")
-    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: None)
+@pytest.mark.parametrize("hip", [None, "test"])
+def test_unknown_backend_delegates_without_loading_runtime(monkeypatch, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: None)
     monkeypatch.setattr(torch.cuda, "set_device", lambda index: None)
-    monkeypatch.setattr(p2p, "_load_hip", lambda: pytest.fail("unknown settings must delegate"))
+    monkeypatch.setattr(p2p, "_load_hip", lambda: pytest.fail("unknown backend must delegate"))
+    monkeypatch.setattr(p2p, "_load_cuda", lambda: pytest.fail("unknown backend must delegate"))
 
     assert p2p._enable_one(0, 1) == (True, p2p.REASON_PYTORCH_ENABLEMENT)
 
@@ -1108,7 +1067,6 @@ def test_rocm_nested_opt_in_preserves_allocator_guard(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "test")
     p2p.configure_p2p(p2p.P2PConfig(use_rocm_nested_peer_copy=True))
     monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: "native")
-    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: "expandable_segments:True")
 
     class FakeTensor:
         def __init__(self, device):
@@ -1117,3 +1075,58 @@ def test_rocm_nested_opt_in_preserves_allocator_guard(monkeypatch):
     monkeypatch.setattr(p2p, "_peer_copy_runtime", lambda: pytest.fail("raw copy is unsafe"))
     assert p2p._rocm_nested_peer_disabled() is False
     assert p2p._peer_copy_batch_enqueue([FakeTensor("cuda:0")], [FakeTensor("cuda:1")]) is False
+
+
+@pytest.mark.parametrize("setting", [
+    "max_split_size_mb:256",
+    "",
+    "expandable_segments:False",
+    "expandable_segments:False,invalid_option:1",
+])
+def test_native_allocator_updates_keep_pytorch_ownership(setting):
+    """Settings updates cannot authorize raw copies of existing VMM tensors."""
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("two CUDA/HIP devices required")
+    if torch.cuda.get_allocator_backend() != "native":
+        pytest.skip("requires the native allocator")
+    if not all(torch.cuda.can_device_access_peer(src, 1 - src) for src in (0, 1)):
+        pytest.skip("two usable peer directions required")
+
+    # Allocator settings are process-global. Keep the transition and retained
+    # segments in a child so other tests never inherit a modified allocator.
+    script = textwrap.dedent("""
+        import sys
+        import torch
+        from gptqmodel.utils import p2p
+
+        torch._C._accelerator_setAllocatorSettings("expandable_segments:True")
+        expected = torch.arange(1024 * 1024, dtype=torch.int32)
+        sources = [expected.to(f"cuda:{index}") for index in (0, 1)]
+        segments = torch.cuda.memory_snapshot()
+        assert all(any(s["device"] == index and s["is_expandable"]
+                       for s in segments) for index in (0, 1))
+        setting = sys.argv[1]
+        try:
+            torch._C._accelerator_setAllocatorSettings(setting)
+        except (ValueError, RuntimeError):
+            assert "invalid_option" in setting
+        else:
+            assert "invalid_option" not in setting
+
+        assert p2p._pytorch_owns_peer_enablement(), setting
+        assert p2p._raw_peer_copy_unsafe(), setting
+        p2p.configure_p2p(p2p.P2PConfig(mode="on"))
+        status = p2p.enable_peer_access([0, 1])
+        for src in (0, 1):
+            dst = 1 - src
+            assert status.can_copy(src, dst), status.summary()
+            target = torch.empty_like(sources[src], device=f"cuda:{dst}")
+            assert not p2p.peer_copy_batch([sources[src]], [target])
+            p2p.copy_tensor_to(target, sources[src], status)
+            assert torch.equal(target.cpu(), expected)
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", script, setting],
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
