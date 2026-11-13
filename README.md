@@ -498,6 +498,19 @@ the Triton path for A/B runs.
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
 
+### Tenstorrent block-float emulation on CPU
+
+[`gptqmodel_ext/ttbfp/`](gptqmodel_ext/ttbfp/) is a standalone, bit-exact CPU
+emulation of Tenstorrent's `ttbf8` / `ttbf4` block-float formats, so models and
+kernels that use them can be tested without Tenstorrent hardware.  It ships a
+quantizer validated against the upstream `tt-llk` helpers, fused
+dequantize+GEMM microkernels for scalar / AVX2+FMA / AVX-512, block-major and
+int8 kernel-native layouts, and a 174-test bitwise-parity suite.  It is not
+built by `setup.py` and is not imported by `gptqmodel`; build it with
+`make -C gptqmodel_ext/ttbfp`.  See
+[`docs/ttbfp-cpu-emulation.md`](docs/ttbfp-cpu-emulation.md) for the dtype
+naming, dispatch flow and measured performance.
+
 ### Native MLX quantization on Apple silicon
 
 Install the optional MLX dependency and quantize a dense model directly to an

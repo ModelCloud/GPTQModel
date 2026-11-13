@@ -1,0 +1,19 @@
+ttbfp - CPU emulation of Tenstorrent block-float formats
+=========================================================
+
+The quantizer/dequantizer in `src/ttbfp_cpu.cpp` and
+`python/ttbfp/reference.py` mirrors the packing rules of the Tenstorrent
+tt-llk reference helpers (`pack.py`, `unpack.py`, `bfp_format_utils.py`):
+
+  SPDX-FileCopyrightText: (c) 2025-2026 Tenstorrent AI ULC
+  SPDX-License-Identifier: Apache-2.0
+
+The verbatim upstream helpers used for validation live in
+`tools/verify_against_tt.py`. No tt-metal source is compiled or linked.
+
+GPT-QModel changes:
+  * CPU encode/decode plus a fused dequantize+GEMM (scalar, AVX2+FMA,
+    AVX-512), with block-major and int8 kernel-native layouts
+  * optional CUDA port of the same kernels (compile-checked only)
+  * decoder-aware tile selection and a software-pipelined decode
+  * 174-test bitwise parity suite and same-process A/B benchmark
