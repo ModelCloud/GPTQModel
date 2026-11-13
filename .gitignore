@@ -249,6 +249,10 @@ gptqmodel_ext/exllamav2/hip/
 !gptqmodel_ext/nf12_hip/nf12_ad_validation.cuh
 !gptqmodel_ext/nf12_hip/nf12_ad_torch.cpp
 
+# Tenstorrent bf8/bf4 HIP emulation. Hand-written, not hipified from CUDA.
+!gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip.h
+!gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip.hip
+
 # TT-Metal writes fabric, watcher and inspector dumps here relative to the
 # working directory. They describe the local mesh and are not sources.
 /generated/

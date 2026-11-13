@@ -660,6 +660,42 @@ mutating the validated inference environment.
 and is not in the inference execution path. Firmware updates are intentionally
 outside this change.
 
+## Emulating bf8/bf4 on ROCm
+
+`gptqmodel_ext/tt_blockfloat_hip` executes the same packed `codes` and int8
+`exponents` a Tenstorrent device consumes on AMD GPUs. It exists to test and
+emulate `bfloat8_b` / `bfloat4_b` without Tenstorrent hardware; it does not
+replace the device kernels.
+
+The HIP kernels unpack bf4 nibbles / bf8 bytes in registers and fuse the
+dequantisation into the GEMM, so an expanded weight exists only in shared
+memory for one K tile. Decode (`m == 1`) uses a bandwidth-bound GEMV that reads
+each packed weight row once; prefill uses a 32x64x32 register-tiled fp32 GEMM,
+or RDNA4 WMMA when the activation is bf16 (bf8/bf4 values are exact in bf16).
+The WMMA path picks its CTA block, warp block and K tile from the token count:
+16x64/32x64 with 16x16 warps and a 256-wide K tile for up to 32 tokens, 64x64
+up to 64, and a 128x128 block with 32x32 warps and a 64-wide K tile above that.
+The dequantised values are exact float32 grid points, so results match
+`recompose_blockfloat` followed by an fp32 GEMM.
+
+`TTBlockfloatLinear`, `TTBlockfloatEmbedding` and `TTBlockfloatTiedHead`
+dispatch to these kernels when the module is on a ROCm device and fall back to
+torch otherwise. See `gptqmodel_ext/tt_blockfloat_hip/README.md` for the
+standalone `hipcc` validation harness and the measured R9700 numbers: ~18 us
+for a 4096x4096 bf4 decode, which is 91% of the card's measured read bandwidth
+once exponents are counted and therefore at the roofline, and 39 us for a
+32x4096x4096 bf16 prefill (185 us at 512 tokens). Prefill throughput is set by
+two tile properties: the M block fixes how many times the packed weight is
+re-read (once per block, and the 9 MiB weight no longer fits the 8 MiB L2), and
+the warp block fixes LDS traffic per WMMA (1 KiB at 16x16, 512 B at 32x32).
+Choosing both per shape raised the large-M rate from 38 to 93 TFLOP/s. Small-M
+prefill is parallelism-limited rather than arithmetic-limited: 16 tokens is 256
+output tiles and 32 tokens is 512, so the card only gets 8 and 16 warps per CU,
+giving 12 TFLOP/s at 16 tokens and 27 at 32. Larger warp blocks do not help
+there -- at 32 tokens a 32x32 warp block halves LDS traffic but leaves four
+warps on the card and measured slower -- so that ceiling needs a split-K
+workspace, which is not implemented.
+
 ## Scope and follow-up
 
 This change implements the following:
