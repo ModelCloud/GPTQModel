@@ -870,3 +870,10 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
         packed.pack_block(module, scale, zero, groups, workers=1)
     else:
         packed.pack_gpu(module, scale, zero, groups, device=torch.device(device))
+
+    def reference_words(values):
+        values = values.long().cpu().reshape(values.shape[0], -1, 8)
+        return sum(values[..., i] << (4 * i) for i in range(8)).to(torch.int32)
+
+    assert torch.equal(packed.qweight.cpu(), reference_words(codes).T)
+    assert torch.equal(packed.qzeros.cpu(), reference_words(expected_zero.T))

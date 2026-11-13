@@ -290,3 +290,29 @@ def test_hybrid_roles_resolve_for_both_token_mixers(hybrid_case):
         "linear_attn.conv1d.undeclared",
     ):
         assert plan.find(path) is None, path
+
+
+def test_checkpoint_conversions_resolve_to_declared_dense_owners(hybrid_case):
+    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+
+    # The source checkpoint stores three convolutions; Transformers combines
+    # them into conv1d. Audit ownership after the declared conversions rather
+    # than treating these source names as additional runtime modules.
+    conversions = get_checkpoint_conversion_mapping(MODEL_TYPE)
+    assert conversions
+    expected = {
+        "linear_attn.q_conv1d.weight": "linear_attn.conv1d.weight",
+        "linear_attn.k_conv1d.weight": "linear_attn.conv1d.weight",
+        "linear_attn.v_conv1d.weight": "linear_attn.conv1d.weight",
+        "attention_layer_norm.weight": "input_layernorm.weight",
+        "feedforward_layer_norm.weight": "post_attention_layernorm.weight",
+    }
+    for source, target in expected.items():
+        converted = f"{LAYERS_NODE}.0.{source}"
+        for conversion in conversions:
+            converted, _ = conversion.rename_source_key(converted)
+        assert converted == f"{LAYERS_NODE}.0.{target}"
+        owner = target.rsplit(".", 1)[0]
+        spec = hybrid_case.plan.find(owner)
+        assert spec is not None and not spec.quantize, (source, owner)
+        assert owner not in hybrid_case.specs
