@@ -39,8 +39,8 @@ from .gsq_scalar import gsq_enabled_for, refine_gptq_scalar
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import (
     HF_OPTIMUM,
-    Quantizer,
     SCALE_STORAGE_FLOOR,
+    Quantizer,
     _floor_scale_for_storage,
     _neutralize_dead_columns,
     _replace_zero_scale,
