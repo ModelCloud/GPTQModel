@@ -10,56 +10,64 @@ checked against the same plan consumers used by quantization.
 
 from __future__ import annotations
 
-import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 import transformers
 
-from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
+from gptqmodel.looper.module_looper import ModuleLooper
+from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
-from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
 QC = SimpleNamespace(dynamic=None)
-MODEL_TYPES = ("granite_swa", "granitemoe_swa")
+MODEL_CASES = (
+    pytest.param(("granite_swa", None), id="granite_swa"),
+    pytest.param(("granitemoe_swa", 64), id="granitemoe_swa-shared"),
+    pytest.param(("granitemoe_swa", 0), id="granitemoe_swa-no-shared"),
+)
 MOE_ROOT = "block_sparse_moe"
 EXPERTS = "block_sparse_moe.experts"
 
 
-def _config(model_type: str):
-    config = transformers.AutoConfig.for_model(model_type)
-    config.vocab_size = 128
-    config.hidden_size = 64
-    config.intermediate_size = 128
-    config.num_hidden_layers = 2
-    config.num_attention_heads = 4
-    config.num_key_value_heads = 2
-    config.pad_token_id = None
-    config.bos_token_id = None
-    config.eos_token_id = None
-    config.layer_types = ["full_attention", "sliding_attention"]
-    config.sliding_window = 16
-    if hasattr(config, "num_local_experts"):
-        config.num_local_experts = 4
-        config.num_experts_per_tok = 2
-    if hasattr(config, "shared_intermediate_size"):
-        config.shared_intermediate_size = 64
-    return config
+def _config(model_type: str, shared_intermediate_size: int | None = None):
+    kwargs = {
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "pad_token_id": None,
+        "bos_token_id": None,
+        "eos_token_id": None,
+        "layer_types": ["full_attention", "sliding_attention"],
+        "layer_rope_theta": [0, 10000],
+        "sliding_window": 16,
+    }
+    if model_type == "granitemoe_swa":
+        kwargs.update(
+            num_local_experts=4,
+            num_experts_per_tok=2,
+            shared_intermediate_size=shared_intermediate_size,
+        )
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
-@pytest.fixture(scope="module", params=MODEL_TYPES)
+@pytest.fixture(scope="module", params=MODEL_CASES)
 def case(request):
-    model_type = request.param
-    config = _config(model_type)
+    model_type, shared_intermediate_size = request.param
+    config = _config(model_type, shared_intermediate_size)
     definition = MODEL_MAP[model_type]
 
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     _convert_model_with_defuser(definition, model, cleanup_original=False)
+
+    wrapper = definition(model=model, quantized=False, quantize_config=None)
 
     layers, layer_names = get_layers_with_prefixes(model, definition.extract_layers_node())
     assert len(layers) == config.num_hidden_layers
@@ -68,34 +76,31 @@ def case(request):
     specs = tuple(
         sorted({name.split(":", 1)[0] for block in definition.simple_layer_modules(config, QC) for name in block})
     )
-    resolved = set()
-    for layer in layers:
-        resolved.update(find_modules(layer))
-
     return SimpleNamespace(
         model_type=model_type,
         config=config,
         definition=definition,
         model=model,
+        wrapper=wrapper,
         layers=layers,
         specs=specs,
-        resolved=resolved,
-        plan=ModulePlan.from_tree(definition.module_tree),
+        plan=wrapper.module_plan(),
     )
 
 
 def test_quantizable_specs_resolve_on_the_real_model(case):
-    for spec in case.specs:
-        pattern = re.compile("^" + re.escape(spec).replace(re.escape(EXPERT_INDEX_PLACEHOLDER), r"\d+") + "$")
-        assert any(pattern.match(name) for name in case.resolved), (
-            case.model_type,
-            spec,
-        )
+    specs = set(case.specs)
+    if case.model_type == "granitemoe_swa" and case.config.shared_intermediate_size == 0:
+        assert all(layer.shared_mlp is None for layer in case.layers)
+        specs.difference_update({"shared_mlp.input_linear", "shared_mlp.output_linear"})
+    for layer in case.layers:
+        assert specs == set(find_modules(layer)), case.model_type
 
 
 def test_every_checkpoint_weight_owner_is_declared(case):
     for layer in case.layers:
         modules = {name for name, _ in layer.named_modules() if name}
+        quantizable = find_modules(layer)
         for weight_path in layer.state_dict():
             owner = max(
                 (
@@ -107,14 +112,17 @@ def test_every_checkpoint_weight_owner_is_declared(case):
                 default="",
             )
             assert owner, (case.model_type, weight_path)
-            assert case.plan.find(owner) is not None, (
-                case.model_type,
-                owner,
-            )
+            spec = case.plan.find(owner)
+            assert spec is not None, (case.model_type, weight_path, owner)
+            if spec.quantize:
+                assert owner in case.specs, (case.model_type, weight_path, owner)
+                assert owner in quantizable, (case.model_type, weight_path, owner)
+            else:
+                assert {"!", "?"}.intersection(spec.flags), (case.model_type, weight_path, spec)
 
 
 def test_nonquantized_owners_carry_explicit_tags(case):
-    for name in ("input_layernorm", "post_attention_layernorm"):
+    for name in ("input_layernorm", "self_attn", "post_attention_layernorm"):
         spec = case.plan.find(name)
         assert spec is not None and not spec.quantize, (case.model_type, name)
 
@@ -122,8 +130,8 @@ def test_nonquantized_owners_carry_explicit_tags(case):
         router = case.plan.find(f"{MOE_ROOT}.router")
         assert router is not None and not router.quantize
 
-    # The learnable attention sink is a direct parameter on the quantizable
-    # attention container, so it is never replaced by a quantized linear.
+    # The direct sink owner is excluded while its projection children remain
+    # quantizable. A container declaration alone does not establish that policy.
     for layer in case.layers:
         assert isinstance(layer.self_attn.sinks, torch.nn.Parameter)
         assert not isinstance(layer.self_attn.sinks, torch.nn.Linear)
@@ -172,3 +180,31 @@ def test_undeclared_descendants_are_rejected(case):
     assert case.plan.find("mlp.unknown_proj") is None
     if case.model_type == "granitemoe_swa":
         assert case.plan.find(f"{EXPERTS}.0.unknown_proj") is None
+
+
+def test_moe_plan_reaches_live_hooks_and_looper_grouping(case):
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = case.wrapper
+    weight_only = WeightOnlyLooper.__new__(WeightOnlyLooper)
+    weight_only.gptq_model = case.wrapper
+
+    if case.model_type != "granitemoe_swa":
+        assert not case.plan.moe_roots()
+        return
+
+    hooks = case.wrapper.moe_lifecycle_hooks
+    assert hooks.module_plan is case.plan
+    for layer in case.layers:
+        block = hooks.get_moe_block(layer, case.wrapper)
+        assert block is layer.block_sparse_moe
+        assert hooks.get_experts_module(block, case.wrapper) is block.experts
+        # The shared MLP is a decoder sibling, outside the routed MoE root.
+        assert hooks.get_shared_experts_module(block, case.wrapper) is None
+        for index in range(case.config.num_local_experts):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                name = f"{EXPERTS}.{index}.{projection}"
+                expected = f"{EXPERTS}.{index}"
+                assert looper._extract_moe_group_key(name) == expected
+                assert weight_only._extract_moe_group_key(name) == expected
+                assert looper._extract_moe_group_key(name + ".unknown") is None
+    assert looper._extract_moe_group_key("shared_mlp.input_linear") is None
