@@ -13,10 +13,6 @@ capability is read, and the NVIDIA-specific checks run only on CUDA builds.
 
 from __future__ import annotations
 
-import os
-import shutil
-from pathlib import Path
-
 import torch
 
 from gptqmodel.models._const import DEVICE, normalize_device
@@ -118,16 +114,6 @@ def swordfish_skip_reason(device: torch.device | None = None) -> str | None:
     )
 
 
-def _nvcc() -> str | None:
-    """Locate nvcc the same way ``gptqmodel_nf12._jit`` does."""
-    from torch.utils.cpp_extension import CUDA_HOME
-
-    candidate = os.environ.get("CUDACXX")
-    if not candidate:
-        candidate = Path(CUDA_HOME) / "bin" / "nvcc" if CUDA_HOME else "nvcc"
-    return shutil.which(str(candidate))
-
-
 def nf12_skip_reason() -> str | None:
     """Return why the vendored NF12 native operators cannot be used here."""
     reason = cuda_only_skip_reason("gptqmodel_nf12")
@@ -148,20 +134,14 @@ def nf12_skip_reason() -> str | None:
             f"{_device_list(unsupported)}"
         )
 
-    missing = [name for name in ("cmake", "ninja") if shutil.which(name) is None]
-    if _nvcc() is None:
-        missing.append("nvcc")
-    if missing:
-        return (
-            "gptqmodel_nf12 native operators require "
-            f"{', '.join(missing)} (CUDA toolkit 13.0+, CMake 3.26+); "
-            "the source build is unavailable"
-        )
-
-    # Once the prerequisites pass, build/load errors are test failures. The
-    # loader already caches successful initialization; never cache an error as
-    # a skip or a compiler/source regression makes the entire suite false green.
+    # The loader reuses registered operators, packaged libraries and successful
+    # JIT builds without compiler tools. Only a real source-build cache miss can
+    # report missing tools; binary, compiler and registration errors must fail.
     import gptqmodel_nf12 as nf12
+    from gptqmodel_nf12._jit import _MissingBuildTools
 
-    nf12.load()
+    try:
+        nf12.load()
+    except _MissingBuildTools as exc:
+        return f"gptqmodel_nf12 source build is unavailable: {exc}"
     return None

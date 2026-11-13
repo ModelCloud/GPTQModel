@@ -25,6 +25,12 @@ _BUILD_ENV = (
     "CUDACXX", "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX", "CXX", "CXXFLAGS",
     "CUDAFLAGS", "LDFLAGS", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS",
 )
+
+
+class _MissingBuildTools(RuntimeError):
+    """A source build is required but its compiler tools are unavailable."""
+
+
 _lock = threading.Lock()
 _directory: Path | None = None
 
@@ -98,7 +104,7 @@ def _build(source: Path, directory: Path, archs: list[int]) -> None:
         nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
     nvcc = shutil.which(nvcc)
     if not cmake or not ninja or not nvcc:
-        raise RuntimeError(
+        raise _MissingBuildTools(
             "nf12: JIT compilation requires CUDA toolkit 13.0+ (nvcc), CMake 3.26+, "
             "Ninja, and a C++ compiler; set CUDA_HOME or CUDACXX to locate CUDA"
         )
