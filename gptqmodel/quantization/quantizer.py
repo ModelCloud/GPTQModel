@@ -16,22 +16,24 @@ log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
 
-# GPTQ/AWQ checkpoints store group scales as FP16. A positive scale below the
-# smallest FP16 subnormal would be lost when the checkpoint is written, so the
-# quantizer floors near-dead groups at that value before computing codes. The
-# affected weights are below one code step, so the absolute error stays below
-# the FP16 scale resolution.
+# GPTQ checkpoints store group scales as FP16. Bound scales before computing
+# codes so near-dead groups survive packing. This bounds the scale, not the
+# weight range: a low-bit group can span several of these steps.
 SCALE_STORAGE_FLOOR = 2.0**-24
 
 
-def _floor_scale_for_storage(scale: torch.Tensor) -> torch.Tensor:
-    """Lift positive scales that would underflow the FP16 checkpoint layout."""
+def _floor_scale_for_storage(
+    scale: torch.Tensor,
+    minimum: float | torch.Tensor = SCALE_STORAGE_FLOOR,
+) -> torch.Tensor:
+    """Bound nonnegative scales, including zeros from arithmetic underflow.
 
-    return torch.where(
-        (scale > 0) & (scale < SCALE_STORAGE_FLOOR),
-        torch.full_like(scale, SCALE_STORAGE_FLOOR),
-        scale,
-    )
+    ``minimum`` may be expressed in a normalized weight domain when the caller
+    restores a smoothing factor after quantization. Nonfinite/negative scales
+    remain visible to validation.
+    """
+
+    return torch.where((scale >= 0) & (scale < minimum), minimum, scale)
 
 
 def _replace_zero_scale(
@@ -295,7 +297,15 @@ class Quantizer(nn.Module):
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
 
-    def find_params(self, x, weight=False):
+    def find_params(
+        self, x, weight=False, *, scale_min: float | torch.Tensor = SCALE_STORAGE_FLOOR,
+    ):
+        """Fit ranges; ``scale_min`` is a weight bound in the input's domain.
+
+        A smoother that later restores a per-row factor must divide the FP16
+        storage floor by that factor and pass the resulting row vector here.
+        Activation ranges and ternary endpoints do not use this weight bound.
+        """
         dev = x.device
         if self.maxq.device != dev:
             self.maxq = self.maxq.to(dev)
@@ -349,12 +359,12 @@ class Quantizer(nn.Module):
                 # Only weight scales are persisted in the FP16 checkpoint
                 # layout; activation scales keep their natural magnitude.
                 if weight:
-                    self.scale = _floor_scale_for_storage(self.scale)
+                    self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 self.zero = torch.zeros_like(self.scale)
             else:
                 self.scale = (xmax - xmin) / self.maxq
                 if weight:
-                    self.scale = _floor_scale_for_storage(self.scale)
+                    self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 if self.qcfg.sym:
                     # ``maxq`` is odd here, so the host-side half is exact.
                     self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
@@ -364,7 +374,10 @@ class Quantizer(nn.Module):
         mse_cfg = getattr(self.qcfg, "mse", None)
         mse = mse_cfg.norm if isinstance(mse_cfg, MSEConfig) else float(mse_cfg or 0.0)
         if mse > 0.0:
-            self._mse_shrink_grid(x, xmin, xmax, mse)
+            self._mse_shrink_grid(
+                x, xmin, xmax, mse,
+                scale_min=scale_min if weight and self._maxq_value >= 0 else None,
+            )
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -394,6 +407,8 @@ class Quantizer(nn.Module):
         xmin: torch.Tensor,
         xmax: torch.Tensor,
         mse: float,
+        *,
+        scale_min: float | torch.Tensor | None,
     ) -> None:
         """Evaluate every shrink-grid candidate's scale/zero and keep the winners.
 
@@ -424,6 +439,11 @@ class Quantizer(nn.Module):
         xmin1 = p * xmin.unsqueeze(0)
         xmax1 = p * xmax.unsqueeze(0)
         scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
+        # Evaluate the same representable scales that will be packed. Flooring
+        # only the initial/final winner would select against a different grid,
+        # and asymmetric zero points must be computed from the bounded scale.
+        if scale_min is not None:
+            scale1 = _floor_scale_for_storage(scale1, scale_min)
         if self.qcfg.sym:
             zero1 = self.zero.unsqueeze(0).expand(steps, rows)
         else:

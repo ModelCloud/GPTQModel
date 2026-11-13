@@ -128,3 +128,89 @@ def test_packer_rejects_scale_lost_at_fp16_storage_boundary(method, scale):
     g_idx = torch.zeros(32, dtype=torch.int32, device=device)
     with pytest.raises(ValueError, match="layer.q_proj.scales"):
         getattr(module, method)(source, scales, zeros, g_idx)
+
+
+def _packed_words(codes, bits):
+    """Independent Python-integer writer, with no production packing helpers."""
+    packed = []
+    for row in codes.cpu().tolist():
+        words = []
+        for start in range(0, len(row), 32 // bits):
+            word = sum(int(code) << (bits * i) for i, code in enumerate(row[start:start + 32 // bits]))
+            words.append(word - 2**32 if word >= 2**31 else word)
+        packed.append(words)
+    return torch.tensor(packed, dtype=torch.int32)
+
+
+_SCALE_DEVICES = ["cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+
+
+@pytest.mark.parametrize("device", _SCALE_DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("sym", [False, True])
+@pytest.mark.parametrize("mse", [0.0, 2.4])
+def test_near_dead_quantizer_codes_and_packed_bytes(device, dtype, bits, sym, mse):
+    # Exact half-steps, their input-dtype neighbors, both signs, signed zero,
+    # and endpoints. All candidate ranges lie below the FP16 scale floor.
+    half = torch.tensor([-0.5, 0.5], dtype=dtype, device=device) * 2.0**-24
+    samples = torch.cat((
+        torch.nextafter(half, torch.full_like(half, -torch.inf)),
+        half,
+        torch.nextafter(half, torch.full_like(half, torch.inf)),
+        torch.tensor([-0.75, -0.0, 0.0, 0.75], dtype=dtype, device=device) * 2.0**-24,
+    ))
+    row = samples.repeat(13)[:128]
+    weights = torch.stack((row, row.abs(), -row.abs())).repeat(11, 1)[:32]
+    qcfg = QuantizeConfig(bits=bits, group_size=128, sym=sym, mse=mse, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True)
+    quantizer.find_params(weights, weight=True)
+
+    # FP64 oracle from the actual input values: neither the selected parameters
+    # nor dequantized weights from the implementation supply expected values.
+    reference = weights.double()
+    scale = torch.full((32, 1), 2.0**-24, dtype=torch.float64, device=device)
+    zero = (torch.full_like(scale, 2**(bits - 1)) if sym else
+            (-reference.amin(1, keepdim=True).clamp_max(0) / scale).round())
+    codes = (reference.div(scale).round() + zero).clamp(0, 2**bits - 1).long()
+    expected = (codes - zero) * scale
+    torch.testing.assert_close(quantizer.scale.double(), scale, rtol=0, atol=0)
+    torch.testing.assert_close(quantizer.zero.double(), zero, rtol=0, atol=0)
+    actual = quantizer.quantize(weights)
+    torch.testing.assert_close(actual.double(), expected, rtol=0, atol=0)
+
+    source = torch.nn.Linear(128, 32, bias=False, dtype=dtype, device=device)
+    with torch.no_grad():
+        source.weight.copy_(actual)
+    packed = TorchLinear(bits=bits, group_size=128, sym=sym, desc_act=False,
+                         in_features=128, out_features=32, bias=False)
+    groups = torch.zeros(128, dtype=torch.int32, device=device)
+    if device == "cpu":
+        packed.pack_block(source, quantizer.scale, quantizer.zero, groups, workers=1)
+    else:
+        packed.pack_gpu(source, quantizer.scale, quantizer.zero, groups, device=torch.device(device))
+    assert torch.equal(packed.qweight.cpu(), _packed_words(codes, bits).T)
+    assert torch.equal(packed.qzeros.cpu(), _packed_words(zero.long().T, bits))
+    torch.testing.assert_close(packed.scales.double().cpu(), scale.T.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", _SCALE_DEVICES)
+@pytest.mark.parametrize("mse", [0.0, 2.4])
+def test_positive_weight_range_that_arithmetically_underflows_is_bounded(device, mse):
+    quantizer = Quantizer(QuantizeConfig(bits=8, group_size=128, mse=mse, offload_to_disk=False))
+    quantizer.configure(perchannel=True)
+    weights = torch.full((4, 128), 1e-44, device=device)
+    quantizer.find_params(weights, weight=True)
+    assert torch.all(quantizer.scale == 2.0**-24)
+    assert torch.equal(quantizer.quantize(weights), torch.zeros_like(weights))
+    _scales_for_storage(quantizer.scale, name="underflow.scales")
+
+
+@pytest.mark.parametrize("device", _SCALE_DEVICES)
+def test_activation_scale_is_not_floored_by_weight_storage(device):
+    for mse in (0.0, 2.4):
+        quantizer = Quantizer(QuantizeConfig(bits=4, group_size=128, mse=mse, offload_to_disk=False))
+        quantizer.configure(perchannel=True)
+        quantizer.find_params(torch.full((128, 4), 1e-7, device=device), weight=False)
+        assert torch.all(quantizer.scale < 2.0**-24)

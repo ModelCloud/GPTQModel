@@ -488,6 +488,42 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError(f"concurrent GPTQ scale guard misclassified scales: {message}")
         return True
 
+    scale_floor_thread = threading.local()
+    scale_floor_lock = threading.Lock()
+    scale_floor_next_device = [0]
+
+    def gptq_weight_scale_floor() -> bool:
+        """Check bounded MSE scales and normalized-domain floors concurrently."""
+        from gptqmodel.quantization.config import QuantizeConfig
+        from gptqmodel.quantization.quantizer import Quantizer, _floor_scale_for_storage
+
+        with scale_floor_lock:
+            if not hasattr(scale_floor_thread, "device"):
+                scale_floor_thread.device = scale_floor_next_device[0] % 2
+                scale_floor_next_device[0] += 1
+        torch.cuda.set_device(scale_floor_thread.device)
+        raw = torch.tensor([0.0, 1e-40, 2.0**-24, 2.0**-23, -1.0], device="cuda")
+        bounded = _floor_scale_for_storage(raw)
+        expected = torch.tensor([2.0**-24, 2.0**-24, 2.0**-24, 2.0**-23, -1.0], device="cuda")
+        if not torch.equal(bounded, expected):
+            raise AssertionError("concurrent weight scale floor changed its bounds")
+        unit = torch.tensor([-0.75, -0.5, 0.0, 0.5, 0.75], device="cuda").repeat(8, 26)[:, :128]
+        for sym in (False, True):
+            for factor in (1.0, 8.0):
+                scale_min = torch.full((8,), 2.0**-24 * factor, device="cuda")
+                weight = unit * scale_min.unsqueeze(1)
+                qcfg = QuantizeConfig(bits=4, group_size=128, sym=sym, mse=2.4, offload_to_disk=False)
+                quantizer = Quantizer(qcfg)
+                quantizer.configure(perchannel=True)
+                quantizer.find_params(weight, weight=True, scale_min=scale_min)
+                output = quantizer.quantize(weight)
+                torch.cuda.current_stream().synchronize()
+                if not torch.equal(quantizer.scale.flatten(), scale_min):
+                    raise AssertionError("concurrent MSE search lost the weight scale floor")
+                if not torch.equal(output, unit.round() * scale_min.unsqueeze(1)):
+                    raise AssertionError("concurrent bounded MSE quantization changed codes")
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -532,6 +568,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "Tensor.index_select row gather": embedding_row_gather,
         "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
+        "GPTQ weight scale floor": gptq_weight_scale_floor,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -622,7 +659,7 @@ def _no_grad_result(torch: Any, context: Callable[[], Any]) -> bool:
 def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
-            or name in ("AWQ FP32 dequantize_gemm", "GPTQ FP16 scale storage guard"))
+            or name in ("AWQ FP32 dequantize_gemm", "GPTQ FP16 scale storage guard", "GPTQ weight scale floor"))
 
 
 def run_child(name: str) -> int:

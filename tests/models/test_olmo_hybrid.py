@@ -31,6 +31,8 @@ class TestOlmoHybrid(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     LOAD_BACKEND = BACKEND.AUTO
     USE_FLASH_ATTN = False
+    # The first full-attention block follows three DeltaNet blocks.
+    MODEL_COMPAT_FAST_LAYER_COUNT = 4
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     # The hybrid DeltaNet reference forward is stateful; keep this 7B smoke
     # test on one device so calibration and evaluation share one allocator.

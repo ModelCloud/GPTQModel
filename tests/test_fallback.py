@@ -809,3 +809,64 @@ def test_gptq_fallback_threshold_triggers_rtn_when_samples_below_percent():
     assert nsamples == 1
     assert avg_loss.startswith("fallback(rtn): ")
     assert (Q - layer.weight.data).abs().mean().item() == pytest.approx(0.0120230, abs=1e-7)
+
+
+@pytest.mark.parametrize("device", ["cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())])
+@pytest.mark.parametrize("strategy", list(FallbackStrategy))
+@pytest.mark.parametrize("smoothing", [None, "mse", "row", "col"])
+@pytest.mark.parametrize("sym", [False, True])
+def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strategy, smoothing, sym):
+    from gptqmodel.nn_modules.qlinear import _scales_for_storage
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.quantization.config import SmoothMSE, SmoothRowCol
+
+    smooth = (SmoothMSE() if smoothing == "mse" else
+              SmoothRowCol(axis=smoothing) if smoothing in ("row", "col") else None)
+    module = nn.Linear(128, 32, bias=False, device=device)
+    with torch.no_grad():
+        module.weight.copy_(torch.linspace(-0.8, 0.9, 128, device=device).repeat(32, 1) * 2.0**-24)
+    config = QuantizeConfig(bits=4, group_size=128, sym=sym,
+                            fallback=Fallback(strategy=strategy, smooth=smooth), offload_to_disk=False)
+    task = GPTQ(module, config)
+    task.quantizer.configure(perchannel=True)
+    quantized, scale, zero, groups, *_ = task._fallback_quantize(strategy, blocksize=128)
+
+    # Independent FP64 fallback math in the original weight domain. Each range
+    # is narrower than one scale step, even after std clipping; every MSE
+    # candidate has the same floored scale and affine zero point for this case.
+    source = module.weight.detach().double()
+    expected_scale = torch.full_like(scale, 2.0**-24, dtype=torch.float64)
+    if smoothing == "mse" or strategy == FallbackStrategy.RTN:
+        expected_zero = (torch.full_like(expected_scale, 8) if sym else
+                         (-source.amin(1, keepdim=True) / expected_scale).round())
+        if smoothing == "mse":
+            codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
+        else:
+            codes = ((source / expected_scale).round() + expected_zero).clamp(0, 15)
+    elif strategy == FallbackStrategy.STDCLIP:
+        lo = source.mean(1, keepdim=True) - 3 * source.std(1, keepdim=True, unbiased=False)
+        expected_zero = (-lo / expected_scale).round().clamp(0, 15)
+        codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
+    else:
+        if strategy == FallbackStrategy.MIDPOINT:
+            center = (source.amin(1, keepdim=True) + source.amax(1, keepdim=True)) / 2
+        elif strategy == FallbackStrategy.MEAN:
+            center = source.mean(1, keepdim=True)
+        else:
+            center = source.median(1, keepdim=True).values
+        expected_zero = (7.5 - center / expected_scale).round().clamp(0, 15)
+        codes = ((source - center) / expected_scale + 7.5).round().clamp(0, 15)
+    expected = (codes - expected_zero) * expected_scale
+    torch.testing.assert_close(scale.double(), expected_scale, rtol=1e-6, atol=0)
+    torch.testing.assert_close(zero.double(), expected_zero, rtol=0, atol=0)
+    torch.testing.assert_close(quantized.double(), expected, rtol=1e-6, atol=0)
+    assert torch.all(_scales_for_storage(scale, name="fallback.scales") > 0)
+
+    with torch.no_grad():
+        module.weight.copy_(quantized)
+    packed = TorchLinear(bits=4, group_size=128, sym=sym, desc_act=False,
+                         in_features=128, out_features=32, bias=False)
+    if device == "cpu":
+        packed.pack_block(module, scale, zero, groups, workers=1)
+    else:
+        packed.pack_gpu(module, scale, zero, groups, device=torch.device(device))
