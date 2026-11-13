@@ -24,6 +24,19 @@ defined at the bit level, for both weights and arithmetic, in
 [`hw/dtypes.md`](../hw/dtypes.md). Hardware measurements for this box are in
 [`hw/tenstorrent.md`](../hw/tenstorrent.md).
 
+## CPU kernels
+
+[`gptqmodel_ext/ttbfp/`](../gptqmodel_ext/ttbfp/) executes the same packed
+`bf8_b`/`bf4_b`/`bf2_b` block floats on ordinary CPUs, with no Tenstorrent
+runtime, PJRT plugin, or card present. It is a standalone C/C++ extension with a
+quantizer validated bit-for-bit against the upstream `tt-llk` helpers and fused
+dequantize+GEMM microkernels for scalar, AVX2+FMA and AVX-512. This makes it
+possible to check a converted checkpoint, reproduce a TT numerical result, or
+develop against the block-float formats on a laptop or CI runner. Build it with
+`make -C gptqmodel_ext/ttbfp`; it is not imported by `gptqmodel`. See
+[`docs/tt-blockfloat-cpu.md`](tt-blockfloat-cpu.md) for the dtype definition,
+layouts, dispatch, and measured performance.
+
 The two backends are mutually exclusive within one process. TT-Metal allows a
 single runtime owner per chip, and initializing the PJRT plugin is irreversible,
 so a process that has used `XLALinear` cannot then open a `ttnn.MeshDevice`.
