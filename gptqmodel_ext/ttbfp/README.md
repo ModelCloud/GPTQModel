@@ -424,7 +424,7 @@ Single thread, `K = N = 4096`, process CPU time, same process, same data:
 | bf4_b | 1 | 2.84 ms | 1.92 ms | **1.81 ms** | n/a | **1.6x** |
 | bf4_b | 4 | 3.41 ms | 2.75 ms | **2.59 ms** | n/a | **1.3x** |
 | bf4_b | 16 | 13.70 ms | 10.78 ms | **7.35 ms** | n/a | **1.9x** |
-| bf4_b | 64 | 54.73 ms | 43.25 ms | **29.31 ms** | n/a | **2.1x** |
+| bf4_b | 64 | 54.73 ms | 43.25 ms | **29.31 ms** | n/a | **1.9x** |
 
 With 8 threads and `bench/ab_compare.py`, the int8 layout against the original
 row-major release gives 4.5x / 2.2x / 2.2x / 2.4x for bf8_b at M = 1 / 4 /
