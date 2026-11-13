@@ -170,6 +170,195 @@ def test_cpu_dequant_matches_independent_formula():
     assert layout.bias.dtype == torch.bfloat16
 
 
+# ---------------------------------------------------------------------------
+# HIP dispatch routing (CPU, with only the backend availability mocked)
+# ---------------------------------------------------------------------------
+
+
+def _hip_routing(monkeypatch, *, available=True):
+    """Make the HIP kernels look reachable so the routing itself is exercised.
+
+    ``is_cuda`` is a property on the tensor type, so patching it is the only way
+    to reach the dispatch branch on a CPU-only host. The kernels themselves are
+    never executed here: every entry point the forward would call is replaced.
+    """
+
+    from gptqmodel.utils import tt_blockfloat_hip
+
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(tt_blockfloat_hip, "available", lambda device=None: available)
+    return tt_blockfloat_hip
+
+
+def _blockfloat_linear(bits=4, in_features=16, out_features=3):
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+
+    return TTBlockfloatLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        backend=BACKEND.TT_BLOCKFLOAT,
+        name="proj",
+    )
+
+
+@pytest.mark.parametrize(
+    "shape, expected",
+    [((16,), (1, 16)), ((2, 16), (2, 16)), ((1, 2, 16), (2, 16)), ((1, 2, 3, 16), (6, 16))],
+)
+def test_hip_linear_flattens_leading_dimensions(monkeypatch, shape, expected):
+    """The binding takes a 2-D activation; F.linear accepted any leading dims."""
+
+    hip = _hip_routing(monkeypatch)
+    module = _blockfloat_linear()
+    seen = {}
+
+    def fake_linear(x, codes, exponents, bits, bias):
+        seen["shape"] = tuple(x.shape)
+        return torch.zeros(x.shape[0], 3)
+
+    monkeypatch.setattr(hip, "linear", fake_linear)
+
+    out = module(torch.zeros(*shape))
+
+    assert seen["shape"] == expected
+    assert out.shape == shape[:-1] + (3,)
+
+
+def test_tied_head_uses_the_embedding_width_and_flattens(monkeypatch):
+    """TTBlockfloatTiedHead holds no ``bits`` of its own; the embedding owns it."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    hip = _hip_routing(monkeypatch)
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    head = TTBlockfloatTiedHead(embedding, name="head")
+    assert not hasattr(head, "bits")
+
+    seen = {}
+
+    def fake_linear(x, codes, exponents, bits, bias):
+        seen["shape"] = tuple(x.shape)
+        seen["bits"] = bits
+        return torch.zeros(x.shape[0], 3)
+
+    monkeypatch.setattr(hip, "linear", fake_linear)
+
+    out = head(torch.zeros(1, 2, 16))
+
+    assert seen == {"shape": (2, 16), "bits": 4}
+    assert out.shape == (1, 2, 3)
+
+
+def test_embedding_with_a_wider_block_stays_on_the_torch_path(monkeypatch):
+    """The kernels bind one exponent per 16 values, so block=32 cannot dispatch."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatEmbedding
+
+    hip = _hip_routing(monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("HIP embedding must not be used for block != 16")
+
+    monkeypatch.setattr(hip, "embedding", refuse)
+    monkeypatch.setattr(hip, "dequantize", refuse)
+
+    embedding = TTBlockfloatEmbedding(3, 32, bits=4, block=32, name="embed")
+    assert embedding.block == 32
+    assert not embedding.hip_dispatch(torch.zeros(4, 32))
+
+    ids = torch.tensor([[0, 2]], dtype=torch.int64)
+    got = embedding(ids)
+    assert got.shape == (1, 2, 32)
+    assert torch.equal(got, embedding.dequantize()[ids])
+
+
+def test_embedding_accepts_int32_indices(monkeypatch):
+    """F.embedding accepts int32; the binding indexes with int64."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatEmbedding
+
+    hip = _hip_routing(monkeypatch)
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    seen = {}
+
+    def fake_embedding(ids, codes, exponents, bits, rows, cols, dtype):
+        seen["dtype"] = ids.dtype
+        seen["shape"] = tuple(ids.shape)
+        return torch.zeros(*ids.shape, cols)
+
+    monkeypatch.setattr(hip, "embedding", fake_embedding)
+
+    out = embedding(torch.tensor([0, 2], dtype=torch.int32))
+
+    assert seen == {"dtype": torch.int64, "shape": (2,)}
+    assert out.shape == (2, 16)
+
+
+def test_empty_batches_short_circuit_before_the_kernels(monkeypatch):
+    """An empty batch must not reach a launcher that rejects null pointers."""
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    hip = _hip_routing(monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("an empty batch must not reach the kernel")
+
+    monkeypatch.setattr(hip, "embedding", refuse)
+    monkeypatch.setattr(hip, "linear", refuse)
+
+    embedding = TTBlockfloatEmbedding(3, 16, bits=4, name="embed")
+    empty_ids = torch.zeros(0, dtype=torch.int64)
+    out = embedding(empty_ids)
+    assert out.shape == (0, 16)
+    assert out.dtype == torch.float32
+
+    head = TTBlockfloatTiedHead(embedding, name="head")
+    hidden = torch.zeros(1, 0, 16)
+    projected = head(hidden)
+    assert projected.shape == (1, 0, 3)
+    assert projected.dtype == hidden.dtype
+
+
+def test_bfloat2_b_grid_is_three_levels_and_packs_four_per_byte():
+    """bfloat2_b is a sign bit plus one magnitude bit, so a block holds
+    ``{-1, 0, +1} x 2**exponent`` and four codes share a byte."""
+
+    from gptqmodel.utils.tt_blockfloat_quant import (
+        _pack_codes,
+        _unpack_codes,
+        decompose_blockfloat,
+        quantize_blockfloat,
+        recompose_blockfloat,
+        stored_mantissa_bits,
+    )
+
+    assert stored_mantissa_bits(2) == 0
+
+    generator = torch.Generator().manual_seed(7)
+    weight = torch.randn(4, 32, generator=generator) * 0.3
+
+    rounded, exponents = quantize_blockfloat(weight, 2)
+    scale = torch.pow(2.0, exponents.float()).repeat_interleave(16, dim=1)
+    # Every stored value is zero or one magnitude step off the shared exponent.
+    assert torch.all((rounded == 0) | (rounded.abs() == scale))
+
+    codes, recovered = decompose_blockfloat(rounded, 2)
+    assert torch.equal(recompose_blockfloat(codes, recovered, 2), rounded)
+
+    packed = _pack_codes(codes, 2)
+    assert packed.numel() == codes.numel() // 4
+    assert torch.equal(_unpack_codes(packed, 2, tuple(codes.shape)), codes)
+
+
 def test_layout_rejects_contract_violations():
     fixture = _fixture()
     with pytest.raises(NotImplementedError, match="symmetric"):
@@ -1287,14 +1476,16 @@ def test_blockfloat_mantissa_widths():
     import importlib
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
-    assert bq.BLOCKFLOAT_BITS == {"bf4_b": 4, "bf8_b": 8}
+    assert bq.BLOCKFLOAT_BITS == {"bf2_b": 2, "bf4_b": 4, "bf8_b": 8}
     # One sign bit and one implicit mantissa bit are not stored.
     assert bq.stored_mantissa_bits(8) == 6
     assert bq.stored_mantissa_bits(4) == 2
+    # At two bits there is no stored mantissa: the magnitude bit is the value.
+    assert bq.stored_mantissa_bits(2) == 0
 
 
 def test_blockfloat_dtype_names_are_canonical():
-    """The two block-float dtypes are named ``bf4_b`` and ``bf8_b``.
+    """The block-float dtypes are named ``bf2_b``, ``bf4_b`` and ``bf8_b``.
 
     The names are Tenstorrent formats, not industry ones: OCP microscaling uses
     a per-32 ``E8M0`` scale and NVFP4 a per-16 ``FP8`` scale, and neither is
@@ -1311,7 +1502,9 @@ def test_blockfloat_dtype_names_are_canonical():
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
-    assert bq.TT_BLOCKFLOAT_DTYPES == {4: "bf4_b", 8: "bf8_b"}
+    assert bq.TT_BLOCKFLOAT_DTYPES == {2: "bf2_b", 4: "bf4_b", 8: "bf8_b"}
+    # ttnn exposes no bfloat2_b attribute, so bf2_b has no vendor spelling.
+    assert 2 not in bq.TT_BLOCKFLOAT_VENDOR_ATTRS
     # No vendor prefix: the shortening is deliberate, not an oversight.
     assert not any(name.startswith("tt") for name in bq.TT_BLOCKFLOAT_DTYPES.values())
     # The canonical name only shortens "bfloat"; every other part of the vendor
