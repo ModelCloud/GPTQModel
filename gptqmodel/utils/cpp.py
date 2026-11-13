@@ -606,10 +606,63 @@ def detected_local_cuda_include_paths() -> list[str]:
 
 
 _ROCM_TOOLKIT_ROOT_ENV_VARS = ("ROCM_PATH", "HIP_PATH", "ROCM_HOME")
+_ROCM_DEFAULT_ROOT = Path("/opt/rocm")
+_ROCM_DEVICE_BITCODE = Path("lib") / "llvm" / "amdgcn" / "bitcode"
 
 
-def _rocm_sdk_devel_include_paths() -> list[str]:
-    """Return the TheRock pip ROCm SDK devel include tree when it is expanded.
+def _rocm_toolkit_version_names() -> tuple[str, ...]:
+    """Return the directory names a version-matched full SDK may use.
+
+    TheRock installs full core SDKs as ``/opt/rocm/core-<major>.<minor>`` while
+    ``torch.version.rocm`` reports the full ``<major>.<minor>.<patch>`` version.
+    """
+
+    version = getattr(torch.version, "rocm", None)
+    if not version:
+        return ()
+    parts = str(version).split(".")
+    names = [f"core-{version}"]
+    if len(parts) >= 2:
+        names.append(f"core-{parts[0]}.{parts[1]}")
+    names.append(f"core-{parts[0]}")
+    return tuple(dict.fromkeys(names))
+
+
+def _rocm_core_root_sort_key(root: Path) -> tuple[int, ...]:
+    """Return a numeric sort key for a ``/opt/rocm/core-<version>`` directory."""
+
+    suffix = root.name[len("core-"):] if root.name.startswith("core-") else root.name
+    key: list[int] = []
+    for token in suffix.replace("-", ".").split("."):
+        key.append(int(token) if token.isdigit() else -1)
+    return tuple(key)
+
+
+def _rocm_core_roots() -> list[Path]:
+    """Return full ROCm SDK roots installed as ``/opt/rocm/core-<version>``.
+
+    TheRock keeps the pip runtime ``_rocm_sdk_core`` sparse (HIP headers only)
+    and installs the matching development headers, unversioned libraries and
+    device bitcode in a versioned ``core-*`` directory. Prefer the version torch
+    was built against, then the newest available version.
+    """
+
+    try:
+        candidates = [entry for entry in _ROCM_DEFAULT_ROOT.glob("core-*") if entry.is_dir()]
+    except OSError:  # pragma: no cover - unreadable /opt/rocm
+        return []
+
+    ordered = sorted(candidates, key=_rocm_core_root_sort_key, reverse=True)
+    preferred: list[Path] = []
+    for name in _rocm_toolkit_version_names():
+        candidate = _ROCM_DEFAULT_ROOT / name
+        if candidate in ordered:
+            preferred.append(candidate)
+    return [*preferred, *(root for root in ordered if root not in preferred)]
+
+
+def _rocm_sdk_devel_roots() -> list[Path]:
+    """Return the TheRock pip ROCm SDK devel tree when it is expanded.
 
     The pip ROCm SDK layout keeps ``_rocm_sdk_core`` (what PyTorch reports as
     ``ROCM_HOME``) and ``_rocm_sdk_devel`` side by side in site-packages. The
@@ -626,16 +679,67 @@ def _rocm_sdk_devel_include_paths() -> list[str]:
     if not rocm_home:
         return []
 
-    rocm_home_path = Path(rocm_home).expanduser()
-    candidate_includes = (
-        rocm_home_path.parent / "_rocm_sdk_devel" / "include",
-        rocm_home_path.parent / "rocm_sdk_devel" / "include",
-    )
+    parent = Path(rocm_home).expanduser().parent
     return [
-        str(candidate)
-        for candidate in candidate_includes
-        if (candidate / "thrust" / "complex.h").is_file()
+        candidate
+        for candidate in (parent / "_rocm_sdk_devel", parent / "rocm_sdk_devel")
+        if candidate.is_dir()
     ]
+
+
+def _rocm_development_roots() -> list[Path]:
+    """Return ROCm development roots in resolution order.
+
+    Prefer the version-matched pip devel tree, then explicit toolkit
+    environment variables, then a versioned ``/opt/rocm/core-*`` SDK, then the
+    legacy install roots. Each consumer below filters this list for the artifact
+    it needs, so a sparse runtime root is skipped instead of selected.
+    """
+
+    roots: list[Path] = []
+    roots.extend(_rocm_sdk_devel_roots())
+    for env_name in _ROCM_TOOLKIT_ROOT_ENV_VARS:
+        value = os.getenv(env_name)
+        if value:
+            roots.append(Path(value).expanduser())
+    roots.extend(_rocm_core_roots())
+    roots.extend((_ROCM_DEFAULT_ROOT, Path("/usr")))
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        normalized = str(root)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(root)
+    return deduped
+
+
+def _rocm_include_roots() -> list[Path]:
+    """Return roots that provide the ROCm template libraries torch needs."""
+
+    return [
+        root
+        for root in _rocm_development_roots()
+        if (root / "include" / "thrust" / "complex.h").is_file()
+    ]
+
+
+def _rocm_toolkit_root() -> Path | None:
+    """Return the first root with both template headers and ``libamdhip64.so``.
+
+    Include and link flags must come from the same tree. A legacy ``/opt/rocm``
+    install can carry the unversioned library without the thrust/hipsparse
+    headers, so resolving each artifact independently would pair a newer
+    ``core-*`` include tree with an older library.
+    """
+
+    include_roots = set(_rocm_include_roots())
+    for root in _rocm_library_roots():
+        if root in include_roots:
+            return root
+    return None
 
 
 def detected_rocm_include_paths() -> list[str]:
@@ -644,28 +748,20 @@ def detected_rocm_include_paths() -> list[str]:
     The pip-packaged ROCm SDK that PyTorch reports as ``ROCM_HOME`` ships the
     HIP runtime headers but not the thrust/rocprim template libraries that some
     kernel sources pull in through torch headers (``thrust/complex.h``). Prefer
-    the SDK's own expanded devel tree, which is version-matched with the active
-    runtime; only then probe the standard environment variables and install
-    roots for an include directory that provides the required headers.
+    the version-matched pip devel tree, then the standard environment
+    variables, then a versioned ``/opt/rocm/core-*`` SDK and the legacy install
+    roots. The chosen tree must also provide ``libamdhip64.so`` so include and
+    link flags cannot come from two different ROCm versions; only when no such
+    tree exists does the first header-only root apply.
     """
 
-    sdk_include_paths = _rocm_sdk_devel_include_paths()
-    if sdk_include_paths:
-        return _dedupe_path_strings(sdk_include_paths)
-
-    candidate_roots: list[Path] = []
-    for env_name in _ROCM_TOOLKIT_ROOT_ENV_VARS:
-        value = os.getenv(env_name)
-        if value:
-            candidate_roots.append(Path(value).expanduser())
-    candidate_roots.extend((Path("/opt/rocm"), Path("/usr")))
-
-    include_paths: list[str] = []
-    for root in candidate_roots:
-        candidate = root / "include"
-        if (candidate / "thrust" / "complex.h").is_file():
-            include_paths.append(str(candidate))
-    return _dedupe_path_strings(include_paths)
+    root = _rocm_toolkit_root()
+    if root is not None:
+        return [str(root / "include")]
+    include_roots = _rocm_include_roots()
+    if not include_roots:
+        return []
+    return [str(include_roots[0] / "include")]
 
 
 def _detected_local_cuda_has_required_headers(required_header_names: Sequence[str]) -> bool:
@@ -716,35 +812,30 @@ def rocm_supplemental_include_cflags() -> list[str]:
     return [f"-I{include_path}" for include_path in detected_rocm_include_paths()]
 
 
-def _rocm_sdk_devel_lib_paths() -> list[str]:
-    """Return the TheRock pip ROCm SDK devel library tree when it is expanded.
+def _rocm_library_roots() -> list[Path]:
+    """Return ROCm roots that carry the unversioned ``libamdhip64.so`` symlink."""
 
-    The pip ROCm SDK layout keeps ``_rocm_sdk_core`` (what PyTorch reports as
-    ``ROCM_HOME``) and ``_rocm_sdk_devel`` side by side in site-packages. The
-    core tree is the runtime package and ships versioned sonames only
-    (``libamdhip64.so.7``), while the devel tree carries the unversioned
-    development symlinks that ``-lamdhip64`` needs.
+    return [
+        root
+        for root in _rocm_development_roots()
+        if (root / "lib" / "libamdhip64.so").is_file()
+    ]
+
+
+def _rocm_sdk_devel_lib_paths() -> list[str]:
+    """Return ROCm development library trees that provide ``-lamdhip64``.
+
+    The pip runtime ``_rocm_sdk_core`` ships versioned sonames only
+    (``libamdhip64.so.7``). A version-matched pip devel tree or a versioned
+    ``/opt/rocm/core-*`` SDK carries the unversioned development symlink. The
+    first tree that also provides the template headers wins, so the include and
+    link flags stay on one ROCm version.
     """
 
-    try:
-        from torch.utils import cpp_extension as _cpp_extension
-    except Exception:  # pragma: no cover - torch is always importable here
-        return []
-
-    rocm_home = getattr(_cpp_extension, "ROCM_HOME", None)
-    if not rocm_home:
-        return []
-
-    rocm_home_path = Path(rocm_home).expanduser()
-    candidate_libs = (
-        rocm_home_path.parent / "_rocm_sdk_devel" / "lib",
-        rocm_home_path.parent / "rocm_sdk_devel" / "lib",
-    )
-    return [
-        str(candidate)
-        for candidate in candidate_libs
-        if (candidate / "libamdhip64.so").is_file()
-    ]
+    root = _rocm_toolkit_root()
+    if root is not None:
+        return [str(root / "lib")]
+    return [str(candidate / "lib") for candidate in _rocm_library_roots()]
 
 
 def rocm_supplemental_ldflags() -> list[str]:
@@ -752,13 +843,50 @@ def rocm_supplemental_ldflags() -> list[str]:
 
     Torch adds ``-lamdhip64`` to every HIP JIT extension, but the pip ROCm
     runtime package behind ``ROCM_HOME`` only ships ``libamdhip64.so.7``, so the
-    link fails with ``cannot find -lamdhip64`` unless the version-matched devel
-    tree's ``lib`` directory is on the search path.
+    link fails with ``cannot find -lamdhip64`` unless a version-matched devel
+    tree's ``lib`` directory is on the search path. Only the first matching
+    tree is used so two ROCm versions cannot be mixed.
     """
 
     if not IS_ROCM:
         return []
-    return [f"-L{lib_path}" for lib_path in _rocm_sdk_devel_lib_paths()]
+    lib_paths = _rocm_sdk_devel_lib_paths()
+    if not lib_paths:
+        return []
+    return [f"-L{lib_paths[0]}"]
+
+
+def rocm_supplemental_device_lib_flags() -> list[str]:
+    """Return the device-library flag hipcc needs for the pip ROCm SDK layout.
+
+    TheRock's ``hipcc`` wrapper does not translate ``ROCM_PATH``/``HIP_PATH``
+    into ``--rocm-path``, so clang++ falls back to its compiled-in install root
+    and reports ``cannot find ROCm device library``. Pass the device bitcode
+    directory explicitly. ``ROCM_HOME`` is preferred because its bitcode is
+    guaranteed to match the runtime torch loaded; a version-matched devel tree
+    is the fallback.
+    """
+
+    if not IS_ROCM:
+        return []
+
+    candidate_roots: list[Path] = []
+    try:
+        from torch.utils import cpp_extension as _cpp_extension
+    except Exception:  # pragma: no cover - torch is always importable here
+        _cpp_extension = None
+    rocm_home = getattr(_cpp_extension, "ROCM_HOME", None) if _cpp_extension else None
+    if rocm_home:
+        candidate_roots.append(Path(rocm_home).expanduser())
+    candidate_roots.extend(
+        root for root in _rocm_development_roots() if root not in candidate_roots
+    )
+
+    for root in candidate_roots:
+        bitcode = root / _ROCM_DEVICE_BITCODE
+        if (bitcode / "hip.bc").is_file():
+            return [f"--rocm-device-lib-path={bitcode}"]
+    return []
 
 
 _CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
@@ -1091,7 +1219,12 @@ class TorchOpsJitExtension:
         return flags
 
     def _resolved_extra_cuda_cflags(self) -> list[str]:
-        return self._with_stable_abi_target(self._resolve_sequence(self.extra_cuda_cflags))
+        flags = self._with_stable_abi_target(self._resolve_sequence(self.extra_cuda_cflags))
+        if self.requires_cuda:
+            for flag in rocm_supplemental_device_lib_flags():
+                if flag not in flags:
+                    flags.append(flag)
+        return flags
 
     def _resolved_extra_ldflags(self) -> list[str]:
         flags = list(self._resolve_sequence(self.extra_ldflags))

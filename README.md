@@ -468,8 +468,12 @@ matching ROCm PyTorch build. ROCm 10.1 ships HIP 7.16; `torch.version.hip`
 reports the HIP runtime version, not the ROCm release, so version checks use
 `torch.version.rocm`.
 
-ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
-matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
+ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` use the
+matching expanded `rocm-sdk-devel` tree, and otherwise fall back to the
+version-matched `/opt/rocm/core-*` SDK for the template headers, the
+`libamdhip64.so` symlink and the device bitcode. See
+[`docs/rocm-jit-toolkit-paths.md`](docs/rocm-jit-toolkit-paths.md) for the
+resolution order and failure paths.
 JIT builds on ROCm always use the HIP/torch headers only: NVIDIA `nvidia` wheel
 headers are never added to a hipcc command line, even when those packages are
 installed in the environment, because their `vector_types.h` conflicts with
