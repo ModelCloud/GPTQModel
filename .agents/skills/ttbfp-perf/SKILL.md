@@ -60,7 +60,7 @@ figure without them is not reproducible.
 Start from the FMA floor, not from the current number.  A pure FMA loop
 (no decode, no scale, no broadcast) runs a 16x4096x16 panel in ~0.0178 ms on
 this host, i.e. ~118 GFLOP/s or ~18.2 ms for the whole M=64, K=N=4096
-problem.  The int8 kernel takes ~26.1 ms, so it is at ~70% of that floor,
+problem.  The bf8_b int8 kernel takes ~26.1 ms, so it is at ~70% of that floor,
 not at it.  The gap is fully accounted for and worth re-deriving before
 trying anything:
 
@@ -83,6 +83,8 @@ Two regimes:
   of 7-12 instructions.  Worth ~1.7x at M=1.  This mirrors ATen's
   `_weight_int4pack_mm` / `_weight_int8pack_mm`; values are unchanged, so
   parity still holds.
+  This layout is bf8_b-only: bf4_b/bf2_b would expand 2x/4x, so they must
+  stay in the packed block-major layout.
 - **Large M (FMA-bound).** The decode is still on the critical path, so the
   shape that minimizes it (tallest `MR`) is not the fastest one: A-panel
   traffic scales as `1/J` and can cost more than the decode.  That is why
@@ -93,7 +95,7 @@ Two regimes:
   | sign-magnitude | M >= 16 | 16x1 | ~7-uop decode; one decode per 16 FMA |
   | sign-magnitude | M == 8 | 8x1 | same, but only 8 rows exist |
   | sign-magnitude | M < 8 | 4x4 | too few rows to amortize a decode |
-  | int8 | any | 4x4 | 3-uop decode; cutting A traffic 4x wins 1.2x |
+  | int8 | bf8_b | 4x4 | 3-uop decode; cutting A traffic 4x wins 1.2x |
 
   The shape only decides which B blocks share an A broadcast, so all shapes
   stay bitwise equal.
@@ -136,7 +138,7 @@ TTBFP_FORCE_SCALAR=1 ...                         # reference path
 
 ```bash
 make -C gptqmodel_ext/ttbfp            # libttbfp.so
-make -C gptqmodel_ext/ttbfp test       # 283 tests, includes bitwise parity
+make -C gptqmodel_ext/ttbfp test       # 280 tests, includes bitwise parity
 make -C gptqmodel_ext/ttbfp bench      # microbenchmarks
 make -C gptqmodel_ext/ttbfp cuda       # optional CUDA library (needs nvcc + GPU)
 ```

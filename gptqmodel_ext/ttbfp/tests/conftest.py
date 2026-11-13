@@ -15,5 +15,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 _LIB = Path(os.environ.get("TTBFP_LIB") or (_ROOT / "libttbfp.so"))
 if _LIB.is_file():
     sys.path.insert(0, str(_ROOT / "python"))
-else:
-    collect_ignore_glob = ["test_*.py"]
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Skip this directory when libttbfp.so has not been built."""
+    return not _LIB.is_file()

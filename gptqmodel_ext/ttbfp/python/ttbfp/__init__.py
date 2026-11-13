@@ -105,6 +105,15 @@ def _cols(cols, nblk, *, flat):
     return cols
 
 
+def _s8_fmt(f):
+    if f != BF8_B:
+        raise ValueError(
+            "the int8 kernel-native layout is bf8_b-only; bf4_b/bf2_b would "
+            "expand the persistent weight 2x/4x. Use transpose_packed + "
+            "matmul_prepacked to keep those formats packed.")
+    return f
+
+
 def _find_lib() -> str:
     env = os.environ.get("TTBFP_LIB")
     if env:
@@ -263,6 +272,8 @@ def matmul(a, exps, data, fmt=BF8_B, cols: int | None = None, ftz: bool = True):
     if rows != K:
         raise ValueError(f"exps has {rows} rows, expected K={K}")
     N = _cols(cols, nblk, flat=True)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul(f, a.ctypes.data_as(_f32p), K, _ptr(exps), _ptr(data),
                       M, K, N, out.ctypes.data_as(_f32p), N, int(bool(ftz)))
@@ -280,6 +291,8 @@ def matmul_bf16(a_bf16, exps, data, fmt=BF8_B, cols: int | None = None,
     if rows != K:
         raise ValueError(f"exps has {rows} rows, expected K={K}")
     N = _cols(cols, nblk, flat=True)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_bf16(f, a.ctypes.data_as(_u16p), K, _ptr(exps),
                            _ptr(data), M, K, N, out.ctypes.data_as(_f32p), N,
@@ -319,6 +332,8 @@ def matmul_prepacked(a, exps_t, data_t, fmt=BF8_B, cols: int | None = None,
     M, K = a.shape
     f, exps_t, data_t, nblk = _block_major(exps_t, data_t, fmt, K)
     N = _cols(cols, nblk, flat=False)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked(f, a.ctypes.data_as(_f32p), K, _ptr(exps_t),
                                 _ptr(data_t), M, K, N,
@@ -335,6 +350,8 @@ def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=BF8_B,
     M, K = a.shape
     f, exps_t, data_t, nblk = _block_major(exps_t, data_t, fmt, K)
     N = _cols(cols, nblk, flat=False)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_bf16(f, a.ctypes.data_as(_u16p), K,
                                      _ptr(exps_t), _ptr(data_t), M, K, N,
@@ -346,10 +363,13 @@ def matmul_prepacked_bf16(a_bf16, exps_t, data_t, fmt=BF8_B,
 def convert_s8(exps, data, fmt=BF8_B):
     """Convert the flat packed layout to the int8 kernel-native layout.
 
+    This layout is bf8_b-only: bf4_b/bf2_b would expand 2x/4x.
     Returns (exps_t, s8) with shapes (nblk, K) and (nblk, K*16).  The values
     are unchanged: sign*magnitude is stored as a two's-complement int8, which
     the matmul kernel decodes in 3 instructions instead of 8-12.
     """
+    f = _fmt(fmt)
+    _s8_fmt(f)
     f, exps, data, K, nblk = _flat_packed(exps, data, fmt)
     exps_t = np.empty((nblk, K), dtype=np.uint8)
     s8 = np.empty((nblk, K * 16), dtype=np.uint8)
@@ -359,20 +379,25 @@ def convert_s8(exps, data, fmt=BF8_B):
 
 
 def prepack_s8(x, fmt=BF8_B):
-    """Quantize straight into the int8 kernel-native block-major layout."""
+    """Quantize into the int8 kernel-native layout (bf8_b only)."""
+    _s8_fmt(_fmt(fmt))
     e, d = pack(x, fmt)
     return convert_s8(e, d, fmt)
 
 
 def matmul_prepacked_s8(a, exps_t, s8, fmt=BF8_B, cols: int | None = None,
                         ftz: bool = True):
-    """C = A @ dequant(B) with B in the int8 kernel-native layout."""
+    """C = A @ dequant(B) with B in the int8 layout (bf8_b only)."""
+    f = _fmt(fmt)
+    _s8_fmt(f)
     a = _f32(a)
     if a.ndim != 2:
         raise ValueError("a must be 2-D")
     M, K = a.shape
     f, exps_t, s8, nblk = _block_major(exps_t, s8, fmt, K, s8=True)
     N = _cols(cols, nblk, flat=False)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_s8(f, a.ctypes.data_as(_f32p), K,
                                    _ptr(exps_t), _ptr(s8), M, K, N,
@@ -384,12 +409,16 @@ def matmul_prepacked_s8(a, exps_t, s8, fmt=BF8_B, cols: int | None = None,
 def matmul_prepacked_s8_bf16(a_bf16, exps_t, s8, fmt=BF8_B,
                              cols: int | None = None, ftz: bool = True):
     """Like matmul_prepacked_s8(), with A as bf16 bit patterns (uint16)."""
+    f = _fmt(fmt)
+    _s8_fmt(f)
     a = np.ascontiguousarray(a_bf16, dtype=np.uint16)
     if a.ndim != 2:
         raise ValueError("a_bf16 must be 2-D")
     M, K = a.shape
     f, exps_t, s8, nblk = _block_major(exps_t, s8, fmt, K, s8=True)
     N = _cols(cols, nblk, flat=False)
+    if K == 0:
+        return np.zeros((M, N), dtype=np.float32)
     out = np.empty((M, N), dtype=np.float32)
     _lib.ttbfp_matmul_prepacked_s8_bf16(f, a.ctypes.data_as(_u16p), K,
                                         _ptr(exps_t), _ptr(s8), M, K, N,

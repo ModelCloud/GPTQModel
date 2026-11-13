@@ -54,11 +54,11 @@ keeps the explicit flush and does not change the ambient mode.
 ```mermaid
 flowchart TD
     A["ttbfp_matmul_prepacked<br/>sign-magnitude B"] --> D["matmul_driver"]
-    B["ttbfp_matmul_prepacked_s8<br/>int8 kernel-native B"] --> D
+    B["ttbfp_matmul_prepacked_s8<br/>int8 kernel-native B (bf8_b)"] --> D
     D --> E["prepacked_tile(M, s8)"]
     E --> F{"decoder"}
     F -->|"SmDec (7 uops/block)"| G["MR=16 J=1 (M>=16)<br/>MR=8 J=1 (M=8)<br/>MR=4 J=4 (M&lt;8)"]
-    F -->|"S8Dec (3 uops/block)"| H["MR=4 J=4 (all M)"]
+    F -->|"S8Dec (bf8_b only; 3 uops/block)"| H["MR=4 J=4 (all M)"]
     G --> I["mm_run &rarr; mm_panel"]
     H --> I
     I --> J{"have_avx512()"}
@@ -75,11 +75,13 @@ changes the `k` order, so every branch above is bitwise equal.
 |---|---|---|---|
 | flat (row-major) | `k*nblk + j` | `(k*nblk + j)*db` | default API, no prepack |
 | block-major | `j*K + k` | `(j*K + k)*db` | recommended for matmul |
-| int8 block-major | `j*K + k` | `(j*K + k)*16` | fastest at every M |
+| int8 block-major | `j*K + k` | `(j*K + k)*16` | bf8_b only; fastest at every M |
 
 `db` is 16 bytes for `bf8_b`, 8 for `bf4_b` and 4 for `bf2_b`.  The int8 layout stores
 `sign*magnitude` as a signed int8, which turns the decode into
 `vpmovsxbd` + `vcvtdq2ps` + `vmulps`; the decoded values are unchanged.
+It is bf8_b-only: bf4_b/bf2_b would expand 2x/4x, so they stay in the packed
+block-major layout.
 
 `cols` may trim only the final partial block.  The flat layout's row stride is
 `ceil(cols/16) * db`, so a `cols` that drops a whole block would change the
@@ -90,15 +92,15 @@ layouts are indexed by block and do not have this constraint.
 
 Single thread, `K = N = 4096`, process CPU time:
 
-| format | M=1 | M=4 | M=16 | M=64 |
-|---|---|---|---|---|
-| `bf8_b` int8 | 0.80 ms | 1.60 ms | 6.48 ms | 25.64 ms |
-| `bf4_b` int8 | 0.80 ms | 1.60 ms | 6.40 ms | 25.93 ms |
-| `bf2_b` int8 | 0.80 ms | 1.60 ms | 6.50 ms | 25.74 ms |
+| format | layout | M=1 | M=4 | M=16 | M=64 |
+|---|---|---|---|---|---|
+| `bf8_b` | int8 | 0.80 ms | 1.60 ms | 6.48 ms | 25.64 ms |
+| `bf4_b` | block-major | 1.81 ms | 2.59 ms | 7.35 ms | 29.31 ms |
+| `bf2_b` | block-major | 2.33 ms | 3.70 ms | 8.08 ms | 30.89 ms |
 
 The pure FMA path (no decode, no scale, no broadcast) runs a 16x4096x16 panel
 in ~0.0178 ms, i.e. ~118 GFLOP/s or ~18.2 ms for the whole M=64 problem.  The
-int8 kernel is at ~70% of that floor.  The gap is accounted for per `k` step
+bf8_b int8 kernel is at ~70% of that floor.  The gap is accounted for per `k` step
 of a 4x4 tile: 16 FMA (8 cycles at two 512-bit FMA pipes) plus 4
 `vpmovsxbd` + 4 `vcvtdq2ps` + 4 `vmulps`, eight vector uops that share the
 same FP pipes.  Deleting the scale multiply alone gives 0.0192 ms, so the

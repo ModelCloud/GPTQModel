@@ -1240,6 +1240,8 @@ void ttbfp_convert_s8(ttbfp_fmt fmt,
                       int64_t K, int64_t N,
                       uint8_t *exps_t, uint8_t *s8_t) {
     if (!exps || !data || !exps_t || !s8_t || K <= 0 || N <= 0) return;
+    // bf4_b/bf2_b would expand 2x/4x; keep those in the packed layout.
+    if (fmt != TTBFP_BF8_B) return;
     const int64_t nblk = (int64_t)ttbfp_blocks_per_row(N);
     const int db = datum_bytes(fmt);
     const int mb = magnitude_bits(fmt);
@@ -1273,6 +1275,7 @@ void ttbfp_matmul_prepacked_s8(ttbfp_fmt fmt,
                                int64_t M, int64_t K, int64_t N,
                                float *C, int64_t ldc, int flush_denormals) {
     if (!A || !exps_t || !s8_t || !C || M <= 0 || K <= 0 || N <= 0) return;
+    if (fmt != TTBFP_BF8_B) return;
     int mrt = 4, jm = 4;
     prepacked_tile(M, true, &mrt, &jm);
     matmul_driver<float, FloatLoader, S8Dec>(
@@ -1287,6 +1290,7 @@ void ttbfp_matmul_prepacked_s8_bf16(ttbfp_fmt fmt,
                                     int64_t M, int64_t K, int64_t N,
                                     float *C, int64_t ldc, int flush_denormals) {
     if (!A || !exps_t || !s8_t || !C || M <= 0 || K <= 0 || N <= 0) return;
+    if (fmt != TTBFP_BF8_B) return;
     int mrt = 4, jm = 4;
     prepacked_tile(M, true, &mrt, &jm);
     matmul_driver<uint16_t, BF16Loader, S8Dec>(

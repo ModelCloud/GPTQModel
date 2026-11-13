@@ -6,7 +6,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import ttbfp
-from ttbfp import torch_ops
+import ttbfp.torch_ops as torch_ops
 
 
 @pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
@@ -49,7 +49,7 @@ def test_torch_prepacked_matches_numpy(fmt):
     np.testing.assert_array_equal(c_t.numpy(), c_np)
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B])
 def test_torch_prepacked_s8_matches_numpy(fmt):
     rng = np.random.default_rng(4)
     a = rng.standard_normal((3, 64)).astype(np.float32)

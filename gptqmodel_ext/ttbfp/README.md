@@ -212,10 +212,10 @@ ttbfp_matmul_prepacked(TTBFP_BF8_B, A, lda, exps_t, data_t, M, K, N, C, ldc, 1);
 
 The byte counts are identical to the flat layout (it is a pure permutation).
 
-### int8 kernel-native layout (fastest at every M)
+### int8 kernel-native layout (bf8_b only; fastest at every M)
 
 The TT datum is sign-magnitude: one sign bit plus magnitude bits, which costs
-8 instructions to decode for bf8_b and 12 for bf4_b.  Storing `sign*magnitude`
+8 instructions to decode for bf8_b.  Storing `sign*magnitude`
 as a two's-complement int8 instead makes the decode `vpmovsxbd` + `vcvtdq2ps` +
 `vmulps` — 3 instructions — and the decoded values are identical, so every path
 stays bitwise equal.
@@ -233,12 +233,16 @@ ttbfp_matmul_prepacked_s8(TTBFP_BF8_B, A, lda, exps_t, s8, M, K, N, C, ldc, 1);
 ```
 
 ```python
-exps_t, s8 = ttbfp.prepack_s8(w, "bf4_b")
-c = ttbfp.matmul_prepacked_s8(a, exps_t, s8, "bf4_b", cols=N)
+exps_t, s8 = ttbfp.prepack_s8(w, "bf8_b")
+c = ttbfp.matmul_prepacked_s8(a, exps_t, s8, "bf8_b", cols=N)
 ```
 
-bf8_b needs 16 bytes per block either way; bf4_b doubles from 8 to 16, which is
-hidden at large M (compute-bound) and still wins at small M.
+The s8 layout is **bf8_b-only**.  bf8_b already stores 16 bytes per block, so
+the int8 representation does not expand the persistent weight.  bf4_b and
+bf2_b would expand 2x and 4x (8/4 bytes per block to 16), which violates the
+repository rule that quantized weights stay packed between uses.  Those
+formats use `pack_transposed` + `matmul_prepacked` instead; the packed payload
+is unchanged.
 
 ### TT tile layout
 
@@ -399,11 +403,11 @@ Which one binds depends on the decoder, so the shape is chosen per decoder:
 | block-major | sign-magnitude | M >= 16 | 16 | 1 |
 | block-major | sign-magnitude | 8 <= M < 16 | 8 | 1 |
 | block-major | sign-magnitude | M < 8 | 4 | 4 |
-| block-major | int8 | M >= 4 | 4 | 4 |
-| block-major | int8 | M < 4 | M | 4 |
+| block-major | int8 (bf8_b) | M >= 4 | 4 | 4 |
+| block-major | int8 (bf8_b) | M < 4 | M | 4 |
 
 Sign-magnitude decode costs ~7 instructions, so it wants the tallest row
-tile and lets `J = 1` carry the A traffic.  The int8 decode is 3
+tile and lets `J = 1` carry the A traffic.  The bf8_b int8 decode is 3
 instructions, so `4 x 4` wins at every M.  `TTBFP_MRT` / `TTBFP_JM` override
 the shape (for tuning on a particular CPU); `MR * J` is clamped to 16.
 
@@ -417,35 +421,38 @@ Single thread, `K = N = 4096`, process CPU time, same process, same data:
 | bf8_b | 4 | 3.87 ms | 2.74 ms | 2.21 ms | **1.67 ms** | **2.3x** |
 | bf8_b | 16 | 15.55 ms | 10.76 ms | 7.58 ms | **6.52 ms** | **2.4x** |
 | bf8_b | 64 | 62.12 ms | 43.48 ms | 30.27 ms | **26.10 ms** | **2.4x** |
-| bf4_b | 1 | 2.84 ms | 1.92 ms | 1.81 ms | **0.80 ms** | **3.6x** |
-| bf4_b | 4 | 3.41 ms | 2.75 ms | 2.59 ms | **1.67 ms** | **2.0x** |
-| bf4_b | 16 | 13.70 ms | 10.78 ms | 7.35 ms | **6.47 ms** | **2.1x** |
-| bf4_b | 64 | 54.73 ms | 43.25 ms | 29.31 ms | **25.90 ms** | **2.1x** |
+| bf4_b | 1 | 2.84 ms | 1.92 ms | **1.81 ms** | n/a | **1.6x** |
+| bf4_b | 4 | 3.41 ms | 2.75 ms | **2.59 ms** | n/a | **1.3x** |
+| bf4_b | 16 | 13.70 ms | 10.78 ms | **7.35 ms** | n/a | **1.9x** |
+| bf4_b | 64 | 54.73 ms | 43.25 ms | **29.31 ms** | n/a | **2.1x** |
 
 With 8 threads and `bench/ab_compare.py`, the int8 layout against the original
 row-major release gives 4.5x / 2.2x / 2.2x / 2.4x for bf8_b at M = 1 / 4 /
-16 / 64, and 3.5x / 2.1x / 2.2x / 2.2x for bf4_b.  All variants are bitwise
-equal.
+16 / 64.  bf4_b/bf2_b use the packed block-major layout; their s8 variants are
+not offered.  All variants are bitwise equal.
+
+`int8` is `bf8_b`-only because bf8_b already stores 16 bytes per block.  For
+bf4_b/bf2_b the packed block-major path is the persistent fast path.
 
 `bf2_b` (`Bfp2_b`) was added after the original release, so it has no "before"
 column.  Same host, same shape:
 
-| format | M | block-major | int8 |
-|---|---|---|---|
-| bf2_b | 1 | 2.33 ms | **0.80 ms** |
-| bf2_b | 4 | 3.70 ms | **1.60 ms** |
-| bf2_b | 16 | 8.08 ms | **6.50 ms** |
-| bf2_b | 64 | 30.89 ms | **25.74 ms** |
+| format | M | block-major |
+|---|---|---|
+| bf2_b | 1 | 2.33 ms |
+| bf2_b | 4 | 3.70 ms |
+| bf2_b | 16 | 8.08 ms |
+| bf2_b | 64 | 30.89 ms |
 
-The int8 layout stores 16 bytes per block for every format, so its cost is the
-same for all three; the sign-magnitude layout shrinks with the datum and its
-decode grows.
+The int8 layout is bf8_b-only.  bf4_b/bf2_b stay in the packed sign-magnitude
+block-major layout, whose payload shrinks with the datum (8/4 bytes per block)
+and whose decode grows accordingly.
 
 ### Where the time goes
 
 At M >= 16 the kernel is FMA-bound.  The pure FMA path (no decode, no scale,
 no broadcast) runs a 16x4096x16 panel in ~0.0178 ms, i.e. ~118 GFLOP/s, or
-~18.2 ms for the whole M=64, K=N=4096 problem.  The int8 kernel takes
+~18.2 ms for the whole M=64, K=N=4096 problem.  The bf8_b int8 kernel takes
 ~26.1 ms, so it is at ~70% of that floor.
 
 The 30% gap is fully accounted for, per k step of a 4x4 tile:

@@ -25,7 +25,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 import ttbfp  # noqa: E402
-from ttbfp import reference as ref  # noqa: E402
+import ttbfp.reference as ref  # noqa: E402
 
 BFP_BLOCK = 16
 BFP_MAX_ALIGNMENT_SHIFT = 8

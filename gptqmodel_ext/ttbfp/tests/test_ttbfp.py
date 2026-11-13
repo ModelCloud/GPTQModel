@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import ttbfp
-from ttbfp import reference as ref
+import ttbfp.reference as ref
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -287,7 +287,7 @@ def test_pack_transposed_matches_reference(fmt):
         dt, d.reshape(9, -1, db).transpose(1, 0, 2).reshape(-1, 9 * db))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B])
 @pytest.mark.parametrize("shape", [(1, 64, 64), (2, 33, 48), (4, 128, 256),
                                    (7, 17, 31), (16, 96, 80), (5, 1, 16),
                                    (33, 48, 32)])
@@ -307,7 +307,7 @@ def test_prepacked_s8_matches_rowmajor(fmt, shape):
     np.testing.assert_array_equal(bits(c2), bits(c0))
 
 
-@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B])
 def test_convert_s8_preserves_values(fmt):
     """int8 datums must decode to exactly the same floats."""
     rng = np.random.default_rng(3)
@@ -476,11 +476,15 @@ def test_rejects_malformed_packed_buffers(fmt, db):
     with pytest.raises(ValueError):
         ttbfp.matmul_prepacked_bf16(a_bf, et, dt[:, :-1], fmt)
 
-    est, s8 = ttbfp.prepack_s8(w, fmt)
-    with pytest.raises(ValueError):
-        ttbfp.matmul_prepacked_s8(a, est, s8[:, :-1], fmt)
-    with pytest.raises(ValueError):
-        ttbfp.matmul_prepacked_s8_bf16(a_bf, est, s8[:, :-1], fmt)
+    if fmt == ttbfp.BF8_B:
+        est, s8 = ttbfp.prepack_s8(w, fmt)
+        with pytest.raises(ValueError):
+            ttbfp.matmul_prepacked_s8(a, est, s8[:, :-1], fmt)
+        with pytest.raises(ValueError):
+            ttbfp.matmul_prepacked_s8_bf16(a_bf, est, s8[:, :-1], fmt)
+    else:
+        with pytest.raises(ValueError):
+            ttbfp.prepack_s8(w, fmt)
 
     blob = ttbfp.tile_pack(np.zeros((32, 32), dtype=np.float32), fmt)
     with pytest.raises(ValueError):
@@ -531,9 +535,11 @@ a = np.array([[2.0 ** 126]], np.float32)
 off = ttbfp.matmul(a, e, d, fmt, cols=16, ftz=False)
 on = ttbfp.matmul(a, e, d, fmt, cols=16, ftz=True)
 y = ttbfp.unpack(e, d, fmt, cols=16, ftz=False)
-s8 = np.zeros((1, 16), np.uint8)
-s8[0, 0] = datum
-s8_off = ttbfp.matmul_prepacked_s8(a, e.T.copy(), s8, fmt, cols=16, ftz=False)
+s8_off = np.zeros((1, 16), np.float32)
+if fmt == 8:
+    s8 = np.zeros((1, 16), np.uint8)
+    s8[0, 0] = datum
+    s8_off = ttbfp.matmul_prepacked_s8(a, e.T.copy(), s8, fmt, cols=16, ftz=False)
 np.savez(sys.argv[4], off=off, on=on, y=y, s8=s8_off)
 """
     out = tmp_path / "out.npz"
@@ -548,6 +554,61 @@ np.savez(sys.argv[4], off=off, on=on, y=y, s8=s8_off)
     assert z["off"][0, 0] == np.float32(0.5)
     assert np.all(z["off"][0, 1:] == 0.0)
     assert np.all(z["on"] == 0.0)
-    assert z["s8"][0, 0] == np.float32(0.5)
-    assert np.all(z["s8"][0, 1:] == 0.0)
+    if fmt == ttbfp.BF8_B:
+        assert z["s8"][0, 0] == np.float32(0.5)
+        assert np.all(z["s8"][0, 1:] == 0.0)
     assert z["y"].view(np.uint32)[0, 0] == 0x00400000
+
+
+@pytest.mark.parametrize("fmt", [ttbfp.BF4_B, ttbfp.BF2_B])
+def test_s8_layout_rejects_expanding_formats(fmt):
+    """bf4_b/bf2_b must stay packed; the s8 layout is bf8_b-only."""
+    rng = np.random.default_rng(808)
+    w = rng.standard_normal((8, 32)).astype(np.float32)
+    e, d = ttbfp.pack(w, fmt)
+    with pytest.raises(ValueError):
+        ttbfp.convert_s8(e, d, fmt)
+    with pytest.raises(ValueError):
+        ttbfp.prepack_s8(w, fmt)
+    et, dt = ttbfp.transpose_packed(e, d, fmt)
+    s8 = np.zeros((e.shape[1], w.shape[0] * 16), np.uint8)
+    a = np.ones((2, w.shape[0]), np.float32)
+    a_bf = np.ones((2, w.shape[0]), np.uint16)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked_s8(a, et, s8, fmt, cols=32)
+    with pytest.raises(ValueError):
+        ttbfp.matmul_prepacked_s8_bf16(a_bf, et, s8, fmt, cols=32)
+
+
+@pytest.mark.parametrize("fmt", [ttbfp.BF8_B, ttbfp.BF4_B, ttbfp.BF2_B])
+@pytest.mark.parametrize(
+    "entry", ["matmul", "matmul_bf16", "prepacked", "prepacked_bf16"])
+def test_zero_length_reduction_returns_zeros(fmt, entry):
+    a = np.empty((2, 0), np.float32)
+    a_bf = np.empty((2, 0), np.uint16)
+    e = np.empty((0, 1), np.uint8)
+    db = {8: 16, 4: 8, 2: 4}[fmt]
+    d = np.empty((0, db), np.uint8)
+    et = np.empty((1, 0), np.uint8)
+    dt = np.empty((1, 0), np.uint8)
+    if entry == "matmul":
+        c = ttbfp.matmul(a, e, d, fmt, cols=16)
+    elif entry == "matmul_bf16":
+        c = ttbfp.matmul_bf16(a_bf, e, d, fmt, cols=16)
+    elif entry == "prepacked":
+        c = ttbfp.matmul_prepacked(a, et, dt, fmt, cols=16)
+    else:
+        c = ttbfp.matmul_prepacked_bf16(a_bf, et, dt, fmt, cols=16)
+    assert c.shape == (2, 16)
+    assert np.all(c == 0.0)
+
+
+def test_zero_length_reduction_s8_returns_zeros():
+    a = np.empty((2, 0), np.float32)
+    a_bf = np.empty((2, 0), np.uint16)
+    et = np.empty((1, 0), np.uint8)
+    s8 = np.empty((1, 0), np.uint8)
+    c = ttbfp.matmul_prepacked_s8(a, et, s8, ttbfp.BF8_B, cols=16)
+    c_bf = ttbfp.matmul_prepacked_s8_bf16(a_bf, et, s8, ttbfp.BF8_B, cols=16)
+    assert c.shape == (2, 16) and np.all(c == 0.0)
+    assert c_bf.shape == (2, 16) and np.all(c_bf == 0.0)

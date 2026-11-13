@@ -111,7 +111,8 @@ def main(argv=None):
             dt = np.empty((nblk, k * db), np.uint8)
             new.ttbfp_transpose_packed(fmt, e.ctypes.data, d.ctypes.data, k, n,
                                        et.ctypes.data, dt.ctypes.data)
-        have_s8 = hasattr(new, "ttbfp_matmul_prepacked_s8")
+        have_s8 = (fmt == 8 and
+                   hasattr(new, "ttbfp_matmul_prepacked_s8"))
         if have_s8:
             nblk = e.shape[1]
             est = np.empty((nblk, k), np.uint8)

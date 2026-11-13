@@ -154,6 +154,10 @@ void ttbfp_dequantize(ttbfp_fmt fmt,
  * ttbfp_transpose_packed() and call ttbfp_matmul_prepacked(): the k loop
  * then streams sequentially and runs ~1.4-1.5x faster.  Benchmark with
  * OMP_WAIT_POLICY=passive (see the Threading note above).
+ *
+ * All matmul entry points require K > 0.  The Python wrappers return a
+ * zero result for K == 0; a C caller must not rely on `C` for an empty
+ * reduction.
  */
 void ttbfp_matmul(ttbfp_fmt fmt,
                   const float *A, int64_t lda,
@@ -211,11 +215,17 @@ void ttbfp_matmul_prepacked_bf16(ttbfp_fmt fmt,
  * This is the same move ATen makes for _weight_int4pack_mm /
  * _weight_int8pack_mm: pack the weights into whatever shape makes the inner
  * loop cheapest.  It matters most when the kernel is decode-bound, i.e. for
- * small M (autoregressive decode): ~1.5x for bf8_b and ~2x for bf4_b at M=1.
+ * small M (autoregressive decode): ~1.5x for bf8_b at M=1.
+ *
+ * The s8 layout is provided for bf8_b only: its packed payload is already
+ * 16 bytes per block, so the int8 representation does not expand the
+ * persistent weight.  bf4_b/bf2_b would expand 2x/4x, which violates the
+ * repository rule that quantized weights stay packed between uses.  Those
+ * formats must use the packed sign-magnitude block-major layout
+ * (ttbfp_transpose_packed + ttbfp_matmul_prepacked) instead.
  *
  * Layout (block-major, one int8 per datum):
  *     exps_t[j * K + k]        s8_t[(j * K + k) * 16]
- * bf8_b needs 16 bytes per block either way; bf4_b doubles from 8 to 16.
  */
 void ttbfp_convert_s8(ttbfp_fmt fmt,
                       const uint8_t *exps, const uint8_t *data,
