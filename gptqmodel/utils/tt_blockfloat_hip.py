@@ -189,6 +189,17 @@ def available(device: Optional[torch.device] = None) -> bool:
     return tt_blockfloat_hip_supported(device) and _EXTENSION.load()
 
 
+#: Code widths the HIP kernels implement.  ``bfloat2_b`` is a grid the host
+#: quantiser can express, but it has no kernel, so it takes the torch path.
+HIP_BITS = (4, 8)
+
+
+def supports_bits(bits: int) -> bool:
+    """Whether the HIP kernels implement this block-float width."""
+
+    return int(bits) in HIP_BITS
+
+
 def last_error() -> str:
     return _EXTENSION.last_error_message()
 
@@ -286,5 +297,6 @@ __all__ = [
     "linear",
     "prewarm_tt_blockfloat_hip_extension",
     "quantize",
+    "supports_bits",
     "tt_blockfloat_hip_supported",
 ]

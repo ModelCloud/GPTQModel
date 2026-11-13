@@ -170,6 +170,37 @@ def test_cpu_dequant_matches_independent_formula():
     assert layout.bias.dtype == torch.bfloat16
 
 
+def test_bfloat2_b_grid_is_three_levels_and_packs_four_per_byte():
+    """bfloat2_b is a sign bit plus one magnitude bit, so a block holds
+    ``{-1, 0, +1} x 2**exponent`` and four codes share a byte."""
+
+    from gptqmodel.utils.tt_blockfloat_quant import (
+        _pack_codes,
+        _unpack_codes,
+        decompose_blockfloat,
+        quantize_blockfloat,
+        recompose_blockfloat,
+        stored_mantissa_bits,
+    )
+
+    assert stored_mantissa_bits(2) == 0
+
+    generator = torch.Generator().manual_seed(7)
+    weight = torch.randn(4, 32, generator=generator) * 0.3
+
+    rounded, exponents = quantize_blockfloat(weight, 2)
+    scale = torch.pow(2.0, exponents.float()).repeat_interleave(16, dim=1)
+    # Every stored value is zero or one magnitude step off the shared exponent.
+    assert torch.all((rounded == 0) | (rounded.abs() == scale))
+
+    codes, recovered = decompose_blockfloat(rounded, 2)
+    assert torch.equal(recompose_blockfloat(codes, recovered, 2), rounded)
+
+    packed = _pack_codes(codes, 2)
+    assert packed.numel() == codes.numel() // 4
+    assert torch.equal(_unpack_codes(packed, 2, tuple(codes.shape)), codes)
+
+
 def test_layout_rejects_contract_violations():
     fixture = _fixture()
     with pytest.raises(NotImplementedError, match="symmetric"):
@@ -1287,14 +1318,16 @@ def test_blockfloat_mantissa_widths():
     import importlib
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
-    assert bq.BLOCKFLOAT_BITS == {"bf4_b": 4, "bf8_b": 8}
+    assert bq.BLOCKFLOAT_BITS == {"bf2_b": 2, "bf4_b": 4, "bf8_b": 8}
     # One sign bit and one implicit mantissa bit are not stored.
     assert bq.stored_mantissa_bits(8) == 6
     assert bq.stored_mantissa_bits(4) == 2
+    # At two bits there is no stored mantissa: the magnitude bit is the value.
+    assert bq.stored_mantissa_bits(2) == 0
 
 
 def test_blockfloat_dtype_names_are_canonical():
-    """The two block-float dtypes are named ``bf4_b`` and ``bf8_b``.
+    """The block-float dtypes are named ``bf2_b``, ``bf4_b`` and ``bf8_b``.
 
     The names are Tenstorrent formats, not industry ones: OCP microscaling uses
     a per-32 ``E8M0`` scale and NVFP4 a per-16 ``FP8`` scale, and neither is
@@ -1311,7 +1344,9 @@ def test_blockfloat_dtype_names_are_canonical():
 
     bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
 
-    assert bq.TT_BLOCKFLOAT_DTYPES == {4: "bf4_b", 8: "bf8_b"}
+    assert bq.TT_BLOCKFLOAT_DTYPES == {2: "bf2_b", 4: "bf4_b", 8: "bf8_b"}
+    # ttnn exposes no bfloat2_b attribute, so bf2_b has no vendor spelling.
+    assert 2 not in bq.TT_BLOCKFLOAT_VENDOR_ATTRS
     # No vendor prefix: the shortening is deliberate, not an oversight.
     assert not any(name.startswith("tt") for name in bq.TT_BLOCKFLOAT_DTYPES.values())
     # The canonical name only shortens "bfloat"; every other part of the vendor

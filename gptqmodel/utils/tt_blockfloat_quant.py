@@ -42,7 +42,14 @@ format       bits   stored mant  representable levels
 ===========  =====  ===========  ===================
 ``bf8_b``       8        6        ~127 per exponent
 ``bf4_b``       4        2        7 per exponent
+``bf2_b``       2        0        1 per exponent
 ===========  =====  ===========  ===================
+
+``bf2_b`` is the degenerate member: one sign bit and one magnitude bit, so a
+block can only hold ``{-1, 0, +1} x 2**exponent``.  It is supported here so the
+grid can be measured, not because a model should be stored in it -- three levels
+cannot represent weights.  ``ttnn`` exposes no ``bfloat2_b`` attribute either,
+so a ``bf2_b`` checkpoint cannot be loaded by the Tenstorrent runtime today.
 
 Rounding is round-to-nearest-even, matching the hardware behaviour described in
 that report.
@@ -59,7 +66,7 @@ from .calibration import iter_calibration_windows
 
 
 #: Canonical name per width. Use these outside the ttnn call site.
-TT_BLOCKFLOAT_DTYPES = {4: "bf4_b", 8: "bf8_b"}
+TT_BLOCKFLOAT_DTYPES = {2: "bf2_b", 4: "bf4_b", 8: "bf8_b"}
 #: The attribute ``ttnn`` exposes for the same storage format. Only the code
 #: that actually calls ttnn should use these spellings.
 TT_BLOCKFLOAT_VENDOR_ATTRS = {4: "bfloat4_b", 8: "bfloat8_b"}
@@ -209,7 +216,9 @@ def stored_mantissa_bits(total_bits: int) -> int:
     """Return the explicitly stored mantissa bits for a block-float width."""
 
     # One sign bit, one implicit mantissa bit, the rest are stored mantissa.
-    return max(total_bits - 2, 1)
+    # At two bits there is no room for a stored mantissa: the single magnitude
+    # bit is the whole value, so the grid is {-1, 0, +1} times the exponent.
+    return max(total_bits - 2, 0)
 
 
 def quantize_blockfloat(
@@ -227,8 +236,10 @@ def quantize_blockfloat(
         raise ValueError("weight must have at least one dimension")
     if block <= 0:
         raise ValueError(f"block must be positive, got {block}")
-    if total_bits not in (4, 8):
-        raise ValueError(f"unsupported block-float width {total_bits}; expected 4 or 8")
+    if total_bits not in (2, 4, 8):
+        raise ValueError(
+            f"unsupported block-float width {total_bits}; expected 2, 4 or 8"
+        )
 
     x = weight.to(torch.float32)
     shape = x.shape
@@ -292,11 +303,23 @@ def quantize_bf4(weight: torch.Tensor) -> torch.Tensor:
     return quantize_blockfloat(weight, 4)[0]
 
 
+def quantize_bf2(weight: torch.Tensor) -> torch.Tensor:
+    """Round ``weight`` the way ``bf2_b`` storage would round it.
+
+    The grid is ``{-1, 0, +1} x 2**exponent`` per 16-value block, so this is a
+    three-level quantiser.  It exists to measure what that grid costs, not as a
+    recommended weight format.
+    """
+
+    return quantize_blockfloat(weight, 2)[0]
+
+
 # Compatibility aliases using the vendor spelling. Prefer the ``bf*`` names:
 # they keep the origin of the format explicit and cannot be mistaken for an
 # industry format such as OCP FP8 or MX.
 quantize_bfloat8_b = quantize_bf8
 quantize_bfloat4_b = quantize_bf4
+quantize_bfloat2_b = quantize_bf2
 
 
 def quantize_uniform_int4(weight: torch.Tensor, *, group_size: int = 128) -> torch.Tensor:
@@ -335,9 +358,11 @@ __all__ = [
     "BLOCKFLOAT_BLOCK",
     "TT_BLOCKFLOAT_DTYPES",
     "TT_BLOCKFLOAT_VENDOR_ATTRS",
+    "quantize_bfloat2_b",
     "quantize_bfloat4_b",
     "quantize_bfloat8_b",
     "quantize_blockfloat",
+    "quantize_bf2",
     "quantize_bf4",
     "quantize_bf8",
     "quantize_uniform_int4",
@@ -421,8 +446,8 @@ def gptq_solve_blockfloat(
         raise ValueError(
             f"hessian must be [{in_features}, {in_features}], got {tuple(hessian.shape)}"
         )
-    if bits not in (4, 8):
-        raise ValueError(f"bits must be 4 or 8, got {bits}")
+    if bits not in (2, 4, 8):
+        raise ValueError(f"bits must be 2, 4 or 8, got {bits}")
     if grid not in ("blockfloat", "uniform"):
         raise ValueError(f"grid must be 'blockfloat' or 'uniform', got {grid!r}")
     use_blockfloat = grid == "blockfloat"
@@ -810,9 +835,17 @@ def recompose_blockfloat(
 
 
 def _pack_codes(codes: torch.Tensor, bits: int) -> torch.Tensor:
-    """Pack codes at their natural density: two per byte for 4-bit, one for 8-bit."""
+    """Pack codes at their natural density: 4/2/1 per byte for 2/4/8-bit."""
 
     flat = codes.reshape(-1)
+    if bits == 2:
+        if flat.numel() % 4:
+            flat = torch.nn.functional.pad(flat, (0, 4 - flat.numel() % 4))
+        b0 = flat[0::4].to(torch.int16)
+        b1 = flat[1::4].to(torch.int16)
+        b2 = flat[2::4].to(torch.int16)
+        b3 = flat[3::4].to(torch.int16)
+        return (b0 | (b1 << 2) | (b2 << 4) | (b3 << 6)).to(torch.uint8)
     if bits == 4:
         if flat.numel() % 2:
             flat = torch.nn.functional.pad(flat, (0, 1))
@@ -826,6 +859,13 @@ def _unpack_codes(packed: torch.Tensor, bits: int, shape: "tuple") -> torch.Tens
     """Inverse of :func:`_pack_codes`."""
 
     flat = packed.reshape(-1)
+    if bits == 2:
+        words = flat.to(torch.int16)
+        out = torch.stack(
+            [words & 3, (words >> 2) & 3, (words >> 4) & 3, (words >> 6) & 3],
+            dim=1,
+        ).reshape(-1)
+        return out[: shape[0] * shape[1]].to(torch.uint8).reshape(shape)
     if bits == 4:
         lo = (flat & 0x0F).to(torch.int16)
         hi = ((flat >> 4) & 0x0F).to(torch.int16)
