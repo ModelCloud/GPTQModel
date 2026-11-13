@@ -166,15 +166,27 @@ def _cast_model_dtype(model, dtype: torch.dtype) -> None:
     A blanket ``model.to(dtype)`` is not equivalent: it also narrows buffers
     that Hugging Face intentionally keeps in float32 (Llama's rotary
     ``inv_freq``), which changes the rotary frequencies and therefore the
-    logits. Casting per tensor lets those stay put.
+    logits. Casting per tensor lets those be handled explicitly.
+
+    Pinned tensors are converted *to* float32 rather than skipped: some models
+    declare ``_keep_in_fp32_modules`` (GPT-OSS lists its norms), and
+    ``_from_config`` initializes them in the checkpoint's dtype. Skipping them
+    would leave bf16 norms in an explicitly-fp32 load, and copying a float32
+    norm payload into a bf16 parameter rounds it (1.001 -> 1.0).
     """
 
     for name, parameter in model.named_parameters():
-        if parameter.is_floating_point() and not _is_pinned_fp32(name, model):
-            parameter.data = parameter.data.to(dtype)
+        if not parameter.is_floating_point():
+            continue
+        target = torch.float32 if _is_pinned_fp32(name, model) else dtype
+        if parameter.dtype is not target:
+            parameter.data = parameter.data.to(target)
     for name, buffer in model.named_buffers():
-        if buffer.is_floating_point() and not _is_pinned_fp32(name, model):
-            buffer.data = buffer.data.to(dtype)
+        if not buffer.is_floating_point():
+            continue
+        target = torch.float32 if _is_pinned_fp32(name, model) else dtype
+        if buffer.dtype is not target:
+            buffer.data = buffer.data.to(target)
 
 
 def _sync_config_dtype(config, dtype: torch.dtype) -> None:

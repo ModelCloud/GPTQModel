@@ -2305,6 +2305,70 @@ def test_blockfloat_load_follows_the_checkpoint_dtype(tmp_path):
     assert torch.equal(again.model.norm.weight.detach(), norm)
 
 
+def test_blockfloat_pinned_fp32_norms_survive_an_fp32_override(tmp_path):
+    """Pinned parameters must be converted to fp32, not skipped.
+
+    GPT-OSS declares ``_keep_in_fp32_modules = ["post_attention_layernorm",
+    "input_layernorm", "norm"]``, so ``from_pretrained`` keeps its norms fp32
+    inside a bf16 model. The loader initialises them in the checkpoint dtype,
+    so an explicit fp32 load has to actively promote them -- skipping the cast
+    leaves a bf16 parameter, and the stored fp32 norm rounds on load
+    (1.001 -> 1.0).
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+    from transformers import GptOssConfig, GptOssForCausalLM
+
+    torch.manual_seed(0)
+    config = GptOssConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        num_local_experts=2, head_dim=8, max_position_embeddings=64,
+        tie_word_embeddings=True, dtype=torch.bfloat16,
+    )
+    model = GptOssForCausalLM._from_config(config)
+    # The precondition: without an explicit promotion the norm starts bf16.
+    assert model.model.norm.weight.dtype is torch.bfloat16
+
+    pinned = tuple(GptOssForCausalLM._keep_in_fp32_modules)
+    with torch.no_grad():
+        # Emulate from_pretrained: pinned tensors are fp32, the rest bf16.
+        for name, parameter in model.named_parameters():
+            if any(fragment in name for fragment in pinned):
+                parameter.data = parameter.data.float()
+                parameter.fill_(1.001)
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(
+                        bq.quantize_bf4(module.weight.detach().float()).to(torch.bfloat16)
+                    )
+        embed = model.model.embed_tokens
+        embed.weight.copy_(
+            bq.quantize_blockfloat(embed.weight.detach().float(), 8)[0].to(torch.bfloat16)
+        )
+
+    out = str(tmp_path / "gptoss")
+    bq.save_blockfloat_model(model, out, bits=4, embed_bits=8)
+    with open(f"{out}/config.json") as handle:
+        saved = json.load(handle)
+    assert saved["dtype"] == "bfloat16"
+
+    # Default load: the model is bf16, but the pinned norm stays fp32 exactly
+    # as it does through from_pretrained.
+    auto, _ = bq.load_blockfloat_model(out)
+    assert next(auto.parameters()).dtype is torch.bfloat16
+    assert auto.model.norm.weight.dtype is torch.float32
+
+    # Explicit fp32 override: the pinned norm must be promoted, not skipped.
+    forced, _ = bq.load_blockfloat_model(out, dtype=torch.float32)
+    assert forced.model.norm.weight.dtype is torch.float32
+    assert float(forced.model.norm.weight[0]) == 1.0010000467300415
+
+
 def test_blockfloat_embedding_follows_module_casts():
     """``.float()``/``.bfloat16()`` must move the table's output dtype too.
 
