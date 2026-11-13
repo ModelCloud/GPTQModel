@@ -7,8 +7,8 @@ This pins the boundary behavior that a scan for silent overflow/underflow
 turned up. Each case here is something that can go wrong quietly: a packed code
 spilling into a neighbour, a zero point truncated to the wrong width, a
 dequantized value leaving its representable range, or an activation quantizer
-turning a finite input into NaN. The scalar cases run on CPU; the backend
-comparisons need a CUDA device and are skipped without one.
+turning a finite input into NaN. These cases run on CPU; the Marlin backend
+comparisons are in the GPU test suite.
 """
 
 import pytest
@@ -19,7 +19,7 @@ from gptqmodel.quantization.activation_floatx import (
     nvfp4_block_qdq,
     nvfp4_global_scale,
 )
-from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns, unpack_awq
+from gptqmodel.quantization.awq.utils.packing_utils import pack_awq, pack_awq_columns, unpack_awq
 from gptqmodel.quantization.quantizer import quantize
 from gptqmodel.utils.nf12_codec import MAX_EXP_BASE, decode, encode
 
@@ -35,8 +35,17 @@ def test_packed_codes_round_trip_at_both_ends(bits):
     codes[:, 1] = 0
     codes[:, 2] = maxq // 2
     codes[:, 3] = 1
+    codes[:, 9] = maxq
+    codes[:, 10] = maxq  # A 3-bit code straddles the first word boundary.
+    codes[:, 11] = 1
+    codes[:, 31] = maxq
+    codes[:, 32] = 1
+    codes[:, 63] = maxq  # Also check the last code in a partial 3-bit group.
 
-    packed = pack_awq_columns(codes, bits)
+    if bits == 3:
+        packed, _ = pack_awq(codes, torch.zeros_like(codes), bits)
+    else:
+        packed = pack_awq_columns(codes, bits)
     back, _ = unpack_awq(packed, None, bits, count=codes.shape[1])
     assert torch.equal(back[:, : codes.shape[1]].to(torch.int32), codes)
 
@@ -46,7 +55,7 @@ def test_eight_bit_zero_point_keeps_its_full_width():
     zeros = torch.full((32, 32), 255, dtype=torch.int32)
     packed = pack_awq_columns(zeros, 8)
     back, _ = unpack_awq(packed, None, 8, count=32)
-    assert int(back.max().item()) == 255
+    assert torch.equal(back.to(torch.int32), zeros)
 
 
 @pytest.mark.parametrize("bits", (4, 8))
@@ -127,43 +136,9 @@ BF16_EXTREMES = (
 
 @pytest.mark.parametrize("label,value", BF16_EXTREMES)
 def test_nf12_round_trip_is_lossless_at_bf16_extremes(label, value):
-    """NF12-AD is a lossless BF16 encoding, including the payload of inf/NaN."""
+    """NF12-AD preserves BF16 bits, including signed infinity patterns."""
     w = torch.full((16, 64), value, dtype=torch.bfloat16)
     packed, escapes, base = encode(w)
     assert 0 <= base <= MAX_EXP_BASE
     back = decode(packed, escapes, base, w.shape[0], w.shape[1])
     assert torch.equal(back.view(torch.int16), w.view(torch.int16))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the marlin repack kernels")
-@pytest.mark.parametrize("pattern", (0, -1, -65536, 65535))
-def test_marlin_repack_matches_torch_at_extreme_codes(pattern):
-    """0x00000000, 0xFFFFFFFF, 0xFFFF0000 and 0x0000FFFF as signed int32."""
-    from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-
-    k, n, group, dtype = 256, 128, 128, torch.float16
-
-    def build(cls):
-        module = cls(
-            bits=4, group_size=group, sym=True, desc_act=False, in_features=k,
-            out_features=n, bias=False, dtype=dtype,
-        ).to("cuda:0", dtype)
-        return module
-
-    reference, candidate = build(TorchLinear), build(MarlinLinear)
-    x = torch.randn(4, k, dtype=dtype, device="cuda:0")
-    with torch.no_grad():
-        qweight = torch.full((k // 8, n), pattern, dtype=torch.int32, device="cuda:0")
-        qzeros = torch.full(reference.qzeros.shape, -2004318072, dtype=torch.int32, device="cuda:0")
-        scales = torch.full(reference.scales.shape, 0.01, dtype=dtype, device="cuda:0")
-        for module in (reference, candidate):
-            module.qweight.copy_(qweight)
-            module.qzeros.copy_(qzeros)
-            module.scales.copy_(scales)
-            if hasattr(module, "qzero_format"):
-                module.qzero_format(format=2)
-            module.post_init()
-        left = reference(x).float()
-        right = candidate(x).float()
-    assert torch.equal(left, right), (left - right).abs().max()
