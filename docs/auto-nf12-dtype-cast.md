@@ -33,7 +33,8 @@ flowchart TD
     F -- Decoded FP8 FP4 MXFP4 MXFP8 --> G
     G --> H[Run calibration forward from packed storage]
     H --> I[Decode exact source dtype before quantization]
-    I --> J[GPTQ AWQ or RTN packs the requested output format]
+    I --> J[Release packed source buffers]
+    J --> K[GPTQ AWQ or RTN packs the requested output format]
 ```
 
 FP16 does not have a subset relationship with BF16. An FP16 matrix is therefore
@@ -49,7 +50,8 @@ BF16 view and `AUTO_NF12` stores that view in NF12 for calibration.
 The processor creates its quantization task before the source is packed. The
 task retains shape and operation metadata, while its dense source storage is
 released. Immediately before that task runs, the exact original dtype and bit
-patterns are reconstructed from NF12 and rebound to the task.
+patterns are reconstructed from NF12 and rebound to the task. The replacement
+is installed first, then the now-unused packed buffers are released.
 
 This handoff prevents a packed calibration forward from changing the input
 matrix seen by GPTQ, AWQ, or RTN. It also prevents the original dense weight
@@ -166,7 +168,7 @@ matched dense BF16 exactly. Its row-major packed representation occupied
 
 ### End-to-end quantization comparison
 
-A separate RTX 4090 run compared GPTQ 4-bit, group size 128, with
+A separate RTX 4090 comparison used GPTQ 4-bit, group size 128, with
 `AUTO_NF12` and `OFF`. Both policies used the same BF16 source model and
 4,096 WikiText calibration tokens from 8 windows of 512 tokens. Model load and
 checkpoint save were excluded from the quantization timer. Peak allocated
@@ -175,20 +177,64 @@ memory was reset immediately before quantization.
 | Metric | `AUTO_NF12` | `OFF` |
 | --- | ---: | ---: |
 | Cast projection modules | 112 | 0 |
-| Peak allocated memory | 1,504.247 MiB | 1,512.221 MiB |
-| Warm median quantization time | 30.131874 s | 29.568869 s |
+| Peak allocated memory | 1,458.342 MiB | 1,458.342 MiB |
+| Warm median quantization time | 5.874719 s | 6.126948 s |
 
-Peak memory was 7.974 MiB, or 0.527%, lower with `AUTO_NF12`. The warm median
-quantization time was 1.904% higher. The first `AUTO_NF12` run took 52.401238
-seconds because it paid the kernel compilation cost; subsequent runs took
-30.722433, 26.454301, and 30.131874 seconds.
+All six final checkpoints, three per policy, contained 482 state tensors, and
+every corresponding tensor was bit identical. On a held-out 4,096-token
+WikiText split, both quantized policies scored NLL
+3.1000067591667175 and perplexity 22.198101321602206.
 
-All four `AUTO_NF12` checkpoints and all three `OFF` checkpoints contained
-482 state tensors, and every corresponding tensor was bit identical. On a
-held-out 4,096-token WikiText split, both quantized checkpoints scored
-NLL 3.1071042120456696 and perplexity 22.35621172659059. The dense BF16 model
-scored perplexity 20.055038906017362 on the same split.
+After warming the kernels, `AUTO_NF12` was 4.12% faster at the median. The
+checkpoint and held-out score remained exact. End-to-end peak allocation was
+equal because the GPTQ Hessian and inverse/damping workspace, rather than
+resident source weights, determined the peak.
 
-These measurements establish equal quantized checkpoints and held-out scores,
-lower peak memory, and a small warm-time regression. They do not establish a
-quantization-time reduction for this calibration size.
+### Memory and timing attribution
+
+The source representation and the quantization workspace peak at different
+times:
+
+```mermaid
+flowchart TD
+    A[Layer subset selected] --> B{AUTO_NF12?}
+    B -- No --> C[Dense BF16 subset]
+    B -- Yes --> D[Native BF16 to NF12 encode]
+    D --> E[Calibration forward from packed source]
+    C --> F[Calibration forward from dense source]
+    E --> G[Restore exact BF16 for GPTQ]
+    F --> G
+    G --> H[Release packed source buffers]
+    H --> I[GPTQ Hessian inverse and damping workspace]
+    I --> J[End-to-end peak]
+```
+
+For the 4K calibration run, resident allocation after module preparation
+peaked at 626.139 MiB with `AUTO_NF12` and 771.844 MiB with `OFF`, an 18.88%
+reduction. The calibration-forward phase peak was 912.420 MiB and
+920.391 MiB respectively because the cached 4K activation inputs dominated
+that phase.
+
+The full quantization peak was 1,458.342 MiB for both policies. Allocation
+history attributed the peak to GPTQ's 512 MiB inverse factor, two 256 MiB
+damping/inverse temporaries, 64 MiB permutation storage, and additional
+quantization and activation buffers. With one 512-token block, where the
+activation cache is small, the calibration-forward peak was 444.420 MiB with
+`AUTO_NF12` and 681.783 MiB with `OFF`.
+
+The packed representation therefore reduces calibration resident memory, but
+cannot reduce the end-to-end peak while GPTQ's dense Hessian workspace remains
+unchanged.
+
+### Native encode path
+
+The first warm implementation copied each GPU weight to CPU, copied it back to
+the GPU for native encoding, then returned the result to CPU and copied the
+packed buffers to the GPU again. It also allocated full zero NF12 buffers
+before immediately overwriting them. Those round trips made 112 encodes take
+about 1.8 seconds and made `AUTO_NF12` slower end to end.
+
+The encoder now consumes the accelerator-resident BF16 source directly and
+installs the native result on that device. Warm encoding took 0.118522 seconds
+for all 112 modules, or 0.079967 seconds after excluding the first seven shape
+specializations. Median warm encoding was 0.478 ms per module.

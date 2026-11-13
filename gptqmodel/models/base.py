@@ -4383,9 +4383,9 @@ class BaseQModel(nn.Module):
             if role == "forward" and named_module is not None and named_module.state.get("auto_dtype_cast_source_spec") is not None:
                 return target_submodule
             if role == "quant_source" and named_module is not None:
+                source_spec = named_module.state.get("auto_dtype_cast_source_spec")
                 quant_source = named_module.state.get("quant_source_module")
                 if not isinstance(quant_source, nn.Module):
-                    source_spec = named_module.state.get("auto_dtype_cast_source_spec")
                     if source_spec is not None:
                         from ..utils.auto_dtype_cast import restore_source_module
 
@@ -4423,6 +4423,10 @@ class BaseQModel(nn.Module):
                     )
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
+                if source_spec is not None:
+                    from ..utils.auto_dtype_cast import release_packed_source_storage
+
+                    release_packed_source_storage(target_submodule)
                 named_module.state.pop("auto_dtype_cast_source_spec", None)
                 if get_device(module) != device:
                     safe_module_to(module, device)

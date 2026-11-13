@@ -238,6 +238,7 @@ def test_forward_role_packs_and_quant_source_role_restores_dense(monkeypatch):
     )
     assert model.linear is packed
     assert "weight" not in packed.state_dict()
+    packed_bytes = sum(t.numel() * t.element_size() for t in packed.buffers())
 
     restored = harness.shell_module_materialize(
         target_submodule=packed,
@@ -250,6 +251,7 @@ def test_forward_role_packs_and_quant_source_role_restores_dense(monkeypatch):
     assert _bits_equal(restored.weight, expected_weight)
     assert _bits_equal(restored.bias, expected_bias)
     assert "auto_dtype_cast_source_spec" not in named.state
+    assert all(not tensor.numel() for tensor in packed.buffers())
     assert harness.auto_dtype_cast_events == [
         {
             "module": "linear",
@@ -257,9 +259,73 @@ def test_forward_role_packs_and_quant_source_role_restores_dense(monkeypatch):
             "kind": "linear",
             "source_dtype": "bfloat16",
             "source_bytes": expected_weight.numel() * 2 + expected_bias.numel() * 2,
-            "packed_bytes": sum(t.numel() * t.element_size() for t in packed.buffers()),
+            "packed_bytes": packed_bytes,
         }
     ]
+
+
+@pytest.mark.parametrize("kind", ["linear", "hooked_linear", "embedding"])
+def test_quant_source_releases_packed_storage_for_every_source_kind(monkeypatch, kind):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    if kind == "embedding":
+        source = nn.Embedding(16, 64, dtype=torch.bfloat16)
+    elif kind == "hooked_linear":
+        source = HookedLinear.from_linear(
+            nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+        )
+    else:
+        source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+    expected = source.weight.detach().clone()
+
+    class Wrapper(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.source = source
+
+    model = Wrapper()
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = model
+    harness.quantize_config = QuantizeConfig(offload_to_disk=False)
+    harness._turtle_lock = threading.RLock()
+    harness.turtle_model = None
+    harness.auto_dtype_cast_events = []
+    named = NamedModule(model.source, name="source", full_name="source", layer_index=0)
+
+    packed = harness._maybe_auto_dtype_cast_forward_module(
+        model.source,
+        device=torch.device("cpu"),
+        named_module=named,
+    )
+    assert any(tensor.numel() for tensor in packed.buffers())
+
+    restored = harness.shell_module_materialize(
+        target_submodule=packed,
+        device=torch.device("cpu"),
+        role="quant_source",
+        named_module=named,
+    )
+
+    assert model.source is restored
+    assert _bits_equal(restored.weight, expected)
+    assert all(not tensor.numel() for tensor in packed.buffers())
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not auto_dtype_cast.nf12_supported_device("cuda:0"),
+    reason="requires a native NF12 accelerator",
+)
+def test_native_gpu_encoding_keeps_packed_tensors_on_source_device():
+    weight = torch.randn(16, 64, device="cuda:0", dtype=torch.bfloat16)
+
+    result = nf12_quantization.quantize_nf12_weight(weight)
+
+    assert result.packed.device == weight.device
+    assert result.escapes.device == weight.device
 
 
 def test_native_floatx_forward_plan_is_left_untouched(monkeypatch):

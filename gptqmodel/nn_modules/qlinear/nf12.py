@@ -291,6 +291,8 @@ class NF12Linear(WeightOnlyQuantLinear):
     def _install_result(self, result: NF12QuantResult, *, linear=None, bias=None):
         if hasattr(self, "nf12_packed"):
             target_device = self.nf12_packed.device
+        elif linear is not None:
+            target_device = weight_to_matrix(linear).device
         elif isinstance(getattr(self, "bias", None), torch.Tensor):
             target_device = self.bias.device
         else:

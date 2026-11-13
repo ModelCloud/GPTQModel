@@ -223,7 +223,7 @@ class AutoNF12HookedLinear(NF12Linear):
             in_features=k,
             out_features=n,
             bias=source.bias is not None,
-            device=source.weight.device,
+            register_buffers=False,
         )
         layer.pack_original(source)
         copy_hooked_linear_runtime(
@@ -260,9 +260,26 @@ def cast_source_module(module: nn.Module, spec: SourceModuleSpec) -> nn.Module:
     if spec.kind == "hooked_linear":
         return AutoNF12HookedLinear.from_linear(module)
     n, k = spec.shape
-    replacement = NF12Linear(bits=12, in_features=k, out_features=n, bias=spec.bias)
+    replacement = NF12Linear(
+        bits=12,
+        in_features=k,
+        out_features=n,
+        bias=spec.bias,
+        register_buffers=False,
+    )
     replacement.pack_original(module)
-    return replacement.to(module.weight.device).eval()
+    return replacement.eval()
+
+
+def release_packed_source_storage(packed: nn.Module) -> None:
+    """Drop packed bytes after the quantizer source has been materialized."""
+
+    for name, tensor in tuple(packed.named_buffers(recurse=False)):
+        if tensor.numel():
+            setattr(packed, name, tensor.new_empty(0))
+    clear_weight_cache = getattr(packed, "clear_weight_cache", None)
+    if clear_weight_cache is not None:
+        clear_weight_cache()
 
 
 def restore_source_module(
@@ -312,5 +329,6 @@ __all__ = [
     "eligible_source_module",
     "fp16_is_bf16_exact",
     "nf12_supported_device",
+    "release_packed_source_storage",
     "restore_source_module",
 ]
