@@ -1,7 +1,6 @@
 #pragma once
 
-#include <torch/all.h>
-#include <Python.h>
+#include "../torch_stable_compat.h"
 
 #include "machete_mm_kernel.cuh"
 #include "cutlass_extensions/torch_utils.hpp"

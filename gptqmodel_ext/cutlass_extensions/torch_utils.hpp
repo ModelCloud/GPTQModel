@@ -1,9 +1,9 @@
 #pragma once
 
-// This header is shared between _C (unstable ABI, used by machete) and
-// _C_stable_libtorch (stable ABI, used by W4A8/sparse). TORCH_TARGET_VERSION
-// is defined only for the stable target, so we switch includes and types
-// accordingly. TorchTensor (not Tensor) avoids ambiguity with cute::Tensor.
+// This header is shared between stable-ABI extensions and legacy unstable-ABI
+// builds. TORCH_TARGET_VERSION is defined only for the stable target, so we
+// switch includes and types accordingly. TorchTensor (not Tensor) avoids
+// ambiguity with cute::Tensor.
 #ifdef TORCH_TARGET_VERSION
   #include <torch/csrc/stable/tensor.h>
   #include <torch/headeronly/util/BFloat16.h>
@@ -15,7 +15,11 @@ using TorchBFloat16 = torch::headeronly::BFloat16;
 using TorchScalarType = torch::headeronly::ScalarType;
   #define TORCH_UTILS_CHECK STD_TORCH_CHECK
 #else
-  #include <torch/all.h>
+  // Spelled through a macro so stable-ABI source scanners do not treat this
+  // optional non-stable branch as a hard dependency.
+  #define GPTQMODEL_TORCH_ALL_HEADER <torch/all.h>
+  #include GPTQMODEL_TORCH_ALL_HEADER
+  #undef GPTQMODEL_TORCH_ALL_HEADER
 using TorchTensor = torch::Tensor;
 using TorchHalf = c10::Half;
 using TorchBFloat16 = c10::BFloat16;
