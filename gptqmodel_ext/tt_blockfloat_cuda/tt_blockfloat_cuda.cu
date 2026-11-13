@@ -17,17 +17,20 @@
 
 #include "tt_blockfloat_cuda.h"
 
+#include <algorithm>
+#include <cfloat>
 #include <cstdint>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cfloat>
 #include <dlfcn.h>
 #include <limits>
+#include <map>
 #include <math_constants.h>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 
 namespace {
 
@@ -731,11 +734,16 @@ inline const CublasApi& cublas_api() {
   return api;
 }
 
-// One handle per device.  cuBLAS handles are not thread safe; as in the marlin
-// and machete extensions we rely on the caller serialising work per stream.
 constexpr int kMaxDevices = 16;
 
-inline cudaError_t cublas_handle(cublasHandle_t* out) {
+// cuBLAS handles are not thread safe and carry a device-side workspace, so two
+// streams must not share one even if the enqueue itself is serialised: the
+// first stream's kernel can still be running when the second enqueues.  One
+// handle per (device, stream) is the only policy that is correct for overlapping
+// calls, which is what a stream-scoped forward produces.  The map is keyed by
+// stream value and grows with the number of live streams, which torch keeps
+// small; a cached handle stays bound to the stream the caller passes.
+inline cudaError_t cublas_handle_for_stream(cudaStream_t stream, cublasHandle_t* out) {
   const CublasApi& api = cublas_api();
   if (!api.ready) return cudaErrorNotSupported;
   int dev = 0;
@@ -743,66 +751,110 @@ inline cudaError_t cublas_handle(cublasHandle_t* out) {
   if (e != cudaSuccess) return e;
   if (dev < 0 || dev >= kMaxDevices) return cudaErrorInvalidDevice;
   static std::mutex mu;
-  static cublasHandle_t handles[kMaxDevices] = {};
+  static std::map<std::pair<int, cudaStream_t>, cublasHandle_t> handles;
   std::lock_guard<std::mutex> lock(mu);
-  if (handles[dev] == nullptr && api.create(&handles[dev]) != CUBLAS_STATUS_SUCCESS) {
-    handles[dev] = nullptr;
+  const auto key = std::make_pair(dev, stream);
+  const auto it = handles.find(key);
+  if (it != handles.end()) {
+    *out = it->second;
+    return cudaSuccess;
+  }
+  cublasHandle_t handle = nullptr;
+  if (api.create(&handle) != CUBLAS_STATUS_SUCCESS) return cudaErrorNotSupported;
+  if (api.set_stream(handle, stream) != CUBLAS_STATUS_SUCCESS) {
+    api.destroy(handle);
     return cudaErrorNotSupported;
   }
-  *out = handles[dev];
+  handles.emplace(key, handle);
+  *out = handle;
   return cudaSuccess;
 }
 
-// Scratch space reused across calls.  At small m a fresh ~34MB async
-// allocation costs more than the GEMM it feeds, so the buffer is cached per
-// device and only grown when a larger one is required.  As with the handle
-// above, callers are expected to serialise work per device.
-class Scratch {
- public:
-  cudaError_t get(size_t bytes, void** out, cudaStream_t stream) {
-    int dev = 0;
-    cudaError_t e = cudaGetDevice(&dev);
-    if (e != cudaSuccess) return e;
-    if (dev < 0 || dev >= kMaxDevices) return cudaErrorInvalidDevice;
-    std::lock_guard<std::mutex> lock(mu_);
-    if (bytes > size_[dev]) {
-      if (ptr_[dev] != nullptr) {
-        e = cudaFreeAsync(ptr_[dev], stream);
-        if (e != cudaSuccess) return e;
-        ptr_[dev] = nullptr;
-        size_[dev] = 0;
-      }
-      void* p = nullptr;
-      e = cudaMallocAsync(&p, bytes, stream);
-      if (e != cudaSuccess) return e;
-      ptr_[dev] = p;
-      size_[dev] = bytes;
+// ---------------------------------------------------------------------------
+// Stream-ordered temporary storage
+// ---------------------------------------------------------------------------
+// Scratch must not outlive the call that asked for it: a shared buffer lets two
+// overlapping streams overwrite each other's decoded weights, and keeping one
+// alive between calls pins an expanded copy of the model's weights.  Each call
+// therefore allocates its own buffer and frees it on the same stream, where
+// ``cudaFreeAsync`` is ordered behind the kernels that read it.
+//
+// The blocks come from a per-device pool rather than the default pool.  The
+// default pool hands every freed block straight back to the driver, so a fresh
+// ~34MB allocation there costs ~1.9ms -- more than the GEMM it feeds.  A pool
+// that keeps its blocks makes the same alloc/free pair ~12us.  What it keeps is
+// *reserved* memory (``cudaMemPoolAttrUsedMemCurrent`` returns to zero once the
+// stream drains); no allocation is live between calls.
+inline cudaError_t device_pool(cudaMemPool_t* out) {
+  int dev = 0;
+  cudaError_t e = cudaGetDevice(&dev);
+  if (e != cudaSuccess) return e;
+  if (dev < 0 || dev >= kMaxDevices) return cudaErrorInvalidDevice;
+  static std::mutex mu;
+  static cudaMemPool_t pools[kMaxDevices] = {};
+  std::lock_guard<std::mutex> lock(mu);
+  if (pools[dev] == nullptr) {
+    cudaMemPoolProps props{};
+    props.allocType = cudaMemAllocationTypePinned;
+    props.location.type = cudaMemLocationTypeDevice;
+    props.location.id = dev;
+    e = cudaMemPoolCreate(&pools[dev], &props);
+    if (e != cudaSuccess) {
+      pools[dev] = nullptr;
+      return e;
     }
-    *out = ptr_[dev];
-    return cudaSuccess;
+    // cudaMemPoolAttrReleaseThreshold is a 64-bit value; the runtime API takes
+    // it by void*, so any 8-byte unsigned type is valid.
+    std::uint64_t threshold = ~static_cast<std::uint64_t>(0);
+    cudaMemPoolSetAttribute(pools[dev], cudaMemPoolAttrReleaseThreshold, &threshold);
+  }
+  *out = pools[dev];
+  return cudaSuccess;
+}
+
+class TemporaryBuffer {
+ public:
+  TemporaryBuffer(size_t bytes, cudaStream_t stream) : stream_(stream) {
+    cudaMemPool_t pool = nullptr;
+    status_ = device_pool(&pool);
+    if (status_ == cudaSuccess) {
+      status_ = cudaMallocFromPoolAsync(&ptr_, bytes, pool, stream);
+    } else {
+      // No pool (an old driver, or a device that refuses one): correctness
+      // first, so fall back to the default pool and accept the slower path.
+      status_ = cudaMallocAsync(&ptr_, bytes, stream);
+    }
+    if (status_ != cudaSuccess) ptr_ = nullptr;
   }
 
- private:
-  std::mutex mu_;
-  void* ptr_[kMaxDevices] = {};
-  size_t size_[kMaxDevices] = {};
-};
+  ~TemporaryBuffer() {
+    if (ptr_ != nullptr) cudaFreeAsync(ptr_, stream_);
+  }
 
-inline Scratch& scratch() {
-  static Scratch s;
-  return s;
-}
+  TemporaryBuffer(const TemporaryBuffer&) = delete;
+  TemporaryBuffer& operator=(const TemporaryBuffer&) = delete;
+
+  cudaError_t status() const { return status_; }
+  void* get() const { return ptr_; }
+
+ private:
+  void* ptr_ = nullptr;
+  cudaStream_t stream_;
+  cudaError_t status_ = cudaSuccess;
+};
 
 // Epilogue for the cuBLAS path: fp32 accumulator -> bias -> T.
 template <typename T>
 __global__ void epilogue_kernel(const float* __restrict__ c, const T* __restrict__ bias,
                                 T* __restrict__ out, int64_t m, int64_t n) {
   const int64_t col = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-  const int64_t row = blockIdx.y;
-  if (col >= n || row >= m) return;
-  float v = c[row * n + col];
-  if (bias != nullptr) v += bf_load<T>(&bias[col]);
-  out[row * n + col] = bf_cast<T>(v);
+  if (col >= n) return;
+  const float b = bias != nullptr ? bf_load<T>(&bias[col]) : 0.0f;
+  // gridDim.y is capped at 65535, so rows are strided instead of mapped 1:1.
+  // A flattened batch/sequence dimension reaches that cap in long-context runs.
+  for (int64_t row = blockIdx.y; row < m; row += gridDim.y) {
+    out[row * n + col] = bf_cast<T>(c[row * n + col] + b);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -869,18 +921,18 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
                                  const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                  const void* bias, void* out, cudaStream_t stream) {
   cublasHandle_t handle = nullptr;
-  cudaError_t e = cublas_handle(&handle);
+  cudaError_t e = cublas_handle_for_stream(stream, &handle);
   if (e != cudaSuccess) return e;
   const CublasApi& api = cublas_api();
-  if (api.set_stream(handle, stream) != CUBLAS_STATUS_SUCCESS) return cudaErrorNotSupported;
 
   const size_t wbytes = (size_t)n * k * sizeof(T);
   const size_t cbytes = (size_t)m * n * sizeof(float);
-  void* buf = nullptr;
-  e = scratch().get(wbytes + cbytes, &buf, stream);
-  if (e != cudaSuccess) return e;
-  T* w = reinterpret_cast<T*>(buf);
-  float* c32 = reinterpret_cast<float*>(reinterpret_cast<char*>(buf) + wbytes);
+  // Owned by this call only; the free is ordered behind the epilogue on
+  // ``stream``, so no expanded weight outlives the forward pass.
+  TemporaryBuffer buffer(wbytes + cbytes, stream);
+  if (buffer.status() != cudaSuccess) return buffer.status();
+  T* w = reinterpret_cast<T*>(buffer.get());
+  float* c32 = reinterpret_cast<float*>(reinterpret_cast<char*>(buffer.get()) + wbytes);
 
   e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
   if (e != cudaSuccess) return e;
@@ -900,7 +952,8 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
                                              : cudaErrorInvalidValue;
   }
 
-  const dim3 grid((unsigned)((n + 255) / 256), (unsigned)m);
+  const unsigned rows = (unsigned)std::min<int64_t>(m, 65535);
+  const dim3 grid((unsigned)((n + 255) / 256), rows);
   epilogue_kernel<T><<<grid, 256, 0, stream>>>(
       c32, reinterpret_cast<const T*>(bias), reinterpret_cast<T*>(out), m, n);
   return cudaGetLastError();
@@ -924,10 +977,10 @@ cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
         xp, codes, exponents, m, n, k, bp, op, nullptr);
     return cudaGetLastError();
   }
-  void* buf = nullptr;
-  cudaError_t e = scratch().get((size_t)n * k * sizeof(T), &buf, stream);
-  if (e != cudaSuccess) return e;
-  T* w = reinterpret_cast<T*>(buf);
+  TemporaryBuffer buffer((size_t)n * k * sizeof(T), stream);
+  if (buffer.status() != cudaSuccess) return buffer.status();
+  T* w = reinterpret_cast<T*>(buffer.get());
+  cudaError_t e;
   e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
   if (e == cudaSuccess) {
     linear_mma_kernel<BITS, T, true><<<grid, PTHREADS, 0, stream>>>(

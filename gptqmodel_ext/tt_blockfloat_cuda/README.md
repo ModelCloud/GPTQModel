@@ -32,9 +32,16 @@ the grid.
 hands the GEMM to `cublasGemmEx` with fp32 accumulate. A hand-written
 128x128x32 `mma.m16n8k16` tile was measured at roughly half of what cuBLAS
 reaches on the same shape (63 vs 146 TFLOP/s at `m = 1024`), and competing with
-cuBLAS is not the interesting part of this problem. The scratch buffer is cached
-per device: a fresh ~34 MB `cudaMallocAsync` per call cost more than the GEMM
-itself below 128 tokens (159 us vs 52 us at `m = 64`).
+cuBLAS is not the interesting part of this problem.
+
+That scratch is owned by the call: allocated from a private per-device memory
+pool and freed on the calling stream, so two overlapping streams never share a
+decoded weight and nothing expanded survives the forward pass. The private pool
+is what makes it affordable — the default pool returns every freed block to the
+driver, which puts a fresh ~34 MB allocation at ~1.9 ms, more than the GEMM it
+feeds, while a pool that keeps its blocks makes the same alloc/free pair ~12 us.
+It keeps *reserved* memory, not live allocations: `cudaMemPoolAttrUsedMemCurrent`
+returns to zero once the stream drains.
 
 cuBLAS is resolved with `dlopen`/`dlsym` rather than a link-time `-lcublas`.
 pip CUDA wheels ship `libcublas.so.13` with no `libcublas.so` symlink, so

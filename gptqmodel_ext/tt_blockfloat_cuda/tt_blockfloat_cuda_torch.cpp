@@ -74,39 +74,43 @@ void check_exponents(const torch::Tensor& exponents, const torch::Tensor& ref,
 // linear
 // ---------------------------------------------------------------------------
 void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
-                     const torch::Tensor& exponents, int64_t bits,
-                     const std::optional<torch::Tensor>& bias, torch::Tensor& out) {
-  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(),
-              "x must be a contiguous 2D CUDA tensor");
+                           const torch::Tensor& exponents, int64_t bits,
+                           const std::optional<torch::Tensor>& bias,
+                           torch::Tensor& out) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
-  const int64_t m = x.size(0);
-  const int64_t k = x.size(1);
+  // A sliced or transposed activation is materialised rather than rejected: the
+  // dense path this replaces accepted any layout, and callers pass views such as
+  // ``x[:, ::2]``.  ``contiguous()`` is a no-op when the tensor is already packed.
+  const torch::Tensor xc = x.contiguous();
+  const int64_t m = xc.size(0);
+  const int64_t k = xc.size(1);
   TORCH_CHECK(m > 0 && k > 0, "x must not be empty");
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
-  check_like(codes, x, "codes");
-  check_like(exponents, x, "exponents");
+  check_like(codes, xc, "codes");
+  check_like(exponents, xc, "exponents");
   TORCH_CHECK(exponents.scalar_type() == at::kChar, "exponents must be int8");
   const int64_t n = out_features(exponents, k);
   check_codes(codes, bits, n, k);
 
-  check_like(out, x, "out");
-  TORCH_CHECK(out.scalar_type() == x.scalar_type(), "out dtype must match x");
+  check_like(out, xc, "out");
+  TORCH_CHECK(out.scalar_type() == xc.scalar_type(), "out dtype must match x");
   TORCH_CHECK(out.dim() == 2 && out.size(0) == m && out.size(1) == n,
               "out must be [", m, ", ", n, "]");
 
   const void* bias_ptr = nullptr;
   if (bias.has_value()) {
     const torch::Tensor& b = *bias;
-    check_like(b, x, "bias");
+    check_like(b, xc, "bias");
     TORCH_CHECK(b.dim() == 1 && b.size(0) == n, "bias must be [n]");
-    TORCH_CHECK(b.scalar_type() == x.scalar_type(), "bias dtype must match x");
+    TORCH_CHECK(b.scalar_type() == xc.scalar_type(), "bias dtype must match x");
     bias_ptr = b.data_ptr();
   }
 
-  const c10::cuda::CUDAGuard guard(x.device());
-  ok(blockfloat_linear(x.data_ptr(), dtype_code(x), codes.data_ptr<uint8_t>(),
-                 exponents.data_ptr<int8_t>(), static_cast<int>(bits), m, n, k,
-                 bias_ptr, out.data_ptr(), at::cuda::getCurrentCUDAStream()),
+  const c10::cuda::CUDAGuard guard(xc.device());
+  ok(blockfloat_linear(xc.data_ptr(), dtype_code(xc), codes.data_ptr<uint8_t>(),
+                       exponents.data_ptr<int8_t>(), static_cast<int>(bits), m, n, k,
+                       bias_ptr, out.data_ptr(), at::cuda::getCurrentCUDAStream()),
      "blockfloat_linear");
 }
 
@@ -114,7 +118,7 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
 // dequant
 // ---------------------------------------------------------------------------
 void blockfloat_dequant_out(const torch::Tensor& codes, const torch::Tensor& exponents,
-                      int64_t bits, int64_t rows, int64_t k, torch::Tensor& out) {
+                            int64_t bits, int64_t rows, int64_t k, torch::Tensor& out) {
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
   TORCH_CHECK(rows > 0 && k > 0 && k % 16 == 0,
               "rows must be > 0 and K a multiple of 16");
@@ -126,8 +130,8 @@ void blockfloat_dequant_out(const torch::Tensor& codes, const torch::Tensor& exp
 
   const c10::cuda::CUDAGuard guard(exponents.device());
   ok(blockfloat_dequant(codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
-                  static_cast<int>(bits), rows, k, out.data_ptr(), dtype_code(out),
-                  at::cuda::getCurrentCUDAStream()),
+                        static_cast<int>(bits), rows, k, out.data_ptr(), dtype_code(out),
+                        at::cuda::getCurrentCUDAStream()),
      "blockfloat_dequant");
 }
 
@@ -135,45 +139,45 @@ void blockfloat_dequant_out(const torch::Tensor& codes, const torch::Tensor& exp
 // quantize / decompose
 // ---------------------------------------------------------------------------
 void blockfloat_quantize_out(const torch::Tensor& x, int64_t bits, torch::Tensor& codes,
-                       torch::Tensor& exponents) {
-  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(),
-              "x must be a contiguous 2D CUDA tensor");
+                             torch::Tensor& exponents) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
-  const int64_t rows = x.size(0);
-  const int64_t k = x.size(1);
+  const torch::Tensor xc = x.contiguous();
+  const int64_t rows = xc.size(0);
+  const int64_t k = xc.size(1);
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
-  check_like(codes, x, "codes");
+  check_like(codes, xc, "codes");
   check_codes(codes, bits, rows, k);
-  check_exponents(exponents, x, rows, k);
+  check_exponents(exponents, xc, rows, k);
 
-  const c10::cuda::CUDAGuard guard(x.device());
-  ok(blockfloat_quantize(x.data_ptr<float>(), static_cast<int>(bits), rows, k,
-                   codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
-                   at::cuda::getCurrentCUDAStream()),
+  const c10::cuda::CUDAGuard guard(xc.device());
+  ok(blockfloat_quantize(xc.data_ptr<float>(), static_cast<int>(bits), rows, k,
+                         codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
+                         at::cuda::getCurrentCUDAStream()),
      "blockfloat_quantize");
 }
 
 void blockfloat_decompose_out(const torch::Tensor& x, int64_t bits, torch::Tensor& codes,
-                        torch::Tensor& exponents, torch::Tensor& failed) {
-  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(),
-              "x must be a contiguous 2D CUDA tensor");
+                              torch::Tensor& exponents, torch::Tensor& failed) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
-  const int64_t rows = x.size(0);
-  const int64_t k = x.size(1);
+  const torch::Tensor xc = x.contiguous();
+  const int64_t rows = xc.size(0);
+  const int64_t k = xc.size(1);
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
-  check_like(codes, x, "codes");
+  check_like(codes, xc, "codes");
   check_codes(codes, bits, rows, k);
-  check_exponents(exponents, x, rows, k);
-  check_like(failed, x, "failed");
+  check_exponents(exponents, xc, rows, k);
+  check_like(failed, xc, "failed");
   TORCH_CHECK(failed.scalar_type() == at::kInt && failed.numel() == 1,
               "failed must be a one-element int32 tensor");
 
-  const c10::cuda::CUDAGuard guard(x.device());
-  ok(blockfloat_decompose(x.data_ptr<float>(), static_cast<int>(bits), rows, k,
-                    codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
-                    failed.data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
+  const c10::cuda::CUDAGuard guard(xc.device());
+  ok(blockfloat_decompose(xc.data_ptr<float>(), static_cast<int>(bits), rows, k,
+                          codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
+                          failed.data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
      "blockfloat_decompose");
 }
 
@@ -181,27 +185,28 @@ void blockfloat_decompose_out(const torch::Tensor& x, int64_t bits, torch::Tenso
 // embedding
 // ---------------------------------------------------------------------------
 void blockfloat_embedding_out(const torch::Tensor& ids, const torch::Tensor& codes,
-                        const torch::Tensor& exponents, int64_t bits, int64_t rows,
-                        int64_t k, torch::Tensor& out) {
-  TORCH_CHECK(ids.is_cuda() && ids.is_contiguous(), "ids must be a contiguous CUDA tensor");
+                              const torch::Tensor& exponents, int64_t bits, int64_t rows,
+                              int64_t k, torch::Tensor& out) {
+  TORCH_CHECK(ids.is_cuda(), "ids must be a CUDA tensor");
   TORCH_CHECK(ids.scalar_type() == at::kLong, "ids must be int64");
+  const torch::Tensor idx = ids.contiguous();
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
   TORCH_CHECK(rows > 0 && k > 0 && k % 16 == 0,
               "rows must be > 0 and K a multiple of 16");
-  check_like(codes, ids, "codes");
-  check_like(exponents, ids, "exponents");
+  check_like(codes, idx, "codes");
+  check_like(exponents, idx, "exponents");
   TORCH_CHECK(exponents.scalar_type() == at::kChar, "exponents must be int8");
-  check_exponents(exponents, ids, rows, k);
+  check_exponents(exponents, idx, rows, k);
   check_codes(codes, bits, rows, k);
-  check_like(out, ids, "out");
-  const int64_t tokens = ids.numel();
+  check_like(out, idx, "out");
+  const int64_t tokens = idx.numel();
   TORCH_CHECK(out.numel() == tokens * k, "out must hold tokens * k elements");
 
-  const c10::cuda::CUDAGuard guard(ids.device());
-  ok(blockfloat_embedding(ids.data_ptr<int64_t>(), codes.data_ptr<uint8_t>(),
-                    exponents.data_ptr<int8_t>(), static_cast<int>(bits), tokens,
-                    rows, k, out.data_ptr(), dtype_code(out),
-                    at::cuda::getCurrentCUDAStream()),
+  const c10::cuda::CUDAGuard guard(idx.device());
+  ok(blockfloat_embedding(idx.data_ptr<int64_t>(), codes.data_ptr<uint8_t>(),
+                          exponents.data_ptr<int8_t>(), static_cast<int>(bits), tokens,
+                          rows, k, out.data_ptr(), dtype_code(out),
+                          at::cuda::getCurrentCUDAStream()),
      "blockfloat_embedding");
 }
 

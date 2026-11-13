@@ -242,3 +242,146 @@ def test_embedding_module_routes_through_the_kernel():
     # Out-of-range ids read as zero instead of indexing another row.
     out_of_range = module(torch.tensor([50, -1], device="cuda"))
     assert torch.count_nonzero(out_of_range) == 0
+
+
+def _constant_bf8(value: float) -> int:
+    """The ``bf8_b`` code for a constant at exponent 0 (levels 64, offset 127)."""
+
+    return int(round(value * 64)) + 127
+
+
+def test_overlapping_streams_get_independent_scratch():
+    """Two streams must not share the decoded-weight buffer.
+
+    Regression for the review finding: the prefill path expanded the weights into
+    one cached workspace per device, so two ordinary stream-scoped forwards could
+    overwrite each other's decoded weights while both were queued.  The weights
+    here are constant, so the exact result is known and any clobber is visible.
+    """
+
+    torch.manual_seed(0)
+    m, n, k = 1024, 4096, 4096
+    values = {"a": 1.0, "b": 1.5}
+
+    cases = {}
+    for tag, value in values.items():
+        code = _constant_bf8(value)
+        cases[tag] = (
+            torch.full((n * k,), code, dtype=torch.uint8, device="cuda"),
+            torch.zeros((n * (k // 16),), dtype=torch.int8, device="cuda"),
+            torch.full((m, n), k * value, dtype=torch.bfloat16, device="cuda"),
+        )
+
+    x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
+    out = {tag: torch.empty((m, n), dtype=torch.bfloat16, device="cuda") for tag in cases}
+    streams = {tag: torch.cuda.Stream() for tag in cases}
+
+    for _ in range(3):
+        for tag in cases:
+            codes, exponents, _ = cases[tag]
+            with torch.cuda.stream(streams[tag]):
+                torch.ops.gptqmodel_blockfloat_cuda.blockfloat_linear(x, codes, exponents, 8, None, out[tag])
+        for stream in streams.values():
+            stream.synchronize()
+        for tag, (_, _, expected) in cases.items():
+            assert torch.equal(out[tag], expected), f"stream {tag} was corrupted"
+
+
+def test_scratch_is_not_left_live_in_the_async_pool():
+    """No expanded weight may stay allocated between calls.
+
+    The reviewer measured 134 MB still live in the default CUDA async pool after
+    a forward returned.  Scratch is now owned by the call, so the process pool
+    must never grow and torch's own counters must return to baseline.
+    """
+
+    import ctypes
+
+    runtime = None
+    for soname in ("libcudart.so.13", "libcudart.so.12", "libcudart.so"):
+        try:
+            runtime = ctypes.CDLL(soname)
+            break
+        except OSError:
+            continue
+    if runtime is None:
+        pytest.skip("libcudart is not loadable by name in this environment")
+
+    pool = ctypes.c_void_p()
+    runtime.cudaDeviceGetDefaultMemPool.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int]
+    assert runtime.cudaDeviceGetDefaultMemPool(ctypes.byref(pool), 0) == 0
+
+    def used_bytes() -> int:
+        value = ctypes.c_uint64()
+        # cudaMemPoolAttrUsedMemCurrent == 0x7
+        assert runtime.cudaMemPoolGetAttribute(pool, 7, ctypes.byref(value)) == 0
+        return value.value
+
+    torch.manual_seed(1)
+    n, k = 4096, 4096
+    weight = torch.randn(n, k, device="cuda", dtype=torch.float32) * 0.05
+    codes, exponents = _cuda_quantize(weight, 8)
+
+    baseline = used_bytes()
+    allocated = torch.cuda.memory_allocated()
+
+    for m in (1024, 512):
+        x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
+        out = bf_cuda.linear(x, codes, exponents, 8)
+        del x, out
+    torch.cuda.synchronize()
+
+    assert used_bytes() == baseline
+    assert torch.cuda.memory_allocated() == allocated
+
+
+def test_linear_accepts_strided_activations():
+    """A sliced activation must not be rejected by the kernel path.
+
+    ``x[:, ::2]`` keeps a stride, so ``reshape(-1, k)`` returns a non-contiguous
+    view.  The dense path this replaces accepted it; the kernel materialises it.
+    """
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+    from gptqmodel.utils.backend import BACKEND
+
+    torch.manual_seed(12)
+    n, k = 32, 32
+    module = TTBlockfloatLinear(
+        bits=4,
+        in_features=k,
+        out_features=n,
+        bias=False,
+        backend=BACKEND.TT_BLOCKFLOAT,
+    ).cuda()
+    module.pack(torch.nn.Linear(k, n, bias=False).cuda())
+
+    base = torch.randn(3, 2 * k, device="cuda")
+    strided = base[:, ::2]
+    assert strided.stride() == (2 * k, 2) and not strided.is_contiguous()
+
+    got = module(strided)
+    expected = strided.to(torch.float32) @ module.dequantize(dtype=torch.float32).T
+    assert ((got.to(torch.float32) - expected).abs().max() / expected.abs().max()).item() < 5e-3
+
+    # The same slice through the raw op, which is the layer that raised.
+    codes, exponents = _cuda_quantize(module.dequantize(dtype=torch.float32), 4)
+    direct = bf_cuda.linear(strided, codes, exponents, 4)
+    assert ((direct.to(torch.float32) - expected).abs().max() / expected.abs().max()).item() < 5e-3
+
+
+def test_linear_handles_a_full_grid_y():
+    """The epilogue must not map every row onto grid.y, which caps at 65535."""
+
+    torch.manual_seed(11)
+    m, n, k = 65536, 1, 16
+    weight = torch.randn(n, k, device="cuda", dtype=torch.float32)
+    grid, _, _ = _reference(weight, 8)
+    codes, exponents = _cuda_quantize(weight, 8)
+
+    x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
+    got = bf_cuda.linear(x, codes, exponents, 8)
+
+    expected = x.to(torch.float32) @ grid.reshape(n, k).T
+    assert tuple(got.shape) == (m, n)
+    assert ((got.to(torch.float32) - expected).abs().max() / expected.abs().max()).item() < 5e-3
