@@ -4636,6 +4636,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "moe_vram_strategy": "moe_vram_strategy",
             "moe_vram_strategy_devices": "moe_vram_strategy_devices",
             "moe": "moe",
+            "p2p": "p2p",
             "offload_to_disk": "offload_to_disk",
             "offload_to_disk_path": "offload_to_disk_path",
             "pack_impl": "pack_impl",
