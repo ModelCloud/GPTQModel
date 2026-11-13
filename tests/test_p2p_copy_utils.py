@@ -51,11 +51,14 @@ class _RecordingLog:
 
 @pytest.fixture(autouse=True)
 def reset_p2p_state(monkeypatch):
+    previous = p2p_mod.get_p2p_config()
+    p2p_mod.configure_p2p(None)
     clear_p2p_cache()
     monkeypatch.setattr(p2p_mod, "_WARNED_DEGRADED", False)
     recorder = _RecordingLog()
     monkeypatch.setattr(p2p_mod, "log", recorder)
     yield recorder
+    p2p_mod.configure_p2p(previous)
     clear_p2p_cache()
 
 
@@ -66,6 +69,8 @@ def _require_two_gpus():
 
 def _require_p2p(src=0, dst=1):
     _require_two_gpus()
+    if p2p_mod._raw_peer_copy_unsafe():
+        pytest.skip("raw peer copies are unsafe with this allocator")
     status = enable_peer_access([src, dst])
     if not status.can_copy(src, dst):
         pytest.skip("P2P is not enabled on this host for %s->%s" % (src, dst))
@@ -80,7 +85,7 @@ def _require_p2p_both_ways(src=0, dst=1):
 
 
 def _require_nested_p2p():
-    if p2p_mod._ROCM_NESTED_PEER_DISABLED:
+    if p2p_mod._rocm_nested_peer_disabled():
         pytest.skip("nested VMM peer copies are disabled on ROCm")
 
 
@@ -254,7 +259,8 @@ def test_p2p_move_nested_skips_non_contiguous():
 def test_p2p_move_nested_falls_back_when_rocm_nested_is_disabled(monkeypatch):
     """ROCm disables the small VMM batch shape that can fault the GPU."""
 
-    monkeypatch.setattr(p2p_mod, "_ROCM_NESTED_PEER_DISABLED", True)
+    monkeypatch.setattr(torch.version, "hip", "test")
+    p2p_mod.configure_p2p(p2p_mod.P2PConfig(use_rocm_nested_peer_copy=False))
     values = _small_leaves()
     assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
 
@@ -337,3 +343,57 @@ def test_p2p_fast_path_does_not_use_torch_cuda_comm(monkeypatch):
     assert moved is not P2P_NOT_APPLICABLE
     for source, result in zip(values, moved):
         torch.testing.assert_close(source.cpu(), result.cpu(), rtol=0, atol=0)
+
+
+def test_mover_fallbacks_are_ordered_and_thread_safe():
+    """Exercise shipped movers even when the allocator withholds raw copies."""
+    _require_two_gpus()
+    if p2p_mod._rocm_peer_link_unusable():
+        pytest.skip("a native allocator is required for direct-copy coverage")
+    if not all(torch.cuda.can_device_access_peer(src, 1 - src) for src in (0, 1)):
+        pytest.skip("two usable peer directions are required")
+    p2p_mod.configure_p2p(p2p_mod.P2PConfig(mode="on"))
+    status = enable_peer_access([0, 1])
+    assert status.can_copy(0, 1) and status.can_copy(1, 0)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def work(index):
+        src, dst = index % 2, 1 - index % 2
+        torch.cuda.set_device(src)
+        source_stream = torch.cuda.Stream(device=src)
+        target_stream = torch.cuda.Stream(device=dst)
+        with torch.cuda.stream(source_stream), torch.cuda.stream(target_stream):
+            expected = torch.arange(1024 * 1024, dtype=torch.int32) + index
+            source = expected.to(f"cuda:{src}")
+            copied = torch.empty_like(source, device=f"cuda:{dst}")
+            p2p_mod.copy_tensor_to(copied, source, status)
+            assert torch.equal(copied.cpu(), expected)
+
+            values = {"ids": source[:8192], "hidden": [source, source[16384:32768]]}
+            moved = move_nested_to_device(values, torch.device("cuda", dst))
+            assert torch.equal(moved["ids"].cpu(), expected[:8192])
+            assert torch.equal(moved["hidden"][0].cpu(), expected)
+            assert torch.equal(moved["hidden"][1].cpu(), expected[16384:32768])
+
+            module = torch.nn.Linear(64, 32, bias=False)
+            with torch.no_grad():
+                module.weight.fill_(index + 1)
+            module.to(f"cuda:{src}")
+            move_module_to_device(module, torch.device("cuda", dst))
+            assert torch.equal(module.weight.cpu(), torch.full((32, 64), float(index + 1)))
+        return True
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(work, range(32)))
+
+
+def test_nested_copy_opt_in_uses_runtime_when_safe():
+    """The explicit ROCm option works only with a raw-copy-safe allocator."""
+    _require_p2p_both_ways()
+    p2p_mod.configure_p2p(p2p_mod.P2PConfig(mode="on", use_rocm_nested_peer_copy=True))
+    values = _small_leaves()
+    moved = p2p_move_nested(values, torch.device("cuda:1"))
+    assert moved is not P2P_NOT_APPLICABLE
+    for source, target in zip(values, moved):
+        assert torch.equal(target.cpu(), source.cpu())
