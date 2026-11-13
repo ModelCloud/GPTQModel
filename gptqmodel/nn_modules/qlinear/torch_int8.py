@@ -29,6 +29,9 @@ INT8_INPUT_PERM_BUFFER_NAME = "int8_input_perm"
 # the group-scale buffer rather than silently reading different semantics.
 INT8_SCALE_BUFFER_NAME = INT8_GROUP_SCALE_BUFFER_NAME
 _INT8_REBUILD_LOCK = threading.Lock()
+# Output channels decoded at once on the asymmetric path. The decoded tile is
+# transient scratch: it is released before the next tile or group is processed.
+_INT8_ASYMMETRIC_DECODE_TILE = 256
 
 
 def _require_native_int8(bits: int) -> None:
@@ -169,9 +172,11 @@ class Int8PackedModule(torch.nn.Module):
     re-quantizing to one scale per output channel. Codes are stored as the
     signed residual ``code - 128``; the residual zero point is folded into a
     per-(group, output) offset, which is exactly zero for symmetric GPTQ and is
-    then not stored at all. Groups with unequal lengths are padded to the widest
-    group and left-multiplied by an augmented activation whose pad columns are
-    zero.
+    then not stored at all. Symmetric groups take the native INT8 op; asymmetric
+    groups decode a bounded tile first so the zero-point subtraction happens
+    before the reduction instead of relying on two large FP32 terms to cancel.
+    Groups with unequal lengths are padded to the widest group and
+    left-multiplied by an augmented activation whose pad columns are zero.
     """
 
     def __init__(
@@ -221,6 +226,32 @@ class Int8PackedModule(torch.nn.Module):
             pieces.append(piece)
         return torch.stack(pieces, dim=-2)
 
+    def _asymmetric_group_output(self, flat: torch.Tensor, group: int) -> torch.Tensor:
+        """Reduce one asymmetric group with its zero point applied first.
+
+        The native INT8 op only accumulates ``scale * (code - 128)``; the
+        caller would then add ``scale * (128 - zero)``. For an asymmetric
+        checkpoint both terms are large and independently rounded, so their
+        cancellation leaves a residue even when every decoded weight is exactly
+        zero. Reconstructing the checkpoint's integer ``code - zero`` per
+        element before the matmul keeps a zero weight exactly zero. The
+        ``[tile, width]`` scratch is bounded by ``_INT8_ASYMMETRIC_DECODE_TILE``
+        and dropped before the next tile is built.
+        """
+        weight = self.int8_weight_gnk[group]
+        scale = self.int8_group_scale[group].float()
+        offset = self.int8_group_offset[group].float()
+        activations = flat[:, group, :]
+        output = torch.empty(
+            activations.shape[0], weight.shape[0], dtype=torch.float32, device=activations.device
+        )
+        for start in range(0, weight.shape[0], _INT8_ASYMMETRIC_DECODE_TILE):
+            stop = min(start + _INT8_ASYMMETRIC_DECODE_TILE, weight.shape[0])
+            decoded = weight[start:stop].float() * scale[start:stop].unsqueeze(-1)
+            decoded = decoded + offset[start:stop].unsqueeze(-1)
+            output[:, start:stop] = activations @ decoded.t()
+        return output
+
     def forward(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -231,16 +262,21 @@ class Int8PackedModule(torch.nn.Module):
         groups = activations.shape[-2]
         width = activations.shape[-1]
         flat = activations.reshape(-1, groups, width)
-        group_scale = self.int8_group_scale.float()
         output = None
-        for group in range(groups):
-            part = torch.ops.aten._weight_int8pack_mm(
-                flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
-            )
-            output = part if output is None else output.add_(part)
-        if self.int8_group_offset is not None:
-            # ``scale * (code - zero) == scale * (code - 128) + scale * (128 - zero)``
-            output = torch.addmm(output, flat.sum(-1), self.int8_group_offset.float())
+        if self.int8_group_offset is None:
+            group_scale = self.int8_group_scale.float()
+            for group in range(groups):
+                part = torch.ops.aten._weight_int8pack_mm(
+                    flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                )
+                output = part if output is None else output.add_(part)
+        else:
+            # Asymmetric zero points must be subtracted before the reduction.
+            # Splitting them into a residual reduction plus an offset reduction
+            # lets FP32 rounding survive the cancellation of two large terms.
+            for group in range(groups):
+                part = self._asymmetric_group_output(flat, group)
+                output = part if output is None else output.add_(part)
         output = output.reshape(activations.shape[:-2] + (self.out_features,))
         if bias is not None:
             output = output + bias.float()

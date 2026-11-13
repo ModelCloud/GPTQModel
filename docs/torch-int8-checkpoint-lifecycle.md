@@ -62,7 +62,7 @@ flowchart TD
 | Zero points | Folded into the per-channel scale by construction | Stored as the signed residual `code - 128`; an asymmetric checkpoint keeps a per-group additive offset, symmetric checkpoints store none |
 | Activation order | Input order | Channels are sorted into group order once (`int8_input_perm`); the executor permutes activations, which is exact for integer-coded dot products |
 | Ragged last group | Not representable | Padded to the widest group and executed with zero pad columns |
-| Matmul | One `aten::_weight_int8pack_mm` call | One call per group, FP32 accumulation, one output rounding and one bias epilogue |
+| Matmul | One `aten::_weight_int8pack_mm` call | One call per group for symmetric sources; asymmetric groups apply the zero point before the reduction (bounded decode), then FP32 accumulation, one output rounding and one bias epilogue |
 | Fusion | Concatenated `[N, K]` codes on the output axis | Concatenated `[G, N, W]` codes and `[G, N]` metadata on the output axis; sources must share `int8_input_perm` |
 
 The runtime is still **8-bit codes plus group scales**, not an expanded
@@ -71,6 +71,32 @@ lower-bit weight cache: nothing denser than the checkpoint is retained.
 conversion or a forward. Normal tensor version counters detect edits; writes to
 inference tensors without a version counter require `clear_weight_cache()`
 before the next forward.
+
+### Symmetric and asymmetric groups take different arithmetic
+
+Symmetric GPTQ stores no offset (`zero == 128`), so the checkpoint weight is
+exactly `scale * (code - 128)` and the native INT8 op computes it directly.
+An asymmetric checkpoint needs `scale * (code - zero)`:
+
+```mermaid
+flowchart TD
+    A["Int8PackedModule.forward"] --> B{"int8_group_offset present?"}
+    B -->|no, symmetric| C["aten::_weight_int8pack_mm per group"]
+    B -->|yes, asymmetric| D["decode a bounded [tile, width] weight tile"]
+    D --> E["weight = residual * scale + offset<br/>zero point applied before the reduction"]
+    E --> F["tile @ weight.t(), then release the tile"]
+    C --> G["FP32 accumulation, one output rounding, bias epilogue"]
+    F --> G
+```
+
+Splitting an asymmetric group into `scale * (code - 128)` plus
+`scale * (128 - zero)` makes both terms large and rounds them separately. Their
+cancellation leaves a residue even when every decoded weight is exactly zero,
+so a zero-point far from 128 produced a non-zero output. The asymmetric path
+reconstructs the checkpoint's integer `code - zero` per element first, then
+reduces. The decoded tile is bounded by `_INT8_ASYMMETRIC_DECODE_TILE` output
+channels, is never stored on the module, and is dropped before the next tile is
+built, so the persistent layout stays 8-bit codes plus group metadata.
 
 `FusionKernelSpec` concatenates the group-preserving codes for its executor.
 Source leaves retain their original GPTQ checkpoint buffers. The fused executor

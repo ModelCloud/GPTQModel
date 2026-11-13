@@ -249,6 +249,77 @@ def test_native_int8_layout_preserves_a_small_group_inside_a_large_channel():
     torch.testing.assert_close(module.dequantize_weight().double(), weight, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("zero_code", [255, 200, 129])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_native_int8_asymmetric_zero_weights_cancel_exactly(zero_code, dtype):
+    """A decoded-zero asymmetric group must reduce to exactly zero.
+
+    ``scale * (code - 128)`` and ``scale * (128 - zero)`` are both large when
+    the zero point is far from 128. Adding the two separately rounded FP32
+    terms leaves a residue even though every checkpoint weight is zero, so the
+    zero-point subtraction has to happen before the reduction.
+    """
+    in_features, out_features, group_size = 512, 32, 128
+    num_groups = in_features // group_size
+    codes = torch.full((in_features, out_features), zero_code, dtype=torch.int64)
+    zeros = torch.full((num_groups, out_features), zero_code, dtype=torch.int64)
+    scales = torch.full((num_groups, out_features), 0.01, dtype=torch.float16)
+    groups = (torch.arange(in_features) // group_size).int()
+
+    module = TorchInt8Linear(bits=8, group_size=group_size, sym=False, desc_act=False,
+                             in_features=in_features, out_features=out_features, bias=False)
+    module.load_state_dict({
+        "qweight": _pack_int8_words(codes.reshape(in_features // 4, 4, out_features).permute(0, 2, 1)),
+        "qzeros": _pack_int8_words(zeros.reshape(num_groups, out_features // 4, 4)),
+        "scales": scales,
+        "g_idx": groups,
+    }, strict=True)
+    module.post_init()
+    module.eval()
+
+    assert module.int8_group_offset is not None
+    assert torch.count_nonzero(module.dequantize_weight()) == 0
+    torch.manual_seed(42)
+    for magnitude in (10000.0, 100.0):
+        activation = (torch.rand(3, in_features) * magnitude).to(dtype)
+        with torch.inference_mode():
+            output = module(activation)
+        torch.testing.assert_close(output, torch.zeros_like(output), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_native_int8_asymmetric_near_zero_weights_meet_oracle(dtype):
+    """One-code residuals must survive the zero-point cancellation."""
+    in_features, out_features, group_size = 512, 32, 128
+    num_groups = in_features // group_size
+    zero_code = 254
+    delta = (torch.arange(in_features, dtype=torch.int64) % 3) - 1
+    codes = (zero_code + delta).unsqueeze(1).expand(in_features, out_features).contiguous()
+    zeros = torch.full((num_groups, out_features), zero_code, dtype=torch.int64)
+    scales = torch.full((num_groups, out_features), 0.01, dtype=torch.float16)
+    groups = (torch.arange(in_features) // group_size).int()
+    weight = delta.unsqueeze(1).double() * scales.double()[groups]
+    assert 0 < torch.count_nonzero(weight) < weight.numel()
+
+    module = TorchInt8Linear(bits=8, group_size=group_size, sym=False, desc_act=False,
+                             in_features=in_features, out_features=out_features, bias=False)
+    module.load_state_dict({
+        "qweight": _pack_int8_words(codes.reshape(in_features // 4, 4, out_features).permute(0, 2, 1)),
+        "qzeros": _pack_int8_words(zeros.reshape(num_groups, out_features // 4, 4)),
+        "scales": scales,
+        "g_idx": groups,
+    }, strict=True)
+    module.post_init()
+    module.eval()
+
+    torch.testing.assert_close(module.dequantize_weight().double(), weight, rtol=0, atol=0)
+    torch.manual_seed(7)
+    activation = torch.randn(3, in_features).to(dtype)
+    with torch.inference_mode():
+        output = module(activation)
+    torch.testing.assert_close(output.double(), activation.double() @ weight, rtol=2e-3, atol=2e-3)
+
+
 def test_native_int8_ragged_last_group_keeps_exact_weights():
     """``in_features`` not divisible by ``group_size`` pads the last group."""
     in_features, out_features, group_size = 100, 64, 32
