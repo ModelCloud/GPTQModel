@@ -84,7 +84,11 @@ def copy_hooked_linear_runtime(
         for name in _REGISTERED_HOOK_ATTRIBUTES:
             value = getattr(source, name, None)
             if value is not None:
-                setattr(target, name, value.copy() if isinstance(value, dict) else value)
+                # Keep the registry shared with the source module. PyTorch's
+                # RemovableHandle retains a weak reference to this exact dict,
+                # so copying it would let handles remove the source hook while
+                # leaving replacement hooks active.
+                setattr(target, name, value)
         target._w4a_replay_input_hook_active = getattr(
             source, "_w4a_replay_input_hook_active", False
         )

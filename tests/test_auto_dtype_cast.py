@@ -480,6 +480,65 @@ def test_restore_hooked_linear_preserves_runtime_metadata_and_forward(monkeypatc
     assert len(registered_hook_seen) == 2
 
 
+def test_registered_hook_removal_survives_cast_and_restore(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    source = HookedLinear.from_linear(
+        nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    )
+    with torch.no_grad():
+        source.weight.fill_(0.5)
+
+    pre_calls = []
+    forward_calls = []
+
+    def pre_hook(_module, args, kwargs):
+        pre_calls.append(1)
+        return args[0] + 1, kwargs
+
+    def forward_hook(_module, args, kwargs, output):
+        forward_calls.append(1)
+        return output
+
+    pre_handle = source.register_forward_pre_hook(pre_hook, with_kwargs=True)
+    forward_handle = source.register_forward_hook(
+        forward_hook,
+        with_kwargs=True,
+        always_call=True,
+    )
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
+    modules = (source, packed, restored)
+
+    for name in (
+        "_forward_pre_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_forward_hooks",
+        "_forward_hooks_with_kwargs",
+        "_forward_hooks_always_called",
+    ):
+        assert all(getattr(module, name) is getattr(source, name) for module in modules)
+
+    pre_handle.remove()
+    forward_handle.remove()
+    for name in (
+        "_forward_pre_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_forward_hooks",
+        "_forward_hooks_with_kwargs",
+        "_forward_hooks_always_called",
+    ):
+        assert all(not getattr(module, name) for module in modules)
+
+    x = torch.zeros(1, 64, dtype=torch.bfloat16)
+    outputs = [module(x) for module in modules]
+    assert all(output.count_nonzero().item() == 0 for output in outputs)
+    assert not pre_calls
+    assert not forward_calls
+
+
 def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):
     """Exercise the live module-installation boundary used by the quantizer."""
 

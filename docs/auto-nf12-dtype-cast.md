@@ -90,8 +90,10 @@ flowchart LR
 ```
 
 Restoring a packed hooked source therefore preserves its class, registered
-hooks, online-rotation settings, and W4A replay state. Subsequent quantization
-replay executes the same forward behavior as the original source.
+hooks, online-rotation settings, and W4A replay state. Source, packed, and
+restored modules share the same hook registries, so a PyTorch `RemovableHandle`
+removes the hook from every replacement. Subsequent quantization replay
+executes the same forward behavior as the original source.
 
 ## Previous behavior
 
