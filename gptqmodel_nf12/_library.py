@@ -21,15 +21,15 @@ _lock = threading.Lock()
 _loaded = threading.Event()
 
 
-def library_path(name: str = "libnf12_ad.so") -> Path:
+def library_path(name: str = "libnf12.so") -> Path:
     """Find a packaged native library, or build and cache it for visible GPUs."""
     for directory in gptqmodel_nf12.__path__:
         candidate = Path(directory) / name
         if candidate.is_file():
-            if name == "libnf12_ad_torch.so" and not candidate.with_name("libnf12_ad.so").is_file():
+            if name == "libnf12_torch.so" and not candidate.with_name("libnf12.so").is_file():
                 continue
             return candidate
-    if name in ("libnf12_ad.so", "libnf12_ad_torch.so"):
+    if name in ("libnf12.so", "libnf12_torch.so"):
         from ._jit import library_directory
 
         return library_directory() / name
@@ -58,8 +58,8 @@ def load() -> None:
             return
         # The Torch extension links the codec. Load it first so bare source
         # checkouts work without changing LD_LIBRARY_PATH.
-        torch.ops.load_library(str(library_path("libnf12_ad.so")))
-        torch.ops.load_library(str(library_path("libnf12_ad_torch.so")))
+        torch.ops.load_library(str(library_path("libnf12.so")))
+        torch.ops.load_library(str(library_path("libnf12_torch.so")))
         _register_fakes()
         _loaded.set()
 

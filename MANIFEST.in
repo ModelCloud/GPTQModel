@@ -15,7 +15,7 @@ include gptqmodel_ext/nf12/CMakeLists.txt
 include gptqmodel_ext/nf12/reference.py
 include gptqmodel_ext/nf12/docs/SPEC.md
 include gptqmodel_nf12/README.md
-# NF12-AD HIP port (RDNA4). Sources only; the extension is always JIT-built.
+# NF12 HIP port (RDNA4). Sources only; the extension is always JIT-built.
 recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
 recursive-include gptqmodel_ext/tt_blockfloat_hip *.h *.hip *.cpp *.py README.md
 recursive-include gptqmodel_ext/gptq_block *.cu *.cpp

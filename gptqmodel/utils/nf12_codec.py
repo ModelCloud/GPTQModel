@@ -4,15 +4,15 @@
 #
 # Adapted from the nf12 reference implementation
 # (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
-"""Pure-Torch NF12-AD codec and inference reference.
+"""Pure-Torch NF12 codec and inference reference.
 
 NF12 (NyoomFloat12) is a lossless 12-bit encoding of BF16 weights from
 "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight
 Compression" by Liberman, Fang, Zhang, Dao, and Fu (Together AI, 2026).
 
 This module is a Torch port of the reference implementation published at
-https://github.com/dphnAI/nf12 by AlpinDale. It implements the AlpinDale
-modified ("AD") tiled layout used by the vendored CUDA kernels in
+https://github.com/dphnAI/nf12 by AlpinDale. It implements the tiled layout
+used by the vendored CUDA kernels in
 ``gptqmodel_ext/nf12``. Encoding is bit-exact: ``decode(encode(w))`` equals
 ``w`` for every BF16 input, including signed zero, subnormals, Inf, and NaN
 payloads.
@@ -259,12 +259,12 @@ def encode_weight(
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Cast a 2-D weight to BF16 and encode it.
 
-    The BF16 cast is the only lossy step in NF12-AD quantization; the encode
+    The BF16 cast is the only lossy step in NF12 quantization; the encode
     itself is bit-exact.
     """
 
     if weight.dim() != 2:
-        raise ValueError(f"NF12-AD expects a 2-D weight, got shape {tuple(weight.shape)}")
+        raise ValueError(f"NF12 expects a 2-D weight, got shape {tuple(weight.shape)}")
     matrix = weight.detach().to(device="cpu", dtype=dtype).contiguous()
     return encode(matrix, exp_base=exp_base)
 

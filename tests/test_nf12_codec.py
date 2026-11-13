@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""NF12-AD codec and inference-oracle tests.
+"""NF12 codec and inference-oracle tests.
 
 The codec is a lossless BF16 encoding, so decode must reproduce every input
 bit. The CUDA kernels share the same format; these tests validate the Torch
@@ -16,6 +16,31 @@ import pytest
 import torch
 
 from gptqmodel.utils import nf12_codec
+
+
+def test_public_nf12_names_and_config_roundtrip():
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization import FORMAT, METHOD, NF12Config, QuantizeConfig
+    from gptqmodel.quantization.nf12 import NF12Quantizer, NF12QuantResult
+    from gptqmodel.utils.backend import BACKEND, normalize_backend
+
+    for enum in (METHOD, FORMAT, BACKEND):
+        assert [name for name in enum.__members__ if name.startswith("NF12")] == ["NF12"]
+        assert enum("nf12") is enum.NF12
+
+    config = NF12Config(exp_base=54)
+    payload = config.to_dict()
+    assert payload["quant_method"] == "nf12"
+    assert payload["format"] == "nf12"
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert type(restored) is NF12Config
+    assert restored.exp_base == 54
+    assert restored.to_dict() == payload
+    assert normalize_backend("nf12", quant_method=METHOD.NF12) is BACKEND.NF12
+    assert normalize_backend(BACKEND.TORCH, quant_method=METHOD.NF12) is BACKEND.NF12
+    assert NF12Linear.QUANT_TYPE == "nf12"
+    assert NF12Quantizer.__name__ == "NF12Quantizer"
+    assert NF12QuantResult.__name__ == "NF12QuantResult"
 
 
 def _adversarial_bits(n: int, k: int, seed: int = 0) -> torch.Tensor:
@@ -80,27 +105,27 @@ def test_linear_matches_fp32_oracle():
 
 
 def test_encode_weight_casts_to_bf16():
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.randn(16, 64, dtype=torch.float32)
-    result = quantize_nf12_ad_weight(weight)
+    result = quantize_nf12_weight(weight)
     decoded = nf12_codec.decode(result.packed, result.escapes, result.exp_base)
     assert torch.equal(decoded, weight.to(torch.bfloat16))
     assert result.storage_bytes == result.packed.numel() + result.escapes.numel() * 2 + 1
 
 
 def test_module_saves_nf12_packed_and_retains_no_dense_cache():
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
     from gptqmodel.utils.backend import BACKEND
 
     torch.manual_seed(0)
     linear = torch.nn.Linear(128, 32, bias=True).to(torch.bfloat16)
-    module = NF12ADLinear(
+    module = NF12Linear(
         bits=12,
         in_features=128,
         out_features=32,
         bias=True,
-        backend=BACKEND.NF12_AD,
+        backend=BACKEND.NF12,
         pack_dtype=torch.int32,
         exp_base=54,
     )
@@ -135,15 +160,15 @@ def test_accelerate_buffer_replacement_refreshes_cached_exponent_base():
     """A pre-load repr must not pin the placeholder exponent for inference."""
     from accelerate.utils.modeling import set_module_tensor_to_device
 
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
-    module = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    module = NF12Linear(bits=12, in_features=64, out_features=16)
     assert "exp_base=0" in repr(module)
 
     weight = torch.full((16, 64), 2.0**-12, dtype=torch.bfloat16)
     weight[:, ::2] = -weight[:, ::2]
-    result = quantize_nf12_ad_weight(weight, exp_base=54)
+    result = quantize_nf12_weight(weight, exp_base=54)
     assert result.escapes.shape == (0, 8)
     set_module_tensor_to_device(module, "nf12_packed", "cpu", value=result.packed)
     set_module_tensor_to_device(module, "nf12_escapes", "cpu", value=result.escapes)
@@ -163,9 +188,9 @@ def test_accelerate_buffer_replacement_refreshes_cached_exponent_base():
 
 
 def test_exponent_cache_tracks_versioned_updates_and_explicit_clear():
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 
-    module = NF12ADLinear(bits=12, in_features=64, out_features=16)
+    module = NF12Linear(bits=12, in_features=64, out_features=16)
     module.nf12_exp_base = torch.tensor([54], dtype=torch.uint8)
     assert module._exp_base() == 54
     module.nf12_exp_base.fill_(55)
@@ -180,14 +205,14 @@ def test_exponent_cache_tracks_versioned_updates_and_explicit_clear():
 
 
 def test_repr_handles_meta_and_unallocated_exponent_buffers():
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 
     with torch.device("meta"):
-        meta = NF12ADLinear(bits=12, in_features=64, out_features=16)
+        meta = NF12Linear(bits=12, in_features=64, out_features=16)
     assert meta.nf12_exp_base.device.type == "meta"
     assert "exp_base=unavailable" in repr(meta)
 
-    unallocated = NF12ADLinear(bits=12, in_features=64, out_features=16,
+    unallocated = NF12Linear(bits=12, in_features=64, out_features=16,
                                register_buffers=False)
     assert "exp_base=unavailable" in repr(unallocated)
 
@@ -200,10 +225,10 @@ def test_forward_on_meta_returns_metadata_output():
     called on meta tensors`, so forward returns the shape/dtype-correct empty
     output that the zero-row path already uses.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 
     with torch.device("meta"):
-        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+        linear = NF12Linear(bits=12, in_features=64, out_features=16, bias=False)
     x = torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta")
 
     out = linear(x)
@@ -216,7 +241,7 @@ def test_forward_on_meta_returns_metadata_output():
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_pack_and_reload_preserve_source_bias_precision(dtype):
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 
     source = torch.nn.Linear(64, 16, bias=True).to(dtype)
     with torch.no_grad():
@@ -224,7 +249,7 @@ def test_pack_and_reload_preserve_source_bias_precision(dtype):
         source.weight[:, ::2].neg_()
         source.bias.fill_(100.25)
 
-    packed = NF12ADLinear(bits=12, in_features=64, out_features=16,
+    packed = NF12Linear(bits=12, in_features=64, out_features=16,
                           bias=True, dtype=dtype, exp_base=54)
     packed.pack_original(source)
     x = torch.zeros((2, 64), dtype=dtype)
@@ -233,7 +258,7 @@ def test_pack_and_reload_preserve_source_bias_precision(dtype):
     assert packed.bias.dtype == dtype
     assert torch.equal(packed.bias, source.bias)
 
-    reloaded = NF12ADLinear(bits=12, in_features=64, out_features=16,
+    reloaded = NF12Linear(bits=12, in_features=64, out_features=16,
                             bias=True, dtype=dtype)
     reloaded.load_state_dict(packed.state_dict())
     assert reloaded.bias.dtype == dtype
@@ -245,16 +270,16 @@ def test_loader_resizes_data_dependent_escape_buffer(tmp_path):
 
     from safetensors.torch import save_file
 
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
     from gptqmodel.utils.backend import BACKEND
     from gptqmodel.utils.model import _prepare_variable_quant_buffers
 
-    module = NF12ADLinear(
+    module = NF12Linear(
         bits=12,
         in_features=64,
         out_features=16,
         bias=False,
-        backend=BACKEND.NF12_AD,
+        backend=BACKEND.NF12,
         pack_dtype=torch.int32,
     )
     assert module.nf12_escapes.shape == (0, 8)
@@ -313,15 +338,15 @@ def test_near_zero_outputs_do_not_trip_the_relative_bound():
 
 
 def test_linear_e2e_matches_fp32_oracle_on_cpu():
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     torch.manual_seed(0)
     n, k, m = 256, 256, 8
     weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16)
     bias = (torch.randn(n) * 0.1).to(torch.bfloat16)
-    linear = NF12ADLinear(bits=12, in_features=k, out_features=n, bias=True)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = NF12Linear(bits=12, in_features=k, out_features=n, bias=True)
+    linear.load_quant_result(quantize_nf12_weight(weight), bias=bias)
     x = (torch.randn(m, k) * 0.05).to(torch.bfloat16)
 
     expected = (torch.matmul(x.float(), weight.float().t()) + bias.float()).to(torch.bfloat16)
@@ -345,19 +370,19 @@ def test_linear_fallback_keeps_bf16_weight_range_for_fp16_input(
     weight_value,
     activation_value,
 ):
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((256, 256), dtype=torch.bfloat16)
     weight[0, 0] = weight_value
     bias = torch.zeros(256, dtype=torch.bfloat16)
-    linear = NF12ADLinear(
+    linear = NF12Linear(
         bits=12,
         in_features=256,
         out_features=256,
         bias=True,
     )
-    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear.load_quant_result(quantize_nf12_weight(weight), bias=bias)
     x = torch.zeros((1, 256), dtype=torch.float16)
     x[0, 0] = activation_value
     expected = (
@@ -395,18 +420,18 @@ def test_linear_fallback_preserves_bf16_weight_range(
 ):
     """The decoded fallback must not narrow a BF16 weight to the FP16 range.
 
-    NF12-AD checkpoints are lossless BF16. Converting the decoded matrix to the
+    NF12 checkpoints are lossless BF16. Converting the decoded matrix to the
     activation dtype before the product loses representable final results on
     every accelerator, so the fallback multiplies wide and rounds the output
     only once.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((256, 256), dtype=torch.bfloat16)
     weight[0, 0] = weight_value
-    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = NF12Linear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_weight(weight))
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -432,16 +457,16 @@ def test_linear_fallback_preserves_bf16_weight_range(
 @pytest.mark.parametrize("device", _GPU_OR_CPU)
 def test_linear_fallback_rounds_only_the_final_bf16_output(device, monkeypatch):
     """A BF16 activation keeps the BF16 weight range and the BF16 output dtype."""
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((64, 128), dtype=torch.bfloat16)
     weight[0, 0] = 65536.0
     weight[1, 1] = -65536.0
     bias = torch.zeros(64, dtype=torch.bfloat16)
     bias[0] = -65536.0
-    linear = NF12ADLinear(bits=12, in_features=128, out_features=64, bias=True)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = NF12Linear(bits=12, in_features=128, out_features=64, bias=True)
+    linear.load_quant_result(quantize_nf12_weight(weight), bias=bias)
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -468,13 +493,13 @@ def test_linear_fallback_preserves_bf16_range_under_autocast(device, monkeypatch
     CPU autocast narrows an FP32 matmul exactly like the CUDA path, so the
     guard is required on every device that the wide branch can run on.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((256, 256), dtype=torch.bfloat16)
     weight[0, 0] = 65536.0
-    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = NF12Linear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_weight(weight))
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -504,13 +529,13 @@ def test_linear_fallback_preserves_bf16_range_for_lossless_activation_under_auto
     branch must therefore widen when the autocast dtype cannot hold the weight
     range, not only when the activation dtype cannot.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((256, 256), dtype=torch.bfloat16)
     weight[0, 0] = 65536.0
-    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = NF12Linear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_weight(weight))
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -538,13 +563,13 @@ def test_linear_fallback_keeps_float64_activation_precision(device, monkeypatch)
     predicate therefore admits float64 so the decoded weight is not narrowed to
     float32 before the product.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     torch.manual_seed(0)
     weight = (torch.randn((256, 256), dtype=torch.float32) * 1e-3).to(torch.bfloat16)
-    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=False)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight))
+    linear = NF12Linear(bits=12, in_features=256, out_features=256, bias=False)
+    linear.load_quant_result(quantize_nf12_weight(weight))
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -574,14 +599,14 @@ def test_linear_fallback_keeps_float64_multiply_wide_for_mixed_bias(device, monk
     equality with the float64 oracle is the contract on an accelerator; CPU
     keeps its documented FP32 decode.
     """
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     torch.manual_seed(1)
     weight = (torch.randn((256, 256), dtype=torch.float32) * 1e-3).to(torch.bfloat16)
     bias = torch.randn(256, dtype=torch.bfloat16) * 1e-3
-    linear = NF12ADLinear(bits=12, in_features=256, out_features=256, bias=True)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = NF12Linear(bits=12, in_features=256, out_features=256, bias=True)
+    linear.load_quant_result(quantize_nf12_weight(weight), bias=bias)
     linear = linear.to(device)
     monkeypatch.setattr(linear, "_native_forward", lambda x, bias: None)
 
@@ -607,8 +632,8 @@ def test_forward_on_meta_applies_the_adapter_exactly_once():
     real device so it cannot be satisfied by the meta branch alone.
     """
 
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     calls = []
 
@@ -618,15 +643,15 @@ def test_forward_on_meta_applies_the_adapter_exactly_once():
             return out
 
     with torch.device("meta"):
-        meta_linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+        meta_linear = NF12Linear(bits=12, in_features=64, out_features=16, bias=False)
     meta_linear.adapter = CountingAdapter()
 
     meta_linear(torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta"))
     assert len(calls) == 1, calls
 
     calls.clear()
-    linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
-    linear.load_quant_result(quantize_nf12_ad_weight(torch.zeros((16, 64), dtype=torch.bfloat16)))
+    linear = NF12Linear(bits=12, in_features=64, out_features=16, bias=False)
+    linear.load_quant_result(quantize_nf12_weight(torch.zeros((16, 64), dtype=torch.bfloat16)))
     linear.adapter = CountingAdapter()
 
     out = linear(torch.zeros((0, 64), dtype=torch.bfloat16))
@@ -642,10 +667,10 @@ def test_forward_on_meta_with_online_rotation_returns_metadata_output():
     lazy-load shell from raising where a plain one already worked.
     """
 
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 
     with torch.device("meta"):
-        linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=False)
+        linear = NF12Linear(bits=12, in_features=64, out_features=16, bias=False)
     linear.online_full_had = True
     x = torch.zeros((2, 3, 64), dtype=torch.bfloat16, device="meta")
 
@@ -664,15 +689,15 @@ def test_forward_on_meta_with_online_rotation_returns_metadata_output():
 def test_linear_fallback_adds_mixed_dtype_bias_before_rounding(
     activation_dtype, bias_dtype
 ):
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     weight = torch.zeros((16, 64), dtype=torch.bfloat16)
     weight[0, 0] = -99840.0
     bias = torch.zeros(16, dtype=bias_dtype)
     bias[0] = 99840.0
-    linear = NF12ADLinear(bits=12, in_features=64, out_features=16, bias=True)
-    linear.load_quant_result(quantize_nf12_ad_weight(weight), bias=bias)
+    linear = NF12Linear(bits=12, in_features=64, out_features=16, bias=True)
+    linear.load_quant_result(quantize_nf12_weight(weight), bias=bias)
     x = torch.zeros((1, 64), dtype=activation_dtype)
     x[0, 0] = 1.0
 
@@ -688,15 +713,15 @@ def test_hip_kernel_is_bit_exact_when_available():
     """RDNA4 HIP decode must reproduce every BF16 bit the Torch codec encodes."""
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("requires an AMD ROCm device")
-    from gptqmodel.utils import nf12_ad_hip
+    from gptqmodel.utils import nf12_hip
 
-    if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
-        pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+    if not nf12_hip.prewarm_nf12_hip_extension():
+        pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
 
     for shape in [(16, 64), (256, 256), (1024, 512)]:
         weight = _adversarial_bits(*shape, seed=5)
         packed, escapes, exp_base = nf12_codec.encode(weight)
-        decoded = nf12_ad_hip.decode(
+        decoded = nf12_hip.decode(
             packed.to("cuda"), escapes.to("cuda"), int(exp_base)
         ).cpu()
         assert torch.equal(decoded.view(torch.int16), weight.contiguous().view(torch.int16))
@@ -707,7 +732,7 @@ def test_hip_wmma_uses_weight_device_when_current_device_differs():
     if torch.version.hip is None or torch.cuda.device_count() < 2:
         pytest.skip("requires at least two AMD ROCm devices")
 
-    from gptqmodel.utils import nf12_ad_hip
+    from gptqmodel.utils import nf12_hip
 
     wmma_devices = [
         index
@@ -719,8 +744,8 @@ def test_hip_wmma_uses_weight_device_when_current_device_differs():
         pytest.skip("requires two RDNA4 WMMA devices")
     target, other = wmma_devices[:2]
     with torch.cuda.device(target):
-        if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
-            pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+        if not nf12_hip.prewarm_nf12_hip_extension():
+            pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
 
     torch.manual_seed(17)
     weight = (torch.randn(256, 256) * 0.02).to(torch.bfloat16)
@@ -735,7 +760,7 @@ def test_hip_wmma_uses_weight_device_when_current_device_differs():
     bias = bias.to(target_device)
     torch.cuda.synchronize(target_device)
     with torch.cuda.device(other):
-        actual = nf12_ad_hip.linear(x, packed, escapes, exp_base, bias)
+        actual = nf12_hip.linear(x, packed, escapes, exp_base, bias)
         assert torch.cuda.current_device() == other
 
     torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=2e-3, atol=2e-3)
@@ -746,14 +771,14 @@ def test_hip_split_k_calls_on_distinct_streams_keep_their_own_workspace():
     if torch.version.hip is None or not torch.cuda.is_available():
         pytest.skip("requires an AMD ROCm device")
 
-    from gptqmodel.utils import nf12_ad_hip
+    from gptqmodel.utils import nf12_hip
 
     device = torch.device("cuda", torch.cuda.current_device())
     arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "").split(":", 1)[0]
     if arch not in {"gfx1200", "gfx1201"}:
         pytest.skip("requires an RDNA4 WMMA device")
-    if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
-        pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
+    if not nf12_hip.prewarm_nf12_hip_extension():
+        pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
 
     torch.manual_seed(23)
     # N=512 launches four CTAs, so the current RDNA4 planner uses eight K
@@ -774,9 +799,9 @@ def test_hip_split_k_calls_on_distinct_streams_keep_their_own_workspace():
 
     for _ in range(4):
         with torch.cuda.stream(stream_a):
-            actual_a = nf12_ad_hip.linear(x_a, packed, escapes, exp_base)
+            actual_a = nf12_hip.linear(x_a, packed, escapes, exp_base)
         with torch.cuda.stream(stream_b):
-            actual_b = nf12_ad_hip.linear(x_b, packed, escapes, exp_base)
+            actual_b = nf12_hip.linear(x_b, packed, escapes, exp_base)
         torch.cuda.synchronize(device)
         torch.testing.assert_close(actual_a.cpu().float(), expected_a.float(), rtol=2e-3, atol=2e-3)
         torch.testing.assert_close(actual_b.cpu().float(), expected_b.float(), rtol=2e-3, atol=2e-3)
@@ -785,11 +810,11 @@ def test_hip_split_k_calls_on_distinct_streams_keep_their_own_workspace():
 def _hip_runtime_or_skip():
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("requires an AMD ROCm device")
-    from gptqmodel.utils import nf12_ad_hip
+    from gptqmodel.utils import nf12_hip
 
-    if not nf12_ad_hip.prewarm_nf12_ad_hip_extension():
-        pytest.skip(f"NF12-AD HIP kernel unavailable: {nf12_ad_hip.last_error()}")
-    return nf12_ad_hip
+    if not nf12_hip.prewarm_nf12_hip_extension():
+        pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
+    return nf12_hip
 
 
 def test_hip_linear_preserves_leading_dimensions():
@@ -855,14 +880,14 @@ def test_hip_linear_preserves_finite_overflow_cancellation():
 def test_nf12_module_preserves_leading_dimensions_on_hip():
     """The quant-linear module must not flatten a multi-dim activation."""
     _hip_runtime_or_skip()
-    from gptqmodel.nn_modules.qlinear.nf12_ad import NF12ADLinear
-    from gptqmodel.quantization.nf12_ad import quantize_nf12_ad_weight
+    from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
 
     torch.manual_seed(9)
     n, k = 256, 256
     weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16)
-    layer = NF12ADLinear(bits=12, in_features=k, out_features=n)
-    layer.load_quant_result(quantize_nf12_ad_weight(weight))
+    layer = NF12Linear(bits=12, in_features=k, out_features=n)
+    layer.load_quant_result(quantize_nf12_weight(weight))
     layer = layer.cuda()
     for shape in [(1, 8, k), (2, 32, k)]:
         x = (torch.randn(shape, device="cuda") * 0.05).to(torch.bfloat16)

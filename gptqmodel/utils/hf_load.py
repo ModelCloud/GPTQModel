@@ -265,10 +265,10 @@ def hf_gptqmodel_prepare_model_for_load(
         return None
 
     # Serialized packed tensors are authoritative; dynamic rules may also name
-    # dense modules. NF12-AD stores its packed weight under `nf12_packed`.
+    # dense modules. NF12 stores its packed weight under `nf12_packed`.
     packed_suffix = (
         ".nf12_packed"
-        if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.NF12_AD
+        if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.NF12
         else ".qweight"
     )
     tensor_keys = _checkpoint_tensor_keys(checkpoint_path, checkpoint_files)

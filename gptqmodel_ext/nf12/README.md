@@ -1,14 +1,13 @@
-# NF12-AD: NyoomFloat12 12-bit BF16 weights in GPT-QModel
+# NF12: NyoomFloat12 12-bit BF16 weights in GPT-QModel
 
 This directory vendors the NF12 CUDA codec and inference kernels from
 [dphnAI/nf12](https://github.com/dphnAI/nf12) so GPT-QModel can quantize
 weights to NF12 and run them without a separate Python package.
 
-GPT-QModel exposes the format as `METHOD.NF12_AD` / `FORMAT.NF12_AD`
-(both serialize as `"nf12"`). The `AD` suffix on the enum names identifies
-the **AlpinDale modified** tiled layout implemented by the upstream `nf12`
-library, which is intentionally not byte-compatible with the layout in the
-paper. See `UPSTREAM_README.md` and
+GPT-QModel exposes the format as `METHOD.NF12` / `FORMAT.NF12`
+and the backend as `BACKEND.NF12` (all serialize as `"nf12"`). The tiled
+layout implemented by the upstream `nf12` library is intentionally not
+byte-compatible with the layout in the paper. See `UPSTREAM_README.md` and
 the format specification below.
 
 ## Credits
@@ -22,7 +21,7 @@ written by **AlpinDale** (Alpin) at [dphnAI/nf12](https://github.com/dphnAI/nf12
 They are licensed under the Apache License 2.0; a copy is in `LICENSE`.
 
 GPT-QModel (ModelCloud.ai) adapted the integration, the pure-Torch reference
-codec, and the `nf12_ad` quantizer/inference module around the unchanged
+codec, and the `nf12` quantizer/inference module around the unchanged
 kernel math.
 
 If you use NF12, please cite both the paper and the upstream implementation:
@@ -36,7 +35,7 @@ If you use NF12, please cite both the paper and the upstream implementation:
 }
 ```
 
-## Format (NF12-AD tiled layout)
+## Format (NF12 tiled layout)
 
 NF12 is a lossless, fixed-length encoding of BF16 matrices. Every matrix
 chooses one 8-bit biased exponent base `B` (0..120); a value is stored in a
@@ -53,7 +52,7 @@ Serialized tensors for a weight `W`:
 
 | tensor | dtype | shape |
 | --- | --- | --- |
-| `W.nf12_packed` | uint8 | `[N, K * 3 / 2]` (the packed NF12-AD weight, under the upstream `nf12` name) |
+| `W.nf12_packed` | uint8 | `[N, K * 3 / 2]` (the packed NF12 weight, under the upstream `nf12` name) |
 | `W.nf12_escapes` | int16 | `[E, 8]` |
 | `W.nf12_exp_base` | uint8 | `[1]` (stored as a scalar buffer) |
 
@@ -74,11 +73,11 @@ outside this directory:
 * `gptqmodel_nf12` lazily builds these sources with CMake
   (`NF12_BUILD_TORCH=ON`) and exposes linear, embedding, MoE, and packed FP32
   projections without requiring a separate upstream `nf12` installation.
-  `gptqmodel/utils/nf12_ad.py` delegates legacy GPTQModel call sites to it.
-* `gptqmodel/nn_modules/qlinear/nf12_ad.py` stores only the packed NF12
+  `gptqmodel/utils/nf12.py` delegates legacy GPTQModel call sites to it.
+* `gptqmodel/nn_modules/qlinear/nf12.py` stores only the packed NF12
   tensors. Its fallback decodes into bounded scratch for the current forward
   and never keeps a dense weight cache.
-* The `nf12_ad` quantizer casts non-BF16 weights to BF16 with
+* The `nf12` quantizer casts non-BF16 weights to BF16 with
   round-to-nearest-even before encoding. That cast is the only lossy step;
   the encode itself is lossless.
 
@@ -88,15 +87,14 @@ There are no precompiled binaries in this repository or in the wheel. Every
 install builds the extension from the sources here with CMake, targeting the
 visible GPU architecture (SM80 or newer, CUDA toolkit 13.0+). Builds are on
 demand and cached per source digest under
-`XDG_CACHE_HOME/gptqmodel/nf12_ad` (override with
-`GPTQMODEL_NF12_AD_BUILD_ROOT`).
+`XDG_CACHE_HOME/gptqmodel/nf12`.
 
 The build produces two objects:
 
 | artifact | contents |
 | --- | --- |
-| `libnf12_ad.so` | the C API (`nf12_encode`, `nf12_decode`, `nf12_linear`, ...) |
-| `libnf12_ad_torch.so` | the `torch.ops.nf12` bindings; links `libnf12_ad.so` |
+| `libnf12.so` | the C API (`nf12_encode`, `nf12_decode`, `nf12_linear`, ...) |
+| `libnf12_torch.so` | the `torch.ops.nf12` bindings; links `libnf12.so` |
 
-The `nf12` op namespace is upstream's; only the shared objects carry the
-`_ad` suffix so they are never mistaken for an upstream `nf12` install.
+The `nf12` op namespace and shared-library names match upstream's. The
+`gptqmodel_nf12` package owns the source-keyed build cache.

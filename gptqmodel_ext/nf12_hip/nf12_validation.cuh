@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace nf12_ad::validation {
+namespace nf12::validation {
 inline bool aligned(const void* p, uintptr_t bytes) {
   return (reinterpret_cast<uintptr_t>(p) & (bytes - 1)) == 0;
 }
@@ -38,4 +38,4 @@ inline bool valid_moe_linear_buffers(const void* x, int64_t ldx, const int32_t* 
   return assignments == 0 || (offsets != nullptr && valid_bf16_matrix(x, k, ldx) &&
                               valid_bf16_matrix(out, n, ldy));
 }
-}  // namespace nf12_ad::validation
+}  // namespace nf12::validation

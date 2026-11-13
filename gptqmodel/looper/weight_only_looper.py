@@ -38,7 +38,7 @@ from ..quantization.config import (
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
-    NF12ADConfig,
+    NF12Config,
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
@@ -477,7 +477,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         target_device: torch.device,
     ) -> Tuple[
         NamedModule,
-        Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig],
+        Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config],
     ]:
         """Run one module's weight-only quantization on its assigned device."""
 
@@ -491,7 +491,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _finalize_quantized_module(
         self,
         named: NamedModule,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
     ) -> str:
         """Move a quantized module back to CPU, pack it, and optionally offload it."""
 
@@ -541,7 +541,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
     def _finalize_target_device(
         self,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
     ) -> torch.device:
         """Resolve the worker device for one finalize task."""
 
@@ -555,7 +555,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         quantized_modules: List[
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
             ]
         ],
     ) -> None:
@@ -648,7 +648,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     ) -> List[
         Tuple[
             NamedModule,
-            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
         ]
     ]:
         """Quantize one subset, using multiple devices when available."""
@@ -657,7 +657,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             str,
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
             ],
         ] = {}
         task_specs = [
@@ -840,11 +840,11 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         quant_config = self.gptq_model.quantize_config
         if not isinstance(
             quant_config,
-            (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, NF12ADConfig),
+            (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, NF12Config),
         ):
             raise NotImplementedError(
                 "Weight-only looper only supports `RTNConfig`, `GGUFConfig`, "
-                "`FP8Config`, `BitsAndBytesConfig`, and `NF12ADConfig` today."
+                "`FP8Config`, `BitsAndBytesConfig`, and `NF12Config` today."
             )
 
         embedding_targets = self._embedding_quant_targets()

@@ -11,37 +11,49 @@ import torch
 from gptqmodel.utils import nf12_codec
 
 
+def test_hip_loader_uses_existing_nf12_sources_and_namespace():
+    from gptqmodel.utils import nf12_hip
+
+    root = Path(__file__).resolve().parents[1] / "gptqmodel_ext/nf12_hip"
+    assert nf12_hip._NAMESPACE == "nf12_hip"
+    assert nf12_hip._OPS_NAME == "gptqmodel_nf12_hip_ops"
+    assert all((root / name).is_file() for name in nf12_hip._SOURCE_FILES)
+    bindings = (root / "nf12_torch.cpp").read_text(encoding="utf-8")
+    assert "TORCH_LIBRARY(nf12_hip, m)" in bindings
+    assert "TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m)" in bindings
+
+
 @pytest.fixture(scope="module")
 def native():
     if torch.version.hip is None or not torch.cuda.is_available():
         pytest.skip("ROCm GPU required")
-    from gptqmodel.utils import nf12_ad_hip as hip
+    from gptqmodel.utils import nf12_hip as hip
 
-    if not hip.nf12_ad_hip_supported():
+    if not hip.nf12_hip_supported():
         pytest.skip("RDNA4 GPU required")
-    assert hip.prewarm_nf12_ad_hip_extension(), hip.last_error()
-    paths = [p for p in torch.ops.loaded_libraries if "gptqmodel_nf12_ad_hip_ops" in Path(p).name]
+    assert hip.prewarm_nf12_hip_extension(), hip.last_error()
+    paths = [p for p in torch.ops.loaded_libraries if "gptqmodel_nf12_hip_ops" in Path(p).name]
     assert len(paths) == 1, paths
     lib = C.CDLL(paths[0])
     p, i = C.c_void_p, C.c_int64
-    lib.nf12_ad_moe_linear.argtypes = [p, p, p, p, C.c_int32, p, i, p, i, p, p, i, p, p, i, i, i, p]
-    lib.nf12_ad_moe_linear.restype = C.c_int
-    lib.nf12_ad_moe_align_workspace_bytes.argtypes = [i, i]
-    lib.nf12_ad_moe_align_workspace_bytes.restype = C.c_size_t
-    lib.nf12_ad_moe_align.argtypes = [p, i, i, i, p, p, p, C.c_size_t, p]
-    lib.nf12_ad_moe_align.restype = C.c_int
-    lib.nf12_ad_moe_decode.argtypes = [p, p, p, p, C.c_int32, i, i, p, i, i, i, p, i, p]
-    lib.nf12_ad_moe_decode.restype = C.c_int
-    lib.nf12_ad_moe_grouped_operands.argtypes = [p, i, p, i, p, i, i, i, p, i, p, p]
-    lib.nf12_ad_moe_grouped_operands.restype = C.c_int
-    lib.nf12_ad_moe_silu_mul.argtypes = [p, i, i, i, p, i, p]
-    lib.nf12_ad_moe_silu_mul.restype = C.c_int
-    lib.nf12_ad_moe_combine.argtypes = [p, i, i, i, i, p, i, p]
-    lib.nf12_ad_moe_combine.restype = C.c_int
-    lib.nf12_ad_wmma_workspace_bytes.argtypes = [i, i, i]
-    lib.nf12_ad_wmma_workspace_bytes.restype = C.c_size_t
-    lib.nf12_ad_linear_wmma_bf16t.argtypes = [p, p, p, i, i, i, p, p, C.c_size_t, p]
-    lib.nf12_ad_linear_wmma_bf16t.restype = C.c_int
+    lib.nf12_moe_linear.argtypes = [p, p, p, p, C.c_int32, p, i, p, i, p, p, i, p, p, i, i, i, p]
+    lib.nf12_moe_linear.restype = C.c_int
+    lib.nf12_moe_align_workspace_bytes.argtypes = [i, i]
+    lib.nf12_moe_align_workspace_bytes.restype = C.c_size_t
+    lib.nf12_moe_align.argtypes = [p, i, i, i, p, p, p, C.c_size_t, p]
+    lib.nf12_moe_align.restype = C.c_int
+    lib.nf12_moe_decode.argtypes = [p, p, p, p, C.c_int32, i, i, p, i, i, i, p, i, p]
+    lib.nf12_moe_decode.restype = C.c_int
+    lib.nf12_moe_grouped_operands.argtypes = [p, i, p, i, p, i, i, i, p, i, p, p]
+    lib.nf12_moe_grouped_operands.restype = C.c_int
+    lib.nf12_moe_silu_mul.argtypes = [p, i, i, i, p, i, p]
+    lib.nf12_moe_silu_mul.restype = C.c_int
+    lib.nf12_moe_combine.argtypes = [p, i, i, i, i, p, i, p]
+    lib.nf12_moe_combine.restype = C.c_int
+    lib.nf12_wmma_workspace_bytes.argtypes = [i, i, i]
+    lib.nf12_wmma_workspace_bytes.restype = C.c_size_t
+    lib.nf12_linear_wmma_bf16t.argtypes = [p, p, p, i, i, i, p, p, C.c_size_t, p]
+    lib.nf12_linear_wmma_bf16t.restype = C.c_int
     return hip, lib
 
 
@@ -50,9 +62,9 @@ def test_bf16t_launcher_uses_shared_split_dispatch():
         Path(__file__).parents[1]
         / "gptqmodel_ext"
         / "nf12_hip"
-        / "nf12_ad_wmma.hip"
+        / "nf12_wmma.hip"
     ).read_text(encoding="utf-8")
-    assert "NF12_AD_SWITCH(WeightSource::kBf16t)" in source
+    assert "NF12_SWITCH(WeightSource::kBf16t)" in source
     assert "kBf16t, false, kMaxTiles, 1" not in source
 
 
@@ -66,9 +78,9 @@ def test_bf16t_launcher_uses_shared_split_dispatch():
 )
 def test_bf16t_wmma_matches_nf12_split_k_plans(native, n, k, m):
     hip, lib = native
-    if lib.nf12_ad_wmma_supported(m) == 0:
+    if lib.nf12_wmma_supported(m) == 0:
         pytest.skip(f"WMMA path unavailable for m={m}")
-    workspace_bytes = lib.nf12_ad_wmma_workspace_bytes(n, k, m)
+    workspace_bytes = lib.nf12_wmma_workspace_bytes(n, k, m)
     assert workspace_bytes > 0
 
     torch.manual_seed(m)
@@ -80,7 +92,7 @@ def test_bf16t_wmma_matches_nf12_split_k_plans(native, n, k, m):
     twin_out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
 
     expected = hip.linear(activations, packed, escapes, int(exp_base))
-    status = lib.nf12_ad_linear_wmma_bf16t(
+    status = lib.nf12_linear_wmma_bf16t(
         twin.data_ptr(),
         activations.data_ptr(),
         twin_out.data_ptr(),
@@ -124,7 +136,7 @@ def test_native_decode_grid_overflow_is_invalid_value(native):
     offsets = torch.zeros(experts + 1, device="cuda", dtype=torch.int64)
     bases = torch.zeros(experts, device="cuda", dtype=torch.uint8)
     out = torch.full((experts, n, k), -7., device="cuda", dtype=torch.bfloat16)
-    assert lib.nf12_ad_moe_decode(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(),
+    assert lib.nf12_moe_decode(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(),
                                   experts, n, k, None, 0, 0, n, out.data_ptr(), k,
                                   torch.cuda.current_stream().cuda_stream) == 1
     torch.cuda.synchronize()
@@ -144,7 +156,7 @@ def test_native_decode_rejects_invalid_slice_or_stride(native, row0, rows, ldo):
     ends = torch.tensor([0, escapes.shape[0]], device="cuda", dtype=torch.int64)
     base = torch.tensor([exp_base], device="cuda", dtype=torch.uint8)
     out = torch.full((34, 80), -7., device="cuda", dtype=torch.bfloat16)
-    assert lib.nf12_ad_moe_decode(
+    assert lib.nf12_moe_decode(
         packed.data_ptr(), escapes.data_ptr(), ends.data_ptr(), base.data_ptr(),
         1, 16, 64, None, 0, row0, rows, out[1:].data_ptr(), ldo,
         torch.cuda.current_stream().cuda_stream,
@@ -176,7 +188,7 @@ def test_native_elementwise_rejects_invalid_buffers(native, op, bad):
     shape = (rows, 8) if op == "silu_mul" else (rows, 2, 8)
     args = (x.data_ptr(), ldi, *shape, out.data_ptr() + offset, ldo,
             torch.cuda.current_stream().cuda_stream)
-    assert getattr(lib, "nf12_ad_moe_" + op)(*args) == 1
+    assert getattr(lib, "nf12_moe_" + op)(*args) == 1
     torch.cuda.synchronize()
     assert bool((out == -7).all())
 
@@ -189,7 +201,7 @@ def test_native_grouped_rejects_invalid_buffers(native, ldx, ldo, count):
     gather = torch.arange(4, device="cuda", dtype=torch.int32)
     offsets = torch.tensor([0, 2, 4], device="cuda", dtype=torch.int64)
     ends = torch.full((2,), -7, device="cuda", dtype=torch.int32)
-    assert lib.nf12_ad_moe_grouped_operands(
+    assert lib.nf12_moe_grouped_operands(
         x.data_ptr(), ldx, gather.data_ptr(), 1, offsets.data_ptr(), count, 2, 8,
         out.data_ptr(), ldo, ends.data_ptr(), torch.cuda.current_stream().cuda_stream,
     ) == 1
@@ -231,7 +243,7 @@ def test_native_moe_offset_bounds(native, producer_stream, raw):
     with torch.cuda.stream(stream):
         x = torch.ones((count + 2, k), device="cuda", dtype=torch.bfloat16)
         out = torch.full_like(expected, -7.)
-        assert lib.nf12_ad_moe_linear(
+        assert lib.nf12_moe_linear(
             packed.data_ptr(), escapes.data_ptr(), escape_offsets.data_ptr(), bases.data_ptr(), experts,
             x[1:].data_ptr(), k, None, 1, None, offsets.data_ptr(), count, None, out[1:].data_ptr(),
             n, n, k, stream.cuda_stream,
@@ -262,7 +274,7 @@ def test_native_decode_and_grouped_operands_share_offset_bounds(native, raw):
     stream = torch.cuda.current_stream().cuda_stream
 
     decoded = torch.full_like(weights, -7.)
-    assert lib.nf12_ad_moe_decode(
+    assert lib.nf12_moe_decode(
         packed.data_ptr(), escapes.data_ptr(), escape_offsets.data_ptr(), bases.data_ptr(),
         experts, n, k, offsets.data_ptr(), count, 0, n, decoded.data_ptr(), k, stream,
     ) == 0
@@ -276,7 +288,7 @@ def test_native_decode_and_grouped_operands_share_offset_bounds(native, raw):
     gather = torch.arange(count - 1, -1, -1, device="cuda", dtype=torch.int32)
     gathered = torch.full_like(x, -7.)
     group_ends = torch.full((experts,), -1, device="cuda", dtype=torch.int32)
-    assert lib.nf12_ad_moe_grouped_operands(
+    assert lib.nf12_moe_grouped_operands(
         x.data_ptr(), k, gather.data_ptr(), 1, offsets.data_ptr(), count, experts, k,
         gathered.data_ptr(), k, group_ends.data_ptr(), stream,
     ) == 0
@@ -297,7 +309,7 @@ def test_native_decode_grid_x_above_32767(native):
     bases = torch.zeros((1,), device="cuda", dtype=torch.uint8)
     offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int64)
     decoded = torch.zeros((n, k), device="cuda", dtype=torch.bfloat16)
-    assert lib.nf12_ad_moe_decode(
+    assert lib.nf12_moe_decode(
         packed.data_ptr(), escapes.data_ptr(), escape_offsets.data_ptr(), bases.data_ptr(),
         1, n, k, offsets.data_ptr(), 1, 0, n, decoded.data_ptr(), k,
         torch.cuda.current_stream().cuda_stream,
@@ -318,7 +330,7 @@ def test_native_wmma_grid_y_boundary(native, count):
     x = torch.ones((count, k), device="cuda", dtype=torch.bfloat16)
     guarded = torch.full((count + 2, n), -7., device="cuda", dtype=torch.bfloat16)
     out = guarded[1:-1]
-    rc = lib.nf12_ad_moe_linear(
+    rc = lib.nf12_moe_linear(
         packed.data_ptr(), escapes.data_ptr(), escape_offsets.data_ptr(), bases.data_ptr(),
         1, x.data_ptr(), k, None, 1, None, offsets.data_ptr(), count, None,
         out.data_ptr(), n, n, k, torch.cuda.current_stream().cuda_stream,
@@ -331,11 +343,11 @@ def test_native_wmma_grid_y_boundary(native, count):
 
 def test_native_empty_align_with_no_workspace(native):
     _, lib = native
-    assert lib.nf12_ad_moe_align_workspace_bytes(0, 4) == 0
+    assert lib.nf12_moe_align_workspace_bytes(0, 4) == 0
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         offsets = torch.full((5,), -7, device="cuda", dtype=torch.int64)
-        assert lib.nf12_ad_moe_align(None, 0, 2, 4, None, offsets.data_ptr(), None, 0,
+        assert lib.nf12_moe_align(None, 0, 2, 4, None, offsets.data_ptr(), None, 0,
                                      stream.cuda_stream) == 0
     stream.synchronize()
     assert bool((offsets == 0).all())
@@ -378,7 +390,7 @@ def test_encode_scheduling_preserves_all_bytes(native, super_atoms):
 def test_native_moe_linear_matches_shared_validation(native, twin, bad):
     hip, abi = native
     p, i = C.c_void_p, C.c_int64
-    fn = abi.nf12_ad_moe_linear_bf16t if twin else abi.nf12_ad_moe_linear
+    fn = abi.nf12_moe_linear_bf16t if twin else abi.nf12_moe_linear
     fn.restype = C.c_int
     fn.argtypes = ([p] if twin else [p] * 4) + [C.c_int32, p, i, p, i, p, p, i, p, p, i, i, i, p]
     w = torch.ones((1, 16, 64), device="cuda", dtype=torch.bfloat16)

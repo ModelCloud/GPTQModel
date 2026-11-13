@@ -42,7 +42,7 @@ from ..quantization.config import (
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
-    NF12ADConfig,
+    NF12Config,
     RTNConfig,
     clone_weight_only_config_for_module,
     resolve_quant_format,
@@ -79,7 +79,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
         forward: Optional[ForwardConfig] = None,
     ):
         """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
@@ -99,11 +99,11 @@ class WeightOnlyProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_pack(
-        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig,
+        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
     ) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.NF12_AD}
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.NF12}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         """Backfills the logged loss field after late dequant-error measurement."""
@@ -119,7 +119,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         *,
         device: Optional[torch.device] = None,
-    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig]:
+    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
         resolved_cfg = get_resolved_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
@@ -182,7 +182,7 @@ class WeightOnlyProcessor(LoopProcessor):
         model: BaseQModel,
         *,
         qcfg: Optional[
-            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12ADConfig
+            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config
         ] = None,
         **kwargs,
     ):
@@ -286,7 +286,7 @@ class WeightOnlyProcessor(LoopProcessor):
             if reference_weight is None:
                 reference_weight = qmodule._weight_to_matrix(original_layer).detach()
             dequant_weight = qmodule.dequantize_weight()
-            # BNB and NF12-AD expose native [out, in] weights; FP8/GGUF expose
+            # BNB and NF12 expose native [out, in] weights; FP8/GGUF expose
             # [in, out].
             if active_qcfg.method in (METHOD.FP8, METHOD.GGUF):
                 dequant_weight = dequant_weight.T
@@ -339,8 +339,8 @@ class WeightOnlyProcessor(LoopProcessor):
             return "weight_only_fp8"
         if self.qcfg.method == METHOD.BITSANDBYTES:
             return "weight_only_bitsandbytes"
-        if self.qcfg.method == METHOD.NF12_AD:
-            return "weight_only_nf12_ad"
+        if self.qcfg.method == METHOD.NF12:
+            return "weight_only_nf12"
         return "weight_only_rtn"
 
 __all__ = ["WeightOnlyProcessor"]

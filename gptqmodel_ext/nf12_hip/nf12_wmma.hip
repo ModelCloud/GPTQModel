@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) fused decode+GEMM using RDNA4 matrix cores.
+// NF12 (NyoomFloat12) fused decode+GEMM using RDNA4 matrix cores.
 //
 // Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
 // (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
@@ -19,7 +19,7 @@
 //
 // Numerics (SPEC.md 6.2/6.3)
 // --------------------------
-// Decode is the same bit-exact NF12 decode as `nf12_ad_decode`, so the
+// Decode is the same bit-exact NF12 decode as `nf12_decode`, so the
 // multiplied values are identical to the decode-then-GEMM route. Accumulation
 // is FP32 in the matrix core (not BF16), and bias joins the FP32 accumulator
 // before the single BF16 rounding, matching the CUDA small-M epilogue. Each
@@ -43,14 +43,14 @@
 // gfx1250 has no `wmma-128b-insts`, so this file compiles to an empty
 // translation unit there and the caller keeps the decode-then-GEMM route.
 // ---------------------------------------------------------------------------
-#include "nf12_ad_format_hip.cuh"
-#include "nf12_ad_validation.cuh"
+#include "nf12_format_hip.cuh"
+#include "nf12_validation.cuh"
 
 // The launcher templates below run before the C entry points are defined, so
 // the two queries they need are declared here instead of pulling in the whole
 // public header (which would also drag the CUDA-compat aliases into this file).
-extern "C" int nf12_ad_wmma_max_m(void);
-extern "C" size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
+extern "C" int nf12_wmma_max_m(void);
+extern "C" size_t nf12_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 
 #include <hip/hip_runtime_api.h>
 
@@ -134,7 +134,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                 const __hip_bfloat16* __restrict__ bias, float* __restrict__ partial,
                 WmmaRoute route_in) {
   static_assert(!kRouted || kSplits == 1, "a routed MoE tile never splits K");
-#if !NF12_AD_HAS_WMMA
+#if !NF12_HAS_WMMA
   // gfx1250 has no wmma-128b-insts. The body still has to exist so the host
   // and device passes agree on the symbol; the dispatcher never selects it.
   (void)x; (void)packed; (void)escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
@@ -414,7 +414,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       }
     }
   }
-#endif  // NF12_AD_HAS_WMMA
+#endif  // NF12_HAS_WMMA
 }
 
 // Sum the per-split FP32 planes and round to BF16 exactly once, so the result
@@ -627,7 +627,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   // tiles with one K pass could only be compared under a tolerance, which
   // cannot distinguish a decode error from a different reduction order.
   if (!wmma_available()) return hipErrorNotSupported;
-  if (m < 16 || m > nf12_ad_wmma_max_m()) return hipErrorInvalidValue;
+  if (m < 16 || m > nf12_wmma_max_m()) return hipErrorInvalidValue;
   const WmmaPlan plan = wmma_plan(n, k, m);
   tiles = plan.tiles;
   splits = plan.splits;
@@ -638,7 +638,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 
   float* partial = nullptr;
   if (splits > 1) {
-    const size_t needed = nf12_ad_wmma_workspace_bytes(n, k, m);
+    const size_t needed = nf12_wmma_workspace_bytes(n, k, m);
     if (workspace == nullptr || workspace_bytes < needed) return hipErrorInvalidValue;
     partial = static_cast<float*>(workspace);
   }
@@ -647,7 +647,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
                   static_cast<unsigned>(splits));
   const WmmaRoute route{};
 
-#define NF12_AD_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
+#define NF12_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
   wmma_kernel<SRC, ROUTED, T, SPL, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(           \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),  \
       escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),     \
@@ -656,16 +656,16 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
   // no reduce pass; every other case reduces from a partial plane. Both weight
   // sources share this table so the twin runs the identical plan.
-#define NF12_AD_DISPATCH(SRC, T, D, P)          \
+#define NF12_DISPATCH(SRC, T, D, P)          \
   do {                                          \
     if (splits == 1) {                          \
-      NF12_AD_LAUNCH(SRC, false, T, 1, D, P);   \
+      NF12_LAUNCH(SRC, false, T, 1, D, P);   \
     } else if (splits == 2) {                   \
-      NF12_AD_LAUNCH(SRC, false, T, 2, D, P);   \
+      NF12_LAUNCH(SRC, false, T, 2, D, P);   \
     } else if (splits == 4) {                   \
-      NF12_AD_LAUNCH(SRC, false, T, 4, D, P);   \
+      NF12_LAUNCH(SRC, false, T, 4, D, P);   \
     } else {                                    \
-      NF12_AD_LAUNCH(SRC, false, T, 8, D, P);   \
+      NF12_LAUNCH(SRC, false, T, 8, D, P);   \
     }                                           \
   } while (0)
 
@@ -685,45 +685,45 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
   // Only the two smallest tile counts get the runtime buffer choice; from
   // three tiles up the buffer is unconditional, so those stay single.
-#define NF12_AD_TILES(SRC, T, D)                                                \
+#define NF12_TILES(SRC, T, D)                                                \
   do {                                                                          \
     if (pad) {                                                                  \
-      NF12_AD_DISPATCH(SRC, T, D, true);                                        \
+      NF12_DISPATCH(SRC, T, D, true);                                        \
     } else {                                                                    \
-      NF12_AD_DISPATCH(SRC, T, D, false);                                       \
+      NF12_DISPATCH(SRC, T, D, false);                                       \
     }                                                                           \
   } while (0)
-#define NF12_AD_TILES_DYN(SRC, T)                                               \
+#define NF12_TILES_DYN(SRC, T)                                               \
   do {                                                                          \
     if (dbl) {                                                                  \
-      NF12_AD_TILES(SRC, T, true);                                              \
+      NF12_TILES(SRC, T, true);                                              \
     } else {                                                                    \
-      NF12_AD_TILES(SRC, T, false);                                             \
+      NF12_TILES(SRC, T, false);                                             \
     }                                                                           \
   } while (0)
-#define NF12_AD_SWITCH(SRC)                                                     \
+#define NF12_SWITCH(SRC)                                                     \
   do {                                                                          \
     switch (tiles) {                                                            \
-      case 1: NF12_AD_TILES_DYN(SRC, 1); break;                                 \
-      case 2: NF12_AD_TILES_DYN(SRC, 2); break;                                 \
-      case 3: NF12_AD_TILES(SRC, 3, true); break;                               \
-      case 4: NF12_AD_TILES(SRC, 4, true); break;                               \
-      case 5: NF12_AD_TILES(SRC, 5, true); break;                               \
-      case 6: NF12_AD_TILES(SRC, 6, true); break;                               \
-      case 7: NF12_AD_TILES(SRC, 7, false); break;                               \
-      default: NF12_AD_TILES(SRC, kMaxTiles, false); break;                      \
+      case 1: NF12_TILES_DYN(SRC, 1); break;                                 \
+      case 2: NF12_TILES_DYN(SRC, 2); break;                                 \
+      case 3: NF12_TILES(SRC, 3, true); break;                               \
+      case 4: NF12_TILES(SRC, 4, true); break;                               \
+      case 5: NF12_TILES(SRC, 5, true); break;                               \
+      case 6: NF12_TILES(SRC, 6, true); break;                               \
+      case 7: NF12_TILES(SRC, 7, false); break;                               \
+      default: NF12_TILES(SRC, kMaxTiles, false); break;                      \
     }                                                                           \
   } while (0)
   if constexpr (Src == WeightSource::kBf16t) {
-    NF12_AD_SWITCH(WeightSource::kBf16t);
+    NF12_SWITCH(WeightSource::kBf16t);
   } else {
-    NF12_AD_SWITCH(WeightSource::kNf12);
+    NF12_SWITCH(WeightSource::kNf12);
   }
-#undef NF12_AD_SWITCH
-#undef NF12_AD_TILES_DYN
-#undef NF12_AD_TILES
-#undef NF12_AD_DISPATCH
-#undef NF12_AD_LAUNCH
+#undef NF12_SWITCH
+#undef NF12_TILES_DYN
+#undef NF12_TILES
+#undef NF12_DISPATCH
+#undef NF12_LAUNCH
 
   hipError_t status = hipGetLastError();
   if (status == hipSuccess && splits > 1) {
@@ -755,7 +755,7 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                                   const int32_t* scatter, const int64_t* expert_offsets,
                                   int64_t max_assignments, const float* row_scale, void* out,
                                   int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
-  using namespace nf12_ad::validation;
+  using namespace nf12::validation;
   if (!valid_moe_shape(num_experts, n, k) || packed == nullptr || !aligned16(packed) ||
       !valid_moe_linear_buffers(x, ldx, gather, gather_div, scatter, expert_offsets,
                                 max_assignments, row_scale, out, ldy, n, k)) {
@@ -806,11 +806,11 @@ extern "C" {
 // decode-then-rocBLAS, which decodes once and runs a full GEMM. 128 tokens is
 // the measured crossover on gfx1201 (see the README table); beyond it the
 // dispatcher keeps the rocBLAS route.
-int nf12_ad_wmma_max_m() { return 2 * kMaxTokens; }
+int nf12_wmma_max_m() { return 2 * kMaxTokens; }
 
 
 
-int nf12_ad_wmma_supported(int64_t m) {
+int nf12_wmma_supported(int64_t m) {
   if (m < 16 || m > 2 * kMaxTokens) return 0;
   int device = 0;
   if (hipGetDevice(&device) != hipSuccess) return 0;
@@ -823,7 +823,7 @@ int nf12_ad_wmma_supported(int64_t m) {
 // is not per device, and even a per-device one would be shared by concurrent
 // streams: two launches would write the same FP32 partial planes and the reduce
 // pass would mix them, silently corrupting both results. The caller owns the
-// scratch instead (``nf12_ad_wmma_workspace_bytes``), so this file holds
+// scratch instead (``nf12_wmma_workspace_bytes``), so this file holds
 // no mutable state and concurrent streams are independent.
 //
 // Do not "optimise" this back into a hipMalloc per call either: hipMalloc and
@@ -833,14 +833,14 @@ int nf12_ad_wmma_supported(int64_t m) {
 
 
 
-size_t nf12_ad_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
+size_t nf12_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
   const WmmaPlan plan = wmma_plan(n, k, m);
   if (plan.splits <= 1 || m <= 0 || n <= 0) return 0;
   return size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float);
 }
 
 
-hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                                 const void* x, void* out, int64_t n, int64_t k, int64_t m,
                                 const void* bias, void* workspace, size_t workspace_bytes,
                                 hipStream_t stream) {
@@ -849,7 +849,7 @@ hipError_t nf12_ad_linear_wmma(const uint8_t* packed, const uint4* escapes, uint
 }
 
 // bf16t twin of the matrix-core route (SPEC.md 4.4).
-hipError_t nf12_ad_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
+hipError_t nf12_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
                                       int64_t k, int64_t m, const void* bias, void* workspace,
                                       size_t workspace_bytes, hipStream_t stream) {
   return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
@@ -857,7 +857,7 @@ hipError_t nf12_ad_linear_wmma_bf16t(const uint8_t* packed, const void* x, void*
 }
 
 // MoE routes. The nf12 form takes a per-expert codec; the bf16t form does not.
-hipError_t nf12_ad_moe_linear(const uint8_t* packed, const uint4* escapes,
+hipError_t nf12_moe_linear(const uint8_t* packed, const uint4* escapes,
                                const int64_t* escape_offsets, const uint8_t* exp_base,
                                int32_t num_experts, const void* x, int64_t ldx,
                                const int32_t* gather, int64_t gather_div, const int32_t* scatter,
@@ -870,7 +870,7 @@ hipError_t nf12_ad_moe_linear(const uint8_t* packed, const uint4* escapes,
                                               n, k, stream);
 }
 
-hipError_t nf12_ad_moe_linear_bf16t(const uint8_t* packed, int32_t num_experts, const void* x,
+hipError_t nf12_moe_linear_bf16t(const uint8_t* packed, int32_t num_experts, const void* x,
                                      int64_t ldx, const int32_t* gather, int64_t gather_div,
                                      const int32_t* scatter, const int64_t* expert_offsets,
                                      int64_t max_assignments, const float* row_scale, void* out,

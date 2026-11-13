@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
 // ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) format + decode for AMD RDNA4 (gfx1200/gfx1201/gfx1250).
+// NF12 (NyoomFloat12) format + decode for AMD RDNA4 (gfx1200/gfx1201/gfx1250).
 //
 // Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
 // (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
 // and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
 //
-// It decodes the identical NF12-AD tiled byte stream that the CUDA kernels
+// It decodes the identical NF12 tiled byte stream that the CUDA kernels
 // produce, so a checkpoint is portable between NVIDIA and AMD hosts. The bit
 // layout is specified in gptqmodel_ext/nf12/docs/SPEC.md sections 2-4.
 //
@@ -415,12 +415,12 @@ __device__ __forceinline__ GroupStats group_stats(const uint32_t (&r)[4]) {
 // guard that changes a *declaration* between the host and device passes makes
 // the two emit different mangled names, and the launch then fails with
 // "Cannot find Symbol". So the fragment types and helpers are declared
-// unconditionally (they are plain vector types), and `NF12_AD_HAS_WMMA` gates
+// unconditionally (they are plain vector types), and `NF12_HAS_WMMA` gates
 // only executable bodies.
 #if defined(__gfx1200__) || defined(__gfx1201__)
-#define NF12_AD_HAS_WMMA 1
+#define NF12_HAS_WMMA 1
 #else
-#define NF12_AD_HAS_WMMA 0
+#define NF12_HAS_WMMA 0
 #endif
 
 using WmmaA = short __attribute__((ext_vector_type(8)));

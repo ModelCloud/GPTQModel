@@ -209,7 +209,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         return True
 
     def cuda_autocast_dtype() -> bool:
-        # `torch.get_autocast_dtype` is read on the NF12-AD fallback path to
+        # `torch.get_autocast_dtype` is read on the NF12 fallback path to
         # decide whether an active context narrows BF16 weights. The disabled
         # context keeps the enclosing dtype; only the enabled flag changes.
         before_enabled = torch.is_autocast_enabled("cuda")

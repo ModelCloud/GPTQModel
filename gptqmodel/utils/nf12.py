@@ -25,13 +25,13 @@ def load() -> bool:
     """Load GPTQModel's vendored NF12 operator set if CUDA is available."""
     global _ERROR
     if not torch.cuda.is_available():
-        _ERROR = "NF12-AD native kernels require an available CUDA device."
+        _ERROR = "NF12 native kernels require an available CUDA device."
         return False
     try:
         gptqmodel_nf12.load()
     except Exception as exc:  # noqa: BLE001 - optional accelerator
         _ERROR = f"{type(exc).__name__}: {exc}"
-        log.debug("NF12-AD native extension unavailable: %s", _ERROR)
+        log.debug("NF12 native extension unavailable: %s", _ERROR)
         return False
     _ERROR = None
     return True
@@ -52,21 +52,21 @@ def build_directory() -> Path | None:
 
 def encode(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
     if not load():
-        raise RuntimeError(_ERROR or "NF12-AD native extension is unavailable")
+        raise RuntimeError(_ERROR or "NF12 native extension is unavailable")
     result = gptqmodel_nf12.encode(weight)
     return result.packed, result.escapes, result.exp_base
 
 
 def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
     if not load():
-        raise RuntimeError(_ERROR or "NF12-AD native extension is unavailable")
+        raise RuntimeError(_ERROR or "NF12 native extension is unavailable")
     return gptqmodel_nf12.decode(gptqmodel_nf12.NF12Weight(packed, escapes, exp_base))
 
 
 def linear(x: torch.Tensor, packed: torch.Tensor, escapes: torch.Tensor,
            exp_base: int, bias: torch.Tensor | None = None) -> torch.Tensor:
     if not load():
-        raise RuntimeError(_ERROR or "NF12-AD native extension is unavailable")
+        raise RuntimeError(_ERROR or "NF12 native extension is unavailable")
     return gptqmodel_nf12.linear(x, gptqmodel_nf12.NF12Weight(packed, escapes, exp_base), bias)
 
 

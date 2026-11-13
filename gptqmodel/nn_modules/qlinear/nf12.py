@@ -4,11 +4,11 @@
 #
 # Adapted from the nf12 reference implementation
 # (https://github.com/dphnAI/nf12) by AlpinDale and the nf12 contributors.
-"""NF12-AD (NyoomFloat12) inference linear layer.
+"""NF12 (NyoomFloat12) inference linear layer.
 
 NF12 is Together AI's lossless 12-bit BF16 weight format, implemented by
 AlpinDale at https://github.com/dphnAI/nf12. This module stores the packed
-NF12-AD weight as ``nf12_packed`` plus ``nf12_escapes`` and
+NF12 weight as ``nf12_packed`` plus ``nf12_escapes`` and
 ``nf12_exp_base``, matching the upstream nf12 serialization names. On CUDA the vendored
 fused decode-GEMM kernels run
 directly from that storage; elsewhere a bounded decode feeds an FP32
@@ -27,10 +27,10 @@ import torch.nn as nn
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.nf12_ad import NF12ADQuantResult, quantize_nf12_ad_weight, weight_to_matrix
-from ...utils import nf12_ad as nf12_ad_runtime
-from ...utils import nf12_ad_hip as nf12_ad_hip_runtime
+from ...quantization.nf12 import NF12QuantResult, quantize_nf12_weight, weight_to_matrix
+from ...utils import nf12 as nf12_runtime
 from ...utils import nf12_codec
+from ...utils import nf12_hip as nf12_hip_runtime
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
@@ -41,7 +41,7 @@ log = setup_logger()
 
 
 def _weight_dtype_is_lossless(activation_dtype: torch.dtype) -> bool:
-    """Whether every BF16 NF12-AD weight survives a cast to the activation dtype.
+    """Whether every BF16 NF12 weight survives a cast to the activation dtype.
 
     ``float64`` is included even though :attr:`SUPPORTS_DTYPES` does not list it:
     a caller that already holds float64 activations must not have the decoded
@@ -70,7 +70,7 @@ def _autocast_enabled(device_type: str) -> bool:
 def _autocast_narrows_weight_range(
     activation_dtype: torch.dtype, device_type: str
 ) -> bool:
-    """Whether an active autocast context narrows BF16 NF12-AD weights.
+    """Whether an active autocast context narrows BF16 NF12 weights.
 
     Autocast rewrites GEMM operands to its own dtype, so an FP16 context
     narrows a BF16 activation to FP16 before the product even though the
@@ -98,20 +98,20 @@ def _hip_path(device: torch.device | str) -> bool:
     fused CUDA MMA path on NVIDIA while routing AMD to the HIP decode port.
     """
 
-    return nf12_ad_hip_runtime.nf12_ad_hip_supported(device)
+    return nf12_hip_runtime.nf12_hip_supported(device)
 
 
-class NF12ADLinear(WeightOnlyQuantLinear):
-    """Weight-only NF12-AD linear layer.
+class NF12Linear(WeightOnlyQuantLinear):
+    """Weight-only NF12 linear layer.
 
     The packed representation is the checkpoint format. ``decode`` is exact,
     so this path is numerically identical to running the original BF16
     weights apart from the kernel's accumulation order.
     """
 
-    SUPPORTS_BACKENDS = [BACKEND.NF12_AD]
-    SUPPORTS_METHODS = [METHOD.NF12_AD]
-    SUPPORTS_FORMATS = {FORMAT.NF12_AD: 100}
+    SUPPORTS_BACKENDS = [BACKEND.NF12]
+    SUPPORTS_METHODS = [METHOD.NF12]
+    SUPPORTS_FORMATS = {FORMAT.NF12: 100}
     SUPPORTS_BITS = [12]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -127,7 +127,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
-    QUANT_TYPE = "nf12_ad"
+    QUANT_TYPE = "nf12"
 
     def __init__(
         self,
@@ -151,7 +151,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             in_features=int(in_features),
             out_features=int(out_features),
             bias=bias,
-            backend=kwargs.pop("backend", BACKEND.NF12_AD),
+            backend=kwargs.pop("backend", BACKEND.NF12),
             adapter=adapter,
             register_buffers=False,
             pack_dtype=pack_dtype,
@@ -265,30 +265,30 @@ class NF12ADLinear(WeightOnlyQuantLinear):
 
     @torch.inference_mode()
     def pack_original(self, linear, scales=None, zeros=None, g_idx=None, *, smooth=None):
-        """Encode ``linear.weight`` into the packed NF12-AD buffers."""
+        """Encode ``linear.weight`` into the packed NF12 buffers."""
 
         del scales, zeros, g_idx
         if smooth is not None:
             raise ValueError(
-                "NF12-AD is a lossless format and does not support smoothing; "
+                "NF12 is a lossless format and does not support smoothing; "
                 "disable `smooth` for this method."
             )
         weight = weight_to_matrix(linear)
-        result = quantize_nf12_ad_weight(weight, exp_base=self.requested_exp_base)
+        result = quantize_nf12_weight(weight, exp_base=self.requested_exp_base)
         self._install_result(result, linear=linear)
 
     @torch.inference_mode()
-    def load_quant_result(self, result: NF12ADQuantResult, *, bias: torch.Tensor | None = None):
+    def load_quant_result(self, result: NF12QuantResult, *, bias: torch.Tensor | None = None):
         """Install a quantizer result without recomputing the encoding."""
 
         if result.packed.shape != (self.out_features, self.in_features * 3 // 2):
             raise ValueError(
-                f"NF12ADLinear `{self.name}`: packed shape {tuple(result.packed.shape)} "
+                f"NF12Linear `{self.name}`: packed shape {tuple(result.packed.shape)} "
                 f"does not match {(self.out_features, self.in_features * 3 // 2)}"
             )
         self._install_result(result, bias=bias)
 
-    def _install_result(self, result: NF12ADQuantResult, *, linear=None, bias=None):
+    def _install_result(self, result: NF12QuantResult, *, linear=None, bias=None):
         if hasattr(self, "nf12_packed"):
             target_device = self.nf12_packed.device
         elif isinstance(getattr(self, "bias", None), torch.Tensor):
@@ -344,21 +344,21 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         escapes = self.nf12_escapes.to(device=target)
         if target.type == "cuda" and _hip_path(target):
             try:
-                weight = nf12_ad_hip_runtime.decode(packed, escapes, self._exp_base())
+                weight = nf12_hip_runtime.decode(packed, escapes, self._exp_base())
             except Exception as exc:  # noqa: BLE001 - fall back to the codec
                 log.warn.once(
-                    f"NF12-AD HIP decode failed ({type(exc).__name__}: {exc}); "
+                    f"NF12 HIP decode failed ({type(exc).__name__}: {exc}); "
                     "using the Torch codec."
                 )
                 weight = nf12_codec.decode(
                     packed, escapes, self._exp_base(), self.out_features, self.in_features
                 )
-        elif target.type == "cuda" and nf12_ad_runtime.available():
+        elif target.type == "cuda" and nf12_runtime.available():
             try:
-                weight = nf12_ad_runtime.decode(packed, escapes, self._exp_base())
+                weight = nf12_runtime.decode(packed, escapes, self._exp_base())
             except Exception as exc:  # noqa: BLE001 - fall back to the codec
                 log.warn.once(
-                    f"NF12-AD native decode failed ({type(exc).__name__}: {exc}); "
+                    f"NF12 native decode failed ({type(exc).__name__}: {exc}); "
                     "using the Torch codec."
                 )
                 weight = nf12_codec.decode(
@@ -385,10 +385,10 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         # RDNA4 has no mma.sync/wgmma, so the HIP port decodes to exact BF16 and
         # uses rocBLAS (SPEC.md 6.5). CUDA hosts keep the fused MMA kernel.
         if _hip_path(x.device):
-            if not nf12_ad_hip_runtime.available(x.device):
+            if not nf12_hip_runtime.available(x.device):
                 return None
             try:
-                return nf12_ad_hip_runtime.linear(
+                return nf12_hip_runtime.linear(
                     x.contiguous(),
                     self.nf12_packed,
                     self.nf12_escapes,
@@ -397,14 +397,14 @@ class NF12ADLinear(WeightOnlyQuantLinear):
                 )
             except Exception as exc:  # noqa: BLE001 - optional accelerator
                 log.warn.once(
-                    f"NF12-AD HIP linear failed ({type(exc).__name__}: {exc}); "
+                    f"NF12 HIP linear failed ({type(exc).__name__}: {exc}); "
                     "using decode + matmul."
                 )
                 return None
-        if not nf12_ad_runtime.available():
+        if not nf12_runtime.available():
             return None
         try:
-            return nf12_ad_runtime.linear(
+            return nf12_runtime.linear(
                 x.contiguous(),
                 self.nf12_packed,
                 self.nf12_escapes,
@@ -413,7 +413,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
             )
         except Exception as exc:  # noqa: BLE001 - native kernels are optional
             log.warn.once(
-                f"NF12-AD native linear failed ({type(exc).__name__}: {exc}); "
+                f"NF12 native linear failed ({type(exc).__name__}: {exc}); "
                 "using decode + matmul."
             )
             return None
@@ -439,7 +439,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         out = self._native_forward(x, bias)
         if out is None:
             # Bounded scratch: the decoded matrix lives only for this forward.
-            # NF12-AD checkpoints store BF16, whose range is far wider than
+            # NF12 checkpoints store BF16, whose range is far wider than
             # FP16. Narrowing the decoded weight to an FP16 activation dtype
             # before the product turns a finite BF16 value (for example 65536)
             # into `inf`, and flushes values below the FP16 subnormal range to
@@ -499,7 +499,7 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         # Validate the loaded checkpoint's packing geometry once.
         if self.nf12_packed.shape != (self.out_features, self.in_features * 3 // 2):
             raise ValueError(
-                f"NF12ADLinear `{self.name}`: unexpected `nf12_packed` shape "
+                f"NF12Linear `{self.name}`: unexpected `nf12_packed` shape "
                 f"{tuple(self.nf12_packed.shape)}"
             )
 
@@ -517,4 +517,4 @@ class NF12ADLinear(WeightOnlyQuantLinear):
         )
 
 
-__all__ = ["NF12ADLinear"]
+__all__ = ["NF12Linear"]

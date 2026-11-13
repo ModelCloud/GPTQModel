@@ -1715,8 +1715,8 @@ class BaseQModel(nn.Module):
                 )
             elif self.quantize_config.method == METHOD.VPTQ:
                 preferred_backend = BACKEND.VPTQ_TORCH
-            elif self.quantize_config.method == METHOD.NF12_AD:
-                preferred_backend = BACKEND.NF12_AD
+            elif self.quantize_config.method == METHOD.NF12:
+                preferred_backend = BACKEND.NF12
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -4843,7 +4843,7 @@ class BaseQModel(nn.Module):
             METHOD.EXL3,
             METHOD.PARO,
             METHOD.VPTQ,
-            METHOD.NF12_AD,
+            METHOD.NF12,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "

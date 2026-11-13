@@ -177,7 +177,7 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | VPTQ                      | ✅          | x | x | x | x             |
-| NF12-AD                   | ✅          | x | x | x | x             |
+| NF12                      | ✅          | x | x | x | x             |
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
@@ -202,7 +202,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
-| `METHOD.NF12_AD` (`nf12`) | `FORMAT.NF12_AD` (`nf12`) | `BACKEND.NF12_AD` (`nf12_ad`) |
+| `METHOD.NF12` (`nf12`) | `FORMAT.NF12` (`nf12`) | `BACKEND.NF12` (`nf12`) |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
@@ -459,12 +459,12 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`), NF12-AD `sm_80+` | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12-AD, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`), NF12 `sm_80+` | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12, BitBLAS, Triton, BitsAndBytes, Torch |
 | 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM/GEMV, ParoQuant Triton, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, FP8 Torch, Torch (fused GPTQ GEMV/GEMM on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
-| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, NF12-AD Torch, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, NF12-AD Torch, MLX via conversion |
+| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, NF12 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 **ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
@@ -795,7 +795,7 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 
 #### Other Quantization Formats 📦
 
-`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12ADConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12Config`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
 `GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
 
@@ -993,12 +993,12 @@ the [NF12 HIP toolchain notes](gptqmodel_ext/nf12_hip/README.md).
 ```py
 import torch
 from gptqmodel import GPTQModel
-from gptqmodel.quantization import NF12ADConfig
+from gptqmodel.quantization import NF12Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-NF12"
 
-model = GPTQModel.load(model_id, NF12ADConfig(), dtype=torch.bfloat16)
+model = GPTQModel.load(model_id, NF12Config(), dtype=torch.bfloat16)
 model.quantize(calibration=None)
 model.save(quant_path)
 ```
@@ -1411,7 +1411,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
-* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12-AD inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
+* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12 inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)

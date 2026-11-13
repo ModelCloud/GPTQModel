@@ -164,7 +164,7 @@ def test_hf_load_bridge_sizes_nf12_escape_buffer_before_weight_assignment(tmp_pa
         model,
         checkpoint_files=[checkpoint],
         device_map={"": "cpu"},
-        backend=BACKEND.NF12_AD,
+        backend=BACKEND.NF12,
         dtype=torch.bfloat16,
     )
     module = model.model.layers[0].self_attn.q_proj

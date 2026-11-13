@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 
 
-_LIBRARIES = ("libnf12_ad.so", "libnf12_ad_torch.so")
+_LIBRARIES = ("libnf12.so", "libnf12_torch.so")
 _BUILD_ENV = (
     "CUDACXX", "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX", "CXX", "CXXFLAGS",
     "CUDAFLAGS", "LDFLAGS", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS",
@@ -143,7 +143,7 @@ def library_directory() -> Path:
         source = _source_root()
         archs = _architectures()
         cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-        directory = cache.expanduser().resolve() / "gptqmodel" / "nf12_ad" / _cache_key(source, archs)
+        directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Keep the lock file: unlinking it lets waiters lock a different inode.
         with (directory / "build.lock").open("a") as lock:

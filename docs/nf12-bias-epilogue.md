@@ -3,14 +3,14 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # NF12 fallback epilogue
 
-`NF12ADLinear.forward` keeps the stored bias dtype and the full BF16 weight
+`NF12Linear.forward` keeps the stored bias dtype and the full BF16 weight
 range until after the temporary decoded weight and activation have been
 multiplied. A native BF16 kernel receives bias only when its dtype matches the
 BF16 activation; other cases use the wide fallback. Introduced in PR #3730,
 corrected for mixed-dtype bias in PR #3735, and corrected for FP16 activation
 range loss in the follow-up that added `test_linear_fallback_preserves_bf16_weight_range`.
 
-NF12-AD checkpoints are lossless BF16. The format range is therefore the BF16
+NF12 checkpoints are lossless BF16. The format range is therefore the BF16
 range, not the activation range: `65536` is a representable weight, and
 `65536 * 2**-16` is exactly `1` even though `65536` is outside the FP16 range.
 A decoded weight narrowed to FP16 becomes `inf` before the product, so a finite
@@ -18,7 +18,7 @@ final result is lost.
 
 ```mermaid
 flowchart TD
-    A["NF12ADLinear.forward"] --> M{"Input device is meta?"}
+    A["NF12Linear.forward"] --> M{"Input device is meta?"}
     M -- Yes --> M1["empty_linear_output metadata result"]
     M -- No --> R["Apply online Hadamard rotation if enabled"]
     R --> Z{"Zero logical rows?"}
@@ -46,10 +46,10 @@ already applies the adapter exactly once.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Bias cast | `gptqmodel/nn_modules/qlinear/nf12_ad.py:377-378` (pre-#3735) converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
+| Bias cast | `gptqmodel/nn_modules/qlinear/nf12.py:377-378` (pre-#3735) converted bias to input dtype before dispatch | The stored bias retains its dtype through the fallback epilogue |
 | Native eligibility | `_native_forward` received the narrowed bias | It declines a mismatched bias dtype, then uses fallback |
 | Fallback operands | The wide branch cast `x` with `.float()`, so a float64 activation re-entered the GEMM as float32 | The wide product multiplies `x` in the scratch dtype and adds the bias in that same dtype before one output rounding |
-| Decoded weight dtype | `nf12_ad.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the wide decode and product |
+| Decoded weight dtype | `nf12.py:392` decoded to `x.dtype` on any non-CPU device, so FP16 activation narrowed BF16 weights to `inf` or zero | `_weight_dtype_is_lossless()` sends FP16 activations to the wide decode and product |
 | Wide scratch dtype | FP32 only | Follows the activation: `float64` keeps a float64 decode and GEMM on an accelerator, every other wide case uses FP32, and CPU stays FP32 by design |
 | Wide GEMM under autocast | Not applicable: the wide branch did not exist on accelerators | The FP32 product runs under `torch.autocast(..., enabled=False)` so autocast cannot narrow it back to FP16 |
 | Narrow branch under autocast | An FP16 autocast context narrowed BF16/FP32 activations too, because autocast rewrites GEMM operands; CUDA hid this only through its FP32 `out_dtype` request, while HIP returned `inf` | `_autocast_narrows_weight_range()` widens whenever the active autocast dtype cannot hold every BF16 weight |

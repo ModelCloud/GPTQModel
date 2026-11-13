@@ -1,7 +1,7 @@
-# NF12-AD HIP port (AMD RDNA4)
+# NF12 HIP port (AMD RDNA4)
 
 Decode, encode and fused matrix-core kernels plus Torch bindings that run the
-**NF12-AD** (`nf12_ad`) quantization format on AMD RDNA4 GPUs — `gfx1200` /
+**NF12** (`nf12`) quantization format on AMD RDNA4 GPUs — `gfx1200` /
 `gfx1201` / `gfx1250` (Radeon AI PRO R9700, RX 9000 series).
 
 Validated on **ROCm SDK 10.1.0 / HIP 7.16.26385** with
@@ -30,19 +30,19 @@ vice versa — both consume the identical byte stream.
 
 RDNA4 has no `mma.sync.m16n8k16`, no `wgmma`, no `tcgen05`, and no TMA. Porting
 the CUDA fused MMA kernel verbatim would mean inventing a different accumulation
-order, which breaks the invariant in SPEC.md §6.2 (`nf12_ad` must reproduce the
+order, which breaks the invariant in SPEC.md §6.2 (`nf12` must reproduce the
 `bf16t` twin for a given configuration). Every route below therefore decodes
 NF12 → **exact BF16** first, so none of them introduces new numerics.
 
 | tokens | route | why |
 | --- | --- | --- |
-| `m <= 15` | `nf12_ad_linear_fused` | bandwidth-bound; decoding once and reusing it beats a GEMM |
-| `16 <= m <= 256` | `nf12_ad_linear_wmma` | matrix cores amortise the decode across token tiles |
+| `m <= 15` | `nf12_linear_fused` | bandwidth-bound; decoding once and reusing it beats a GEMM |
+| `16 <= m <= 256` | `nf12_linear_wmma` | matrix cores amortise the decode across token tiles |
 | `m > 256`, or no `wmma-128b-insts` | row-sliced decode-then-rocBLAS | a real GEMM wins once decode can be amortised |
 
 ### 1. Fused small-M kernel (`m <= 15`)
 
-`nf12_ad_linear_fused` never materialises the dense weight. Each CTA owns one
+`nf12_linear_fused` never materialises the dense weight. Each CTA owns one
 16-row output block and splits K across its eight warps; the decoded super-atom
 stays in registers and is reduced against the activation tile with
 `v_dot2_f32_bf16` (two columns per instruction), then the per-warp partials are
@@ -56,7 +56,7 @@ saving over BF16, which is where the wins come from.
 
 ### 2. Matrix-core fused kernel (`16 <= m <= 256`)
 
-`nf12_ad_linear_wmma` decodes each 16×64 super-atom **once** into shared memory
+`nf12_linear_wmma` decodes each 16×64 super-atom **once** into shared memory
 and feeds `v_wmma_f32_16x16x16_bf16_w32_gfx12` for every token tile in flight,
 so the packed bytes are read exactly once and the dense weight never exists.
 Accumulation is FP32 in the matrix core and bias joins the accumulator before
@@ -107,14 +107,14 @@ the cache locality buys.
 
 ## Encoding
 
-`nf12_ad_encode.hip` ports the CUDA analyze/count/scan/write pipeline, with a
+`nf12_encode.hip` ports the CUDA analyze/count/scan/write pipeline, with a
 hand-written block-wide exclusive scan because ROCm ships no CUB. It is
 **byte-identical** to `nf12_codec.encode`: same `exp_base`, same packed bytes,
 same escape order. Encoding a 4096² matrix drops from 809 ms to 1.4 ms, and
 11008×4096 from 1309 ms to 21.4 ms, which removes the CPU codec from the
 quantization critical path. A forced `exp_base` still routes through the codec.
 
-`scripts/validate_nf12_ad.py` calls `hip.encode()` and compares packed bytes,
+`scripts/validate_nf12.py` calls `hip.encode()` and compares packed bytes,
 escapes and the decode round-trip against the reference codec, so the native
 encoder is gated rather than assumed.
 
@@ -124,7 +124,7 @@ The measurements below are from #3644 on Radeon AI PRO R9700 (`gfx1201`, 32
 CUs, wave32), before the per-call split-K workspace change in #3635. They are
 the median of the best of several trials, compared against
 `torch.nn.functional.linear` on the dense BF16 weight. Reproduce with
-`scripts/validate_nf12_ad.py --backend hip`.
+`scripts/validate_nf12.py --backend hip`.
 
 ### Read the cache geometry before reading the table
 
@@ -211,7 +211,7 @@ The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
   the decode-then-GEMM route.
 
 Reproduce the table with `bench/hip_linear.py` in
-[dphnAI/nf12](https://github.com/dphnAI/nf12); `scripts/validate_nf12_ad.py
+[dphnAI/nf12](https://github.com/dphnAI/nf12); `scripts/validate_nf12.py
 --backend hip` is the accuracy gate and the shape-coverage check.
 
 No end-to-end model speedup is claimed. These are single-operator numbers.
@@ -225,7 +225,7 @@ All of these were verified on `gfx1201` hardware, not assumed:
    `[x.b0..x.b3, y.b0..y.b3]`. AMD uses one *full byte* per output byte, where
    `0..3` selects `src1` (the **second** argument) and `4..7` selects `src0`
    (the **first**) — reversed relative to NVIDIA. `nv_sel_to_amd()` in
-   `nf12_ad_format_hip.cuh` converts NVIDIA selectors at compile time, so every
+   `nf12_format_hip.cuh` converts NVIDIA selectors at compile time, so every
    call site still lowers to a single `v_perm_b32` with a literal selector.
 2. **`hip_bfloat16` is not a valid type in a hipified `.hip` TU.** torch's
    hipify rewrites the sources before compiling, and the rewritten file knows
@@ -241,7 +241,7 @@ All of these were verified on `gfx1201` hardware, not assumed:
    The architecture test is now a runtime `hipGetDeviceProperties().gcnArchName`
    check. For the same reason, guards must not change a *declaration* between
    the host and device passes — different mangled names fail the launch with
-   "Cannot find Symbol" — so `NF12_AD_HAS_WMMA` gates only executable bodies.
+   "Cannot find Symbol" — so `NF12_HAS_WMMA` gates only executable bodies.
 5. **`__builtin_amdgcn_fdot2` is FP16, not BF16.** It compiles and runs, and
    produces silently wrong results on BF16 data. The BF16 packed dot is
    `__builtin_amdgcn_fdot2_f32_bf16`, which lowers to `v_dot2_f32_bf16`.
@@ -256,10 +256,10 @@ All of these were verified on `gfx1201` hardware, not assumed:
 
 ## Self-test
 
-`nf12_ad_selftest` launches a real kernel that stamps the sentinel `0x4E463132`
+`nf12_selftest` launches a real kernel that stamps the sentinel `0x4E463132`
 ("NF12"). It must be a kernel launch: hipcc leaves `__CUDA_ARCH__` undefined,
 so a stale architecture guard would emit an empty kernel and a host-side
-memcpy would not detect it. `prewarm_nf12_ad_hip_extension()` fails loudly if
+memcpy would not detect it. `prewarm_nf12_hip_extension()` fails loudly if
 the sentinel is missing.
 
 ## Building
@@ -267,20 +267,20 @@ the sentinel is missing.
 Nothing is shipped precompiled — no `.so` in the repo or the wheel. The
 extension is JIT-built from these sources for the visible gfx target on first
 use, cached under
-`~/.cache/gptqmodel/torch_extensions/nf12_ad_hip/<hash>/`.
+`~/.cache/gptqmodel/torch_extensions/nf12_hip/<hash>/`.
 
 ```python
-from gptqmodel.utils import nf12_ad_hip
-assert nf12_ad_hip.prewarm_nf12_ad_hip_extension()
+from gptqmodel.utils import nf12_hip
+assert nf12_hip.prewarm_nf12_hip_extension()
 ```
 
 Environment knobs:
 
 | Variable | Meaning |
 | --- | --- |
-| `GPTQMODEL_NF12_AD_HIP_BUILD_ROOT` | Override the build/cache directory. |
-| `GPTQMODEL_NF12_AD_HIP_FORCE_REBUILD` | Rebuild even when the cache matches. |
-| `GPTQMODEL_NF12_AD_HIP_FORCE_DOT_FALLBACK` | Force the gfx1250 portable-dot path on gfx1200/gfx1201 for oracle validation. |
+| `GPTQMODEL_NF12_HIP_BUILD_ROOT` | Override the build/cache directory. |
+| `GPTQMODEL_NF12_HIP_FORCE_REBUILD` | Rebuild even when the cache matches. |
+| `GPTQMODEL_NF12_HIP_FORCE_DOT_FALLBACK` | Force the gfx1250 portable-dot path on gfx1200/gfx1201 for oracle validation. |
 | `GPTQMODEL_EXT_VERBOSE` | Show the full hipcc command line. |
 | `GPTQMODEL_NO_ROCM_LLC` | Skip the `gptqmodel.rocm_llc` back-port. |
 
@@ -288,15 +288,15 @@ Environment knobs:
 
 | File | Contents |
 | --- | --- |
-| `nf12_ad_format_hip.cuh` | Format geometry, `nv_sel_to_amd`/`prmt`, `decode_bulk`/`decode_group`, tiling and wmma fragment helpers. |
-| `nf12_ad_decode.hip` | `nf12_ad_decode` (NF12 → exact BF16), `nf12_ad_linear_fused` (small-M fused decode+GEMM), and `nf12_ad_selftest`. |
-| `nf12_ad_encode.hip` | Native analyze/count/scan/write encoder, byte-identical to the Torch codec. |
-| `nf12_ad_wmma.hip` | Matrix-core fused path for `16 <= m <= 256`, including split-K, its reduce kernel, and the bf16t twin. |
-| `nf12_ad_moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
-| `nf12_ad_pack_bf16t.hip` | BF16 → bf16t twin packing (SPEC.md §4.4). |
-| `nf12_ad_torch.cpp` | Host-only Torch bindings: `encode`, `decode`, `linear`, `selftest`, `arch_info`. |
+| `nf12_format_hip.cuh` | Format geometry, `nv_sel_to_amd`/`prmt`, `decode_bulk`/`decode_group`, tiling and wmma fragment helpers. |
+| `nf12_decode.hip` | `nf12_decode` (NF12 → exact BF16), `nf12_linear_fused` (small-M fused decode+GEMM), and `nf12_selftest`. |
+| `nf12_encode.hip` | Native analyze/count/scan/write encoder, byte-identical to the Torch codec. |
+| `nf12_wmma.hip` | Matrix-core fused path for `16 <= m <= 256`, including split-K, its reduce kernel, and the bf16t twin. |
+| `nf12_moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
+| `nf12_pack_bf16t.hip` | BF16 → bf16t twin packing (SPEC.md §4.4). |
+| `nf12_torch.cpp` | Host-only Torch bindings: `encode`, `decode`, `linear`, `selftest`, `arch_info`. |
 
-`nf12_ad_torch.cpp` must stay free of torch types in the `.hip` translation
+`nf12_torch.cpp` must stay free of torch types in the `.hip` translation
 unit: the ROCm SDK here ships no thrust, so the two TUs are strictly split.
 
 ## Syncing with upstream nf12
@@ -306,11 +306,11 @@ lands once and is copied, not reimplemented. The transform is:
 
 | Step | Rule |
 | --- | --- |
-| Headers | `#include "format_hip.cuh"` → `#include "nf12_ad_format_hip.cuh"` |
-| Symbols | `nf12_hip_` → `nf12_ad_`, except `nf12_hip_linear_wmma_workspace_bytes` → `nf12_ad_wmma_workspace_bytes` (the name `nf12_ad_torch.cpp` and the docs already use) |
+| Headers | `#include "format_hip.cuh"` → `#include "nf12_format_hip.cuh"` |
+| Symbols | `nf12_hip_` → `nf12_`, except `nf12_hip_linear_wmma_workspace_bytes` → `nf12_wmma_workspace_bytes` (the name `nf12_torch.cpp` and the docs already use) |
 | Attribution | Prepend `// SPDX-FileCopyrightText: 2026 ModelCloud.ai`; drop the upstream `Adapted from GPT-QModel` line |
-| Geometry | `nf12_ad_format_hip.cuh` drops `#include "nf12/format.cuh"` and the `static_assert`s that compare against it |
-| Duplicates | `nf12_ad_decode.hip` drops the local `warp_super_atom`/`grid_blocks`, which the format header now owns |
+| Geometry | `nf12_format_hip.cuh` drops `#include "nf12/format.cuh"` and the `static_assert`s that compare against it |
+| Duplicates | `nf12_decode.hip` drops the local `warp_super_atom`/`grid_blocks`, which the format header now owns |
 
 Two constraints the upstream sources already satisfy, and that a sync must not
 break:
@@ -318,12 +318,12 @@ break:
 * Every `kernel<<<...>>>` launch must be a plain identifier or template-id.
   torch's hipify rewrites launches by matching an identifier, so a launch
   through an indexed expression is silently mangled.
-* `nf12_ad_decode.hip` and `nf12_ad_wmma.hip` must not include a public header
+* `nf12_decode.hip` and `nf12_wmma.hip` must not include a public header
   that drags in CUDA-compat aliases; the queries the launchers need are
   forward-declared in the file.
 
 MoE and the bf16t twin are vendored for parity but not exposed through
-`torch.ops.nf12_ad_hip`: GPT-QModel quantizes MoE expert linears individually,
+`torch.ops.nf12_hip`: GPT-QModel quantizes MoE expert linears individually,
 so there is no fused-MoE consumer, and the C ABI is the integration point.
-`_SOURCE_FILES` in `gptqmodel/utils/nf12_ad_hip.py` derives the compiled source
+`_SOURCE_FILES` in `gptqmodel/utils/nf12_hip.py` derives the compiled source
 list from itself, so a new file is either built or not staged at all.
