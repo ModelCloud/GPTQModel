@@ -13,6 +13,13 @@ and is declared only by the `gguf`, `bitblas`, and `mlx` extras. The core
 quantization path never imports it, and the GGUF modules are loaded lazily so
 `gptqmodel.models.loader` / `gptqmodel.utils.hf` do not pull them in.
 
+This does not yet make `import gptqmodel` succeed in a NumPy-free environment.
+`transformers` hard-imports NumPy at module scope (`transformers/utils/generic.py`)
+and `gptqmodel.models` imports `transformers` eagerly, so NumPy still arrives
+transitively. Removing that edge is the larger transformers-decoupling effort,
+not part of this change; what this change guarantees is that GPT-QModel's own
+code contributes no NumPy import and no NumPy-accelerated fallback.
+
 The byte-extraction and packing paths are fully NumPy-free. The one remaining
 optional integration is the checkpoint RNG snapshot, which can only exist when
 the process already loaded NumPy. No module imports NumPy to provide a fast
@@ -23,9 +30,11 @@ implementation it replaced.
 
 `tensor_bytes` replaced ten ad-hoc `tensor.numpy().tobytes()` /
 `memoryview(tensor.numpy())` call sites. It copies the contiguous CPU buffer
-with a single `ctypes.string_at` call (a C memcpy), so it needs no NumPy and no
-Python-level element loop. Shape and dtype stay in the caller's identity record
-instead of the byte stream.
+by wrapping the tensor's data pointer in a `ctypes` array and materializing a
+single `bytes` object (a C memcpy), so it needs no NumPy and no Python-level
+element loop. `tensor_buffer` exposes the same storage as a zero-copy
+`memoryview` for callers that only hash or stream. Shape and dtype stay in the
+caller's identity record instead of the byte stream.
 
 ```mermaid
 flowchart TD
@@ -127,6 +136,13 @@ CPU the JIT-built extension measured 244-248 ms for the same 4096x4096 4-bit
 layer, so the optimized Python path is at parity here (235-245 ms). The affine
 stage now divides/rounds/clamps in place instead of materializing three full
 temporaries (0.71-0.85x of the previous affine cost).
+
+The native-vs-Python packing comparison is host-dependent and should be read as
+such. The reference host is AVX2-only (no AVX-512) and the JIT build uses `-O3`
+without `-march=native`; `gptqmodel_ext/pack_block_cpu.cpp` contains no AVX-512
+intrinsics, so a build on a wider-ISA host or with `-march=native` can be
+materially faster than the numbers above. Any claim that the Python packer
+matches the native extension applies to this reference configuration only.
 
 Three findings drove the implementation:
 
