@@ -133,6 +133,8 @@ from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
 from .definitions.granitemoe import GraniteMoeQModel
 from .definitions.granitemoehybrid import GraniteMoeHybridQModel
+from .definitions.granitemoe_swa import GraniteMoeSWAQModel
+from .definitions.granite_swa import GraniteSWAQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
@@ -391,8 +393,10 @@ MODEL_MAP = {
     "marin": Qwen3QModel,
     "mage_vl": MageVLQModel,
     "granite": LlamaQModel, # 100% llama clone
+    "granite_swa": GraniteSWAQModel,
     "granitemoe": GraniteMoeQModel,
     "granitemoehybrid": GraniteMoeHybridQModel,
+    "granitemoe_swa": GraniteMoeSWAQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo": LlamaQModel, # 100% llama clone (OlmoModel == LlamaModel module layout)

@@ -2027,6 +2027,10 @@
         }
       ]
     },
+    "granite_swa": {
+      "definition": "GraniteSWAQModel",
+      "reason": "Per-layer sliding-window attention dispatch and post-attention attention-sink scaling are not modeled by the current fused qkv/gate_up executor."
+    },
     "granitemoe": {
       "definition": "GraniteMoeQModel",
       "profiles": {
@@ -2108,6 +2112,10 @@
           "parent_type": "transformers.models.granitemoehybrid.modeling_granitemoehybrid.GraniteMoeHybridAttention"
         }
       ]
+    },
+    "granitemoe_swa": {
+      "definition": "GraniteMoeSWAQModel",
+      "reason": "Per-layer sliding-window attention dispatch and post-attention attention-sink scaling are not modeled by the current fused qkv/gate_up executor."
     },
     "grinmoe": {
       "definition": "GrinMoeQModel",

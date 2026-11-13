@@ -18,5 +18,5 @@ jinja2>=3.1.6
 ninja>=1.13.2
 datasets>=5.1.0
 torchao>=0.18.0
-defuser>=0.0.29
+defuser>=0.0.30
 xxhash>=4.0.2
