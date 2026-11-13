@@ -246,11 +246,18 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             return True
         with p2p_guard_verdict_lock:
             if "value" not in p2p_guard_verdict:
-                p2p_guard_verdict["value"] = p2p._rocm_raw_peer_copy_unsafe()
-                p2p_guard_verdict["settings"] = p2p._runtime_alloc_conf_value()
+                p2p_guard_verdict["value"] = (
+                    p2p._rocm_raw_peer_copy_unsafe(),
+                    p2p._rocm_peer_link_unusable(),
+                    p2p._rocm_pytorch_owns_peer_enablement(),
+                )
             expected = p2p_guard_verdict["value"]
-        actual = p2p._rocm_raw_peer_copy_unsafe()
-        if actual is not expected:
+        actual = (
+            p2p._rocm_raw_peer_copy_unsafe(),
+            p2p._rocm_peer_link_unusable(),
+            p2p._rocm_pytorch_owns_peer_enablement(),
+        )
+        if actual != expected:
             raise AssertionError("the P2P allocator guard verdict changed across threads")
         return True
 

@@ -134,98 +134,92 @@ measured by the probe (the probe itself performs a direct copy). Enablement is
 still kept for PyTorch's own paths; GPT-QModel moves in that direction are
 staged through host memory.
 
-### ROCm VMM-allocator memory disables raw peer copies
+### ROCm peer enablement on a VMM allocator
 
 `hipMemcpyPeerAsync` is not sound against ROCm memory that comes from a VMM
-reservation. Two allocator configurations produce such memory, and both break
-the raw runtime copy in the same way:
+reservation, and the failure is easy to misattribute. Two allocator
+configurations produce such memory, and they need different fixes:
 
 * the native caching allocator with `expandable_segments` enabled, which is the
   GPT-QModel default, and
 * any non-native backend, including `backend:cudaMallocAsync`.
 
-The failure is either `hipErrorIllegalAddress` — which poisons the HIP context,
-so the *next* unrelated `torch.cuda` call raises — or a return code of 0 with the
-destination left untouched. A capability bit, an `enabled` status, and a
-successful `hipMemcpyPeerAsync` return are therefore all insufficient evidence.
+#### The native + `expandable_segments` case: stop pre-enabling
 
-The guard therefore fails closed before any raw copy is issued, including the
-copy-based validation:
+The defect is the ctypes `hipDeviceEnablePeerAccess` call, not the allocator.
+That call grants access to the expandable segments that exist at that moment;
+segments the allocator reserves afterwards stay unreachable, and a copy into one
+of them returns success while moving nothing. Measured on gfx1201 with ROCm
+10.1, 4 MiB payload, peer access pre-enabled with ctypes:
+
+| copy path | result |
+|---|---|
+| `Tensor.copy_` | 40 of 80 rounds copied nothing (3 of 3 processes) |
+| raw `hipMemcpyPeerAsync` | same |
+| `Tensor.copy_`, PyTorch owning enablement | **80 of 80 byte-exact** (3 of 3 processes) |
+
+PyTorch grants peer access per segment from its own copy path
+(`ExpandableSegment::addPeer` → `hipMemSetAccess`), so on this allocator
+GPT-QModel stops pre-enabling and lets PyTorch own it. **P2P stays direct**:
+
+| configuration | pairs | direct | host staging |
+|---|---|---|---|
+| `expandable_segments:True` (default) | `enabled` | 28.7 GB/s | 22.7 GB/s |
+
+This is the default ROCm configuration, and it is why the fix is not a
+performance regression: the link is kept, and the raw ctypes copy — the one
+call that is unsafe here — is withheld. Validated copy correctness and the
+timing loop both run through `_copy_payloads_like_movers`, which selects
+`Tensor.copy_` whenever the raw call is withheld, so the probe measures the
+path the movers actually use.
+
+#### The non-native backend case: fail closed
+
+`cudaMallocAsync` cannot be saved the same way — even `Tensor.copy_` returned
+mismatched bytes, and so did a plain *same-device* copy, so the fault is the
+allocator rather than the peer path. Every directed pair is reported `degraded`
+and moves stage through pinned host memory.
 
 ```mermaid
 flowchart TD
-    A["_rocm_raw_peer_copy_unsafe()"] --> B{"torch.version.hip"}
-    B -- "None" --> Z["False: CUDA path unchanged"]
-    B -- "set" --> C["_allocator_forces_vmm()"]
-    C --> D["_runtime_alloc_conf_value()<br/>torch._C._accelerator_getAllocatorSettings"]
-    D --> E{"backend non-native?"}
-    E -- "yes" --> T["True"]
-    E -- "no" --> F["_runtime_allocator_backend()<br/>torch.cuda.get_allocator_backend"]
-    F --> G{"backend non-native?"}
-    G -- "yes" --> T
-    G -- "no" --> H{"expandable_segments?"}
-    H -- "set" --> T
-    H -- "unset" --> Z
-```
-
-`_allocator_forces_vmm` prefers the parsed runtime setting over the environment
-because Torch consumes the environment exactly once, when the allocator is
-created; a later `os.environ` change is invisible to the allocator. The
-environment remains the fallback for builds that do not expose the parsed value.
-
-`enable_peer_access` reports every directed pair `degraded` without calling
-`_enable_one` or `_validate_peer_copy_pair`, and tags the status with
-`reason_code = REASON_ROCM_VMM` so the one-time warning names the allocator
-rather than the motherboard/BIOS topology:
-
-```mermaid
-flowchart TD
-    A["enable_peer_access(devices)"] --> B{"_rocm_raw_peer_copy_unsafe()"}
-    B -- "True" --> C["status.reason_code = REASON_ROCM_VMM<br/>mark every directed pair degraded"]
-    C --> D["cache PeerStatus and return<br/>no _enable_one, no _validate_peer_copy_pair"]
-    B -- "False" --> E["pass 1: _enable_one per direction"]
-    E --> F["pass 2: _validate_peer_copy_pair"]
-    F --> G["enabled / degraded / unsupported"]
+    A["_allocator_is_native()"] --> B{"backend resolves to native?"}
+    B -- "no (cudaMallocAsync, unknown)" --> C["_rocm_peer_link_unusable() = True"]
+    C --> D["enable_peer_access: every pair degraded<br/>reason_code = REASON_ROCM_VMM"]
+    D --> E["moves staged through pinned host memory"]
+    B -- "yes" --> F{"expandable_segments?"}
+    F -- "no" --> G["ctypes enable + raw peer copy<br/>(unchanged path)"]
+    F -- "yes" --> H["_rocm_pytorch_owns_peer_enablement() = True"]
+    H --> I["_enable_one returns REASON_ROCM_PYTORCH_ENABLEMENT<br/>no hipDeviceEnablePeerAccess"]
+    I --> J["_rocm_raw_peer_copy_unsafe() = True<br/>raw enqueue withheld"]
+    J --> K["link stays enabled and direct<br/>probe and movers use Tensor.copy_"]
 ```
 
 | Mechanism | Before | After |
 |---|---|---|
-| Raw peer-copy validation | `enable_peer_access` ran `_validate_peer_copy_pair` (`gptqmodel/utils/p2p.py:1078` on `main`), which issued `hipMemcpyPeerAsync` against allocator memory and faulted or copied nothing. | `enable_peer_access` returns before `_enable_one`/`_validate_peer_copy_pair` (`gptqmodel/utils/p2p.py:1167`). |
-| Allocator detection | None; the default `expandable_segments:True` was installed and the probe still ran. | `_rocm_raw_peer_copy_unsafe` (`gptqmodel/utils/p2p.py:180`) reads the parsed settings and the live backend, so `cudaMallocAsync` is covered too. |
-| Move decision | `can_transfer_directly` (`gptqmodel/utils/p2p.py:1204` on `main`) trusted the cached `enabled` status or `can_device_access_peer`. | The guard returns `False` before the status/capability check (`gptqmodel/utils/p2p.py:1394`). |
-| Raw copy data path | `_can_peer_copy` (`gptqmodel/utils/p2p.py:1394` on `main`) and `_peer_copy_batch_enqueue` (`:1439` on `main`) issued the runtime copy. | Both return `False` under the guard (`gptqmodel/utils/p2p.py:1573`, `:1652`). |
-| Mixed-device batch | `peer_copy_batch` (`gptqmodel/utils/p2p.py:1546` on `main`) probed the pair before rejecting a mixed group. | The group is rejected first, so the probe never runs (`gptqmodel/utils/p2p.py:1750`). |
-| Degraded warning | `_warn_degraded_once` always blamed motherboard/BIOS/hardware P2P compatibility. | A `REASON_ROCM_VMM` status logs the allocator warning instead (`gptqmodel/utils/p2p.py:1083`). |
+| ROCm pre-enablement | `_enable_one` always called `hipDeviceEnablePeerAccess` (`gptqmodel/utils/p2p.py:867`), which granted only the existing expandable segments. | On a native expandable allocator it delegates to PyTorch (`gptqmodel/utils/p2p.py:875`) and P2P stays direct. |
+| Allocator detection | None; the default `expandable_segments:True` was installed and the probe still ran. | `_allocator_is_native` / `_rocm_peer_link_unusable` distinguish the two cases (`gptqmodel/utils/p2p.py:174`, `:245`). |
+| Probe copy path | The probe validated `_peer_copy_batch_enqueue` (`gptqmodel/utils/p2p.py:1078` on `main`) even when the movers would use `Tensor.copy_`. | `_copy_payloads_like_movers` validates and times the path the movers take (`gptqmodel/utils/p2p.py:1053`). |
+| Raw copy data path | `_can_peer_copy` (`:1394` on `main`) and `_peer_copy_batch_enqueue` (`:1439` on `main`) issued the runtime copy. | The raw enqueue is withheld on a pre-enable-free allocator (`gptqmodel/utils/p2p.py:1763`); `can_transfer_directly` keeps the link. |
+| Degraded warning | `_warn_degraded_once` always blamed motherboard/BIOS/hardware P2P compatibility. | A `REASON_ROCM_VMM` status logs the allocator cause instead (`gptqmodel/utils/p2p.py:1199`). |
 
-The failing path is explicit: a `True` guard result never reaches
-`hipMemcpyPeerAsync`, and a `False` result still goes through the existing
-per-direction `enabled` / `degraded` / `unverified` decision. To restore direct
-peer copies on ROCm, use the native allocator without `expandable_segments`:
+The guard never lets a `True` predicate reach `hipMemcpyPeerAsync`, and a `False`
+result still goes through the existing per-direction `enabled` / `degraded` /
+`unverified` decision. Peer access is configured through
+`BaseQuantizeConfig.p2p` (`P2PConfig`), not environment variables.
 
-```bash
-PYTORCH_ALLOC_CONF=max_split_size_mb:256 python quantize.py
-```
+Measured on two ROCm devices, 4 MiB payload, peer access pre-enabled, source
+buffer allocated first:
 
-Measured on two ROCm devices, 4 MiB payload, with peer access already enabled
-and the source buffer allocated first:
-
-| allocator setting | raw `hipMemcpyPeerAsync` | destination | following `torch.cuda` op |
+| allocator setting | raw `hipMemcpyPeerAsync` | `Tensor.copy_` | following `torch.cuda` op |
 |---|---|---|---|
-| `expandable_segments:True` | rc 0 | unchanged | `hipErrorIllegalAddress` in the reproduction |
-| `expandable_segments:False` | rc 0 | byte-exact | ok |
-| `backend:cudaMallocAsync` | rc 0 | unchanged | ok in some runs, fault in others |
+| `expandable_segments:True` + ctypes enable | rc 0, destination unchanged | destination unchanged | `hipErrorIllegalAddress` |
+| `expandable_segments:True`, PyTorch enablement | not used | byte-exact | ok |
+| `expandable_segments:False` | byte-exact | byte-exact | ok |
+| `backend:cudaMallocAsync` | rc 0, destination unchanged | mismatched bytes | ok or fault |
 
-Host staging (`src -> pinned CPU -> dst`) moved the same payloads correctly in
-every configuration; that is the fallback the guard selects. A cross-device
-`Tensor.copy_`/`Tensor.to` was correct with `expandable_segments:False`, but it
-is not a guaranteed substitute: under `backend:cudaMallocAsync` the same copy
-also returned mismatched bytes in one run and left the context faulted, because
-PyTorch selects `hipMemcpyPeerAsync` for a peer-enabled pair. The guard
-therefore routes moves through pinned host memory rather than through a direct
-cross-device PyTorch copy.
-
-The guard is covered by `tests/test_p2p.py`; when it is active the raw-copy
-tests skip rather than issue the unsafe call.
+The guard and the delegation are covered by `tests/test_p2p.py`; when a
+non-native allocator forces staging, the raw-copy tests skip rather than issue
+the unsafe call.
 
 Inference is **not** covered by this routing. Loading the quantized model with
 `device_map="auto"` installs accelerate's `AlignDevicesHook`, whose

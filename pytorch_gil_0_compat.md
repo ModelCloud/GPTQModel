@@ -278,39 +278,36 @@ Regression test:
 `tests/test_p2p_copy_utils.py::test_p2p_move_nested_is_ordered_on_destination_stream`
 (fails on the pre-fix code, passes after).
 
-### 6. Raw HIP peer copies are unsafe against VMM allocator memory
+### 6. Pre-enabling ROCm peer access breaks expandable segments
 
-`hipMemcpyPeerAsync` must not be issued against memory the caching allocator
-served from a VMM reservation. Two configurations produce it: the native
-allocator with `expandable_segments` enabled (the GPT-QModel default) and any
-non-native backend, including `backend:cudaMallocAsync`.
+`hipDeviceEnablePeerAccess` against a native allocator running
+`expandable_segments` grants access only to the segments that exist at that
+moment. Segments reserved afterwards stay unreachable: the copy returns 0 and
+moves nothing. Measured with two ROCm devices (gfx1201, ROCm 10.1, 4 MiB
+payload, peer access pre-enabled with ctypes, source buffer allocated first):
+`Tensor.copy_` copied nothing in 40 of 80 rounds (3 of 3 processes).
 
-Measured with two ROCm devices (gfx1201, ROCm 10.1, 4 MiB payload, peer access
-already enabled, source buffer allocated before enablement):
+PyTorch grants access per segment from its own copy path
+(`ExpandableSegment::addPeer` → `hipMemSetAccess`). Letting PyTorch own
+enablement copied **80 of 80 rounds byte-exactly in 3 of 3 processes** with the
+same `expandable_segments:True` setting, and the direct link stayed at 28.7 GB/s
+against 22.7 GB/s for ordered host staging. So the fix is to stop pre-enabling,
+not to abandon P2P — this is the default ROCm configuration.
 
-| allocator setting | raw copy | destination | next `torch.cuda` op |
-|---|---|---|---|
-| `expandable_segments:True` | rc 0 | unchanged | `hipErrorIllegalAddress` |
-| `expandable_segments:False` | rc 0 | byte-exact | ok |
-| `backend:cudaMallocAsync` | rc 0 | unchanged | ok or fault |
+The raw `hipMemcpyPeerAsync` call is still withheld there, because it is the
+call measured to return success without moving bytes on that allocator. Probe
+correctness and timing both go through `_copy_payloads_like_movers`, which
+selects `Tensor.copy_` whenever the raw enqueue is withheld, so the probe
+measures the path the movers use.
 
-A zero return code is not success, and the illegal-address fault poisons the HIP
-context: after it, unrelated `torch.cuda` calls fail and later work can hang.
-Order matters too: a buffer allocated before peer access was enabled copied
-correctly in one run while a fresh destination did not, so the result is not
-deterministic enough to probe for. Host staging (`src -> pinned CPU -> dst`) was
-correct in every configuration; that is the fallback the guard selects.
+A non-native backend (`cudaMallocAsync`) is different: `Tensor.copy_` returned
+mismatched bytes, and so did a plain same-device copy, so that configuration
+fails closed and stages through pinned host memory
+(`PeerStatus.reason_code == REASON_ROCM_VMM`).
 
-Fix: `gptqmodel.utils.p2p._rocm_raw_peer_copy_unsafe` fails closed before the
-validation copy, before `enable_peer_access` enables a pair, and in
-`_can_peer_copy`/`_peer_copy_batch_enqueue`, so every move stages through host
-memory instead. `PeerStatus.reason_code == REASON_ROCM_VMM` keeps the warning
-from blaming the motherboard/BIOS. Restore direct P2P with the native allocator
-and no `expandable_segments`.
-
-Regression tests: `tests/test_p2p.py` covers the detector, the fail-closed
-paths, the mixed-batch ordering, and the warning wording; the raw-copy tests
-skip while the guard is active.
+Regression tests: `tests/test_p2p.py` covers the allocator classification, the
+delegation, the withheld raw path, the probe path selection, both warning
+wordings, and the mixed-batch ordering.
 
 ### 7. The P2P allocator guard must be thread-safe metadata
 
@@ -322,7 +319,7 @@ suppresses.
 
 | API | Result | Where we use it | Notes / workaround |
 |---|---|---|---|
-| `gptqmodel.p2p.allocator_guard` (`_rocm_raw_peer_copy_unsafe`, `_runtime_alloc_conf_value`, `_runtime_allocator_backend`) | SAFE (concurrent), metadata only | every cross-device move and `enable_peer_access` | Probe `gptqmodel.p2p.allocator_guard` passed 3/3 child processes on the ROCm host, 8 threads x 4 iterations with `PYTHON_GIL=0`, and 1/1 on the CUDA host. It asserts the guard verdict does not change across threads. It reads the parsed settings and the backend name; it never issues a peer copy. |
+| `gptqmodel.p2p.allocator_guard` (`_allocator_is_native`, `_rocm_peer_link_unusable`, `_rocm_pytorch_owns_peer_enablement`) | SAFE (concurrent), metadata only | every cross-device move, `enable_peer_access` and `_enable_one` | Probe `gptqmodel.p2p.allocator_guard` passed 3/3 child processes on the ROCm host, 8 threads x 4 iterations with `PYTHON_GIL=0`, and 1/1 on the CUDA host. It asserts the three guard verdicts do not change across threads. It reads parsed allocator settings and the backend name; it never issues a peer copy or calls `hipDeviceEnablePeerAccess`. |
 
 ## Adding a probe
 
