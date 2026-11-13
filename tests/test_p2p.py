@@ -10,6 +10,10 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.utils import p2p
 
 
+_REAL_ALLOCATOR_FORCES_VMM = p2p._allocator_forces_vmm
+_REAL_ROCM_RAW_PEER_COPY_UNSAFE = p2p._rocm_raw_peer_copy_unsafe
+
+
 @pytest.fixture(autouse=True)
 def _isolate_p2p_config():
     """Keep the process-wide P2P policy from leaking between tests."""
@@ -22,6 +26,19 @@ def _isolate_p2p_config():
     finally:
         p2p.configure_p2p(previous)
         p2p.clear_p2p_cache()
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_rocm_vmm_guard(monkeypatch):
+    """Keep the generic P2P state-machine tests independent of the host allocator.
+
+    The guard reads the allocator configuration Torch consumed at startup, so a
+    test cannot change it through the environment after import. Patch the
+    detector instead; its own tests call the saved real implementation, and the
+    guard's behavior tests opt back in explicitly.
+    """
+
+    monkeypatch.setattr(p2p, "_rocm_raw_peer_copy_unsafe", lambda: False)
 
 
 def main():
@@ -500,6 +517,8 @@ def test_p2p_unmeasurable_direct_link_is_degraded(monkeypatch):
 def test_multi_gpu_direct_copy(monkeypatch):
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
         pytest.skip("two CUDA/HIP devices required")
+    if _REAL_ROCM_RAW_PEER_COPY_UNSAFE():
+        pytest.skip("raw ROCm peer copies are unsafe with this allocator")
 
     # The mocked cases above cache synthetic statuses for the same device tuple;
     # this test needs the real probe, so drop them (and any probe bandwidth).
@@ -771,3 +790,163 @@ def test_p2p_validation_rejects_a_noop_copy(monkeypatch):
     assert usable is False
     assert direct is None and staged is None
     assert "mismatched bytes" in reason
+
+
+def _activate_rocm_vmm_guard(monkeypatch):
+    """Force the ROCm VMM-allocator condition on any test host."""
+
+    monkeypatch.setattr(p2p, "_rocm_raw_peer_copy_unsafe", lambda: True)
+    p2p.clear_p2p_cache()
+
+
+@pytest.mark.parametrize(
+    ("backend", "conf", "expected"),
+    [
+        ("native", "expandable_segments:True", True),
+        ("native", "max_split_size_mb:256,expandable_segments:True", True),
+        ("native", "expandable_segments:False", False),
+        ("native", "expandable_segments:0", False),
+        ("native", "max_split_size_mb:256", False),
+        ("cudaMallocAsync", "expandable_segments:True", True),
+        ("cudaMallocAsync", "backend:cudaMallocAsync", True),
+    ],
+)
+def test_allocator_forces_vmm_detection(monkeypatch, backend, conf, expected):
+    monkeypatch.setattr(p2p, "_runtime_alloc_conf_value", lambda: "")
+    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: backend)
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", conf)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+
+    assert _REAL_ALLOCATOR_FORCES_VMM() is expected
+
+
+def test_parsed_runtime_setting_wins_over_the_environment(monkeypatch):
+    """Torch parses the environment once; a later env change is misleading."""
+
+    monkeypatch.setattr(
+        p2p, "_runtime_alloc_conf_value", lambda: "expandable_segments:True"
+    )
+    monkeypatch.setattr(p2p, "_runtime_allocator_backend", lambda: "native")
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:False")
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+
+    assert _REAL_ALLOCATOR_FORCES_VMM() is True
+
+
+def test_rocm_guard_is_inert_off_rocm(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(p2p, "_allocator_forces_vmm", lambda: True)
+
+    assert _REAL_ROCM_RAW_PEER_COPY_UNSAFE() is False
+
+
+def test_rocm_vmm_fail_closed_without_probing(monkeypatch):
+    """The probe itself faults, so the guard must skip enablement and validation."""
+
+    calls = _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+    _activate_rocm_vmm_guard(monkeypatch)
+    monkeypatch.setattr(
+        p2p,
+        "_validate_peer_copy_pair",
+        lambda *a, **k: pytest.fail("a VMM-backed allocator must not be probed"),
+    )
+
+    status = p2p.enable_peer_access([0, 1])
+
+    assert calls == []
+    assert status.state(0, 1) == p2p.STATE_DEGRADED
+    assert status.state(1, 0) == p2p.STATE_DEGRADED
+    assert status.can_copy(0, 1) is False
+    assert status.reason_code == p2p.REASON_ROCM_VMM
+    assert "VMM-backed" in status.reason
+
+
+def test_rocm_vmm_guard_overrides_enabled_status(monkeypatch):
+    """A cached ``enabled`` verdict must not bypass the allocator guard."""
+
+    _activate_rocm_vmm_guard(monkeypatch)
+    status = p2p.PeerStatus(
+        devices=(0, 1),
+        pairs={(0, 1): p2p.STATE_ENABLED, (1, 0): p2p.STATE_ENABLED},
+    )
+
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1", status) is False
+    assert p2p.can_transfer_directly("cuda:1", "cuda:0", status) is False
+    # Same-device and host transfers do not use a peer link.
+    assert p2p.can_transfer_directly("cuda:0", "cuda:0", status) is True
+    assert p2p.can_transfer_directly("cpu", "cuda:1", status) is True
+
+
+def test_rocm_vmm_disables_raw_peer_copy(monkeypatch):
+    _activate_rocm_vmm_guard(monkeypatch)
+    monkeypatch.setattr(
+        p2p,
+        "enable_peer_access",
+        lambda *a, **k: pytest.fail("a VMM-backed allocator must not be probed"),
+    )
+
+    class FakeTensor:
+        def __init__(self, device):
+            self.device = torch.device(device)
+
+        def is_contiguous(self):
+            return True
+
+        def numel(self):
+            return 1
+
+        def element_size(self):
+            return 1
+
+    assert p2p._can_peer_copy(0, 1) is False
+    assert p2p._peer_copy_batch_enqueue(
+        [FakeTensor("cuda:0")], [FakeTensor("cuda:1")]
+    ) is False
+
+
+def test_rocm_vmm_guard_reports_its_own_warning(monkeypatch):
+    """The allocator guard must not blame the motherboard/BIOS topology wording."""
+
+    _activate_rocm_vmm_guard(monkeypatch)
+    warnings = []
+
+    class RecordingLog:
+        def warning(self, message, *args, **kwargs):
+            warnings.append(message % args if args else message)
+
+        def info(self, message, *args, **kwargs):
+            pass
+
+        def debug(self, message, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(p2p, "log", RecordingLog())
+
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1") is False
+    assert p2p.can_transfer_directly("cuda:1", "cuda:0") is False
+    p2p.enable_peer_access([0, 1])
+
+    assert len(warnings) == 1
+    assert "VMM-backed" in warnings[0]
+    assert "hipErrorIllegalAddress" in warnings[0]
+    # The topology wording is reserved for a real peer-link problem.
+    assert "motherboard" not in warnings[0]
+
+
+def test_peer_copy_batch_rejects_mixed_group_before_probing(monkeypatch):
+    """A mixed group is rejected without a real probe copy."""
+
+    class FakeTensor:
+        def __init__(self, device):
+            self.device = torch.device(device)
+
+    monkeypatch.setattr(
+        p2p,
+        "_can_peer_copy",
+        lambda *a, **k: pytest.fail("a mixed group must not be probed"),
+    )
+
+    assert p2p.peer_copy_batch(
+        [FakeTensor("cuda:0"), FakeTensor("cuda:1")],
+        [FakeTensor("cuda:1"), FakeTensor("cuda:0")],
+    ) is False

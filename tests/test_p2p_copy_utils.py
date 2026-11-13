@@ -29,6 +29,8 @@ from gptqmodel.utils.p2p import (
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/HIP required")
 
+_REAL_ROCM_RAW_PEER_COPY_UNSAFE = p2p_mod._rocm_raw_peer_copy_unsafe
+
 
 class _RecordingLog:
     def __init__(self):
@@ -52,6 +54,10 @@ class _RecordingLog:
 @pytest.fixture(autouse=True)
 def reset_p2p_state(monkeypatch):
     clear_p2p_cache()
+    # The generic degraded-warning tests exercise the probe path; the real
+    # allocator guard has its own coverage in tests/test_p2p.py. Raw-copy tests
+    # still consult the real detector through ``_REAL_...`` and skip on ROCm.
+    monkeypatch.setattr(p2p_mod, "_rocm_raw_peer_copy_unsafe", lambda: False)
     monkeypatch.setattr(p2p_mod, "_WARNED_DEGRADED", False)
     recorder = _RecordingLog()
     monkeypatch.setattr(p2p_mod, "log", recorder)
@@ -66,6 +72,8 @@ def _require_two_gpus():
 
 def _require_p2p(src=0, dst=1):
     _require_two_gpus()
+    if _REAL_ROCM_RAW_PEER_COPY_UNSAFE():
+        pytest.skip("raw ROCm peer copies are unsafe with this allocator")
     status = enable_peer_access([src, dst])
     if not status.can_copy(src, dst):
         pytest.skip("P2P is not enabled on this host for %s->%s" % (src, dst))
