@@ -9,12 +9,12 @@ import math
 import torch
 
 
-def tensor_bytes(tensor: torch.Tensor) -> bytes:
-    """Return a tensor's logical payload as raw bytes, without NumPy.
+def tensor_buffer(tensor: torch.Tensor):
+    """Return ``(owner, memoryview)`` over a contiguous CPU tensor payload.
 
-    ``ctypes.string_at`` copies the contiguous CPU buffer in one C call, which
-    matches ``Tensor.numpy().tobytes()`` throughput (it is the same memcpy) and
-    avoids both a NumPy import and the very slow ``tolist()`` fallback.
+    The view aliases the tensor's storage (no copy), so ``owner`` must stay
+    alive while the view is used. ``ctypes`` provides the buffer protocol
+    without importing NumPy.
     """
     view = tensor.detach()
     if view.is_conj() or view.is_neg():
@@ -22,8 +22,18 @@ def tensor_bytes(tensor: torch.Tensor) -> bytes:
     view = view.to(device="cpu").contiguous().reshape(-1)
     nbytes = view.nbytes
     if nbytes == 0:
-        return b""
-    return ctypes.string_at(view.data_ptr(), nbytes)
+        return view, memoryview(b"")
+    return view, memoryview((ctypes.c_char * nbytes).from_address(view.data_ptr()))
+
+
+def tensor_bytes(tensor: torch.Tensor) -> bytes:
+    """Return a tensor's logical payload as raw bytes, without NumPy.
+
+    Callers that only hash or stream the payload should use
+    :func:`tensor_buffer` to avoid materializing a second copy.
+    """
+    _owner, buffer = tensor_buffer(tensor)
+    return bytes(buffer)
 
 
 # helper method to get accurate parameter count for a gptq model

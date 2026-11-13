@@ -116,6 +116,13 @@ and taking the minimum of 3-9 samples on a 4096x4096 layer with
 | `budget_constrained_argmax` DP (28 layers, budget 1751) | 2.82 ms | 0.26 ms | 0.09x |
 | `tensor_bytes` on 256 MiB | 14.5 ms | 14.6 ms | 1.01x |
 
+The native `pack_block` extension is intentionally removed: the Python packer
+is the only packer and `workers=` is the only thread control. On the reference
+CPU the JIT-built extension measured 244-248 ms for the same 4096x4096 4-bit
+layer, so the optimized Python path is at parity here (235-245 ms). The affine
+stage now divides/rounds/clamps in place instead of materializing three full
+temporaries (0.71-0.85x of the previous affine cost).
+
 Three findings drove the implementation:
 
 1. **Pack in int32, not int64.** A signed int32 left shift and an int32 sum both

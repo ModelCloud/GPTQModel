@@ -1557,7 +1557,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            int_block = t.round((Wblk.to(t.float32) + sz_blk_T) / s_blk_T)  # [out, blk]
+            # The add allocates the one temporary we need; divide/round/clamp
+            # then run in place instead of materializing two more full copies.
+            int_block = Wblk.to(t.float32) + sz_blk_T  # [out, blk]
+            int_block.div_(s_blk_T)
+            int_block.round_()
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
@@ -1881,9 +1885,12 @@ class PackableQuantLinear(GPTQQuantLinear):
             if is_embedding:
                 # Embedding weights already use [token, feature] orientation;
                 # the GPTQ embedding result is transposed only for quantizing.
-                int_weight = t.round((W + scale_zeros[self.g_idx]) / scales[self.g_idx])
+                int_weight = W + scale_zeros[self.g_idx]
+                int_weight.div_(scales[self.g_idx])
             else:
-                int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
+                int_weight = W + scale_zeros[self.g_idx].T
+                int_weight.div_(scales[self.g_idx].T)
+            int_weight.round_()
             int_weight.clamp_(0, self.maxq)
             int_weight = int_weight.to(t.int32)
             if not is_embedding:

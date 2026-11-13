@@ -73,7 +73,7 @@ from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
-from .tensor import tensor_bytes
+from .tensor import tensor_buffer
 from .torch import HAS_CUDA, as_torch_device, torch_empty_cache
 
 
@@ -2834,7 +2834,8 @@ def _copy_file_stream(
 def _write_tensor_bytes(out, tensor: torch.Tensor) -> None:
     # Write the exact storage payload. The raw uint8 view covers bfloat16 and
     # float8, which have no direct NumPy bridge, and needs no NumPy at all.
-    out.write(tensor_bytes(tensor))
+    _owner, buffer = tensor_buffer(tensor)
+    out.write(buffer)
 
 
 def _safetensors_header(
