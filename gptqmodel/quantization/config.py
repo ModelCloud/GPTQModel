@@ -4037,6 +4037,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # `original` = legacy CPU pack, `gpu` forces CUDA/ROCm pack, `cpu` forces block CPU pack).
     pack_impl: str = field(default="auto")
 
+    # Enable torch.compile for the Torch kernels' dequantize/matmul paths. This is
+    # a runtime-only choice: it is not stored in the checkpoint because a kernel
+    # compiled by another host may be unusable on the loading host (for example a
+    # dead inductor compile-worker pool). Set it to False, or export
+    # `TORCHDYNAMO_DISABLE=1`, to stay on eager execution.
+    compile: bool = field(
+        default=True,
+        metadata={"help": "Allow torch.compile for Torch kernels during inference"},
+    )
+
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
@@ -4860,7 +4870,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return not self.uses_weight_only_lifecycle()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {}
+        return {"compile": self.compile}
 
 
 @dataclass

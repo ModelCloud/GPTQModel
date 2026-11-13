@@ -219,6 +219,12 @@ class TorchLinear(PackableQuantLinear):
         format: Optional[FORMAT] = None,
         **kwargs,
     ):
+        # Optional per-module opt-out from torch.compile. Validate here so a typo
+        # cannot silently leave compilation enabled.
+        compile_flag = kwargs.pop("compile", True)
+        if not isinstance(compile_flag, bool):
+            raise TypeError(f"`compile` must be bool, got {type(compile_flag).__name__}")
+        self._compile_enabled = compile_flag
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -358,6 +364,11 @@ class TorchLinear(PackableQuantLinear):
             # torch.compile's inductor backend here is unsupported.
             self.optimized = True
             log.info.once("Optimize: `TorchLinear` torch.compile skipped on XLA.")
+            return
+
+        if not self._compile_enabled:
+            self.optimized = True
+            log.info.once("Optimize: `TorchLinear` torch.compile disabled by `compile=False`.")
             return
 
         if backend is None:

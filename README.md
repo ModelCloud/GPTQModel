@@ -89,6 +89,11 @@ Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ run
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
+Torch compilation is best-effort: a `torch.compile` failure at first use (for
+example a dead inductor compile-worker pool) logs once and continues eagerly, so
+inference is never aborted; see the [torch compile fallback](docs/torch-compile-fallback.md)
+flow and the `TorchLinear(compile=False)` / `QuantizeConfig(compile=False)` /
+`TORCHDYNAMO_DISABLE=1` opt-outs.
 The legacy `GPTQ_TORCH_CACHE_WEIGHTS` / `GPTQ_TORCH_LOOKAHEAD` flags and
 `enable_weight_cache(True)` / `enable_lookahead(True)` APIs now warn and leave
 these features disabled. CUDA streaming uses per-forward tiles, not persistent
