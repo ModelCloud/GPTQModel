@@ -139,3 +139,56 @@ matched dense execution on all three devices:
 
 The source weights are restored exactly. The logits difference comes from the
 NF12 kernel's floating-point reduction order; it is not a lossy weight decode.
+
+### Lossless storage and projection arithmetic
+
+NF12 storage and decoding are bit exact for BF16. That property does not make
+every NF12 matrix multiplication bitwise identical to a dense BF16 GEMM:
+the kernels can associate the same FP32 partial sums in a different order.
+
+On RTX 4090, all 113 aligned projection weights restored bit exactly across
+1,235,746,816 elements. Representative projection comparisons were:
+
+| Projection | Max absolute difference | Mean absolute difference | Bit exact |
+| --- | ---: | ---: | --- |
+| `model.layers.0.self_attn.q_proj` | 0.0009765625 | 1.7003549146465957e-07 | No |
+| `model.layers.0.mlp.down_proj` | 0.03125 | 1.4519027899950743e-05 | No |
+| `lm_head` | 0.0 | 0.0 | Yes |
+
+The full model retained the same next-token IDs, with maximum logits difference
+0.21875 and mean absolute difference 0.023402199131775. This is numerically
+close execution of an exactly restored source, not bitwise-identical GEMM
+arithmetic.
+
+The Llama embedding table decoded bit exactly, and 512 sampled lookup rows
+matched dense BF16 exactly. Its row-major packed representation occupied
+394,365,297 bytes instead of 525,336,576 bytes, a 24.93% reduction.
+
+### End-to-end quantization comparison
+
+A separate RTX 4090 run compared GPTQ 4-bit, group size 128, with
+`AUTO_NF12` and `OFF`. Both policies used the same BF16 source model and
+4,096 WikiText calibration tokens from 8 windows of 512 tokens. Model load and
+checkpoint save were excluded from the quantization timer. Peak allocated
+memory was reset immediately before quantization.
+
+| Metric | `AUTO_NF12` | `OFF` |
+| --- | ---: | ---: |
+| Cast projection modules | 112 | 0 |
+| Peak allocated memory | 1,504.247 MiB | 1,512.221 MiB |
+| Warm median quantization time | 30.131874 s | 29.568869 s |
+
+Peak memory was 7.974 MiB, or 0.527%, lower with `AUTO_NF12`. The warm median
+quantization time was 1.904% higher. The first `AUTO_NF12` run took 52.401238
+seconds because it paid the kernel compilation cost; subsequent runs took
+30.722433, 26.454301, and 30.131874 seconds.
+
+All four `AUTO_NF12` checkpoints and all three `OFF` checkpoints contained
+482 state tensors, and every corresponding tensor was bit identical. On a
+held-out 4,096-token WikiText split, both quantized checkpoints scored
+NLL 3.1071042120456696 and perplexity 22.35621172659059. The dense BF16 model
+scored perplexity 20.055038906017362 on the same split.
+
+These measurements establish equal quantized checkpoints and held-out scores,
+lower peak memory, and a small warm-time regression. They do not establish a
+quantization-time reduction for this calibration size.
