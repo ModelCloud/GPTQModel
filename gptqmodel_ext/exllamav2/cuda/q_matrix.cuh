@@ -1,3 +1,4 @@
+#include "../../torch_stable_compat.h"
 #ifndef _q_matrix_cuh
 #define _q_matrix_cuh
 

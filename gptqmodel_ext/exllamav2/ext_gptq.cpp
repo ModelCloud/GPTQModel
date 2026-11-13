@@ -1,6 +1,6 @@
+#include "./../torch_stable_compat.h"
 #include "ext_common.h"
 #include <optional>
-#include <torch/library.h>
 
 #include "cuda/q_matrix.cuh"
 #include "cuda/q_gemm.cuh"
@@ -30,21 +30,21 @@ int64_t make_q_matrix(
     torch::Tensor gptq_g_idx = gptq_g_idx_opt.value_or(torch::Tensor());
 
     TORCH_CHECK_DTYPE(q_weight, kInt);
-    TORCH_CHECK(!q_perm.defined() || q_perm.device().is_meta() || q_perm.dtype() == torch::kShort,
+    TORCH_CHECK(!q_perm.defined() || at::is_meta(q_perm.device()) || q_perm.scalar_type() == torch::kShort,
                 "q_perm is incorrect datatype, must be kShort");
-    TORCH_CHECK(!q_invperm.defined() || q_invperm.device().is_meta() || q_invperm.dtype() == torch::kShort,
+    TORCH_CHECK(!q_invperm.defined() || at::is_meta(q_invperm.device()) || q_invperm.scalar_type() == torch::kShort,
                 "q_invperm is incorrect datatype, must be kShort");
-    TORCH_CHECK(!q_scale.defined() || q_scale.device().is_meta() || q_scale.dtype() == torch::kInt,
+    TORCH_CHECK(!q_scale.defined() || at::is_meta(q_scale.device()) || q_scale.scalar_type() == torch::kInt,
                 "q_scale is incorrect datatype, must be kInt");
-    TORCH_CHECK(!q_scale_max.defined() || q_scale_max.device().is_meta() || q_scale_max.dtype() == torch::kHalf,
+    TORCH_CHECK(!q_scale_max.defined() || at::is_meta(q_scale_max.device()) || q_scale_max.scalar_type() == torch::kHalf,
                 "q_scale_max is incorrect datatype, must be kHalf");
-    TORCH_CHECK(!q_groups.defined() || q_groups.device().is_meta() || q_groups.dtype() == torch::kShort,
+    TORCH_CHECK(!q_groups.defined() || at::is_meta(q_groups.device()) || q_groups.scalar_type() == torch::kShort,
                 "q_groups is incorrect datatype, must be kShort");
-    TORCH_CHECK(!gptq_qzeros.defined() || gptq_qzeros.device().is_meta() || gptq_qzeros.dtype() == torch::kInt,
+    TORCH_CHECK(!gptq_qzeros.defined() || at::is_meta(gptq_qzeros.device()) || gptq_qzeros.scalar_type() == torch::kInt,
                 "gptq_qzeros is incorrect datatype, must be kInt");
-    TORCH_CHECK(!gptq_scales.defined() || gptq_scales.device().is_meta() || gptq_scales.dtype() == torch::kHalf,
+    TORCH_CHECK(!gptq_scales.defined() || at::is_meta(gptq_scales.device()) || gptq_scales.scalar_type() == torch::kHalf,
                 "gptq_scales is incorrect datatype, must be kHalf");
-    TORCH_CHECK(!gptq_g_idx.defined() || gptq_g_idx.device().is_meta() || gptq_g_idx.dtype() == torch::kInt,
+    TORCH_CHECK(!gptq_g_idx.defined() || at::is_meta(gptq_g_idx.device()) || gptq_g_idx.scalar_type() == torch::kInt,
                 "gptq_g_idx is incorrect datatype, must be kInt");
 
     TORCH_CHECK(!q_perm.defined() || !q_invperm.defined() || q_perm.size(0) == q_invperm.size(0),
@@ -55,7 +55,7 @@ int64_t make_q_matrix(
     int groups;
     int height;
 
-    if (q_scale.defined() && !q_scale.device().is_meta())
+    if (q_scale.defined() && !at::is_meta(q_scale.device()))
     {
         TORCH_CHECK_SHAPES(q_weight, 1, q_scale, 1, 8);
         TORCH_CHECK_SHAPES(q_scale_max, 0, q_scale, 0, 1);
@@ -80,14 +80,14 @@ int64_t make_q_matrix(
         width,
         groups,
         (uint32_t*) q_weight.data_ptr(),
-        (!q_perm.defined() || q_perm.device().is_meta()) ? NULL : (uint16_t*) q_perm.data_ptr(),
-        (!q_invperm.defined() || q_invperm.device().is_meta()) ? NULL : (uint16_t*) q_invperm.data_ptr(),
-        (!q_scale.defined() || q_scale.device().is_meta()) ? NULL : (uint32_t*) q_scale.data_ptr(),
-        (!q_scale_max.defined() || q_scale_max.device().is_meta()) ? NULL : (half*) q_scale_max.data_ptr(),
-        (!q_groups.defined() || q_groups.device().is_meta()) ? NULL : (uint16_t*) q_groups.data_ptr(),
-        (!gptq_qzeros.defined() || gptq_qzeros.device().is_meta()) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
-        (!gptq_scales.defined() || gptq_scales.device().is_meta()) ? NULL : (half*) gptq_scales.data_ptr(),
-        (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
+        (!q_perm.defined() || at::is_meta(q_perm.device())) ? NULL : (uint16_t*) q_perm.data_ptr(),
+        (!q_invperm.defined() || at::is_meta(q_invperm.device())) ? NULL : (uint16_t*) q_invperm.data_ptr(),
+        (!q_scale.defined() || at::is_meta(q_scale.device())) ? NULL : (uint32_t*) q_scale.data_ptr(),
+        (!q_scale_max.defined() || at::is_meta(q_scale_max.device())) ? NULL : (half*) q_scale_max.data_ptr(),
+        (!q_groups.defined() || at::is_meta(q_groups.device())) ? NULL : (uint16_t*) q_groups.data_ptr(),
+        (!gptq_qzeros.defined() || at::is_meta(gptq_qzeros.device())) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
+        (!gptq_scales.defined() || at::is_meta(gptq_scales.device())) ? NULL : (half*) gptq_scales.data_ptr(),
+        (!gptq_g_idx.defined() || at::is_meta(gptq_g_idx.device())) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
         already_shuffled
     );
 
@@ -112,7 +112,7 @@ void gemm_half_q_half(
     const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
 
     if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
-        auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
+        auto weights = torch::empty({qm->height, qm->width}, at::TensorOptions().dtype(at::kHalf).device(a.device()));
         qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
         if (a.scalar_type() == at::kHalf) {
             gemm_half_half_cuda(
@@ -126,7 +126,7 @@ void gemm_half_q_half(
                 true
             );
         } else {
-            c.copy_(at::matmul(a.to(at::kFloat), weights.to(at::kFloat)));
+            torch::stable::copy_(c, torch::stable::matmul(at::to(a, at::kFloat), at::to(weights, at::kFloat)));
         }
         return;
     }
@@ -143,17 +143,22 @@ void gemm_half_q_half(
     );
 }
 
-TORCH_LIBRARY(gptqmodel_exllamav2, m)
+STABLE_TORCH_LIBRARY(gptqmodel_exllamav2, m)
 {
     m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx, bool already_shuffled=False) -> int");
     m.def("clone_q_matrix(int handle, Tensor weight, Tensor zeros, Tensor scales, Tensor? perm=None, Tensor? invperm=None) -> int");
-    m.def("free_q_matrix(int handle) -> ()", &free_q_matrix);
+    m.def("free_q_matrix(int handle) -> ()");
     m.def("gemm_half_q_half(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_exllamav2, CUDA, m)
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav2, CUDA, m)
 {
-    m.impl("make_q_matrix", &make_q_matrix);
-    m.impl("clone_q_matrix", &clone_q_matrix);
-    m.impl("gemm_half_q_half", &gemm_half_q_half);
+    m.impl("make_q_matrix", TORCH_BOX(&make_q_matrix));
+    m.impl("clone_q_matrix", TORCH_BOX(&clone_q_matrix));
+    m.impl("gemm_half_q_half", TORCH_BOX(&gemm_half_q_half));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav2, CompositeExplicitAutograd, m)
+{
+    m.impl("free_q_matrix", TORCH_BOX(&free_q_matrix));
 }
