@@ -3,9 +3,10 @@
 
 """Best-effort GPU peer-access (P2P) detection, enablement and safe copies.
 
-PyTorch exposes ``torch.cuda.can_device_access_peer`` but no enablement API, so
-enablement goes through ``ctypes``: ``hipDeviceEnablePeerAccess`` on ROCm and
-``cuCtxEnablePeerAccess`` on CUDA.  ``hipErrorPeerAccessAlreadyEnabled`` /
+Native expandable allocators manage peer mappings through PyTorch's copy
+path on CUDA and ROCm. Other native layouts use ``ctypes`` enablement:
+``hipDeviceEnablePeerAccess`` on ROCm and ``cuCtxEnablePeerAccess`` on CUDA.
+``hipErrorPeerAccessAlreadyEnabled`` /
 ``CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED`` (704) is treated as success, which
 makes repeated calls idempotent.
 
@@ -16,7 +17,7 @@ PyTorch already enables peer access lazily inside its own copy path
 (``c10/cuda/PeerToPeerAccess.cpp`` -> ``CUDACachingAllocator::enablePeerAccess``),
 so this module is **not** required for ``copy_``/``to`` to stay on the
 interconnect.  Its job is to (a) enable the links before the first cross-device
-copy so the very first transfer is direct, (b) route every cross-device move
+copy when the allocator permits it, (b) route every cross-device move
 through a direction-aware helper, and (c) optionally *diagnose* the links.
 Enabling is cheap and idempotent; bandwidth probing moves real payload and is
 opt-in through :class:`P2PConfig` (``probe=True``).
@@ -107,45 +108,37 @@ DEFAULT_MIN_RATIO = 1.0
 #    same-device copy did too, so it is the allocator, not the peer path). That
 #    configuration fails closed and stages through pinned host memory.
 #
-# ``PeerStatus.reason_code`` records which of the two applied so diagnostics do
-# not blame the motherboard/BIOS for an allocator limitation.
+# Native expandable allocators also need this rule on CUDA: concurrent Tensor
+# copies after ctypes pre-enablement intermittently failed with an inaccessible
+# VMM operand. Delegation plus raw-copy suppression passed repeated mover stress.
+# The non-native allocator restriction remains ROCm-specific.
+#
+# ``PeerStatus.reason_code`` identifies non-native ROCm allocator failures so
+# diagnostics do not blame the motherboard/BIOS for an allocator limitation.
 _ROCM_VMM_PEER_COPY_WARNED = False
-_ROCM_PYTORCH_ENABLEMENT_WARNED = False
+_PYTORCH_ENABLEMENT_WARNED = False
 #: Allocator guard: a non-native backend makes even the PyTorch copy path
 #: unreliable, so every directed pair is degraded and moves stage through host.
 REASON_ROCM_VMM = "rocm_vmm_allocator"
-#: Peer-access enablement is delegated to PyTorch because pre-enabling it on an
-#: expandable-segment allocator only grants the segments that already exist.
-REASON_ROCM_PYTORCH_ENABLEMENT = "rocm_pytorch_enablement"
+#: Native expandable allocators on CUDA and ROCm must own peer enablement.
+REASON_PYTORCH_ENABLEMENT = "pytorch_allocator_enablement"
 
 
-def _alloc_conf_value() -> str:
-    """Return the allocator configuration Torch consumes, if one is set."""
+def _runtime_alloc_conf_value() -> str | None:
+    """Return Torch's parsed settings, distinguishing empty from unavailable.
 
-    for name in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
-
-
-def _runtime_alloc_conf_value() -> str:
-    """Return the allocator settings Torch actually parsed, if exposed.
-
-    Torch consumes the environment once, when the caching allocator is created,
-    so a later environment change is invisible to it. Current wheels expose the
-    parsed value through ``torch._C._accelerator_getAllocatorSettings``; prefer
-    that over the environment because it reflects what the allocator really
-    does, including a backend selected by a caller-supplied configuration.
+    An empty string is a valid native allocator configuration. Environment
+    strings can change after Torch parses them, so they are not a fallback.
     """
 
     getter = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
     if getter is None:
-        return ""
+        return None
     try:
-        return str(getter() or "")
+        value = getter()
+        return None if value is None else str(value)
     except Exception:  # pragma: no cover - older/limited builds
-        return ""
+        return None
 
 
 def _parse_alloc_conf(value: str) -> tuple[str, bool]:
@@ -174,77 +167,51 @@ def _runtime_allocator_backend() -> str | None:
 
 
 def _allocator_is_native() -> bool:
-    """True only when the caching allocator is the native one.
+    """Use the active backend; parsed settings cannot identify the live allocator.
 
-    The backend name is resolved from three sources, most authoritative first:
-    the parsed allocator settings, the live backend query, and finally the
-    environment. An unreadable backend is treated as non-native so an unknown
-    configuration fails closed instead of issuing an unsafe copy.
+    In particular, a stale or rejected backend setting must never authorize
+    raw peer copies. An unreadable backend fails closed.
     """
 
-    value = _runtime_alloc_conf_value() or _alloc_conf_value()
-    backend, _expandable = _parse_alloc_conf(value)
-    if backend:
-        return backend == "native"
-    live = _runtime_allocator_backend()
-    if live is not None:
-        return live == "native"
-    return False
+    return _runtime_allocator_backend() == "native"
 
 
 def _allocator_forces_vmm() -> bool:
-    """True when the allocator serves memory from a VMM reservation.
+    """Treat unavailable settings conservatively without disabling native P2P.
 
-    The native allocator with ``expandable_segments`` and any non-native
-    backend both do, and both break a *pre-enabled* ROCm peer link. Only the
-    non-native case is fatal to PyTorch's own copy path; see
-    :func:`_rocm_pytorch_owns_peer_enablement`.
+    A native allocator with unknown settings delegates enablement to PyTorch
+    and withholds raw copies, just like an expandable allocator. Known empty
+    settings mean expandable segments are off.
     """
 
-    value = _runtime_alloc_conf_value() or _alloc_conf_value()
-    _backend, expandable = _parse_alloc_conf(value)
     if not _allocator_is_native():
         return True
+    value = _runtime_alloc_conf_value()
+    if value is None:
+        return True
+    _backend, expandable = _parse_alloc_conf(value)
     return expandable
 
 
-def _rocm_pytorch_owns_peer_enablement() -> bool:
-    """True when PyTorch, not GPT-QModel, must enable ROCm peer access.
+def _pytorch_owns_peer_enablement() -> bool:
+    """Let the native allocator manage peer mappings for expandable segments.
 
-    On a native allocator with ``expandable_segments`` the ctypes
-    ``hipDeviceEnablePeerAccess`` grants access to the segments that already
-    exist, and later segments stay unreachable: the copy returns success and
-    silently moves nothing. PyTorch's own copy path grants access per segment
-    as it allocates, which is why the direct link works when GPT-QModel leaves
-    enablement alone. Peer access therefore stays usable and direct -- this is
-    not a degradation.
+    This applies to both CUDA and ROCm: direct runtime enablement does not
+    update the allocator's peer metadata for future VMM reservations. Native
+    allocators with unreadable settings take the same conservative path.
     """
 
-    if torch.version.hip is None:
-        return False
     return _allocator_is_native() and _allocator_forces_vmm()
 
 
-def _rocm_raw_peer_copy_unsafe() -> bool:
-    """True when the raw ``hipMemcpyPeerAsync`` path must not be used.
+def _raw_peer_copy_unsafe() -> bool:
+    """Withhold raw runtime copies when allocator-managed mappings are needed.
 
-    The raw path is the ctypes runtime call that ``peer_copy_batch`` issues, and
-    it is unsafe whenever peer access was pre-enabled by ctypes on VMM memory --
-    it returns success without moving bytes. With PyTorch owning enablement the
-    direct path is ``Tensor.copy_``/``Tensor.to``, which were measured correct,
-    so only the *raw* call is withheld there, not the link.
-
-    A non-native backend is unsafe for the copy path itself and is handled
-    separately by :func:`_rocm_raw_peer_copy_unsafe` callers checking
-    :func:`_allocator_is_native`.
+    Native expandable allocators on CUDA and ROCm use PyTorch's direct copy
+    path. Non-native ROCm allocators additionally require host staging.
     """
 
-    if torch.version.hip is None:
-        return False
-    if not _allocator_is_native():
-        # Nothing on this allocator can be trusted to copy; callers stage.
-        return True
-    return _allocator_forces_vmm()
+    return _pytorch_owns_peer_enablement() or _rocm_peer_link_unusable()
 
 
 def _rocm_peer_link_unusable() -> bool:
@@ -281,22 +248,21 @@ def _warn_rocm_vmm_peer_copy_once() -> None:
     )
 
 
-def _warn_rocm_pytorch_enablement_once() -> None:
-    """Explain once that PyTorch owns ROCm peer enablement on this allocator."""
+def _warn_pytorch_enablement_once() -> None:
+    """Explain once that the native allocator owns peer enablement."""
 
-    global _ROCM_PYTORCH_ENABLEMENT_WARNED
+    global _PYTORCH_ENABLEMENT_WARNED
 
-    if _ROCM_PYTORCH_ENABLEMENT_WARNED:
+    if _PYTORCH_ENABLEMENT_WARNED:
         return
     with _WARN_LOCK:
-        if _ROCM_PYTORCH_ENABLEMENT_WARNED:
+        if _PYTORCH_ENABLEMENT_WARNED:
             return
-        _ROCM_PYTORCH_ENABLEMENT_WARNED = True
+        _PYTORCH_ENABLEMENT_WARNED = True
     log.info(
-        "ROCm peer access is enabled by PyTorch instead of the ctypes "
-        "hipDeviceEnablePeerAccess call: with expandable segments the latter "
-        "only grants the segments that already exist, so later segments copy "
-        "nothing and report success. Direct P2P stays enabled."
+        "Peer access is enabled by PyTorch so the native allocator tracks "
+        "peer mappings for existing and future expandable segments. Direct "
+        "P2P stays enabled; raw runtime peer copies are withheld."
     )
 
 
@@ -323,6 +289,9 @@ class P2PConfig:
     ``min_gbps`` / ``min_ratio``
         Diagnostic gates: absolute floor in GB/s, and the fraction of the
         ordered host-staging rate a direct copy must reach.
+    ``use_rocm_nested_peer_copy``
+        Allow the small nested runtime-copy path on ROCm. It is off by default
+        and never bypasses the allocator safety checks.
     ``use_torch_replicate``
         Allow ``torch.nn.parallel.replicate`` when the GIL is enabled. It is
         off by default and skipped on free-threaded builds regardless because
@@ -341,6 +310,7 @@ class P2PConfig:
     min_gbps: float = DEFAULT_MIN_GBPS
     min_ratio: float = DEFAULT_MIN_RATIO
     use_torch_replicate: bool = False
+    use_rocm_nested_peer_copy: bool = False
 
     def __post_init__(self) -> None:
         mode = str(self.mode).strip().lower()
@@ -357,6 +327,7 @@ class P2PConfig:
 
         self.probe = bool(self.probe)
         self.use_torch_replicate = bool(self.use_torch_replicate)
+        self.use_rocm_nested_peer_copy = bool(self.use_rocm_nested_peer_copy)
         try:
             self.probe_mib = max(1, int(self.probe_mib))
         except (TypeError, ValueError) as exc:
@@ -551,7 +522,7 @@ class PeerStatus:
 
 def clear_p2p_cache() -> None:
     """Drop cached probe/bandwidth results (tests, device hot-plug)."""
-    global _LAST_STATUS, _ROCM_VMM_PEER_COPY_WARNED, _ROCM_PYTORCH_ENABLEMENT_WARNED
+    global _LAST_STATUS, _ROCM_VMM_PEER_COPY_WARNED, _PYTORCH_ENABLEMENT_WARNED
     _STATUS_CACHE.clear()
     _BANDWIDTH_CACHE.clear()
     _PEER_VALIDATION_CACHE.clear()
@@ -559,7 +530,7 @@ def clear_p2p_cache() -> None:
     _STAGED_DIRECTIONS.clear()
     _LAST_STATUS = None
     _ROCM_VMM_PEER_COPY_WARNED = False
-    _ROCM_PYTORCH_ENABLEMENT_WARNED = False
+    _PYTORCH_ENABLEMENT_WARNED = False
 
 
 def _cache_namespace() -> bool:
@@ -876,15 +847,13 @@ def _enable_one(src: int, dst: int) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"set_device({src}) failed: {exc}"
 
+    if _pytorch_owns_peer_enablement():
+        # The native allocator must track peer mappings before future VMM
+        # reservations are created, on both CUDA and ROCm.
+        _warn_pytorch_enablement_once()
+        return True, REASON_PYTORCH_ENABLEMENT
+
     if torch.version.hip is not None:
-        if _rocm_pytorch_owns_peer_enablement():
-            # ``hipDeviceEnablePeerAccess`` grants only the expandable segments
-            # that exist now; segments reserved later stay unreachable and the
-            # copy silently moves nothing. PyTorch grants access per segment
-            # from its own copy path, so let it own enablement and keep the
-            # direct link (this is why the raw ctypes copy is withheld below).
-            _warn_rocm_pytorch_enablement_once()
-            return True, REASON_ROCM_PYTORCH_ENABLEMENT
         lib = _load_hip()
         if lib is None:
             return False, "HIP runtime library not found"
@@ -944,14 +913,16 @@ def _timed_gbps(step, src: int, dst: int, bytes_moved: int, iterations: int) -> 
     # creation and kernel module load, measured at ~80 ms / 0.9 GB/s on gfx1201
     # before settling at 0.35 ms / 50 GB/s.
     for _ in range(8):
-        step()
+        if step() is False:
+            return None
         torch.cuda.synchronize(src)
         torch.cuda.synchronize(dst)
 
     samples: list[float] = []
     for _ in range(iterations):
         started = time.perf_counter()
-        step()
+        if step() is False:
+            return None
         torch.cuda.synchronize(src)
         torch.cuda.synchronize(dst)
         samples.append(time.perf_counter() - started)
@@ -1059,13 +1030,13 @@ def _copy_payloads_like_movers(sources, targets, dst: int) -> bool:
     """Copy ``sources -> targets`` exactly the way the move helpers would.
 
     The probe must exercise the same path the movers use, or it validates a
-    copy that never runs. When the raw ctypes runtime call is withheld (ROCm
-    with a pre-enable-free allocator) the movers fall back to
+    copy that never runs. When the raw ctypes runtime call is withheld (a
+    native expandable allocator) the movers fall back to
     ``Tensor.copy_``, so the probe validates that instead. Validating the raw
     call there would demote a healthy link for a copy nothing depends on.
     """
 
-    if not _rocm_raw_peer_copy_unsafe():
+    if not _raw_peer_copy_unsafe():
         return _peer_copy_batch_enqueue(sources, targets)
     try:
         with torch.cuda.device(torch.device("cuda", dst)):
@@ -1148,7 +1119,7 @@ def _validate_peer_copy_pair(
         # nested movers, with different payload sizes. The nested fast path is
         # disabled on ROCm by default, so this extra check runs only where the
         # shape is actually reachable.
-        if ok and not _ROCM_NESTED_PEER_DISABLED:
+        if ok and not _rocm_nested_peer_disabled():
             sizes = (64 * 1024, 256 * 1024, 1024 * 1024)
             batch_sources = [
                 torch.randint(0, 256, (size,), dtype=torch.uint8,
@@ -1238,11 +1209,10 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
 
     ``enabled``   - capability reported and enablement succeeded.
     ``unsupported`` - capability is false or enablement failed.
-    ``degraded``  - the link is not usable. On ROCm an allocator that serves
-    VMM-backed memory (``expandable_segments`` or a non-native backend) reports
-    every pair this way without enablement or probing, because the validation
-    copy itself faults on such a segment; ``reason_code`` is
-    ``REASON_ROCM_VMM`` in that case.
+    ``degraded``  - the link is not usable. A non-native ROCm allocator reports
+    every pair this way without enablement or probing; ``reason_code`` is
+    ``REASON_ROCM_VMM``. A native expandable allocator instead delegates
+    enablement to PyTorch and validates its direct ``Tensor.copy_`` path.
 
     When ``P2PConfig.probe`` is set a measured copy additionally downgrades a
     link to ``degraded`` if it is slower than ordered pinned-host staging. That
@@ -1768,7 +1738,7 @@ def _peer_copy_batch_enqueue(
         return False
     if source_device.index is None or target_device.index is None:
         return False
-    if _rocm_raw_peer_copy_unsafe():
+    if _raw_peer_copy_unsafe():
         return False
     if any(tensor.device != source_device for tensor in sources):
         return False
@@ -1894,16 +1864,10 @@ def _contiguous_like(tensor: torch.Tensor, device: torch.device) -> torch.Tensor
 # between the measured win and loss regions.
 _PEER_COPY_MAX_AVG_LEAF_BYTES = 256 * 1024
 
-# ROCm's HIP runtime can fault the GPU (``HSA_STATUS_ERROR_MEMORY_FAULT``) and
-# wedge the process when a small VMM peer copy targets an expandable-segment
-# mapping that the executing device was never granted. The per-tensor nested
-# path is the only caller that hits that shape; the module path copies larger,
-# validated ranges. Disable the nested fast path on ROCm until the runtime VMM
-# peer-access fix is available. Set ``GPTQMODEL_P2P_NESTED_ROCM=1`` to opt in
-# on a runtime that carries the fix.
-_ROCM_NESTED_PEER_DISABLED = torch.version.hip is not None and os.environ.get(
-    "GPTQMODEL_P2P_NESTED_ROCM", ""
-).strip().lower() not in ("1", "true", "yes", "on")
+def _rocm_nested_peer_disabled() -> bool:
+    """Keep small ROCm runtime copies opt-in through the P2P policy."""
+
+    return torch.version.hip is not None and not get_p2p_config().use_rocm_nested_peer_copy
 
 
 def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) -> bool:
@@ -2036,7 +2000,7 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
     ):
         return _P2P_NOT_APPLICABLE
 
-    if _ROCM_NESTED_PEER_DISABLED:
+    if _rocm_nested_peer_disabled():
         return _P2P_NOT_APPLICABLE
 
     tensors: list[torch.Tensor] = []

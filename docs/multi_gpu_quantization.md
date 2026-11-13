@@ -134,23 +134,26 @@ measured by the probe (the probe itself performs a direct copy). Enablement is
 still kept for PyTorch's own paths; GPT-QModel moves in that direction are
 staged through host memory.
 
-### ROCm peer enablement on a VMM allocator
+### Allocator-managed peer enablement
 
-`hipMemcpyPeerAsync` is not sound against ROCm memory that comes from a VMM
-reservation, and the failure is easy to misattribute. Two allocator
-configurations produce such memory, and they need different fixes:
+Introduced in [PR #3815](https://github.com/ModelCloud/GPTQModel/pull/3815).
+
+Direct runtime peer enablement does not update the native allocator's peer
+metadata for future VMM reservations. This affects native expandable segments
+on both CUDA and ROCm. A separate ROCm restriction applies to non-native
+allocators. The two cases need different handling:
 
 * the native caching allocator with `expandable_segments` enabled, which is the
   GPT-QModel default, and
 * any non-native backend, including `backend:cudaMallocAsync`.
 
-#### The native + `expandable_segments` case: stop pre-enabling
+#### Native expandable segments: delegate to PyTorch
 
 The defect is the ctypes `hipDeviceEnablePeerAccess` call, not the allocator.
 That call grants access to the expandable segments that exist at that moment;
 segments the allocator reserves afterwards stay unreachable, and a copy into one
-of them returns success while moving nothing. Measured on gfx1201 with ROCm
-10.1, 4 MiB payload, peer access pre-enabled with ctypes:
+of them returns success while moving nothing. Measured with a 4 MiB payload
+on ROCm, peer access pre-enabled with ctypes:
 
 | copy path | result |
 |---|---|
@@ -160,7 +163,11 @@ of them returns success while moving nothing. Measured on gfx1201 with ROCm
 
 PyTorch grants peer access per segment from its own copy path
 (`ExpandableSegment::addPeer` → `hipMemSetAccess`), so on this allocator
-GPT-QModel stops pre-enabling and lets PyTorch own it. **P2P stays direct**:
+GPT-QModel stops pre-enabling and lets PyTorch own it. The same policy is
+required for native expandable segments on CUDA: bidirectional threaded mover
+tests after manual enablement intermittently raised `CUDA_ERROR_INVALID_VALUE`
+for an inaccessible VMM operand. Delegating enablement and withholding raw copies
+passed the repeated CUDA and ROCm mover checks. **P2P stays direct**:
 
 | configuration | pairs | direct | host staging |
 |---|---|---|---|
@@ -182,28 +189,52 @@ and moves stage through pinned host memory.
 
 ```mermaid
 flowchart TD
-    A["_allocator_is_native()"] --> B{"backend resolves to native?"}
-    B -- "no (cudaMallocAsync, unknown)" --> C["_rocm_peer_link_unusable() = True"]
-    C --> D["enable_peer_access: every pair degraded<br/>reason_code = REASON_ROCM_VMM"]
-    D --> E["moves staged through pinned host memory"]
-    B -- "yes" --> F{"expandable_segments?"}
-    F -- "no" --> G["ctypes enable + raw peer copy<br/>(unchanged path)"]
-    F -- "yes" --> H["_rocm_pytorch_owns_peer_enablement() = True"]
-    H --> I["_enable_one returns REASON_ROCM_PYTORCH_ENABLEMENT<br/>no hipDeviceEnablePeerAccess"]
-    I --> J["_rocm_raw_peer_copy_unsafe() = True<br/>raw enqueue withheld"]
-    J --> K["link stays enabled and direct<br/>probe and movers use Tensor.copy_"]
+    A["_runtime_allocator_backend()<br/>active backend only"] --> B{"_rocm_peer_link_unusable()<br/>ROCm and backend not native?"}
+    B -- "yes, including unreadable backend" --> C["enable_peer_access: every pair degraded<br/>reason_code = REASON_ROCM_VMM"]
+    C --> D["moves staged through pinned host memory"]
+    B -- "no" --> F{"_pytorch_owns_peer_enablement()<br/>native and expandable on or unknown?"}
+    F -- "no" --> G["_enable_one: runtime enablement<br/>existing raw-copy validation"]
+    F -- "yes, CUDA or ROCm" --> H["_enable_one returns REASON_PYTORCH_ENABLEMENT<br/>no direct runtime enablement"]
+    H --> I["_raw_peer_copy_unsafe() = True<br/>raw enqueue withheld"]
+    I --> J["_copy_payloads_like_movers<br/>Tensor.copy_ validates the direct path"]
+    G --> O["_validate_peer_copy_pair<br/>_verify_peer_payloads"]
+    J --> O
+    O --> P{"payload bytes match?"}
+    P -- "no" --> M["pair degraded"]
+    P -- "yes" --> K["_timed_gbps"]
+    K --> L{"copy returns False?"}
+    L -- "yes, measurement unavailable" --> M
+    L -- "no" --> N["classify measured direct path"]
+    style C fill:#ffdddd,stroke:#cc0000
+    style M fill:#ffdddd,stroke:#cc0000
 ```
 
-| Mechanism | Before | After |
+| Mechanism | Before (`276605140`, merge base) | After |
 |---|---|---|
-| ROCm pre-enablement | `_enable_one` always called `hipDeviceEnablePeerAccess` (`gptqmodel/utils/p2p.py:867`), which granted only the existing expandable segments. | On a native expandable allocator it delegates to PyTorch (`gptqmodel/utils/p2p.py:875`) and P2P stays direct. |
-| Allocator detection | None; the default `expandable_segments:True` was installed and the probe still ran. | `_allocator_is_native` / `_rocm_peer_link_unusable` distinguish the two cases (`gptqmodel/utils/p2p.py:174`, `:245`). |
-| Probe copy path | The probe validated `_peer_copy_batch_enqueue` (`gptqmodel/utils/p2p.py:1078` on `main`) even when the movers would use `Tensor.copy_`. | `_copy_payloads_like_movers` validates and times the path the movers take (`gptqmodel/utils/p2p.py:1053`). |
-| Raw copy data path | `_can_peer_copy` (`:1394` on `main`) and `_peer_copy_batch_enqueue` (`:1439` on `main`) issued the runtime copy. | The raw enqueue is withheld on a pre-enable-free allocator (`gptqmodel/utils/p2p.py:1763`); `can_transfer_directly` keeps the link. |
-| Degraded warning | `_warn_degraded_once` always blamed motherboard/BIOS/hardware P2P compatibility. | A `REASON_ROCM_VMM` status logs the allocator cause instead (`gptqmodel/utils/p2p.py:1199`). |
+| Native VMM pre-enablement | `_enable_one` (`gptqmodel/utils/p2p.py:654`) always called the runtime enablement function without updating allocator metadata. | `_pytorch_owns_peer_enablement` delegates native expandable allocators on both CUDA and ROCm. |
+| Allocator detection | No allocator check preceded enablement or validation. | `_allocator_is_native` uses the active backend; `_rocm_peer_link_unusable` handles the separate ROCm restriction. |
+| Probe copy path | `_validate_peer_copy_pair` (`gptqmodel/utils/p2p.py:854`) validated raw enqueues even when movers would use `Tensor.copy_`. | `_copy_payloads_like_movers` validates and times the selected path. |
+| Raw copy data path | `_can_peer_copy` (`gptqmodel/utils/p2p.py:1394`) and `_peer_copy_batch_enqueue` (`:1439`) issued runtime copies. | `_raw_peer_copy_unsafe` withholds raw calls while `can_transfer_directly` preserves native P2P. |
+| Degraded warning | `_warn_degraded_once` (`gptqmodel/utils/p2p.py:929`) attributed every failure to topology. | `REASON_ROCM_VMM` identifies a non-native ROCm allocator failure. |
 
-The guard never lets a `True` predicate reach `hipMemcpyPeerAsync`, and a `False`
-result still goes through the existing per-direction `enabled` / `degraded` /
+Allocator classification reads the active backend through
+`_runtime_allocator_backend()`. Parsed settings describe expandable segments;
+they cannot override the active backend. An empty parsed string means known
+defaults, while unavailable settings delegate native peer enablement to PyTorch
+and withhold raw copies. Mutable environment strings are never a fallback.
+A copy returning `False` aborts bandwidth timing, so a failed enqueue cannot
+be measured as a successful fast transfer.
+
+| Review correction | Before (`dcec732c0`) | After |
+|---|---|---|
+| Backend authority | `_allocator_is_native`, `gptqmodel/utils/p2p.py:176`, allowed parsed/environment backend names to override the live backend. | Only the live backend authorizes the native path; unreadable ROCm backends stage. |
+| CUDA native VMM | `_enable_one`, `gptqmodel/utils/p2p.py:872`, delegated only on ROCm. | `_pytorch_owns_peer_enablement` delegates native expandable allocators on both CUDA and ROCm. |
+| Missing allocator settings | `_runtime_alloc_conf_value`, `gptqmodel/utils/p2p.py:132`, collapsed missing and empty settings, then consulted the environment. | Empty stays known; unavailable settings delegate native enablement. |
+| Failed timing step | `_timed_gbps`, `gptqmodel/utils/p2p.py:922`, ignored a false copy result. | Warm-up and measured failures return no bandwidth. |
+| Nested ROCm policy | `_ROCM_NESTED_PEER_DISABLED`, `gptqmodel/utils/p2p.py:1904`, read a runtime environment switch. | `P2PConfig.use_rocm_nested_peer_copy` owns the choice and preserves allocator checks. |
+
+A `True` result from `_raw_peer_copy_unsafe()` withholds raw runtime copies.
+A `False` result still goes through the existing per-direction `enabled` / `degraded` /
 `unverified` decision. Peer access is configured through
 `BaseQuantizeConfig.p2p` (`P2PConfig`), not environment variables.
 
@@ -217,9 +248,26 @@ buffer allocated first:
 | `expandable_segments:False` | byte-exact | byte-exact | ok |
 | `backend:cudaMallocAsync` | rc 0, destination unchanged | mismatched bytes | ok or fault |
 
-The guard and the delegation are covered by `tests/test_p2p.py`; when a
-non-native allocator forces staging, the raw-copy tests skip rather than issue
-the unsafe call.
+The guard and delegation are covered by `tests/test_p2p.py`. Hardware tests keep
+the real allocator guards: raw-copy tests skip when the allocator withholds that
+path, while `test_mover_fallbacks_are_ordered_and_thread_safe` checks actual
+module, nested-input and tensor-copy fallbacks with separate source and
+destination streams in both directions.
+
+Validation on 2026-11-13 used `PYTHON_GIL=0` for CUDA and ROCm. The raw-copy
+runs disabled expandable segments through Torch's allocator API before invoking
+pytest; default runs kept the shipped allocator guards in place.
+
+| Check | CUDA | ROCm |
+|---|---|---|
+| P2P tests, default allocator | 101 passed, 14 skipped (including allocator configuration tests) | 92 passed, 15 skipped |
+| P2P tests, expandable segments off | 107 passed | 99 passed, 8 skipped |
+| Allocator metadata probe | 3/3 independent processes passed | 3/3 independent processes passed |
+| Bidirectional mover stress | 3/3 independent processes passed | 3/3 independent processes passed |
+
+Raw-copy tests skip when that path is withheld. The separate stress check uses
+8 workers and 32 tasks per process and validates exact tensor values through
+actual fallback movers.
 
 Inference is **not** covered by this routing. Loading the quantized model with
 `device_map="auto"` installs accelerate's `AlignDevicesHook`, whose
@@ -266,6 +314,7 @@ a `P2PConfig` is accepted. `None` uses the defaults.
 | `min_gbps` | `5.0` | absolute floor; below it a direction is `degraded` (host-staged) |
 | `min_ratio` | `1.0` | direct copy must reach this fraction of ordered pinned-host staging, else `degraded` |
 | `probe_mib` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
+| `use_rocm_nested_peer_copy` | `False` | opt into small ROCm nested runtime copies; allocator checks still apply |
 | `use_torch_replicate` | `False` | allow `torch.nn.parallel.replicate` on GIL builds (always skipped when the GIL is disabled) |
 
 `P2PConfig` is a no-op for CPU-only runs and for any CPU<->CPU transfer: peer

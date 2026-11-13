@@ -234,7 +234,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     p2p_guard_verdict = {}
 
     def p2p_allocator_guard() -> bool:
-        """Check the ROCm VMM allocator guard from concurrent workers.
+        """Check CUDA/ROCm allocator guards from concurrent workers.
 
         Every cross-device copy consults this metadata-only guard, so it must be
         safe on worker threads and must return a stable verdict. The probe never
@@ -242,20 +242,20 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         """
         from gptqmodel.utils import p2p
 
-        if torch.version.hip is None:
-            return True
         with p2p_guard_verdict_lock:
             if "value" not in p2p_guard_verdict:
                 p2p_guard_verdict["value"] = (
-                    p2p._rocm_raw_peer_copy_unsafe(),
+                    p2p._raw_peer_copy_unsafe(),
                     p2p._rocm_peer_link_unusable(),
-                    p2p._rocm_pytorch_owns_peer_enablement(),
+                    p2p._pytorch_owns_peer_enablement(),
+                    p2p._rocm_nested_peer_disabled(),
                 )
             expected = p2p_guard_verdict["value"]
         actual = (
-            p2p._rocm_raw_peer_copy_unsafe(),
+            p2p._raw_peer_copy_unsafe(),
             p2p._rocm_peer_link_unusable(),
-            p2p._rocm_pytorch_owns_peer_enablement(),
+            p2p._pytorch_owns_peer_enablement(),
+            p2p._rocm_nested_peer_disabled(),
         )
         if actual != expected:
             raise AssertionError("the P2P allocator guard verdict changed across threads")
