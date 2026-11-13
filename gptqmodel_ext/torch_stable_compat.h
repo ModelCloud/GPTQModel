@@ -43,9 +43,12 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -58,6 +61,7 @@ using DeviceType = torch::headeronly::DeviceType;
 using Layout = torch::headeronly::Layout;
 using Device = torch::stable::Device;
 using StreamId = torch::stable::accelerator::StreamId;
+using DeviceIndex = int32_t;
 
 template <class T>
 using optional = std::optional<T>;
@@ -105,17 +109,6 @@ using torch::stable::get_num_threads;
 using torch::stable::parallel_for;
 using torch::stable::sum;
 
-inline Device device_of(const Tensor& tensor) { return tensor.device(); }
-
-inline Tensor sum(const Tensor& self, int64_t dim) {
-  std::array<int64_t, 1> dims{dim};
-  return torch::stable::sum(
-      self,
-      torch::headeronly::IntHeaderOnlyArrayRef(dims),
-      false,
-      std::nullopt);
-}
-
 /// A minimal TensorOptions replacement. The stable API takes individual
 /// dtype/device/layout arguments, so kernels keep the familiar builder style
 /// and this struct forwards the resolved values.
@@ -161,6 +154,80 @@ class TensorOptions {
   std::optional<bool> requires_grad_;
   std::optional<bool> pinned_memory_;
 };
+
+inline Device device_of(const Tensor& tensor) { return tensor.device(); }
+
+inline bool is_floating_point(const Tensor& tensor) {
+  const ScalarType dtype = tensor.scalar_type();
+  return dtype == ScalarType::Half || dtype == ScalarType::BFloat16 ||
+      dtype == ScalarType::Float || dtype == ScalarType::Double;
+}
+
+inline Tensor sum(const Tensor& self, int64_t dim) {
+  std::array<int64_t, 1> dims{dim};
+  return torch::stable::sum(
+      self,
+      torch::headeronly::IntHeaderOnlyArrayRef(dims),
+      false,
+      std::nullopt);
+}
+
+inline Tensor repeat(const Tensor& self, IntHeaderOnlyArrayRef repeats) {
+  std::array<StableIValue, 2> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(repeats)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::repeat", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor ones(
+    IntHeaderOnlyArrayRef size,
+    const TensorOptions& options = TensorOptions()) {
+  return torch::stable::full(
+      size,
+      1.0,
+      options.dtype(),
+      options.layout(),
+      options.device(),
+      options.pinned_memory());
+}
+
+inline Tensor arange(int64_t end, const TensorOptions& options = TensorOptions()) {
+  // aten::arange takes Scalar arguments, which the stable IValue bridge does
+  // not expose. Build the (small, autotune-only) index tensor from a cached
+  // host buffer instead and let the stable copy move it to the target device.
+  struct Cache {
+    std::mutex mutex;
+    std::unordered_map<int64_t, std::shared_ptr<std::vector<int64_t>>> values;
+  };
+  static Cache cache;
+  std::shared_ptr<std::vector<int64_t>> values;
+  {
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    auto& entry = cache.values[end];
+    if (!entry) {
+      entry = std::make_shared<std::vector<int64_t>>(static_cast<size_t>(end));
+      for (int64_t index = 0; index < end; ++index) {
+        (*entry)[static_cast<size_t>(index)] = index;
+      }
+    }
+    values = entry;
+  }
+  const int64_t sizes[1] = {end};
+  const int64_t strides[1] = {1};
+  Tensor host = torch::stable::from_blob(
+      values->data(),
+      torch::headeronly::IntHeaderOnlyArrayRef(sizes, 1),
+      torch::headeronly::IntHeaderOnlyArrayRef(strides, 1),
+      Device(DeviceType::CPU),
+      ScalarType::Long);
+  return torch::stable::to(
+      host,
+      options.dtype().value_or(ScalarType::Long),
+      std::nullopt,
+      options.device());
+}
 
 inline Tensor empty(
     IntHeaderOnlyArrayRef size,
@@ -257,6 +324,14 @@ inline int32_t current_device_index() {
   return torch::stable::accelerator::getCurrentDeviceIndex();
 }
 
+inline const cudaDeviceProp* getDeviceProperties(int32_t device_index) {
+  static thread_local cudaDeviceProp properties{};
+  if (cudaGetDeviceProperties(&properties, device_index) != cudaSuccess) {
+    return nullptr;
+  }
+  return &properties;
+}
+
 class CUDAGuard {
  public:
   explicit CUDAGuard(int32_t device_index) : guard_(device_index) {}
@@ -272,8 +347,6 @@ class CUDAGuard {
 };
 
 using OptionalCUDAGuard = CUDAGuard;
-
-inline Device device_of(const Tensor& tensor) { return tensor.device(); }
 
 }  // namespace cuda
 #endif  // USE_CUDA || __CUDACC__
@@ -316,6 +389,9 @@ namespace cuda {
 using CUDAGuard = at::cuda::CUDAGuard;
 using OptionalCUDAGuard = at::cuda::OptionalCUDAGuard;
 using CUDAStream = at::cuda::CompatibleCUDAStream;
+inline int32_t current_device() {
+  return torch::stable::accelerator::getCurrentDeviceIndex();
+}
 }  // namespace cuda
 }  // namespace c10
 #endif  // USE_CUDA || __CUDACC__

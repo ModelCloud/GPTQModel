@@ -22,6 +22,7 @@ import torch
 
 from ..utils.torch import dynamo_is_compiling
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     default_jit_cflags,
     default_jit_cuda_cflags,
@@ -398,6 +399,7 @@ _PARO_ROTATION_EXTENSION = TorchOpsJitExtension(
     requires_cuda=True,
     python_abi_dependent=False,
     stage_hip_sources=True,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
