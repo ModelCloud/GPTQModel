@@ -22,8 +22,13 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextRMSNorm
 
 from gptqmodel.models.definitions.gemma2 import Gemma2QModel
+from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
-from gptqmodel.quantization.awq.quantize.scale import scale_ln_fcs
+from gptqmodel.quantization.awq.quantize.scale import (
+    UnresolvableGainOffset,
+    apply_scale,
+    scale_ln_fcs,
+)
 
 
 try:
@@ -259,3 +264,195 @@ def test_moe_router_is_not_selected_as_prev_op():
 
     assert gate_up["prev_op"] is layer.post_attention_layernorm
     assert gate_up["prev_op"] is not layer.mlp.gate
+
+
+class _Lfm3Conv(nn.Module):
+    """The depthwise-conv block LFM3 executes before the residual add."""
+
+    def __init__(self, hidden: int):
+        super().__init__()
+        self.in_proj = nn.Linear(hidden, hidden, bias=False)
+        self.out_proj = nn.Linear(hidden, hidden, bias=False)
+
+    def forward(self, hidden_states):
+        return self.out_proj(torch.nn.functional.silu(self.in_proj(hidden_states)))
+
+
+class _Lfm3FeedForward(nn.Module):
+    def __init__(self, hidden: int, intermediate: int):
+        super().__init__()
+        self.w1 = nn.Linear(hidden, intermediate, bias=False)
+        self.w3 = nn.Linear(hidden, intermediate, bias=False)
+        self.w2 = nn.Linear(intermediate, hidden, bias=False)
+
+    def forward(self, hidden_states):
+        return self.w2(
+            torch.nn.functional.silu(self.w1(hidden_states)) * self.w3(hidden_states)
+        )
+
+
+class _Lfm3DecoderLayer(nn.Module):
+    """Mirror of `Lfm3DecoderLayer` with `use_sandwich_norm=True`.
+
+    `post_operator_norm` / `post_ffn_norm` run on the block output after the
+    residual add, so their output never feeds `conv.in_proj` or
+    `feed_forward.w1` even though the module tree lists them first.
+    """
+
+    def __init__(self, hidden: int = 32, intermediate: int = 64):
+        super().__init__()
+        self.operator_norm = nn.RMSNorm(hidden)
+        self.post_operator_norm = nn.RMSNorm(hidden)
+        self.conv = _Lfm3Conv(hidden)
+        self.ffn_norm = nn.RMSNorm(hidden)
+        self.post_ffn_norm = nn.RMSNorm(hidden)
+        self.feed_forward = _Lfm3FeedForward(hidden, intermediate)
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.post_operator_norm(self.conv(self.operator_norm(hidden_states)))
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_ffn_norm(self.feed_forward(self.ffn_norm(hidden_states)))
+        return residual + hidden_states
+
+
+def _bare_lfm3_qmodel():
+    qmodel = LFM3QModel.__new__(LFM3QModel)
+    nn.Module.__init__(qmodel)
+    qmodel.__dict__["model"] = types.SimpleNamespace(
+        config=types.SimpleNamespace(num_experts=0),
+    )
+    return qmodel
+
+
+def _lfm3_features(hidden: int = 32, intermediate: int = 64):
+    return {
+        "conv.in_proj": torch.randn(4, hidden),
+        "conv.out_proj": torch.randn(4, hidden),
+        "feed_forward.w1": torch.randn(4, hidden),
+        "feed_forward.w3": torch.randn(4, hidden),
+        "feed_forward.w2": torch.randn(4, intermediate),
+    }
+
+
+def test_lfm3_post_norms_are_declared_non_sources():
+    assert LFM3QModel.get_post_norm_modules() == ["post_operator_norm", "post_ffn_norm"]
+
+    from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
+    from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
+
+    for definition in (LFM3VLQModel, LFM3OmniQModel):
+        assert definition.get_post_norm_modules() == [
+            "post_operator_norm",
+            "post_ffn_norm",
+        ], definition.__name__
+
+
+def test_lfm3_sandwich_post_norms_are_not_fold_sources():
+    torch.manual_seed(0)
+    layer = _Lfm3DecoderLayer()
+    qmodel = _bare_lfm3_qmodel()
+
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _lfm3_features(), {})
+    conv = next(node for node in nodes if any(module is layer.conv.in_proj for module in node["layers"]))
+    ffn = next(node for node in nodes if any(module is layer.feed_forward.w1 for module in node["layers"]))
+
+    assert conv["prev_op"] is layer.operator_norm
+    assert conv["prev_op"] is not layer.post_operator_norm
+    assert ffn["prev_op"] is layer.ffn_norm
+    assert ffn["prev_op"] is not layer.post_ffn_norm
+
+
+def test_lfm3_sandwich_norm_fold_is_output_neutral():
+    torch.manual_seed(0)
+    layer = _Lfm3DecoderLayer()
+    qmodel = _bare_lfm3_qmodel()
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _lfm3_features(), {})
+    conv = next(node for node in nodes if any(module is layer.conv.in_proj for module in node["layers"]))
+    ffn = next(node for node in nodes if any(module is layer.feed_forward.w1 for module in node["layers"]))
+
+    x = torch.randn(4, 32)
+    with torch.no_grad():
+        before = layer(x)
+        for node in (conv, ffn):
+            scales = torch.rand(32) + 0.5
+            scale_ln_fcs(node["prev_op"], node["layers"], scales)
+        after = layer(x)
+
+    # Folding into a post-norm changes the block output by ~0.57 on this
+    # fixture; the data-flow source keeps it at floating-point noise.
+    assert _relative_error(after, before) < 1e-5
+
+
+def _scaled_before_norm_class():
+    """A norm that scales before normalizing; its gain is not foldable."""
+
+    try:
+        from transformers.models.muse_spark.modeling_muse_spark import (
+            MuseSparkTextInputScaledRMSNorm,
+        )
+
+        return MuseSparkTextInputScaledRMSNorm
+    except Exception:  # pragma: no cover - older transformers builds
+        class _ScaledBeforeNorm(nn.Module):
+            def __init__(self, dim: int, eps: float = 1e-6):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(dim))
+                self.eps = eps
+
+            def forward(self, hidden_states):
+                scaled = hidden_states.float() * (1.0 + self.weight).float()
+                normed = scaled * torch.rsqrt(
+                    scaled.pow(2).mean(-1, keepdim=True) + self.eps
+                )
+                return normed.type_as(hidden_states)
+
+        return _ScaledBeforeNorm
+
+
+def test_probe_failure_skips_scale_instead_of_guessing_from_source():
+    torch.manual_seed(0)
+    dim = 32
+    norm_cls = _scaled_before_norm_class()
+    norm = norm_cls(dim)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(dim) * 0.1)
+    linear = nn.Linear(dim, dim, bias=False)
+    scales = torch.rand(dim) + 0.5
+
+    # The old source-text fallback read `1.0 + self.weight` here and folded as
+    # an offset gain, changing the linear output by ~0.11.
+    with pytest.raises(UnresolvableGainOffset):
+        scale_ln_fcs(norm, [linear], scales)
+
+    class _Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = norm_cls(dim)
+            self.linear = nn.Linear(dim, dim, bias=False)
+
+        def forward(self, hidden_states):
+            return self.linear(self.norm(hidden_states))
+
+    block = _Block()
+    with torch.no_grad():
+        block.norm.weight.copy_(torch.randn(dim) * 0.1)
+    norm_before = block.norm.weight.detach().clone()
+    linear_before = block.linear.weight.detach().clone()
+    x = torch.randn(8, dim)
+    features = {"linear": x.clone()}
+    with torch.no_grad():
+        before = block(x)
+        apply_scale(
+            block,
+            [("norm", ["linear"], scales, None)],
+            input_feat_dict=features,
+        )
+        after = block(x)
+
+    assert torch.equal(block.norm.weight, norm_before)
+    assert torch.equal(block.linear.weight, linear_before)
+    assert torch.equal(features["linear"], x)
+    assert torch.equal(after, before)

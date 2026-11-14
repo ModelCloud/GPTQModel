@@ -6,12 +6,16 @@ facts that the model tree alone does not encode:
 
 1. **Which module feeds the block.** In a run of consecutive non-quantized
    blocks, the consumer's input comes from the *last gain norm whose width
-   matches the consumer's input*. Earlier entries in the run belong to sibling
-   branches (a MoE router) or to the residual stream (Gemma's
-   `post_attention_layernorm`).
+   matches the consumer's input and which is not declared `:postnorm`*.
+   Earlier entries in the run belong to sibling branches (a MoE router) or to
+   the residual stream (Gemma's `post_attention_layernorm`, LFM3's
+   `post_operator_norm` / `post_ffn_norm`). See
+   [AWQ normalization selection](awq-norm-selection.md).
 2. **How the norm applies its gain.** Plain norms multiply by `weight`;
    Gemma-style norms multiply by `1 + weight`. The parameterization is a
-   property of the module's forward, not of its class hierarchy.
+   property of the module's forward, not of its class hierarchy. If the live
+   probe cannot decide, the scale is skipped rather than inferred from source
+   text.
 
 Both decisions were previously made from the wrong signal: a fixed class list
 for the gain offset and the first block of a non-quantized run for `prev_op`.
@@ -30,33 +34,40 @@ flowchart TD
     D -- "no" --> F["keep fallback"]
     B -- "yes" --> G["resolve feature_name and inp"]
     G --> H["_select_prev_op(inp.shape[-1])"]
-    H --> I{"reverse pending_nonquant:<br/>gain norm with<br/>weight.numel == input width?"}
+    H --> I{"reverse pending_nonquant:<br/>gain norm with<br/>weight.numel == input width<br/>and name not in post_norm_modules?"}
     I -- "yes" --> J["prev_op = that norm"]
-    I -- "no" --> K["prev_op = last_module"]
+    I -- "no" --> K{"last_module is a post-norm?"}
+    K -- "yes" --> K2["skip block"]
+    K -- "no" --> K3["prev_op = last_module"]
     J --> L["generate_node_for_awq_scaling"]
-    K --> L
+    K3 --> L
     L --> M["apply_scale -> scale_ln_fcs"]
     M --> N{"_norm_gain_offset(ln)"}
     N -- "1.0" --> O["float32<br/>w.add_(1).div_(s).sub_(1)"]
     N -- "0.0" --> P["w.div_(s)"]
-    N -. "probe and source fail" .-> Q["warn + assume plain gain"]
+    N -- "ambiguous or probe fails" --> Q["raise UnresolvableGainOffset"]
+    Q --> Q2["apply_scale logs and skips the group"]
+    style K2 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
     style Q fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style Q2 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
 ```
 
-`_norm_gain_offset` first calls `resolve_gain_offset` (the live gain probe in
+`_norm_gain_offset` calls `resolve_gain_offset` (the live gain probe in
 `gptqmodel/quantization/norm_tuning.py`). The probe evaluates `weight` and
 `1 + weight` on a private copy at two small gains. If the module's forward
-cannot be probed, `_source_gain_offset` inspects the forward source for an
-additive offset; if that is inconclusive the fold warns and falls back to a
-plain gain (the pre-fix behavior).
+cannot be probed or both hypotheses fit, `_norm_gain_offset` raises
+`UnresolvableGainOffset`; `apply_scale` logs and skips that group without
+mutating weights or captured features. Source text is never parsed.
 
 ## Before and after
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Offset-gain detection | `isinstance(ln, GemmaRMSNorm) or isinstance(ln, Gemma2RMSNorm)` at `gptqmodel/quantization/awq/quantize/scale.py:145` (origin/main) | `_norm_gain_offset` -> `resolve_gain_offset` at `gptqmodel/quantization/awq/quantize/scale.py:87` |
-| Offset fold precision | `ln.weight += 1; ln.weight.div_(scales); ln.weight -= 1` in the stored dtype | float32 `folded.add_(1).div_(s).sub_(1)` then cast back, `gptqmodel/quantization/awq/quantize/scale.py:202` |
-| `prev_op` for a run of non-quantized blocks | first block of the run; subsequent blocks skipped at `gptqmodel/models/base.py:4415` (origin/main) | all blocks collected in `pending_nonquant`; consumer picks the matching gain norm via `_select_prev_op` at `gptqmodel/models/base.py:4407` |
+| Offset-gain detection | `isinstance(ln, GemmaRMSNorm) or isinstance(ln, Gemma2RMSNorm)` at `gptqmodel/quantization/awq/quantize/scale.py:145` (origin/main) | `_norm_gain_offset` -> `resolve_gain_offset` at `gptqmodel/quantization/awq/quantize/scale.py:75` |
+| Offset fold precision | `ln.weight += 1; ln.weight.div_(scales); ln.weight -= 1` in the stored dtype | float32 `folded.add_(1).div_(s).sub_(1)` then cast back, `gptqmodel/quantization/awq/quantize/scale.py:189` |
+| `prev_op` for a run of non-quantized blocks | first block of the run; subsequent blocks skipped at `gptqmodel/models/base.py:4415` (origin/main) | all blocks collected in `pending_nonquant`; consumer picks the matching gain norm via `_select_prev_op` at `gptqmodel/models/base.py:4443` |
+| Sandwich post-norms | not distinguishable from a source norm; LFM3 selected `post_operator_norm` / `post_ffn_norm` | `:postnorm` excludes them from `_select_prev_op`, `gptqmodel/models/base.py:420` and `:1202` |
+| Gain probe failure | grep the forward source for `1.0+self.weight` and fold as offset, `gptqmodel/quantization/awq/quantize/scale.py:62` (origin/main) | raise `UnresolvableGainOffset`; `apply_scale` skips the group, `gptqmodel/quantization/awq/quantize/scale.py:65` and `:150` |
 | Empty block inside a run | skipped only because the first-of-run rule skipped every later block | explicitly skipped without breaking the run, `gptqmodel/models/base.py:4442` |
 
 ### Measured effect
@@ -69,6 +80,9 @@ plain gain (the pre-fix behavior).
 | `LlamaRMSNorm` / `Gemma2RMSNorm` fold, relative L2 | ~1e-7 | ~1e-7 |
 | Gemma2 MLP `prev_op` | `post_attention_layernorm` | `pre_feedforward_layernorm` |
 | Gemma2 MLP fold, layer-output relative L2 | 0.561 | < 1e-5 |
+| LFM3 conv/FFN `prev_op` | `post_operator_norm` / `post_ffn_norm` | `operator_norm` / `ffn_norm` |
+| LFM3 layer-output relative L2 | 0.569 (fixture) / 0.688 (real model, issue #4002) | 1.57e-07 |
+| `MuseSparkTextInputScaledRMSNorm` fold relative L2 | 0.113 (fp32) | scale skipped; output unchanged |
 
 The tests are in `tests/test_awq_scale_folding.py`; the pre-fold
 `norm -> linear` output and the closed-form folded weights are the two
@@ -79,9 +93,12 @@ independent oracles.
 - The gain offset is resolved per module instance, so the same class can be
   configured as a plain or an offset gain.
 - `prev_op` must be a gain norm whose parameter width equals the consumer's
-  input width. If no candidate matches, the historical `last_module` fallback
-  is retained rather than guessing.
+  input width and which is not tagged `:postnorm`. If no candidate matches,
+  the historical `last_module` fallback is retained unless that module is a
+  post-norm, in which case the block is skipped.
 - The selected norm must be a module that `apply_scale` can fold into
   (`scale_ln_fcs`). A non-norm candidate is never selected.
+- An unresolvable gain is fail-closed: the group is skipped, not folded with
+  an assumed offset.
 - Low-precision checkpoints keep their stored dtype; only the intermediate
   `1 + weight` and division are widened to float32.
