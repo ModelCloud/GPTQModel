@@ -157,3 +157,6 @@ BF16 measured the same 1.4x-6.9x band. The Blackwell entry ships the same
 packed-load kernel and gate. This host has no Blackwell GPU to re-measure, so
 the entry follows the issue's indicative sm_120 report (1.3x-5.9x); no sm_120
 timing was taken here.
+
+Introduced in [PR #3999](https://github.com/ModelCloud/GPTQModel/pull/3999) for
+[issue #3982](https://github.com/ModelCloud/GPTQModel/issues/3982).
