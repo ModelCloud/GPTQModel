@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+from ...utils.logger import setup_logger
 from ...utils.model import move_to
 from ..base import BaseQModel
+
+
+log = setup_logger()
 
 
 class ZambaQModel(BaseQModel):
@@ -74,7 +78,12 @@ class ZambaQModel(BaseQModel):
 
             return self.slow_forward(hidden_states, cache_params, attention_mask=attention_mask)
 
-        for layer in self.model.model.layers:
+        model_root = getattr(self.model, "model", None)
+        layers = getattr(model_root, "layers", None)
+        if layers is None:
+            return
+
+        for layer in layers:
             candidates = []
 
             mixer = getattr(layer, "mamba", None)
@@ -89,4 +98,11 @@ class ZambaQModel(BaseQModel):
 
             for mixer in candidates:
                 if mixer.__class__.__name__ == "ZambaMambaMixer":
-                    type(mixer).forward = forward
+                    mixer_class = type(mixer)
+                    if not all(hasattr(mixer_class, name) for name in ("slow_forward", "cuda_kernels_forward")):
+                        log.info.once(
+                            "Zamba mixer does not expose the legacy slow/fast forward methods; "
+                            "leaving the upstream forward in place because it selects kernels internally."
+                        )
+                        continue
+                    mixer_class.forward = forward

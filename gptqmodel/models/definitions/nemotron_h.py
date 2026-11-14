@@ -3,7 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...utils.logger import setup_logger
 from ..base import BaseQModel
+
+
+log = setup_logger()
 
 
 class NemotronHQModel(BaseQModel):
@@ -12,8 +16,11 @@ class NemotronHQModel(BaseQModel):
     layer_modules_strict = False
     # require_pkgs = ["transformers<=4.48.3"]
 
+    # Transformers 5.22 renamed the native tree root ``backbone`` -> ``model``
+    # through the ``nemotron_h`` checkpoint conversion mapping. The definition
+    # must describe the runtime tree, so it uses ``model`` directly.
     module_tree = [
-        "backbone",
+        "model",
         "layers",
         "#",
         {
@@ -72,7 +79,27 @@ class NemotronHQModel(BaseQModel):
 
             return self.torch_forward(hidden_states, cache_params, cache_position, attention_mask)
 
-        for layer in self.model.backbone.layers:
-            if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":
-                mixer_class = type(layer.mixer)
-                mixer_class.forward = forward
+        # Native 5.22 exposes ``self.model.model.layers``; older remote code
+        # exposed ``self.model.backbone.layers``.
+        layers = None
+        for root_name in ("model", "backbone"):
+            root = getattr(self.model, root_name, None)
+            candidate = getattr(root, "layers", None)
+            if candidate is not None:
+                layers = candidate
+                break
+        if layers is None:
+            return
+
+        for layer in layers:
+            mixer = getattr(layer, "mixer", None)
+            if mixer is None or mixer.__class__.__name__ != "NemotronHMamba2Mixer":
+                continue
+            mixer_class = type(mixer)
+            if not all(hasattr(mixer_class, name) for name in ("torch_forward", "cuda_kernels_forward")):
+                log.info.once(
+                    "NemotronH Mamba2 mixer does not expose the legacy Torch/fast forward methods; "
+                    "leaving the upstream forward in place because it selects kernels internally."
+                )
+                continue
+            mixer_class.forward = forward

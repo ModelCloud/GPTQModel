@@ -209,6 +209,7 @@ For how checkpoint index tensors (`g_idx`, NF12 escapes, ParoQuant pairs, VPTQ
 outliers, EXL3 `K`) are validated before any native kernel indexes memory, see
 [checkpoint index validation](docs/checkpoint-index-validation.md).
 For checkpoint-backed module loading, see [lazy checkpoint materialization](docs/lazy-checkpoint-materialization.md).
+For how Transformers 5.22 class-keyed conversion maps, legacy mixer patch guards, the Nemotron-H tree root, and non-persistent Mamba buffers are handled, see [Transformers 5.22 model compatibility](docs/transformers-5-compat.md).
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).

@@ -1841,7 +1841,7 @@
       ]
     },
     "NemotronHQModel/gptq": {
-      "layers": ["backbone.layers"],
+      "layers": ["model.layers"],
       "blocks": [
         ["norm:!"],
         ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"],

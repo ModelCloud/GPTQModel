@@ -1692,15 +1692,46 @@ class LazyTurtle:
         return key
 
     @classmethod
+    def _hf_conversion_lookup_keys(
+        cls,
+        *,
+        target_model: Optional[nn.Module] = None,
+        model_type: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        """Ordered keys for the transformers checkpoint-conversion registry.
+
+        Transformers registers some mappings under the config ``model_type`` and
+        others under the model class name (for example ``GPTNeoXForCausalLM``
+        owns the ``embed_out.`` -> ``lm_head.`` rename). Config ``architectures``
+        carries the same class names for checkpoints that were saved with them.
+        """
+        config = getattr(target_model, "config", None)
+        # An explicit definition alias wins, then the config ``model_type``.
+        # Some Transformers 5.22 maps are registered under the class name only
+        # (for example GPT-NeoX), so the model class and ``config.architectures``
+        # are queried as additional keys.
+        candidates: list[Any] = [model_type, getattr(config, "model_type", None)]
+        if target_model is not None:
+            candidates.append(type(target_model).__name__)
+        architectures = getattr(config, "architectures", None)
+        if isinstance(architectures, (list, tuple)):
+            candidates.extend(architectures)
+
+        keys: list[str] = []
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate and candidate not in keys:
+                keys.append(candidate)
+        return tuple(keys)
+
+    @classmethod
     def infer_hf_conversion_map_reversed(
         cls,
         *,
         target_model: Optional[nn.Module] = None,
         model_type: Optional[str] = None,
     ) -> Optional[Any]:
-        if model_type is None:
-            model_type = getattr(getattr(target_model, "config", None), "model_type", None)
-        if isinstance(model_type, str):
+        lookup_keys = cls._hf_conversion_lookup_keys(target_model=target_model, model_type=model_type)
+        if lookup_keys:
             # Prefer the public transformers conversion registry and fall back to
             # older per-model mappings when needed.
             try:
@@ -1714,9 +1745,12 @@ class LazyTurtle:
                     None,
                 )
                 if callable(get_checkpoint_conversion_mapping):
-                    reversed_map = cls.reverse_hf_conversion_map(get_checkpoint_conversion_mapping(model_type))
-                    if reversed_map is not None:
-                        return reversed_map
+                    for lookup_key in lookup_keys:
+                        reversed_map = cls.reverse_hf_conversion_map(
+                            get_checkpoint_conversion_mapping(lookup_key)
+                        )
+                        if reversed_map is not None:
+                            return reversed_map
 
         if target_model is None:
             return None

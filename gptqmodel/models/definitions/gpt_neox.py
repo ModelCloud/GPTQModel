@@ -8,7 +8,10 @@ from ..base import BaseQModel
 
 class GPTNeoXQModel(BaseQModel):
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
-    lm_head = "embed_out"
+    # Transformers 5.22 renamed the runtime module to ``lm_head``; the
+    # checkpoint still stores ``embed_out.weight`` and is bridged by the
+    # class-keyed conversion mapping handled in LazyTurtle.
+    lm_head = "lm_head"
 
     module_tree= [
         "gpt_neox",

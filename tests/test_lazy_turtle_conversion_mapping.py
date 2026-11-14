@@ -1897,3 +1897,64 @@ def test_lazy_turtle_registers_atexit_cleanup_for_temporary_checkpoint_dir(tmp_p
     assert registered == [
         (structure_module.shutil.rmtree, (str(temp_path),), {"ignore_errors": True}),
     ]
+
+
+def test_class_keyed_hf_conversion_mapping_is_discovered():
+    """Transformers registers some renames under the model class name only."""
+
+    class GPTNeoXForCausalLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(model_type="not_a_registered_model_type", architectures=None)
+
+    resolved = LazyTurtle.infer_hf_conversion_map_reversed(target_model=GPTNeoXForCausalLM())
+
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+    assert LazyTurtle.convert_hf_checkpoint_key("lm_head.weight", resolved) == "embed_out.weight"
+
+
+def test_config_architectures_hf_conversion_mapping_is_discovered():
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(
+                model_type="not_a_registered_model_type",
+                architectures=["GPTNeoXForCausalLM"],
+            )
+
+    resolved = LazyTurtle.infer_hf_conversion_map_reversed(target_model=Shell())
+
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+
+
+def test_gpt_neox_definition_resolves_lm_head_through_class_keyed_mapping(tmp_path):
+    from transformers.models.gpt_neox.configuration_gpt_neox import GPTNeoXConfig
+    from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
+
+    from gptqmodel.models.definitions.gpt_neox import GPTNeoXQModel
+
+    config = GPTNeoXConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        max_position_embeddings=128,
+        rotary_pct=0.25,
+    )
+    model = GPTNeoXForCausalLM(config)
+
+    assert GPTNeoXQModel.lm_head == "lm_head"
+    resolved = GPTNeoXQModel.resolve_hf_conversion_map_reversed(target_model=model)
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "gpt_neox.embed_in.weight": torch.zeros(128, 64),
+            "embed_out.weight": torch.zeros(128, 64),
+        },
+        module_tree=GPTNeoXQModel.module_tree,
+        target_model=model,
+    )
+    assert turtle._resolve_checkpoint_tensor_name("lm_head", "weight") == "embed_out.weight"
