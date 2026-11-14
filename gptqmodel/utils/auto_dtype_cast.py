@@ -19,6 +19,10 @@ from ..nn_modules.hooked_linear import (
 from ..nn_modules.qlinear.nf12 import NF12Linear
 from ..quantization.nf12 import quantize_nf12_weight
 from . import nf12_codec
+from .logger import setup_logger
+
+
+log = setup_logger()
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,11 @@ def _rowmajor_ops(device: torch.device):
     if torch.version.hip is not None:
         from . import nf12_hip
 
-        if not hasattr(nf12_hip, "rowmajor_pack"):
+        # The module-level wrapper exists unconditionally; only the loaded
+        # extension binds the operator. Probe the extension itself, so an
+        # unsupported or unbuildable RDNA4 host falls back here instead of
+        # raising from the first pack call.
+        if not nf12_hip.rowmajor_available(device):
             return None
         return nf12_hip.rowmajor_pack, "nf12_hip"
     if torch.cuda.get_device_capability(device)[0] < 8:
@@ -108,14 +116,36 @@ def _rowmajor_ops(device: torch.device):
     import gptqmodel_nf12 as nf12
 
     # A supported compute capability does not prove the row-major extension is
-    # usable: a source checkout still has to build it on first use. Choose the
-    # generic packed layout unless the native kernels are actually available so
-    # an eligible embedding never aborts quantization on a missing toolkit.
-    if not nf12.available():
+    # usable: a source checkout still has to build it on first use, and a
+    # preloaded legacy namespace can own ``torch.ops.nf12`` without the
+    # row-major operators. Probe the exact operators this layout needs, not the
+    # namespace as a whole, so an eligible embedding never aborts quantization.
+    if not nf12.available_ops("rowmajor_pack", "rowmajor_embedding"):
         return None
     return (
         lambda packed, escapes, base: nf12.rowmajor_pack(nf12.NF12Weight(packed, escapes, base)),
         "nf12",
+    )
+
+
+# Namespaces already reported. A set (never rebound) keeps the once-guard
+# explicit and visible to static analysis, which cannot follow a module-level
+# boolean that is only rebound behind a ``global`` statement.
+_ROWMAJOR_FALLBACK_REPORTED: set[str] = set()
+
+
+def _warn_rowmajor_fallback(namespace: str, exc: Exception) -> None:
+    """Report a row-major pack failure once per namespace, then stay quiet."""
+
+    if namespace in _ROWMAJOR_FALLBACK_REPORTED:
+        return
+    _ROWMAJOR_FALLBACK_REPORTED.add(namespace)
+    log.warn(
+        "AUTO_NF12: the %s row-major embedding layout is unavailable (%s: %s); "
+        "using the generic packed layout instead.",
+        namespace,
+        type(exc).__name__,
+        exc,
     )
 
 
@@ -133,16 +163,30 @@ class AutoNF12Embedding(nn.Module):
         packed = result.packed.to(device)
         escapes = result.escapes.to(device)
         ops = _rowmajor_ops(device)
-        self.row_major = ops is not None
+        row_layout = None
+        if ops is not None:
+            try:
+                row_packed, row_escapes, original, collisions = ops[0](packed, escapes, result.exp_base)
+                # Packing has loaded the extension, so bind the native dispatcher
+                # directly and keep the Python wrapper off the forward hot path.
+                row_embedding = getattr(getattr(torch.ops, ops[1]), "rowmajor_embedding")
+            except (AttributeError, OSError, RuntimeError) as exc:
+                # An availability probe can still be optimistic: a preloaded
+                # legacy namespace owns `torch.ops.nf12` without the row-major
+                # operators, and a HIP wrapper raises when its optional
+                # extension fails to load. The generic packed layout is always
+                # available, so a failed pack must not abort the cast.
+                _warn_rowmajor_fallback(ops[1], exc)
+            else:
+                row_layout = (row_packed, row_escapes, original, collisions, row_embedding)
+        self.row_major = row_layout is not None
         if self.row_major:
-            row_packed, row_escapes, original, collisions = ops[0](packed, escapes, result.exp_base)
+            row_packed, row_escapes, original, collisions, row_embedding = row_layout
             self.original_escapes = int(original)
             self.selected_half_collisions = int(collisions)
             self.register_buffer("nf12_row_packed", row_packed)
             self.register_buffer("nf12_row_escapes", row_escapes)
-            # Packing has loaded the extension, so bind the native dispatcher
-            # directly and keep the Python wrapper off the forward hot path.
-            self._rowmajor_embedding_op = getattr(getattr(torch.ops, ops[1]), "rowmajor_embedding")
+            self._rowmajor_embedding_op = row_embedding
         else:
             self._rowmajor_embedding_op = None
             self.register_buffer("nf12_packed", packed)

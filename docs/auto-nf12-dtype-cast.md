@@ -48,34 +48,53 @@ BF16 view and `AUTO_NF12` stores that view in NF12 for calibration.
 ## Native availability
 
 The row-major embedding layout is a native extension, so a supported compute
-capability is not evidence that it can run. `gptqmodel_nf12.available()` answers
-that question without starting a build, and `_rowmajor_ops` consults it before
-choosing a layout.
+capability is not evidence that it can run. `_rowmajor_ops` therefore asks for
+the two operators this layout actually needs — `rowmajor_pack` and
+`rowmajor_embedding` — instead of asking whether the namespace is usable at
+all, and a pack that still fails falls back to the generic layout.
 
 ```mermaid
 flowchart TD
     A[AutoNF12Embedding.__init__] --> B[quantize_nf12_weight]
     B --> C[_rowmajor_ops device]
-    C --> D{HIP build exposes rowmajor_pack?}
-    D -- Yes --> R[Row-major packed buffers]
-    D -- No --> E{compute capability 8.0 or newer?}
-    E -- No --> G[Generic packed buffers]
-    E -- Yes --> F{gptqmodel_nf12.available}
-    F -- Yes --> R
-    F -- No --> G
+    C --> D{HIP build?}
+    D -- Yes --> E{nf12_hip.rowmajor_available device}
+    D -- No --> F{compute capability 8.0 or newer?}
+    F -- No --> G[Generic packed buffers]
+    F -- Yes --> H{nf12.available_ops rowmajor_pack and rowmajor_embedding}
+    E -- No --> G
+    E -- Yes --> P{pack succeeds?}
+    H -- No --> G
+    H -- Yes --> P
+    P -- No --> W[Warn once, then use the generic layout]
+    W --> G
+    P -- Yes --> R[Row-major packed buffers]
     R --> X[torch.ops.nf12.rowmajor_embedding]
     G --> Y[nf12.embedding when available]
     Y --> Z[nf12_codec.decode]
     style G fill:#fee,stroke:#c00
+    style W fill:#fee,stroke:#c00
     style Z fill:#fee,stroke:#c00
 ```
 
-`available()` is a capability probe, not a build. It is true when
-`torch.ops.nf12` is already registered, when both native libraries ship with the
-package, when a source build for the visible GPUs is already cached, or when the
-JIT build tools (nvcc, CMake, Ninja) are present. Otherwise the generic packed
-layout is selected and decoding uses the pure-Torch codec. Both branches keep
-packed NF12 bytes resident; neither retains a dense weight cache.
+`available_ops()` is a capability probe, not a build. It is true when the named
+operators are registered, when both native libraries ship with the package, when
+a source build for the visible GPUs is already cached, or when the JIT build
+tools (nvcc, CMake, Ninja) are present. Otherwise the generic packed layout is
+selected and decoding uses the pure-Torch codec. Both branches keep packed NF12
+bytes resident; neither retains a dense weight cache.
+
+On HIP, `nf12_hip.rowmajor_available(device)` loads the optional extension and
+checks that it bound both row-major operators. The Python wrapper
+`nf12_hip.rowmajor_pack` exists whether or not the extension can load, so a
+`hasattr` check proves nothing and the first pack would raise.
+
+A failed pack is treated as "this host cannot use the row-major layout": the
+constructor warns once per namespace — the names already reported live in
+`_ROWMAJOR_FALLBACK_REPORTED`, so a model with one embedding per layer emits a
+single message — and keeps the generic packed buffers. A probe that was
+optimistic (a partial preloaded namespace, or an extension that loads but omits
+an operator) therefore never aborts an otherwise supported quantization run.
 
 The probe is a property of the host, not a configuration switch. There is no
 `GPTQMODEL_*` override for it.
@@ -116,6 +135,7 @@ the same question without loading anything.
 | Namespace has the full current set | Reused | Reused (unchanged) |
 | Nothing registered, build tools present | Build | Build (unchanged) |
 | Required operator genuinely missing | Generic build error | `RuntimeError` naming the operator |
+| Namespace owns `nf12` without `rowmajor_pack` | `available()` true, so the first pack raised `AttributeError` and aborted the cast | `available_ops()` false, so the generic packed layout is chosen |
 
 ## Quantization handoff
 
@@ -187,11 +207,14 @@ successful compression. Native floatx selection takes precedence over NF12
 when its capability check succeeds.
 
 An eligible embedding never aborts quantization because the row-major extension
-cannot be built. When `available()` is false, the generic packed layout is used
-and `forward()` decodes through `nf12_codec`; a dense view exists only for the
-duration of that forward. The previous failure was a `_MissingBuildTools`
-exception raised from the first embedding cast on a CUDA host without a
-toolkit or a prebuilt library.
+cannot be built or cannot serve the layout. `_rowmajor_ops` requires the two
+row-major operators, and a pack that still fails keeps the generic packed
+buffers. The generic layout decodes through `nf12_codec` (and uses
+`nf12.embedding` when `available()`); a dense view exists only for the duration
+of that forward. Previous failures were a `_MissingBuildTools` exception raised
+from the first cast on a CUDA host without a toolkit, and an `AttributeError`
+when a preloaded namespace owned `torch.ops.nf12` without the row-major
+operators.
 
 ### Embedding index contract
 
