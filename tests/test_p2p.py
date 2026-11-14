@@ -799,12 +799,25 @@ def _activate_rocm_non_native_guard(monkeypatch):
     p2p.clear_p2p_cache()
 
 
-def _activate_pytorch_enablement(monkeypatch):
-    """Force the "PyTorch owns enablement" condition on any test host."""
+def _activate_pytorch_enablement(monkeypatch, *, ndev=2, capability=None):
+    """Force the "PyTorch owns enablement" condition on any test host.
+
+    These are policy-only tests: the allocator and raw-copy predicates are
+    replaced, so the link verdict must not depend on how many GPUs the host
+    actually has. Install a synthetic peer topology alongside the policy stubs.
+    """
 
     monkeypatch.setattr(p2p, "_raw_peer_copy_unsafe", lambda: True)
     monkeypatch.setattr(p2p, "_rocm_peer_link_unusable", lambda: False)
     monkeypatch.setattr(p2p, "_pytorch_owns_peer_enablement", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: ndev)
+    peers = capability if capability is not None else {(0, 1): True, (1, 0): True}
+    monkeypatch.setattr(
+        torch.cuda,
+        "can_device_access_peer",
+        lambda src, dst: bool(peers.get((src, dst), False)),
+    )
     p2p.clear_p2p_cache()
 
 
@@ -887,6 +900,16 @@ def test_pytorch_enablement_keeps_direct_moves(monkeypatch):
 
     assert p2p.can_transfer_directly("cuda:0", "cuda:1") is True
     assert p2p.can_transfer_directly("cuda:1", "cuda:0") is True
+
+
+def test_pytorch_enablement_verdict_follows_the_synthetic_topology(monkeypatch):
+    """The verdict must come from the stubbed topology, not the host GPU count."""
+
+    _activate_pytorch_enablement(monkeypatch, capability={})
+
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1") is False
+    # A single-device host cannot have this pair, so a same-device query stays safe.
+    assert p2p.can_transfer_directly("cuda:0", "cuda:0") is True
 
 
 def test_pytorch_enablement_withholds_only_the_raw_copy(monkeypatch):
