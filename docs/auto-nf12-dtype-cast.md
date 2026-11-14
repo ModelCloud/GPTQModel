@@ -193,6 +193,25 @@ duration of that forward. The previous failure was a `_MissingBuildTools`
 exception raised from the first embedding cast on a CUDA host without a
 toolkit or a prebuilt library.
 
+### Embedding index contract
+
+Every embedding path returns a `+0.0` row for an ID outside
+`[0, num_embeddings)`: the row-major operator, the canonical `nf12.embedding`
+operator, the HIP operator, and the portable `nf12_codec` fallback. The
+fallback masks the lookup before calling `F.embedding`, because that function
+gathers the raw ID — an out-of-range ID raises `IndexError` on the host and
+trips a device-side assert (`indexSelectSmallIndex`) on CUDA, poisoning the
+context for the rest of the process.
+
+| Path | Invalid-ID behavior |
+| --- | --- |
+| `torch.ops.nf12.rowmajor_embedding` | `+0.0` row |
+| `nf12.embedding` / `nf12_hip.embedding` | `+0.0` row |
+| `nf12_codec` fallback (`F.embedding`) | `+0.0` row, lookup masked first |
+
+Valid IDs always select the exact decoded BF16 row, including signed zero and
+subnormal escapes.
+
 ## Measured validation
 
 The real model was `unsloth/Llama-3.2-1B-Instruct` loaded as BF16. GPTQ

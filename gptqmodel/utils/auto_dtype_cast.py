@@ -210,7 +210,17 @@ class AutoNF12Embedding(nn.Module):
                     # stays resident even when a device cannot build its kernel.
                     pass
         dense = self.dequantize_weight(device=ids.device, dtype=torch.bfloat16)
-        return torch.nn.functional.embedding(ids, dense).to(self.output_dtype)
+        # Every native NF12 embedding operator (CUDA, HIP, and the row-major
+        # layout) returns a ``+0.0`` row for an ID outside ``[0, num_embeddings)``.
+        # ``F.embedding`` instead gathers the raw ID, which is an illegal access
+        # on CUDA: it trips a device-side assert and poisons the context. Mask
+        # the lookup so the portable fallback keeps the native contract.
+        valid = (ids >= 0) & (ids < self.num_embeddings)
+        safe_ids = torch.where(valid, ids, torch.zeros_like(ids))
+        output = torch.nn.functional.embedding(safe_ids, dense)
+        if not bool(valid.all()):
+            output = torch.where(valid.unsqueeze(-1), output, torch.zeros_like(output))
+        return output.to(self.output_dtype)
 
 
 class AutoNF12HookedLinear(NF12Linear):

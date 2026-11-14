@@ -180,6 +180,38 @@ def test_exact_fp16_embedding_keeps_source_dtype(monkeypatch):
     assert _bits_equal(actual, source(ids))
 
 
+def test_cpu_embedding_fallback_masks_out_of_range_ids(monkeypatch):
+    """Same contract on the host path, which runs the identical fallback (#3922).
+
+    ``F.embedding`` raises ``IndexError`` on the host and trips a device-side
+    assert on CUDA, so the portable path must mask the lookup itself rather than
+    rely on the backend to tolerate a bad ID.
+    """
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    source = nn.Embedding(32, 128, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+        source.weight[7, 0] = -0.0
+        source.weight[15, 127] = 2.0**-20
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    assert not packed.row_major
+
+    ids = torch.tensor([[-1, 0, 7], [15, 31, 32]])
+    actual = packed(ids)
+
+    valid = (ids >= 0) & (ids < source.num_embeddings)
+    oracle = torch.zeros_like(actual)
+    oracle[valid] = source(ids[valid])
+
+    assert _bits_equal(actual, oracle)
+    assert torch.equal(actual[~valid].view(torch.int16), torch.zeros_like(actual[~valid], dtype=torch.int16))
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
     reason="requires NVIDIA SM80 or newer",
@@ -296,6 +328,64 @@ def test_cuda_embedding_falls_back_when_native_nf12_is_unavailable(monkeypatch):
 
     restored = auto_dtype_cast.restore_source_module(packed, spec, device="cuda:0")
     assert _bits_equal(restored.weight, source.weight)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
+    reason="requires NVIDIA SM80 or newer",
+)
+def test_dense_embedding_fallback_masks_out_of_range_ids(monkeypatch):
+    """The portable fallback keeps the native "+0.0 for invalid IDs" contract (#3922).
+
+    ``F.embedding`` gathers the raw ID, so an ID outside ``[0, num_embeddings)``
+    is an illegal CUDA access: it trips a device-side assert and poisons the
+    context instead of returning a zero row the way every native NF12 embedding
+    operator does. The layout and native availability are forced here so the
+    fallback is exercised on hosts that do have the extension built.
+    """
+
+    import gptqmodel_nf12
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(auto_dtype_cast, "_rowmajor_ops", lambda _device: None)
+    monkeypatch.setattr(gptqmodel_nf12, "available", lambda: False)
+
+    source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+        source.weight[7, 0] = -0.0
+        source.weight[15, 127] = 2.0**-20
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cuda:0")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    assert not packed.row_major
+    assert {name for name, _ in packed.named_buffers()} == {
+        "nf12_packed",
+        "nf12_escapes",
+        "nf12_exp_base",
+    }
+
+    # Negative and >= num_embeddings IDs, mixed with valid ones, in one batch.
+    ids = torch.tensor([[-1, 0, 7], [15, 31, 32]], dtype=torch.int64, device="cuda:0")
+    actual = packed(ids)
+
+    valid = (ids >= 0) & (ids < source.num_embeddings)
+    oracle = torch.zeros_like(actual)
+    oracle[valid] = source(ids[valid])
+
+    assert _bits_equal(actual, oracle)
+    # Exactly +0.0, not -0.0: the native operators zero the row, they do not
+    # multiply the selected value by a mask.
+    assert torch.equal(actual[~valid].view(torch.int16), torch.zeros_like(actual[~valid], dtype=torch.int16))
+    # Valid rows still carry the exact checkpoint bits.
+    assert _bits_equal(actual[valid], source(ids[valid]))
+
+    # The same contract holds for an all-invalid batch, including 0-dim input.
+    all_invalid = torch.tensor([[-1, -1, 32]], dtype=torch.int64, device="cuda:0")
+    assert torch.count_nonzero(packed(all_invalid)) == 0
+    scalar = packed(torch.tensor(-1, dtype=torch.int64, device="cuda:0"))
+    assert scalar.shape == (128,)
+    assert torch.count_nonzero(scalar) == 0
 
 
 def test_source_build_available_reports_missing_tools(monkeypatch):
