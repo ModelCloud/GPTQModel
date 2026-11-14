@@ -90,40 +90,50 @@ def _run_pack(quant_cfg: QuantizeConfig, requires_v2: bool) -> int:
             quantize_config=quant_cfg,
         )
 
-    return convert_mock.call_count
+    return convert_mock.call_count, dummy_module
 
 
-def test_pack_module_converts_for_gptq_requires_v2():
+def test_pack_module_keeps_runtime_v2_and_marks_the_checkpoint_layout():
+    """A v2 kernel must not leave the v1 checkpoint words in memory (#4063)."""
+
     cfg = QuantizeConfig(bits=4, quant_method=METHOD.GPTQ, format=FORMAT.GPTQ, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=True)
-    assert calls == 1
+    calls, module = _run_pack(cfg, requires_v2=True)
+    assert calls == 0
+    assert module.qzero_format() == 2
+    assert module._checkpoint_format_on_disk == FORMAT.GPTQ
 
 
 def test_pack_module_skips_for_non_gptq_method():
     cfg = QuantizeConfig(bits=4, quant_method=METHOD.AWQ, format=FORMAT.GEMM, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=True)
+    calls, module = _run_pack(cfg, requires_v2=True)
     assert calls == 0
+    assert not hasattr(module, "_checkpoint_format_on_disk")
 
 
 def test_pack_module_skips_for_non_gptq_export_method():
     cfg = RTNConfig(bits=4, format=FORMAT.GEMM, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=True)
+    calls, module = _run_pack(cfg, requires_v2=True)
     assert calls == 0
+    assert not hasattr(module, "_checkpoint_format_on_disk")
 
 
-def test_pack_module_converts_for_rtn_gptq_export_requires_v2():
+def test_pack_module_marks_the_checkpoint_layout_for_rtn_gptq_export():
     cfg = RTNConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=True)
-    assert calls == 1
+    calls, module = _run_pack(cfg, requires_v2=True)
+    assert calls == 0
+    assert module.qzero_format() == 2
+    assert module._checkpoint_format_on_disk == FORMAT.GPTQ
 
 
 def test_pack_module_skips_for_rtn_gguf_export():
     cfg = GGUFConfig(bits=4, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=True)
+    calls, module = _run_pack(cfg, requires_v2=True)
     assert calls == 0
+    assert not hasattr(module, "_checkpoint_format_on_disk")
 
 
 def test_pack_module_skips_when_kernel_uses_v1():
     cfg = QuantizeConfig(bits=4, quant_method=METHOD.GPTQ, format=FORMAT.GPTQ, offload_to_disk=False)
-    calls = _run_pack(cfg, requires_v2=False)
+    calls, module = _run_pack(cfg, requires_v2=False)
     assert calls == 0
+    assert not hasattr(module, "_checkpoint_format_on_disk")

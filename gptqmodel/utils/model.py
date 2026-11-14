@@ -1385,14 +1385,18 @@ def pack_module(
             and getattr(module_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(
-                "convert_v2_to_v1",
+                "mark_checkpoint_qzero_format",
                 logger=log,
                 module_name=name,
             ):
-                convert_gptq_v2_to_v1_format_module(
-                    module=module,
-                    quantize_config=quantize_config,
-                )
+                # Packing writes logical (v2) zero points, which is also what a
+                # ``REQUIRES_FORMAT_V2`` kernel decodes. Convert only for
+                # serialization: leaving the live buffer in the v1 ``zero - 1``
+                # layout made every in-process forward read each zero point one
+                # step low (issue #4063). ``checkpoint_layout_qzeros`` and the
+                # writer emit the converted copy from this marker.
+                module.qzero_format(format=2)
+                module._checkpoint_format_on_disk = FORMAT.GPTQ
 
         # TODO: why move it back to gpu?
         # start = time.time()
@@ -2494,7 +2498,7 @@ def _collect_state_dict_with_offload(
                         f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
                     )
             else:
-                source = buf
+                source = _checkpoint_layout_buffer(module, buffer_name, buf)
             state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
 
     return state_dict
@@ -2521,6 +2525,28 @@ def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
                 clear()
             restored += 1
     return restored
+
+
+def _checkpoint_layout_buffer(
+    module: nn.Module,
+    buffer_name: str,
+    buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Return the checkpoint-layout payload for one live quantized buffer.
+
+    A kernel that requires the v2 qzero layout keeps logical zero points in
+    memory while the checkpoint stores the v1 ``zero - 1`` words. The module
+    owns the conversion so every serialization surface (this writer and
+    ``state_dict()``) emits the same bytes without mutating the live buffer.
+    """
+
+    if buffer_name != "qzeros":
+        return buffer
+    converter = getattr(module, "checkpoint_layout_qzeros", None)
+    if not callable(converter):
+        return buffer
+    converted = converter(buffer)
+    return buffer if converted is None else converted
 
 
 def get_state_dict_for_save(
@@ -2572,7 +2598,12 @@ def get_state_dict_for_save(
                     continue
                 if name in state_dict:
                     continue
-                state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
+                state_dict[name] = TensorSource(
+                    name=name,
+                    torch_dtype=buf.dtype,
+                    shape=tuple(buf.shape),
+                    source=_checkpoint_layout_buffer(module, buffer_name, buf),
+                )
 
     ptrs = collections.defaultdict(list)
     for name, entry in state_dict.items():
