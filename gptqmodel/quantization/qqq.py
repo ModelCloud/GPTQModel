@@ -14,6 +14,7 @@ from typing import Dict, Optional
 import torch
 import transformers
 from torch import nn
+from torch.nn import functional as F
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
@@ -23,6 +24,7 @@ from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.p2p import safe_move_to
+from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
@@ -367,6 +369,11 @@ class QQQ:
                 "width is per-group. Exclude grouped convolutions from QQQ "
                 "quantization or use an ungrouped equivalent."
             )
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)):
+            # Resolve the padding contract once, at validation, so an
+            # unsupported setting fails before calibration instead of silently
+            # capturing a Hessian for a different operator.
+            conv_padding_pairs(module)
 
     @staticmethod
     def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
@@ -548,22 +555,36 @@ class QQQ:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         if isinstance(self.layer, nn.Conv1d):
-            # nn.Unfold requires a 2-D spatial input, so add a singleton height
-            # dimension and unfold the length dimension only.
+            # nn.Unfold only accepts integer zero padding, so apply the
+            # convolution's own padding (including its mode) first and unfold
+            # the already-padded input. This keeps the Hessian describing the
+            # operator that will actually run.
+            (left, right), = conv_padding_pairs(self.layer)
+            inp = F.pad(
+                inp.unsqueeze(2),
+                (left, right, 0, 0),
+                mode=pad_mode(self.layer.padding_mode),
+            )
             unfold = nn.Unfold(
                 (1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(0, self.layer.padding[0]),
+                padding=0,
                 stride=(1, self.layer.stride[0]),
             )
-            inp = unfold(inp.unsqueeze(2))
+            inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
         elif isinstance(self.layer, nn.Conv2d):
+            (left, right), (top, bottom) = conv_padding_pairs(self.layer)
+            inp = F.pad(
+                inp,
+                (left, right, top, bottom),
+                mode=pad_mode(self.layer.padding_mode),
+            )
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
-                padding=self.layer.padding,
+                padding=0,
                 stride=self.layer.stride,
             )
             inp = unfold(inp)
