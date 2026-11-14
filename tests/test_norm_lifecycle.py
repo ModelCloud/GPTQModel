@@ -115,9 +115,10 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
             model.requantize(**args, norm=tune)
         assert all(torch.equal(v, before[k]) for k, v in model.model.state_dict().items())
         model.requantize(**args)
-        assert model.model.lm_head.qzero_format() == 1
-        with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-            model.requantize(calibration, norm=tune, calibration_data_min_length=1)
+        assert model.model.lm_head.qzero_format() == 2
+        # A fresh GPTQ pack now keeps the v2 runtime qzero layout in memory
+        # (#4063), so the reload-only norm-tuning guard no longer applies.
+        model.requantize(calibration, norm=tune, calibration_data_min_length=1)
         model.save(str(embedded))
         model = GPTQModel.load(str(embedded), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
     else:

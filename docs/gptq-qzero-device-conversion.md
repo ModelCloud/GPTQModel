@@ -4,7 +4,9 @@ SPDX-License-Identifier: Apache-2.0 -->
 # GPTQ qzeros conversion: packed helpers stay on the input device
 
 GPTQ zero points are stored packed, and two format conversions rewrite them:
-v1 -> v2 on load, and v2 -> v1 while packing a checkpoint for saving. Both go
+v1 -> v2 on load, and v2 -> v1 when a checkpoint is serialized (the live
+buffer keeps the kernel's runtime layout; see
+[the runtime vs checkpoint layout](gptq-qzero-runtime-layout.md)). Both go
 through `_shift_gptq_qzeros` (`gptqmodel/utils/model_dequant.py:990`), which
 decodes every packed field with `unpack_cols` (`:804`), shifts the logical
 values, and re-encodes them with `pack_cols` (`:827`). The same unpackers feed
@@ -29,7 +31,7 @@ the loop implementation.
 ```mermaid
 flowchart TD
     A["GPTQModel.load of a v1 checkpoint (loader.py:2526)"] --> B["utils/model.py:930 convert_gptq_v1_to_v2_format_module"]
-    C["pack_module v2 -> v1 (utils/model.py:1056)"] --> D["utils/model.py:1056 _revert_gptq_v1_qzeros_correction"]
+    C["serialize: checkpoint_layout_qzeros (qlinear/__init__.py)"] --> D["utils/model_dequant.py:1006 _revert_gptq_v1_qzeros_correction"]
     B --> E["model_dequant.py:1000 _correct_gptq_v1_qzeros"]
     D --> F["model_dequant.py:1004 _revert_gptq_v1_qzeros_correction"]
     E --> G["model_dequant.py:990 _shift_gptq_qzeros"]

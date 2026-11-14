@@ -1247,6 +1247,41 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         super()._save_to_state_dict(destination, prefix, keep_vars)
         self._write_checkpoint_layout_qzeros(destination, prefix)
 
+    def checkpoint_layout_qzeros(self, qzeros=None) -> t.Tensor | None:
+        """Return qzeros converted to the checkpoint layout, or ``None``.
+
+        The live buffer is never mutated. A kernel that requires the v2 runtime
+        layout keeps its logical zero points in memory, while the checkpoint
+        (``_checkpoint_format_on_disk``) stores the v1 ``zero - 1`` convention.
+        Serialization surfaces call this and write the returned copy, so the
+        in-memory module and the on-disk file can differ without either one
+        misreading the other's words.
+        """
+
+        if qzeros is None:
+            qzeros = getattr(self, "qzeros", None)
+        if qzeros is None or qzeros.numel() == 0:
+            return None
+
+        checkpoint_format = getattr(self, "_checkpoint_format_on_disk", None)
+        if checkpoint_format is None:
+            return None
+        runtime_format = self._qzeros_format
+        planar = bool(getattr(self, "planar", False))
+        if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
+            from ...utils.model_dequant import _revert_gptq_v1_qzeros_correction
+
+            return _revert_gptq_v1_qzeros_correction(
+                qzeros, self.bits, planar=planar,
+            )
+        if runtime_format == 1 and checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
+            from ...utils.model_dequant import _correct_gptq_v1_qzeros
+
+            return _correct_gptq_v1_qzeros(
+                qzeros, self.bits, planar=planar,
+            )
+        return None
+
     def _write_checkpoint_layout_qzeros(self, destination, prefix: str) -> None:
         """Emit qzeros in the checkpoint's format, not the kernel's runtime one.
 
@@ -1257,28 +1292,10 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         mislabel v2 words as v1.
         """
 
-        from ...utils.model_dequant import (
-            _correct_gptq_v1_qzeros,
-            _revert_gptq_v1_qzeros_correction,
-        )
-
         qzeros = destination.get(prefix + "qzeros")
-        if qzeros is None or qzeros.numel() == 0:
-            return
-
-        checkpoint_format = getattr(self, "_checkpoint_format_on_disk", None)
-        if checkpoint_format is None:
-            return
-        runtime_format = self._qzeros_format
-        planar = bool(getattr(self, "planar", False))
-        if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
-            destination[prefix + "qzeros"] = _revert_gptq_v1_qzeros_correction(
-                qzeros, self.bits, planar=planar,
-            )
-        elif runtime_format == 1 and checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            destination[prefix + "qzeros"] = _correct_gptq_v1_qzeros(
-                qzeros, self.bits, planar=planar,
-            )
+        converted = self.checkpoint_layout_qzeros(qzeros)
+        if converted is not None:
+            destination[prefix + "qzeros"] = converted
 
     def _load_from_state_dict(self, *args, **kwargs):
         super()._load_from_state_dict(*args, **kwargs)
