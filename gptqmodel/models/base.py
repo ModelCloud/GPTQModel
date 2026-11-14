@@ -484,6 +484,11 @@ _LAYER_TYPE_REPLAY_KWARGS_KEY = "_gptqmodel_layer_type_replay_kwargs"
 # declared type (`full_attention`, `hybrid`, ...) uses the plain causal mask.
 _LAYER_TYPE_SLIDING = "sliding_attention"
 
+# Returned when a declared layer type has no single mask builder (for example
+# the composite `hybrid` pattern). Replay then keeps the captured layer-0 mask
+# instead of guessing one.
+_LAYER_TYPE_MASK_UNSUPPORTED = object()
+
 
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
@@ -3416,7 +3421,7 @@ class BaseQModel(nn.Module):
     ):
         """Rebuild the mask `transformers` would hand to a layer of `layer_type`."""
 
-        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+        from transformers.masking_utils import LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING
 
         mask_kwargs = {
             "config": text_config,
@@ -3428,13 +3433,14 @@ class BaseQModel(nn.Module):
         if getattr(text_config, "use_bidirectional_attention", False):
             or_mask_function = self._layer_type_or_mask(layer_type, text_config)
             if or_mask_function is None:
-                return None
+                return _LAYER_TYPE_MASK_UNSUPPORTED
             mask_kwargs["or_mask_function"] = or_mask_function
-        builder = (
-            create_sliding_window_causal_mask
-            if layer_type == _LAYER_TYPE_SLIDING
-            else create_causal_mask
-        )
+        # Use the same pattern-to-builder table `create_masks_for_generate` uses.
+        # A bare `create_causal_mask` fallback silently gives chunked, recurrent,
+        # and other non-sliding types the wrong attention pattern.
+        builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+        if builder is None or isinstance(builder, dict):
+            return _LAYER_TYPE_MASK_UNSUPPORTED
         return builder(**mask_kwargs)
 
     def _build_layer_type_position_embeddings(
@@ -3540,13 +3546,15 @@ class BaseQModel(nn.Module):
         by_type: Dict[str, Dict[str, Any]] = {}
         for layer_type in sorted(set(layer_types) - {base_type}):
             entry: Dict[str, Any] = {}
-            entry["attention_mask"] = self._build_layer_type_attention_mask(
+            layer_type_mask = self._build_layer_type_attention_mask(
                 text_config=text_config,
                 layer_type=layer_type,
                 hidden_states=hidden_states,
                 raw_attention_mask=raw_attention_mask,
                 position_ids=position_ids,
             )
+            if layer_type_mask is not _LAYER_TYPE_MASK_UNSUPPORTED:
+                entry["attention_mask"] = layer_type_mask
             if rotary is not None:
                 entry["position_embeddings"] = self._build_layer_type_position_embeddings(
                     rotary=rotary,
@@ -3660,16 +3668,18 @@ class BaseQModel(nn.Module):
         if not entry:
             return
 
-        # Only replace kwargs the caller is already replaying: a model that is
-        # handed no mask (for example a wrapper that keeps the layer-0 mask out
-        # of replay) must not start receiving one here.
-        if "attention_mask" in entry and additional_inputs.get("attention_mask") is not None:
+        # A `None` layer-0 mask can mean "causal skip" rather than "masks are
+        # disabled", so a later layer type that needs a materialized mask (for
+        # example chunked attention after a full-attention layer 0) must still
+        # receive it. Only skip the write when both sides are `None`.
+        if "attention_mask" in entry:
             layer_type_mask = entry["attention_mask"]
-            additional_inputs["attention_mask"] = (
-                None
-                if layer_type_mask is None
-                else move_to(layer_type_mask, device=target_device)
-            )
+            if layer_type_mask is not None or additional_inputs.get("attention_mask") is not None:
+                additional_inputs["attention_mask"] = (
+                    None
+                    if layer_type_mask is None
+                    else move_to(layer_type_mask, device=target_device)
+                )
         position_embeddings = entry.get("position_embeddings")
         if position_embeddings is not None and additional_inputs.get("position_embeddings") is not None:
             additional_inputs["position_embeddings"] = self._move_position_embeddings(
