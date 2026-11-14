@@ -1224,6 +1224,29 @@ class LazyTurtle:
             weight_map = self._load_weight_map(tempdir)
             return tempdir, weight_map
 
+    def has_checkpoint_tensor(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        rel_name: str = "weight",
+    ) -> bool:
+        """Return whether the checkpoint owns `rel_name` for one shell submodule.
+
+        This resolves the same runtime-to-checkpoint aliases as the
+        materializers but never loads a tensor, so callers can decide whether a
+        lazily loaded module has an independent source weight at all. A tied
+        embedding model omits `lm_head.weight` from the checkpoint, which is
+        exactly the case the shell cannot discover through parameter identity.
+        """
+
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock:
+            source_name, _expert_index, _split_index, _split_dim = (
+                self._resolve_checkpoint_tensor_source(path, rel_name)
+            )
+            return source_name is not None
+
     def checkpoint_tensors_for_submodule(
         self,
         *,

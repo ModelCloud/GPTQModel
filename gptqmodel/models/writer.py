@@ -210,6 +210,38 @@ def _merge_missing_config_fields(saved: Dict[str, Any], source: Dict[str, Any]) 
             _merge_missing_config_fields(saved[key], value)
 
 
+def hf_compat_warnings(quantize_config: Any, runtime_format: FORMAT) -> List[str]:
+    """Return the ways this checkpoint is unsafe for a plain HF loader.
+
+    GPT-QModel can serialize more than `transformers.AutoModelForCausalLM`
+    consumes, and both gaps below are silent: HF random-initializes the missing
+    `lm_head.weight` and builds uninitialized AWQ layers for excluded modules.
+    Reporting them at save time is the only place the information still exists.
+    """
+
+    del runtime_format  # the caveats are format-independent
+    warnings: List[str] = []
+    if bool(getattr(quantize_config, "lm_head", False)):
+        warnings.append(
+            "`lm_head=True` stores the output head as quantized `lm_head.qweight` "
+            "and drops `lm_head.weight`, so `AutoModelForCausalLM.from_pretrained` "
+            "random-initializes the head and returns garbage logits. Load this "
+            "checkpoint with `GPTQModel.load` or vLLM."
+        )
+    if (
+        getattr(quantize_config, "method", None) == METHOD.AWQ
+        and getattr(quantize_config, "bits", None) == 8
+    ):
+        warnings.append(
+            "8-bit AWQ is packed in GPT-QModel's natural lane order (lane i is "
+            "output column i). vLLM `awq_marlin` and AutoAWQ undo a `[0, 2, 1, 3]` "
+            "interleave, so they decode these weights and zero points in the "
+            "wrong order and lose accuracy silently. Load 8-bit AWQ with "
+            "`GPTQModel.load`, or export 4-bit AWQ for vLLM."
+        )
+    return warnings
+
+
 def _quantization_config_for_model_config(
     quantize_config: Any,
     runtime_format: FORMAT,
@@ -1934,6 +1966,9 @@ def ModelWriter(cls):
             log.warn(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPT-QModel version >= {MIN_VERSION_WITH_V2}."
             )
+
+        for compat_warning in hf_compat_warnings(quantize_config, runtime_format):
+            log.warn(f"Model: {compat_warning}")
 
         if runtime_format == FORMAT.EXL3:
             _validate_exllamav3_publication_modules(

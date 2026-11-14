@@ -74,6 +74,43 @@ column order that `marlin_zero_points` expects.
 | `_undo_awq_interleave` (`gptqmodel/nn_modules/qlinear/machete_awq.py:35-45` on main) | permuted 8-bit with `[0,2,1,3]` | returns 8-bit input unchanged |
 | `convert_awq_file` (`gptqmodel/utils/model_dequant.py:1569-1572` on main) | `bits = 4` and generic `unpack_cols`, no `AWQ_REVERSE_ORDER` | reads `bits` from the quantization config and uses `unpack_awq` + `reverse_awq_order` |
 
+## 8-bit lane order and vLLM
+
+Two consumers disagree about the 8-bit lane order, and neither reports a
+problem:
+
+- GPT-QModel's 8-bit packer (`pack_awq`) and readers (`_unpack_columnwise`,
+  `dequantize_gemm`) use natural order: lane `i` of a 32-bit word is output
+  column `i`.
+- vLLM's `awq_marlin` repack (`awq_marlin_repack.cu`, `undo_pack[4] =
+  {0, 2, 1, 3}` in both 0.11 and 0.33) and AutoAWQ undo a `[0, 2, 1, 3]`
+  interleave for every non-4-bit width, which swaps lanes 1 and 2.
+
+Decision for this change: **natural order stays canonical for GPT-QModel**, and
+an 8-bit AWQ export logs a warning that the checkpoint is not
+`awq_marlin`-loadable. The alternative — writing the `[0, 2, 1, 3]` interleave
+and undoing it in every GPT-QModel reader — was rejected because:
+
+1. It would change the meaning of every 8-bit AWQ checkpoint published since
+   #3993, with no version marker to tell the two layouts apart.
+2. The `awq_marlin` side of that decision lives in a compiled extension
+   (`gptqmodel_ext/marlin/awq_marlin_repack.cu`), so flipping the canonical
+   order cannot be validated without rebuilding and re-qualifying that kernel
+   on every supported architecture.
+
+The warning is emitted by `hf_compat_warnings` in
+`gptqmodel/models/writer.py`, and the same function reports a quantized
+`lm_head`. See the [checkpoint compatibility](checkpoint-compat.md) page for the
+full contract.
+
+Measured with an independent FP64 oracle (`out_features=64`, `in_features=128`,
+`group_size=32`, 8-bit codes, maximum absolute weight error):
+
+| Decode | Error vs FP64 oracle |
+| --- | --- |
+| natural order (GPT-QModel) | 4.12e-07 |
+| vLLM `[0, 2, 1, 3]` order | 8.42 |
+
 ## Contracts
 
 - `bits` is read from `quantization_config["bits"]`; a missing key keeps the
@@ -83,6 +120,8 @@ column order that `marlin_zero_points` expects.
 - An unsupported width raises instead of guessing a layout.
 - `dequantize_model` passes the checkpoint's quantization config into
   `convert_awq_file`, so the width is never hardcoded.
+- 8-bit `qweight`/`qzeros` are written in natural lane order and are not
+  vLLM-`awq_marlin`-compatible; saving one logs that limitation.
 
 ## Validation
 
