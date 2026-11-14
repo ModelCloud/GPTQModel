@@ -116,6 +116,7 @@
     "marin": "Qwen3QModel",
     "mimo": "MimoQModel",
     "mimo_v2": "MimoV2QModel",
+    "mimo_v2_flash": "MimoV2FlashQModel",
     "minicpm": "MiniCPMGPTQ",
     "minicpm3": "MiniCpm3QModel",
     "minicpmo": "MiniCPMOQModel",
@@ -984,7 +985,7 @@
       ]
     },
     "GlmASRGPTQ/gptq": {
-      "layers": ["language_model.model.layers"],
+      "layers": ["model.language_model.layers"],
       "blocks": [
         ["input_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -1412,13 +1413,13 @@
         ["operator_norm:!"],
         ["conv.in_proj", "conv.out_proj"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
+        ["self_attn.out_proj"],
         ["ffn_norm:!"],
         ["feed_forward.gate:!"],
         ["feed_forward.w1", "feed_forward.w3"],
         ["feed_forward.w2"],
-        ["feed_forward.experts.{expert_index}.w1", "feed_forward.experts.{expert_index}.w3"],
-        ["feed_forward.experts.{expert_index}.w2"]
+        ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj"],
+        ["feed_forward.experts.{expert_index}.down_proj"]
       ]
     },
     "LFM2VLQModel/gptq": {
@@ -1601,6 +1602,21 @@
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
+      ]
+    },
+    "MimoV2FlashQModel/gptq": {
+      "layers": ["model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"]
       ]
     },
     "MimoV2QModel/gptq": {
