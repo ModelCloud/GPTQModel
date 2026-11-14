@@ -183,7 +183,7 @@ def main() -> None:
         "torch": torch.__version__, "gil_enabled": sys._is_gil_enabled(),
         "upstream_fused_checkout": str(UPSTREAM), "upstream_fused_commit": upstream_head,
         "upstream_fused_source_sha256": hashlib.sha256((UPSTREAM / "gptqmodel_ext/nf12/csrc/codec/embedding.cu").read_bytes()).hexdigest(),
-        "rowmajor_source_sha256": hashlib.sha256((ROOT / "gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu").read_bytes()).hexdigest(),
+        "rowmajor_source_sha256": hashlib.sha256((ROOT / "gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu").read_bytes()).hexdigest(),
         "weight_sha256": weight_sha, "ids_fixture_sha256": hashlib.sha256(source_bytes).hexdigest(),
         "shape": [n, k], "repeat": args.repeat, "rounds": args.rounds,
         "selected_variants": sorted(variants),

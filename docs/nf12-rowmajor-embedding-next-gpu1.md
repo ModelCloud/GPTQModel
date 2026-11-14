@@ -1,5 +1,9 @@
 # NF12 row-major embedding vector experiment on GPU1
 
+This page records the prototype measurements that led to production adoption.
+The shipped cross-vendor flow is documented in
+[NF12 row-major embedding storage](nf12-row-major-embedding.md).
+
 Baseline: `e3141059`. This experiment extends the GPU2 row-major prototype
 with native vector loads, contiguous stores, cache variants, and CTA ID packing.
 It does not change the installed NF12 operator.
@@ -84,7 +88,7 @@ faster on those code cases. Production adoption needs a row-major checkpoint
 layout and weight mutation lifecycle; the experiment does not add dispatch or
 model-owned cache state.
 
-Source: [kernel](../gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu)
+Source: [kernel](../gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu)
 and [benchmark](../scripts/bench_nf12_rowmajor_embedding_next.py).
 Raw samples: [first run](nf12-rowmajor-next-gpu1-20261111.json) and
 [confirmation](nf12-rowmajor-next-gpu1-confirm-20261111.json).

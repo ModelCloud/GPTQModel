@@ -140,6 +140,13 @@ class FORMAT(str, Enum):
     PAROQUANT = "paroquant"
 
 
+class AutoDtypeCast(str, Enum):
+    """Storage policy for source weights used during quantization forwards."""
+
+    OFF = "off"
+    AUTO_NF12 = "auto_nf12"
+
+
 # quant methods
 class METHOD(str, Enum):
     """Supported quantization algorithms exposed by config payloads."""
@@ -4005,6 +4012,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # Serialized/exported checkpoint layout. This is the authoritative post-quantization format.
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    # Compress eligible source matrices for calibration forwards. The original
+    # dense dtype is restored from the lossless NF12 representation immediately
+    # before the quantizer consumes each matrix.
+    auto_dtype_cast: AutoDtypeCast = field(default=AutoDtypeCast.AUTO_NF12)
+
     # Input quantization for selected GPTQ Linear modules. Saved weights remain
     # ordinary INT32-packed GPTQ tensors; this only selects the activation path.
     activation: Optional[Union[str, Dict[str, Any]]] = field(default=None)
@@ -4283,6 +4295,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
     def __post_init__(self):
+        try:
+            self.auto_dtype_cast = AutoDtypeCast(self.auto_dtype_cast)
+        except ValueError as exc:
+            raise ValueError(
+                "auto_dtype_cast must be 'auto_nf12' or 'off'"
+            ) from exc
         self.method = _normalize_quant_method(self.method)
         format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -4815,6 +4833,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
             "activation": self.activation,
+            "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
             QUANT_METHOD_FIELD: self.method,
             FORMAT_FIELD_CODE: self.format,

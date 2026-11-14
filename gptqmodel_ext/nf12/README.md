@@ -44,6 +44,18 @@ chooses one 8-bit biased exponent base `B` (0..120); a value is stored in a
 escape table. `decode(encode(W))` is bit-identical to `W` for every BF16
 input, including `-0`, subnormals, Inf, and NaN payloads.
 
+`nf12_decode` writes BF16. `nf12_decode_fp32` writes the same elements as
+FP32, widening each register pair with a bit shift during the store, so a
+BF16 matrix is never materialized for FP32 consumers. The two outputs agree
+bit for bit, and the fused store moves 5.5 bytes per element instead of 9.5.
+
+`nf12_sub_fp32` extends the widening store with a subtraction:
+`out = widen(decode(W)) - wq` for a contiguous FP32 `wq`. It is the EoRA
+`w - wq` path, so the FP32 source matrix is never written; the result is
+bit-identical to `nf12_decode_fp32` followed by `Tensor - wq`. The fused store
+peaks at 4 B/element instead of 8 B/element and is 1.76× to 1.85× faster on
+the large Llama projections.
+
 The tiled memory layout packs 16x64 super-atoms so a decoded group is exactly
 the `A` fragment of `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`.
 Constraints are `N % 16 == 0` and `K % 64 == 0`.

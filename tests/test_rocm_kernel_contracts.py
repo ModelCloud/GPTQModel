@@ -16,6 +16,7 @@ from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
+from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -27,7 +28,8 @@ ROCM_KERNELS = set("""
     AllSparkLinear AllSparkAwqLinear AwqGEMMTritonLinear AwqGEMVTritonLinear
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
-    GGUFTorchLinear ParoLinear VPTQLinear NF12Linear
+    GGUFTorchLinear ParoLinear ParoQuantTritonLinear VPTQLinear NF12Linear
+    TTBlockfloatLinear
 """.split())
 CUDA_ONLY_KERNELS = set("""
     TritonV2Linear W4AFP8Linear W4ANVFP4Linear ExllamaV2Linear AwqExllamaV2Linear
@@ -45,9 +47,12 @@ OTHER_KERNELS = set("""
     ParoMlxQuantLinear QQQMlxQuantLinear GGUFMlxQuantLinear FP8MlxQuantLinear
     BitsAndBytesMlxQuantLinear
     XLALinear
-    TTNNLinear
+    TTNNLinear TTNNBlockFloat8Linear
 """.split())
-KERNELS = sorted([*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings], key=lambda c: c.__name__)
+KERNELS = sorted(
+    [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
+    key=lambda c: c.__name__,
+)
 
 
 @pytest.fixture

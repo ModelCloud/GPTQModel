@@ -51,8 +51,8 @@ def load() -> None:
         # may already own the torch namespace. A second TORCH_LIBRARY load
         # would fail, so reuse a complete registered implementation.
         namespace = torch.ops.nf12
-        required = ("encode", "decode", "linear", "embedding", "encode_moe",
-                    "moe_linear", "_fused_moe")
+        required = ("encode", "decode", "linear", "embedding", "rowmajor_pack",
+                    "rowmajor_embedding", "encode_moe", "moe_linear", "_fused_moe")
         if all(callable(getattr(namespace, name, None)) for name in required):
             _loaded.set()
             return
@@ -78,6 +78,15 @@ def _register_fakes() -> None:
         n, row_bytes = packed.shape
         return packed.new_empty((n, row_bytes * 2 // 3), dtype=torch.bfloat16)
 
+    @torch.library.register_fake("nf12::decode_fp32")
+    def _decode_fp32(packed, escapes, exp_base):
+        n, row_bytes = packed.shape
+        return packed.new_empty((n, row_bytes * 2 // 3), dtype=torch.float32)
+
+    @torch.library.register_fake("nf12::sub_fp32")
+    def _sub_fp32(packed, escapes, exp_base, wq):
+        return torch.empty_like(wq)
+
     @torch.library.register_fake("nf12::linear")
     def _linear(x, packed, escapes, exp_base, bias=None, *, static_weights=False):
         return x.new_empty((*x.shape[:-1], packed.shape[0]))
@@ -102,6 +111,21 @@ def _register_fakes() -> None:
     @torch.library.register_fake("nf12::embedding_repeat4")
     def _embedding_repeat4(ids, packed, escapes, exp_base):
         return packed.new_empty((*ids.shape, 4, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
+
+    @torch.library.register_fake("nf12::rowmajor_pack")
+    def _rowmajor_pack(packed, escapes, exp_base):
+        ctx = torch.library.get_ctx()
+        n, row_bytes = packed.shape
+        row_packed = packed.new_empty((n, row_bytes), dtype=torch.uint8)
+        row_escapes = packed.new_empty((ctx.new_dynamic_size(), 4), dtype=torch.int16)
+        return (row_packed, row_escapes, ctx.new_dynamic_size(min=0),
+                ctx.new_dynamic_size(min=0))
+
+    @torch.library.register_fake("nf12::rowmajor_embedding")
+    def _rowmajor_embedding(ids, row_packed, row_escapes, exp_base):
+        return row_packed.new_empty(
+            (*ids.shape, row_packed.shape[1] * 2 // 3), dtype=torch.bfloat16
+        )
 
     @torch.library.register_fake("nf12::encode_moe")
     def _encode_moe(w):

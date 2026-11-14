@@ -417,15 +417,18 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #endif  // NF12_HAS_WMMA
 }
 
-// Sum the per-split FP32 planes and round to BF16 exactly once, so the result
-// is identical to a single-pass FP32 accumulation followed by one rounding
-// (splitting K only changes the association order of the FP32 adds).
+// Sum the per-split FP32 planes pairwise and round to BF16 exactly once.
+// K splitting creates several long FP32 accumulator chains; a balanced tree
+// avoids adding a small tail partial to an already large linear sum.
 __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bfloat16* __restrict__ out,
                                    int64_t total, int splits, int64_t n, const __hip_bfloat16* __restrict__ bias) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
-    float s = partial[i];
-    for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
+    float vals[8];
+    for (int j = 0; j < splits; ++j) vals[j] = partial[int64_t(j) * total + i];
+    for (int width = 1; width < splits; width *= 2)
+      for (int j = 0; j + width < splits; j += 2 * width) vals[j] += vals[j + width];
+    float s = vals[0];
     if (bias != nullptr) s += __bfloat162float(bias[i % n]);
     out[i] = __float2bfloat16(s);
   }
@@ -495,6 +498,7 @@ static bool wmma_available() {
 //   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
 //   8192x8192    64 CTAs, 128 k-blocks   s1 / s1
 //   8192x57344  448 CTAs, 128 k-blocks   s2 / s2
+//   8192x2048    16 CTAs, 128 k-blocks   s8 / s8
 //   2048x8192    64 CTAs,  32 k-blocks   s1 / s1
 //   896x4864     38 CTAs,  14 k-blocks   s1 / s1
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
@@ -508,6 +512,12 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // single token tile leaves the machine idle; at m=32/64 the extra CTAs only
   // add the reduce pass (1260/1371 -> 1230/1293 us).
   if (blocks_x >= 8 * kOneWave) return (m >= 128 || m <= 16) ? 2 : 1;
+  // A single token tile with long K and a half-wave to one-wave grid still
+  // benefits from split-K. On gfx1201, 2048x8192 at m=16 drops from 45.3 us
+  // unsplit to 23.2 us with eight disjoint K slices.
+  if (m <= 16 && blocks_x >= kOneWave / 2 && blocks_x <= kOneWave &&
+      k_blocks >= 4 * kOneWave)
+    return 8;
   // Wide N already fills the machine several times over, so a split only adds
   // the reduce pass. Measured on gfx1201 against the same launch with one K
   // pass: 4096x28672 (224 CTAs) lost 6.5% / 11.1% / 23.7% at m=16/32/64 when
@@ -682,7 +692,8 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   const int lds_kib = pad ? 36 : 32;
   const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
   const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
-  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
+  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved) &&
+                   !(m <= 16 && splits >= 8 && ctas >= 4 * kCtasPerWave);
   // Only the two smallest tile counts get the runtime buffer choice; from
   // three tiles up the buffer is unconditional, so those stay single.
 #define NF12_TILES(SRC, T, D)                                                \

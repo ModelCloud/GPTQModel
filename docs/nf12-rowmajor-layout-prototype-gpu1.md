@@ -1,5 +1,9 @@
 # NF12 row-major embedding layout prototype on GPU1
 
+This page records the prototype measurements that led to production adoption.
+The shipped cross-vendor flow is documented in
+[NF12 row-major embedding storage](nf12-row-major-embedding.md).
+
 Baseline: `e3141059`. This is an explicit experimental helper and native
 prototype; the production NF12 operator, Lite loader, and Lite model are
 unchanged. It extends the [four-lane lookup experiment](nf12-rowmajor-embedding-next-gpu1.md)
@@ -123,7 +127,7 @@ code IDs at M1536/2048/3072, while M312/313 is 3–4% slower. It remains an
 experimental layout with no dynamic cache or production dispatch.
 
 Prototype: [API](../gptqmodel_nf12/experimental_rowmajor.py),
-[native transform and lookup](../gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu),
+[native transform and lookup](../gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu),
 [benchmark](../scripts/bench_nf12_rowmajor_layout_gpu1.py), and
 [tests](../tests/test_nf12_rowmajor_experimental.py).
 The [raw GPU1 report](nf12-rowmajor-layout-gpu1-20261111.json) contains all

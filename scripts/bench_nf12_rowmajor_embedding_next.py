@@ -34,7 +34,10 @@ repack_rowmajor = from_nf12
 
 
 def load_kernel():
-    source = Path(__file__).resolve().parents[1] / "gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu"
+    )
     key = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
     output = Path(tempfile.gettempdir()) / f"nf12-rowmajor-next-embed-{key}.so"
     if not output.is_file():

@@ -1383,9 +1383,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         )
         deferred_quant_source = (
             isinstance(named_module.state.get("quant_source_module"), torch.nn.Module)
+            or named_module.state.get("auto_dtype_cast_source_spec") is not None
             or needs_deferred_quant_source
             or get_device(named_module.module) == META
         )
+        auto_dtype_cast_source = named_module.state.get("auto_dtype_cast_source_spec")
         if deferred_quant_source:
             prepared = self.gptq_model.shell_module_materialize(
                 target_submodule=named_module.module,
@@ -1395,6 +1397,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             )
             if prepared is not named_module.module:
                 named_module.module = prepared
+            if auto_dtype_cast_source is not None:
+                self._rebind_processor_task_module(
+                    processor,
+                    named_module,
+                    None,
+                    prepared,
+                )
             # Shell materialization may leave Accelerate hooks pointing at the
             # previous placement, so realign them explicitly.
             rehome_module_to_device(
@@ -2128,6 +2137,25 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             # some modules are skipped
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
+            else:
+                source_module = subset[name].module
+                # EoRA runs after quantization: its forward must consume the
+                # quantized module in the model tree, not a freshly packed
+                # copy of the restored dense source.
+                if isinstance(processor, EoraProcessor):
+                    subset[name].state["auto_dtype_cast_forward_disabled"] = True
+                    continue
+                packed_module = self.gptq_model._maybe_auto_dtype_cast_forward_module(
+                    source_module,
+                    device=get_device(source_module),
+                    named_module=subset[name],
+                )
+                if packed_module is not source_module:
+                    subset[name].module = packed_module
+                    full[name] = subset[name]
+                    self._release_processor_task_source_storage(
+                        processor, subset[name], source_module
+                    )
 
         for name in skipped_modules:
             subset.pop(name)
@@ -2135,3 +2163,53 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if task_map is not None:
                 task_map.pop(name, None)
         return subset
+
+    @staticmethod
+    def _rebind_processor_task_module(
+        processor: LoopProcessor,
+        named_module: NamedModule,
+        old_module: torch.nn.Module | None,
+        new_module: torch.nn.Module,
+    ) -> None:
+        """Keep processor task state on the current source representation."""
+
+        tasks = getattr(processor, "tasks", None)
+        if not tasks:
+            return
+        task = tasks.get(named_module.name)
+        if task is None:
+            return
+        if isinstance(task, dict):
+            capture = task.get("capture")
+            if capture is not None and getattr(capture, "module", None) is old_module:
+                capture.module = new_module
+            return
+        if old_module is None or getattr(task, "module", None) is old_module:
+            task.module = new_module
+
+    @staticmethod
+    def _release_processor_task_source_storage(
+        processor: LoopProcessor,
+        named_module: NamedModule,
+        source_module: torch.nn.Module,
+    ) -> None:
+        """Drop dense task storage while keeping task metadata for capture."""
+
+        tasks = getattr(processor, "tasks", None)
+        task = tasks.get(named_module.name) if tasks else None
+        if task is None or isinstance(task, dict):
+            return
+        module = getattr(task, "module", None)
+        if module is not source_module:
+            return
+        for name in ("weight", "bias"):
+            tensor = getattr(module, name, None)
+            if isinstance(tensor, torch.Tensor) and not tensor.is_meta:
+                setattr(
+                    module,
+                    name,
+                    torch.nn.Parameter(
+                        torch.empty_like(tensor, device="meta"),
+                        requires_grad=False,
+                    ),
+                )
