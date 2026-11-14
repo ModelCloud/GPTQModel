@@ -370,7 +370,6 @@ def test_exact_hadamard_head_dim_uses_the_weight_device(monkeypatch, output):
         expected_bias = block_hadamard(bias.reshape(1, -1)).reshape(bias.shape)
     else:
         expected_weight = block_hadamard(weight)
-        expected_bias = None
 
     assert linear.weight.device.type == "cpu"
     assert backend.calls == []
