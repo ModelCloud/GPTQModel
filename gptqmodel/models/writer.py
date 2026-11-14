@@ -24,7 +24,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
@@ -67,6 +67,7 @@ from ..utils.model import (
     TensorSource,
     _atomic_shard_path,
     _validate_offload_sources_outside_save_dir,
+    convert_loaded_qzeros_for_format_change,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -74,6 +75,7 @@ from ..utils.model import (
     get_state_dict_for_save,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
+    resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
@@ -1997,6 +1999,12 @@ def ModelWriter(cls):
         save_state_overlay = _validated_save_state_overlay(self)
         quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
         runtime_format = resolve_quant_format(quantize_config.format, quant_method)
+
+        # Fail before writing any config when a loaded checkpoint's format was
+        # changed to a layout that cannot be converted exactly.
+        if self.load_quantized_model:
+            resolve_resave_format_conversion(quantize_config)
+
         checkpoint_passthrough_plan = None
 
         if runtime_format == FORMAT.GPTQ_V2:
@@ -2329,6 +2337,7 @@ def ModelWriter(cls):
 
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
+            external_inclusions = qcfg.external_module_inclusions()
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
@@ -2352,10 +2361,15 @@ def ModelWriter(cls):
                     relative == leaf or (relative.startswith(f"{leaf}.") and EXPERT_INDEX_PLACEHOLDER in leaf)
                     for leaf in declared
                 )
+                inclusion_match = (
+                    external_inclusions is None
+                    or relative is None
+                    or any(relative.endswith(entry) for entry in external_inclusions)
+                )
                 if any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")
                         for ignore_module in ignore_modules
-                ) or not relative_match:
+                ) or not relative_match or not inclusion_match:
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2392,6 +2406,24 @@ def ModelWriter(cls):
                 # offload_state_dict=True,
                 # offload_buffers=True,
             )
+            resave_conversion = resolve_resave_format_conversion(qcfg)
+            if resave_conversion is not None:
+                source_format, target_format = resave_conversion
+                converted = convert_loaded_qzeros_for_format_change(
+                    model, source_format, target_format,
+                )
+                log.info(
+                    "Model: converted qzeros for format change `%s` -> `%s` on %s modules.",
+                    source_format,
+                    target_format,
+                    converted,
+                )
+            # The rebuilt shell now carries the target layout; do not convert
+            # again if its state dict is serialized directly.
+            target_format = resolve_quant_format(qcfg.format, qcfg.method)
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = target_format
         torch_empty_cache()
         return model
 

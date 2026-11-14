@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os.path
+import re
 import tempfile
 import threading
 import weakref
@@ -3270,6 +3271,95 @@ def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
     return patterns
 
 
+# Third-party producers record module exclusions outside `dynamic`.  AutoAWQ /
+# HF `AwqConfig` use `modules_to_not_convert`, llm-compressor uses `ignore`,
+# and Optimum's GPTQ path uses `modules_in_block_to_quantize` (an inclusion
+# list).  Fold the two exclusion lists into `-:` dynamic rules so the loader
+# has one authoritative decision surface; the inclusion list needs the module
+# tree and is applied by the loader.
+_EXTERNAL_EXCLUSION_KEYS = ("modules_to_not_convert", "ignore")
+_EXTERNAL_INCLUSION_KEY = "modules_in_block_to_quantize"
+
+
+def _external_string_list(value: Any) -> List[str]:
+    """Flatten a producer's string / list-of-strings / list-of-lists value."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            if item:
+                result.append(item)
+        elif isinstance(item, (list, tuple)):
+            result.extend(entry for entry in item if isinstance(entry, str) and entry)
+    return result
+
+
+def _external_exclusion_dynamic_pattern(pattern: str) -> Optional[str]:
+    """Translate one producer exclusion into a `dynamic` matching pattern.
+
+    AutoAWQ / HF / vLLM compare these entries as module-name substrings, while
+    `dynamic` rules are exact literals or start-anchored regexes.  Plain names
+    become a suffix regex (``.*(?:^|\\.)down_proj$``); anything that already
+    contains regex metacharacters is kept verbatim.
+    """
+
+    pattern = pattern.strip()
+    if not pattern:
+        return None
+    # A dot is ambiguous: it is both a module separator and a regex wildcard.
+    # Producer keys name modules, so treat dotted plain names as literals and
+    # only keep patterns with explicit regex syntax.
+    if any(character in pattern for character in "*+?[](){}|^$\\"):
+        try:
+            pcre.compile(pattern)
+            return pattern
+        except Exception:
+            # Producers also emit glob-style entries (e.g. `*.mlp.down_proj`).
+            # Fall back to a glob-to-regex suffix instead of rejecting the
+            # whole checkpoint over one unparsable pattern.
+            glob_parts = pattern.split("*")
+            return r".*(?:^|\.)" + r".*".join(re.escape(part) for part in glob_parts) + "$"
+    return r".*(?:^|\.)" + re.escape(pattern) + "$"
+
+
+def _apply_external_checkpoint_module_filters(
+    config: "BaseQuantizeConfig",
+    exclusion_patterns: List[str],
+    inclusion_patterns: Optional[List[str]],
+) -> None:
+    """Attach producer-declared exclusions/inclusions to a parsed config."""
+
+    patterns = list(dict.fromkeys(exclusion_patterns))
+    # `AWQConfig` keeps the compatibility field; preserve it as an exclusion
+    # source as well so a config constructed without the parser still honors it.
+    patterns = list(dict.fromkeys(
+        patterns + _external_string_list(getattr(config, "modules_to_not_convert", None))
+    ))
+    if patterns:
+        derived = []
+        for pattern in patterns:
+            dynamic_pattern = _external_exclusion_dynamic_pattern(pattern)
+            if dynamic_pattern is not None:
+                derived.append(dynamic_pattern)
+        if derived:
+            # Exclusions are authoritative and must win first-match resolution.
+            merged: Dict[str, Any] = {}
+            for dynamic_pattern in derived:
+                merged[f"-:{dynamic_pattern}"] = {}
+            for pattern, override in (config.dynamic or {}).items():
+                merged.setdefault(pattern, override)
+            config.dynamic = merged
+        config._external_exclusion_patterns = tuple(patterns)
+    if inclusion_patterns is not None:
+        config._external_module_inclusions = tuple(dict.fromkeys(inclusion_patterns))
+
+
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
     """Return the `dynamic` pattern that decides `module_name`'s override.
 
@@ -4541,6 +4631,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
 
+    def external_module_inclusions(self) -> Optional[Tuple[str, ...]]:
+        """Return Optimum's `modules_in_block_to_quantize` inclusion list.
+
+        `None` means the checkpoint did not declare one and every module in the
+        model tree is eligible.  A non-empty tuple restricts quantization to
+        modules whose block-relative name ends with one of the entries.
+        """
+
+        inclusions = getattr(self, "_external_module_inclusions", None)
+        return tuple(inclusions) if inclusions else None
+
     def resolve_module_config(self, module_name: str) -> ResolvedModuleConfig:
         """Snapshot the resolved dynamic rule for one quantizable module."""
         return resolve_module_config_snapshot(self, module_name)
@@ -4626,6 +4727,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         }
         format_field_present = format is not None
         legacy_checkpoint_format = None
+        external_exclusions: List[str] = []
+        external_inclusions: Optional[List[str]] = None
 
         for key, val in quantize_cfg.items():
             key = key.lower()
@@ -4649,6 +4752,15 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                         legacy_checkpoint_format = _normalize_format(val)
                 if legacy_checkpoint_format is not None:
                     checkpoint_format_hint = legacy_checkpoint_format
+                continue
+
+            if key in _EXTERNAL_EXCLUSION_KEYS:
+                external_exclusions.extend(_external_string_list(val))
+                if key == "ignore":
+                    # Not a config field; the derived `-:` rules carry it.
+                    continue
+            if key == _EXTERNAL_INCLUSION_KEY:
+                external_inclusions = _external_string_list(val)
                 continue
 
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -4831,7 +4943,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
-        return target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        config = target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        _apply_external_checkpoint_module_filters(
+            config,
+            external_exclusions,
+            external_inclusions,
+        )
+        return config
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
@@ -5304,10 +5422,25 @@ class AWQConfig(PreProcessorConfig):
         checkpoints produced by other tools, so it is preserved as well.
         """
 
-        patterns = _dynamic_exclusion_patterns(
-            self.dynamic,
-            sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
-        )
+        # Producer-declared exclusions are mirrored into `dynamic` as regex
+        # rules for the loader.  Emit the original spelling, not the derived
+        # regex, so a round-trip does not rewrite `down_proj` into a pattern.
+        external = tuple(getattr(self, "_external_exclusion_patterns", ()) or ())
+        derived = {
+            _external_exclusion_dynamic_pattern(pattern)
+            for pattern in external
+        }
+        patterns = [
+            pattern
+            for pattern in _dynamic_exclusion_patterns(
+                self.dynamic,
+                sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
+            )
+            if pattern not in derived
+        ]
+        for pattern in external:
+            if pattern not in patterns:
+                patterns.append(pattern)
         for pattern in self.modules_to_not_convert or ():
             if isinstance(pattern, str) and pattern and pattern not in patterns:
                 patterns.append(pattern)

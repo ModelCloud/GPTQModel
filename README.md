@@ -108,6 +108,7 @@ LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept 
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 AWQ dequantization dispatches on the saved checkpoint layout and per-module `dynamic` widths; see the [AWQ dequantization layouts](docs/awq-dequant-layouts.md) flow.
 Legacy 5.4.x `meta.gptaq` booleans, untied `lm_head` quantization, and the metadata plain Transformers or vLLM need are described in the [checkpoint compatibility](docs/checkpoint-compat.md) contract.
+Third-party `modules_to_not_convert` / `modules_in_block_to_quantize` filters, format-changing re-saves, and `save_pretrained()` layout safety are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
 The native FP8 forward wrapper and the W4A16 quant source resolve one
 `weight_scale_semantics` per checkpoint, so a DeepSeek multiplier and a native

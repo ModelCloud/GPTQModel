@@ -396,6 +396,16 @@ def hf_gptqmodel_post_init_for_load(
         max_input_length=max_input_length,
     )
 
+    # Remember the on-disk layout so a caller that later uses
+    # `save_pretrained()` emits checkpoint-format qzeros rather than the
+    # kernel's converted runtime words.
+    from ..nn_modules.qlinear import GPTQQuantLinear
+
+    checkpoint_format = resolve_quant_format(qcfg.format, qcfg.method)
+    for module in model.modules():
+        if isinstance(module, GPTQQuantLinear):
+            module._checkpoint_format_on_disk = checkpoint_format
+
     # Rotated checkpoints fuse an orthogonal Q and an exact Hadamard H into the
     # weights; the H has to be re-applied to activations at inference. Without
     # this the rotated weights consume untransformed activations and produce
