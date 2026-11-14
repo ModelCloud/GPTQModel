@@ -34,10 +34,10 @@ flowchart TD
 ```mermaid
 flowchart TD
     A["_DeviceWorker._run"] --> B["_run_warmup"]
-    B -- "failure" --> W["_on_task_finished; fut.set_exception; continue"]
+    B -- "failure" --> W["_on_task_finished, fut.set_exception, continue"]
     B -- "ok" --> C["fn under ctx(read lock, _device_ctx)"]
-    C -- "exception" --> E["_on_task_finished; fut.set_exception"]
-    C -- "result" --> R["_on_task_finished; fut.set_result"]
+    C -- "exception" --> E["_on_task_finished, fut.set_exception"]
+    C -- "result" --> R["_on_task_finished, fut.set_result"]
     W --> Q["caller future.result raises"]
     E --> Q
     R --> S["caller receives result"]
