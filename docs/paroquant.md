@@ -118,3 +118,78 @@ separate addition. Peak allocator delta includes the output allocations.
 | 16 | 0.064 ms; 64 KiB peak | 0.056 ms; 32 KiB peak |
 
 The Triton bias epilogue was introduced by [PR #3657](https://github.com/ModelCloud/GPTQModel/pull/3657).
+
+## Native dispatch gate
+
+`ParoLinear` advertises `group_size=16` and unconstrained output widths because
+its CPU, ATen and dense paths support them. The native AWQ CUDA GEMM does not:
+`validate_awq_gemm_args` in
+`gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu` requires uint4b codes, a group
+size divisible by 32, an output width divisible by the 64-column CTA tile, and
+an output width divisible by that group size. Dispatch therefore asks the
+kernel's own shape contract before calling it, instead of letting the kernel
+raise from inside a forward.
+
+```mermaid
+flowchart TD
+    A["ParoLinear.forward"] --> B["_forward_cuda_awq_kernel(rotated)"]
+    B --> C["_cuda_awq_kernel_supported(compute_dtype)"]
+    C --> D{"HIP build or non-CUDA packed weight?"}
+    D -- Yes --> R["return None: portable path"]
+    D -- No --> E{"group_size % 32 == 0?"}
+    E -- No --> R
+    E -- Yes --> F{"out_features % 64 == 0 and out_features % group_size == 0?"}
+    F -- No --> R
+    F -- Yes --> G{"BF16 activation on SM below 8.0?"}
+    G -- Yes --> R
+    G -- No --> H["Native AWQ GEMM"]
+    R --> I["_forward_cpu_avx512 / _forward_cpu_aten / _forward_dense"]
+    style R fill:#fee,stroke:#c00
+```
+
+The group size is derived from the packed tensors the kernel actually reads
+(`in_features // scales.size(0)`), not from the config value: `group_size=-1`
+packs one scale row per input channel, which the kernel turns into
+`in_features / scaling_factors.size(0)`.
+
+### Previous behavior
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| CUDA dispatch | Called the native GEMM for every CUDA tensor | Gated on the native validator's shape and device contract |
+| `group_size=16` (advertised by `SUPPORTS_GROUP_SIZE`) | `RuntimeError: Group size should be a multiple of 32` | Dense fallback |
+| Narrow output width, e.g. 8 | `RuntimeError: OC is not multiple of cta_N = 64` | Dense fallback |
+| ROCm | `RuntimeError: The native AWQ JIT extension is CUDA-only and cannot be built by hipcc` | Portable path |
+| FP16/BF16 activation beside the reconstructed FP32 grid | `RuntimeError: input dtypes must be the same` | Operands promoted to FP32, one cast at the end |
+
+The gate is a capability query, not a configuration switch: there is no
+environment override and no new public option.
+
+### Dense fallback dtype contract
+
+`linear_wide_bias` uses `torch.mm(..., out_dtype=torch.float32)` only when both
+operands already share a low-precision dtype, which keeps them narrow and the
+reduction wide. A mismatched pair (FP16 activation, FP32 reconstructed weight)
+is promoted to at least FP32 before the matmul, so the fallback never narrows a
+weight or an activation below FP32; the previous `.float()` arithmetic is
+preserved bit for bit for same-dtype operands.
+
+### Validation
+
+Measured with torch 2.16.0.dev20261102+cu130 on an RTX 4090 (SM 8.9) and
+torch 2.16.0.dev20261025+rocm10.1 on an R9700 (gfx1201). The oracle is the
+independent FP32 packed-grid dequantization in
+`tests/kernels/test_paroquant.py::_fp32_awq_oracle`.
+
+| Configuration | Native gate | Result |
+| --- | --- | --- |
+| `in=16, out=8, group_size=16` | rejected (group size 16) | dense fallback, FP16 `65024` matches the oracle exactly |
+| `in=16, out=8, group_size=-1` | rejected (output width 8) | dense fallback |
+| `in=128, out=64, group_size=16` | rejected (group size 16) | dense fallback |
+| `in=32, out=64, group_size=32` | admitted | native kernel, unchanged |
+| `in=128, out=128, group_size=-1` | admitted (derived group size 128) | native kernel, unchanged |
+| `in=256, out=128, group_size=128` | admitted | native kernel, unchanged |
+| ROCm, `in=32, out=64, group_size=32` | rejected (HIP build) | dense fallback, matches the oracle |
+
+Repeated fallback forwards keep only the packed `int32` buffers; the test
+asserts that no `(in_features, out_features)` tensor is retained by the module.

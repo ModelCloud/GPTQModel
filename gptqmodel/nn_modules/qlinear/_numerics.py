@@ -187,12 +187,27 @@ def linear_wide_bias(
     reshape_bias = bias is not None and bias.dim() != 1 and bias.shape != flat_shape
 
     def reduce() -> torch.Tensor:
-        if x.device.type == "cuda" and not wide_autograd:
-            # FP32 output keeps the low-precision operands (no expanded FP32
-            # weight copy) and keeps split reductions wide.
+        # ``out_dtype`` keeps the low-precision operands (no expanded FP32
+        # weight copy) and keeps a split reduction wide, but ATen requires both
+        # operands to share a dtype. A reconstructed FP32 weight beside FP16 or
+        # BF16 activations is the normal shape of a wide dequantizing fallback
+        # (ParoQuant's dense path, for example), so promote the pair rather than
+        # asking for an output dtype the operands cannot satisfy.
+        if (
+            x.device.type == "cuda"
+            and not wide_autograd
+            and flat_x.dtype == weight_t.dtype
+            and flat_x.dtype in (torch.float16, torch.bfloat16)
+        ):
             output = torch.mm(flat_x, weight_t, out_dtype=torch.float32)
         else:
-            output = torch.mm(flat_x.float(), weight_t.float())
+            # Never narrow below FP32: the low-precision operands are widened for
+            # the reduction, exactly as the previous ``.float()`` pair did, and
+            # only an already-wider operand keeps its precision.
+            compute_dtype = torch.promote_types(
+                torch.promote_types(flat_x.dtype, weight_t.dtype), torch.float32
+            )
+            output = torch.mm(flat_x.to(compute_dtype), weight_t.to(compute_dtype))
         if bias is not None:
             if reshape_bias:
                 output = output.reshape(shape) + bias.float()
