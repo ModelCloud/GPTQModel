@@ -575,10 +575,139 @@ inline int32_t current_device_index() {
   return torch::stable::accelerator::getCurrentDeviceIndex();
 }
 
-inline void record_stream(const Tensor&, DeviceStream) {
-  // The stable ABI does not expose Tensor::record_stream. Callers keep the
-  // workspace alive for the duration of the op; this is a lifetime hint, not
-  // a correctness requirement.
+// ---------------------------------------------------------------------------
+// Stream-aware tensor lifetime
+// ---------------------------------------------------------------------------
+// `Tensor::record_stream` lives in the unstable C++ API: it hands the block to
+// the caching allocator together with an event, so the block is not reused
+// until the foreign stream passes the record point. Dropping those calls lets
+// the allocator hand a caller-owned output or scratch buffer to an unrelated
+// allocation while asynchronous work still writes to it.
+//
+// Recreate the guarantee without unstable symbols: keep a reference to the
+// tensor until an event recorded on that stream completes. Completed entries
+// are reaped on the next call, which keeps the retained set to the calls that
+// are actually in flight without a background thread. Callers must record
+// *after* enqueuing the work that uses the tensor, which the original API
+// requires as well.
+namespace record_stream_detail {
+
+#if GPTQMODEL_STABLE_HIP
+using DeviceEvent = hipEvent_t;
+
+inline DeviceEvent create_event() {
+  hipEvent_t event = nullptr;
+  return hipEventCreateWithFlags(&event, hipEventDisableTiming) == hipSuccess
+      ? event
+      : nullptr;
+}
+inline bool event_completed(DeviceEvent event) {
+  return hipEventQuery(event) != hipErrorNotReady;
+}
+inline void destroy_event(DeviceEvent event) {
+  if (event != nullptr) hipEventDestroy(event);
+}
+inline bool record_event(DeviceEvent event, DeviceStream stream) {
+  return hipEventRecord(event, stream) == hipSuccess;
+}
+inline void stream_synchronize(DeviceStream stream) {
+  hipStreamSynchronize(stream);
+}
+#else
+using DeviceEvent = cudaEvent_t;
+
+inline DeviceEvent create_event() {
+  cudaEvent_t event = nullptr;
+  return cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess
+      ? event
+      : nullptr;
+}
+inline bool event_completed(DeviceEvent event) {
+  return cudaEventQuery(event) != cudaErrorNotReady;
+}
+inline void destroy_event(DeviceEvent event) {
+  if (event != nullptr) cudaEventDestroy(event);
+}
+inline bool record_event(DeviceEvent event, DeviceStream stream) {
+  return cudaEventRecord(event, stream) == cudaSuccess;
+}
+inline void stream_synchronize(DeviceStream stream) {
+  cudaStreamSynchronize(stream);
+}
+#endif
+
+struct RetainedTensor {
+  Tensor tensor;
+  DeviceEvent event;
+};
+
+// Leaked on purpose: a tensor may still be retained while static destructors
+// run at process exit.
+inline std::mutex& retained_mutex() {
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
+}
+
+inline std::vector<RetainedTensor>& retained_tensors() {
+  static std::vector<RetainedTensor>* tensors = new std::vector<RetainedTensor>();
+  return *tensors;
+}
+
+inline std::vector<DeviceEvent>& event_pool() {
+  static std::vector<DeviceEvent>* events = new std::vector<DeviceEvent>();
+  return *events;
+}
+
+/// Drop every tensor whose event has completed. Called from `record_stream`.
+inline void reap_completed() {
+  std::vector<RetainedTensor> released;
+  {
+    std::lock_guard<std::mutex> lock(retained_mutex());
+    auto& tensors = retained_tensors();
+    for (auto it = tensors.begin(); it != tensors.end();) {
+      if (event_completed(it->event)) {
+        event_pool().push_back(it->event);
+        released.push_back(std::move(*it));
+        it = tensors.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  // `released` drops the tensor handles here, outside the lock.
+}
+
+}  // namespace record_stream_detail
+
+inline void record_stream(const Tensor& tensor, DeviceStream stream) {
+  if (!tensor.defined() || tensor.numel() == 0 || stream == nullptr ||
+      !tensor.device().is_cuda()) {
+    return;
+  }
+  record_stream_detail::reap_completed();
+
+  record_stream_detail::DeviceEvent event = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(record_stream_detail::retained_mutex());
+    auto& pool = record_stream_detail::event_pool();
+    if (!pool.empty()) {
+      event = pool.back();
+      pool.pop_back();
+    }
+  }
+  if (event == nullptr) {
+    event = record_stream_detail::create_event();
+  }
+  if (event == nullptr || !record_stream_detail::record_event(event, stream)) {
+    record_stream_detail::destroy_event(event);
+    // Correctness over latency: without an event there is no way to know when
+    // the stream is done with the buffer, so wait for it instead of dropping
+    // the protection.
+    record_stream_detail::stream_synchronize(stream);
+    return;
+  }
+  std::lock_guard<std::mutex> lock(record_stream_detail::retained_mutex());
+  record_stream_detail::retained_tensors().push_back({tensor, event});
 }
 
 #if !GPTQMODEL_STABLE_HIP

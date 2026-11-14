@@ -1429,3 +1429,90 @@ def test_marlin_include_paths_skip_wheel_headers_when_local_cuda_has_required_he
     include_paths = marlin_utils._marlin_include_paths()
 
     assert include_paths == [str(root)]
+
+
+def _marlin_module_for_stream_tests(device, dtype, *, in_features=256, out_features=64):
+    """Build a small, valid MarlinLinear whose buffers can drive the raw op."""
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=dtype,
+    ).to(device)
+    with torch.no_grad():
+        module.qweight.copy_(
+            torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32)
+        )
+        module.g_idx.copy_(
+            torch.arange(in_features, device=device, dtype=torch.int32) // 128
+        )
+        module.scales.copy_(torch.full_like(module.scales, 0.01, device=device))
+        module.qzeros.zero_()
+    module.post_init()
+    return module
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_rejects_scratch_overlapping_padded_rows():
+    """Scratch inside a row-padded input's storage must be rejected.
+
+    Marlin accepts inputs whose row stride exceeds K, so the bytes it can touch
+    run past ``numel() * element_size()``. A contiguous-interval alias check
+    lets a scratch view that starts in a later row through.
+    """
+
+    if not marlin_utils.marlin_runtime_available(torch.float16):
+        pytest.skip(marlin_utils.marlin_runtime_error(torch.float16))
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    in_features, out_features, m = 256, 64, 17
+    row_stride = 4096  # > in_features: padded rows
+
+    probe = torch.zeros((m, in_features), device=device, dtype=dtype)
+    required_c_tmp, _ = marlin_utils.marlin_scratch_sizes(
+        probe,
+        size_m=m,
+        size_k=in_features,
+        use_fp32_reduce=True,
+        has_act_order=False,
+    )
+
+    # One storage holds both the padded activation and the scratch view, which
+    # starts at half-element 8192 (row 2 of the activation).
+    scratch_start = 8192 // 2  # in float32 elements
+    elements = max(m * row_stride, (scratch_start + required_c_tmp) * 2)
+    backing = torch.zeros(elements, device=device, dtype=dtype)
+    a = torch.as_strided(backing, (m, in_features), (row_stride, 1))
+    c_tmp = backing.view(torch.float32)[scratch_start:scratch_start + required_c_tmp]
+    assert c_tmp.is_contiguous()
+    assert c_tmp.data_ptr() == backing.data_ptr() + 8192 * 2
+
+    module = _marlin_module_for_stream_tests(device, dtype)
+
+    with pytest.raises(RuntimeError, match="must not alias a"):
+        marlin_utils.gptq_marlin_gemm(
+            a,
+            None,
+            module.qweight,
+            None,
+            module.scales,
+            None,
+            module.qzeros,
+            module.g_idx,
+            module.g_idx_sort_indices,
+            module.workspace,
+            scalar_types.uint4b8,
+            size_m=m,
+            size_n=out_features,
+            size_k=in_features,
+            is_k_full=True,
+            use_fp32_reduce=True,
+            c_tmp=c_tmp,
+        )
