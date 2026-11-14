@@ -268,6 +268,112 @@ def _run_mismatched_exponents(kind: str, target: str) -> subprocess.CompletedPro
     )
 
 
+_CONCURRENT_FIRST_USE_SCRIPT = """
+import sys
+import threading
+
+import torch
+
+from gptqmodel.utils.tt_blockfloat_hip import (
+    dequantize,
+    linear,
+    prewarm_tt_blockfloat_hip_extension,
+    quantize,
+)
+
+# The race only exists when the interpreter really runs threads in parallel.
+if sys._is_gil_enabled():
+    print("GIL_ENABLED")
+    sys.exit(4)
+
+assert prewarm_tt_blockfloat_hip_extension(), "block-float HIP extension failed to build"
+
+rows, cols, m = 64, 128, 32
+torch.manual_seed(0)
+weight = torch.randn(rows, cols, dtype=torch.float32, device="cuda")
+codes, exponents = quantize(weight, 4)
+# bf16 with m > 1 is the only path that consults the WMMA device cache, and a
+# fresh process guarantees that cache is still cold when the threads arrive.
+x = torch.randn(m, cols, dtype=torch.bfloat16, device="cuda")
+
+threads = 8
+barrier = threading.Barrier(threads)
+results = [None] * threads
+errors = []
+
+
+def worker(index):
+    try:
+        barrier.wait(60)
+        results[index] = linear(x, codes, exponents, 4)
+    except BaseException as exc:  # noqa: BLE001 - report, do not mask
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+
+workers = [threading.Thread(target=worker, args=(i,)) for i in range(threads)]
+for item in workers:
+    item.start()
+for item in workers:
+    item.join(120)
+
+if errors:
+    print("ERRORS:", errors)
+    sys.exit(5)
+if any(result is None for result in results):
+    print("INCOMPLETE: a worker produced no result")
+    sys.exit(6)
+
+first = results[0]
+for index, result in enumerate(results):
+    if not torch.equal(result, first):
+        print("MISMATCH at worker", index)
+        sys.exit(7)
+
+# Independent oracle: the explicit dequant path never consults the WMMA cache,
+# so it cannot warm the cache the burst above is racing on.
+dense = dequantize(codes, exponents, 4, (rows, cols), torch.float32)
+reference = (x.float() @ dense.t()).bfloat16()
+if not torch.equal(reference, first):
+    print("ORACLE MISMATCH")
+    sys.exit(8)
+
+print("OK")
+sys.exit(0)
+"""
+
+
+@pytest.mark.parametrize("attempt", [0, 1, 2], ids=["first", "second", "third"])
+def test_concurrent_first_use_of_the_wmma_dispatch_cache(attempt):
+    """Eight threads must agree on a cold WMMA-cache decision.
+
+    ``ttbf_wmma_device()`` caches a per-device architecture decision in
+    process-wide state, and the bf16 ``m > 1`` linear path calls it on every
+    launch. A fresh interpreter guarantees a cold cache, so every thread here
+    races on the first initialization. The test pins the observable contract: no
+    crash, no torn result, and the same output the explicit dequant path
+    produces. It runs under ``PYTHON_GIL=0`` because a GIL-enabled interpreter
+    would serialize the burst and prove nothing.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    env["PYTHON_GIL"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", _CONCURRENT_FIRST_USE_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3000,
+    )
+
+    if "GIL_ENABLED" in result.stdout:
+        pytest.skip("this interpreter cannot disable the GIL")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK" in result.stdout
+
+
 @pytest.mark.parametrize("kind", ["linear", "embedding"])
 def test_host_exponents_are_rejected_before_launch(kind):
     """A CPU exponent buffer has no device pointer the kernel may dereference."""
