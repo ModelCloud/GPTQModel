@@ -54,6 +54,47 @@ class NativeProcessor(LoopProcessor):
         )
 
         self.native_inp_caches = {}
+        # GPTAQ and FOEM (alpha > 0) consume one native entry per *sample*:
+        # GPTQProcessor preserves the batch keep-mask and calls `add_batch`
+        # once per sample, while this processor captures one entry per
+        # forward batch. Capturing per sample here keeps the two lists
+        # aligned; other quantizers still receive one entry per batch.
+        foem = getattr(qcfg, "foem", None)
+        self._native_per_sample = bool(
+            getattr(qcfg, "gptaq", None) is not None
+            or (foem is not None and getattr(foem, "alpha", 0) != 0)
+        )
+        # Preserve the raw [B, S, H] input so the per-sample keep-mask can be
+        # applied here exactly as GPTQProcessor applies it to its own input.
+        self.preserve_batch_keep_mask = self._native_per_sample
+
+    @staticmethod
+    def _split_batch_samples(inp: torch.Tensor, keep_mask, target_device) -> list:
+        """Split one forward batch into per-sample masked native entries.
+
+        ``keep_mask`` is the ``[B, S]`` sequence mask GPTQProcessor uses for
+        the same forward pass. Samples with no kept tokens are skipped, which
+        mirrors GPTQProcessor's per-sample `add_batch` calls. A missing or
+        non-matching mask keeps the historical one-entry-per-batch layout.
+        """
+
+        if (
+            not torch.is_tensor(inp)
+            or inp.dim() < 3
+            or not torch.is_tensor(keep_mask)
+            or keep_mask.ndim != 2
+            or keep_mask.shape[0] != inp.shape[0]
+            or keep_mask.shape[1] != inp.shape[1]
+        ):
+            return [inp.to(device=target_device)]
+
+        mask = keep_mask.to(device=inp.device, dtype=torch.bool)
+        entries = []
+        for sample_index, sample_has_tokens in enumerate(mask.any(dim=1).tolist()):
+            if not sample_has_tokens:
+                continue
+            entries.append(inp[sample_index][mask[sample_index]].to(device=target_device))
+        return entries
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because capture setup is fixed at construction."""
@@ -98,7 +139,12 @@ class NativeProcessor(LoopProcessor):
             else:
                 target_device = DEVICE_1
 
-            self.native_inp_caches[name] += [inp.to(device=target_device)]
+            if self._native_per_sample:
+                keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+                entries = self._split_batch_samples(inp, keep_mask, target_device)
+            else:
+                entries = [inp.to(device=target_device)]
+            self.native_inp_caches[name] += entries
             del inp, out
 
         return tmp

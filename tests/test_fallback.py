@@ -383,24 +383,16 @@ def _assert_fallback_bounds(
     ):
         assert math.isfinite(err), f"{label}, group={group_size}: {name}_err is not finite ({err})"
 
-    min_val = weights.min().item()
-    max_val = weights.max().item()
-    one_sided = min_val > 0.0 or max_val < 0.0
-
-    if one_sided:
-        floor = rtn_err * 5.0
-        assert midpoint_err >= floor, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err >= floor, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err >= floor, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        assert std_err >= floor, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err >= floor, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
-    else:
-        ceiling = rtn_err * 3.0
-        assert midpoint_err <= ceiling, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err <= ceiling, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err <= ceiling, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        assert std_err <= ceiling, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+    # Every strategy fits a range that includes zero, so a one-sided group uses
+    # the same representable grid as RTN instead of being shifted by roughly its
+    # group minimum. The former "one-sided is at least 5x worse than RTN" floor
+    # encoded that group-offset bug (fixed for #3978).
+    ceiling = rtn_err * 3.0
+    assert midpoint_err <= ceiling, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
+    assert mean_err <= ceiling, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+    assert median_err <= ceiling, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
+    assert std_err <= ceiling, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+    assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
 
 
 def _assert_finite_errors(label: str, group_size: int, errors: dict) -> None:
@@ -849,13 +841,22 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
         codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     else:
         if strategy == FallbackStrategy.MIDPOINT:
-            center = (source.amin(1, keepdim=True) + source.amax(1, keepdim=True)) / 2
+            lo = source.amin(1, keepdim=True)
+            hi = source.amax(1, keepdim=True)
         elif strategy == FallbackStrategy.MEAN:
             center = source.mean(1, keepdim=True)
+            dev = (source - center).abs().amax(1, keepdim=True).clamp(min=1e-8)
+            lo, hi = center - dev, center + dev
         else:
             center = source.median(1, keepdim=True).values
-        expected_zero = (7.5 - center / expected_scale).round().clamp(0, 15)
-        codes = ((source - center) / expected_scale + 7.5).round().clamp(0, 15)
+            dev = (source - center).abs().amax(1, keepdim=True).clamp(min=1e-8)
+            lo, hi = center - dev, center + dev
+        # The fitted range includes zero, so a group that does not cross zero
+        # keeps a representable zero point instead of clamping to a boundary.
+        lo = torch.minimum(lo, torch.zeros_like(lo))
+        hi = torch.maximum(hi, torch.zeros_like(hi))
+        expected_zero = (-lo / expected_scale).round().clamp(0, 15)
+        codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     expected = (codes - expected_zero) * expected_scale
     torch.testing.assert_close(scale.double(), expected_scale, rtol=1e-6, atol=0)
     torch.testing.assert_close(zero.double(), expected_zero, rtol=0, atol=0)

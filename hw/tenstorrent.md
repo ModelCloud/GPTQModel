@@ -986,6 +986,37 @@ Four things are required and none are documented for the wheel:
    `generic_op_smoke.py`). Rebuilding the plugin with a correct prefix is the
    clean fix.
 
+### Exponent-block orientation: the checkpoint must block along `out_features`
+
+`ttnn.linear(x, W)` takes its weight as `[in_features, out_features]`, and a
+`bf4_b`/`bf8_b` tile shares one exponent per 16 consecutive values of the
+**last** dim. The block-float checkpoints written so far
+(`gptq_solve_blockfloat(..., block_axis="in")`, the default) block along
+`in_features` of `[out, in]`, so uploading them in the orientation `ttnn.linear`
+wants re-quantizes every weight on the host. Measured on a p300c with real
+Llama-3.2-1B-Instruct layers from the published bf4/bf8 checkpoint:
+
+| layer | upload as `[out, in]` | upload as `[in, out]` (what `ttnn.linear` needs) |
+| --- | --- | --- |
+| `q_proj` bf8 | drift 0 | 14 % of values change, weight relL1 0.30 % |
+| `gate_proj` bf4 | drift 0 | 11 % change, weight relL1 3.4 % |
+| `up_proj` (layer 7) bf4 | drift 0 | 16 % change, weight relL1 5.0 % |
+
+At `M = 32` the bf4 `gate_proj` output error against an fp64 reference is
+**8.1 %** with the re-quantized `[in, out]` weight, against 0.42 % with
+`matmul(transpose_b=True)` on the exact `[out, in]` upload, which is also 30 %
+slower (0.065 vs 0.050 ms). Neither is acceptable for serving.
+
+`block_axis="out"` solves GPTQ with blocks of 16 consecutive **output**
+features of one input column. Every block then lies inside one GPTQ column, so
+its exponent is picked when that column is quantized (after error feedback,
+with the same lowest-error neighbour search as `quantize_blockfloat`), and
+`act_order` no longer splits blocks. A Llama-3.2-1B-Instruct checkpoint solved
+this way uploads as `W^T` with **zero drift on all 81 block-float tensors**
+(fused QKV and the `E^T` bf8 tied head included), because concatenating
+`q|k|v` or `gate|up` along `out_features` at tile multiples never cuts a
+block.
+
 ## 10. Qualified host
 
 | Item | Validated value |
