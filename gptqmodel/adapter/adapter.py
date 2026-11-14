@@ -5,7 +5,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Dict, Hashable, List, Optional, Tuple, Union
+from typing import Dict, Hashable, Iterable, List, Optional, Tuple, Union
 
 import pcre
 import safetensors
@@ -73,9 +73,31 @@ class AdapterCache():
 
     @classmethod
     def add(cls, path: Hashable, config: LoraConfig, weights: Dict[str, torch.Tensor]):
-        """Stores adapter config and weight tensors under the source path."""
+        """Stores adapter config and weight tensors under the source path.
 
-        cls.cache[path] = {"config": config, "weights": weights}
+        The cached ``weights`` mapping is the immutable source of truth. A load
+        records what it consumed in a separate ``consumed`` set instead of
+        deleting entries, because one model load may legitimately consume only a
+        subset of the adapter's target modules.
+        """
+
+        cls.cache[path] = {"config": config, "weights": weights, "consumed": set()}
+
+    @classmethod
+    def consume(cls, path: Hashable, keys: Iterable[str]) -> bool:
+        """Record ``keys`` as consumed and report whether the entry is now spent.
+
+        Consumption is recorded, never applied to the cached tensors: a second
+        model load of the same adapter must still see every module. The entry is
+        released once every cached weight has been consumed by some load.
+        """
+
+        data = cls.cache.get(path)
+        if not data:
+            return False
+        consumed = data.setdefault("consumed", set())
+        consumed.update(keys)
+        return len(consumed) >= len(data.get("weights") or {})
 
     @classmethod
     def remove(cls, key):
@@ -289,11 +311,11 @@ class Lora(Adapter):
                     weight_key = legacy_key
 
         if pop_keys:
-            for k in pop_keys:
-                lora_weights.pop(k) # releasee lora weights from cache memory
-
-            # we have consumed all modules
-            if len(lora_weights) == 0:
+            # Record consumption instead of deleting the cached tensors. One
+            # model load may legitimately use only a subset of the adapter's
+            # target modules, and deleting the rest made the next load of the
+            # same adapter fail because those keys were already gone.
+            if AdapterCache.consume(cache_key, pop_keys):
                 AdapterCache.remove(cache_key)
                 log.info("Adapter: Consumed all Lora weights")
 
