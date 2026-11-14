@@ -25,6 +25,7 @@ from ...utils.paroquant import (
     apply_paroquant_rotation_vectorized,
     build_identity_rotation_buffers,
     is_identity_rotation,
+    validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
 from ._numerics import linear_wide_bias
@@ -228,6 +229,20 @@ class ParoLinear(AwqTorchLinear):
             not self.theta.is_meta
             and not self.channel_scales.is_meta
             and is_identity_rotation(self.theta, self.channel_scales)
+        )
+
+    def post_init(self) -> None:
+        super().post_init()
+        # Rotation pairs are checkpoint data used as shared-memory indices by
+        # the fused CUDA kernel. Validate them once after the weights load.
+        validate_rotation_buffers(
+            self.pairs,
+            self.theta,
+            self.channel_scales,
+            group_size=self.group_size,
+            in_features=self.in_features,
+            krot=self.krot,
+            layer_name=f"ParoQuant `{self.name}`",
         )
 
     @classmethod
