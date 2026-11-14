@@ -94,15 +94,36 @@ def _ready(directory: Path) -> bool:
     )
 
 
-def _build(source: Path, directory: Path, archs: list[int]) -> None:
-    # Import CUDA toolkit discovery only on a cache miss.
+def _build_tools() -> tuple[str | None, str | None, str | None]:
+    """Locate ``(cmake, ninja, nvcc)`` without building anything."""
+    # Import CUDA toolkit discovery only when the tools are actually needed.
     from torch.utils.cpp_extension import CUDA_HOME
 
     cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
     nvcc = os.environ.get("CUDACXX")
     if not nvcc:
         nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
-    nvcc = shutil.which(nvcc)
+    return cmake, ninja, shutil.which(nvcc)
+
+
+def source_build_available() -> bool:
+    """Return whether a source build can be produced for the visible GPUs.
+
+    Callers use this to choose a portable fallback instead of starting a build
+    that is guaranteed to fail; :func:`_build` remains the authority and still
+    reports the concrete missing tool when a build is attempted.
+    """
+    try:
+        archs = _architectures()
+    except (ImportError, RuntimeError):
+        return False
+    if not archs or min(archs) < 80:
+        return False
+    return all(_build_tools())
+
+
+def _build(source: Path, directory: Path, archs: list[int]) -> None:
+    cmake, ninja, nvcc = _build_tools()
     if not cmake or not ninja or not nvcc:
         raise _MissingBuildTools(
             "nf12: JIT compilation requires CUDA toolkit 13.0+ (nvcc), CMake 3.26+, "
@@ -135,15 +156,33 @@ def _build(source: Path, directory: Path, archs: list[int]) -> None:
     (directory / "complete").touch()
 
 
+def _cache_target() -> tuple[Path, list[int], Path]:
+    source = _source_root()
+    archs = _architectures()
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
+    return source, archs, directory
+
+
+def cache_directory() -> Path:
+    """Return the source-keyed build directory without creating or building it."""
+    return _cache_target()[2]
+
+
+def cache_ready() -> bool:
+    """Return whether a completed build already exists for the visible GPUs."""
+    try:
+        return _ready(cache_directory())
+    except (ImportError, OSError, RuntimeError):
+        return False
+
+
 def library_directory() -> Path:
     global _directory
     with _lock:
         if _directory is not None:
             return _directory
-        source = _source_root()
-        archs = _architectures()
-        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-        directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
+        source, archs, directory = _cache_target()
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Keep the lock file: unlinking it lets waiters lock a different inode.
         with (directory / "build.lock").open("a") as lock:

@@ -7,7 +7,7 @@ The native libraries are built from GPTQModel's vendored sources on first use.
 Importing this package does not initialize the full GPTQModel framework.
 """
 
-from ._library import library_path, load
+from ._library import available, library_path, load
 from .api import (
     NF12Weight,
     decode,
@@ -48,6 +48,7 @@ __all__ = [
     "NF12Linear",
     "NF12MoEWeight",
     "NF12Weight",
+    "available",
     "decode",
     "decode_fp32",
     "embedding",

@@ -20,6 +20,56 @@ import gptqmodel_nf12
 _lock = threading.Lock()
 _loaded = threading.Event()
 
+_REQUIRED_OPS = (
+    "encode",
+    "decode",
+    "linear",
+    "embedding",
+    "rowmajor_pack",
+    "rowmajor_embedding",
+    "encode_moe",
+    "moe_linear",
+    "_fused_moe",
+)
+
+
+def _registered() -> bool:
+    """Return whether a complete ``torch.ops.nf12`` implementation is already live."""
+    namespace = torch.ops.nf12
+    return all(callable(getattr(namespace, name, None)) for name in _REQUIRED_OPS)
+
+
+def _packaged() -> bool:
+    """Return whether both native libraries ship with this checkout/wheel."""
+    for directory in gptqmodel_nf12.__path__:
+        base = Path(directory)
+        if all((base / name).is_file() for name in ("libnf12.so", "libnf12_torch.so")):
+            return True
+    return False
+
+
+def _native_available() -> bool:
+    """Return whether the native extension can be used without a failed build attempt."""
+    if _loaded.is_set() or _registered() or _packaged():
+        return True
+    from ._jit import cache_ready, source_build_available
+
+    return cache_ready() or source_build_available()
+
+
+def available() -> bool:
+    """Return whether native NF12 kernels can run here.
+
+    This is a capability probe, not a build: it reports whether the extension is
+    already loaded/registered/packaged, a source build is cached for the visible
+    GPUs, or the build tools needed for a first-use JIT build are present.
+    Callers that can keep packed storage without native kernels should check
+    this before selecting a native-only path.
+    """
+    if torch.version.hip is not None:
+        return False
+    return _native_available()
+
 
 def library_path(name: str = "libnf12.so") -> Path:
     """Find a packaged native library, or build and cache it for visible GPUs."""
@@ -50,10 +100,7 @@ def load() -> None:
         # GPTQModel's legacy runtime or an explicitly imported standalone NF12
         # may already own the torch namespace. A second TORCH_LIBRARY load
         # would fail, so reuse a complete registered implementation.
-        namespace = torch.ops.nf12
-        required = ("encode", "decode", "linear", "embedding", "rowmajor_pack",
-                    "rowmajor_embedding", "encode_moe", "moe_linear", "_fused_moe")
-        if all(callable(getattr(namespace, name, None)) for name in required):
+        if _registered():
             _loaded.set()
             return
         # The Torch extension links the codec. Load it first so bare source
