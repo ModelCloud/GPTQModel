@@ -215,6 +215,18 @@ CASES = {
         ),
         [("feed_forward.experts.0.gate_proj", "feed_forward.experts.0.up_proj")],
     ),
+    "glm": (
+        lambda: _cfg("GlmConfig", pad_token_id=0, eos_token_id=1, bos_token_id=2),
+        _DENSE_PAIRS,
+    ),
+    "exaone4": (lambda: _cfg("Exaone4Config"), _DENSE_PAIRS),
+    "hunyuan_v1_dense": (lambda: _cfg("HunYuanDenseV1Config", head_dim=16), _DENSE_PAIRS),
+    "apertus": (
+        lambda: _cfg("ApertusConfig"),
+        # Apertus' MLP has no gate projection.
+        [("self_attn.q_proj", "self_attn.k_proj"), ("self_attn.q_proj", "self_attn.v_proj")],
+    ),
+    "gemma4_text": (lambda: _cfg("Gemma4TextConfig", head_dim=16), _DENSE_PAIRS),
 }
 
 

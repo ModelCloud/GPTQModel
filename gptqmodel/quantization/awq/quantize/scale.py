@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import logging
-from typing import List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -109,7 +109,22 @@ def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
 
 
 def apply_scale(module, scales_list, input_feat_dict=None):
-    for prev_op_name, layer_names, scales, _ in scales_list:
+    # Sibling captures (q/k/v, gate/up) can be backed by one host tensor, so a
+    # name-keyed in-place division would scale that tensor once per module.
+    # Track the group that already scaled each object and divide it once per
+    # group; a tensor reached by two different groups restarts from the value
+    # captured before the first division.
+    divided: Dict[int, int] = {}
+    pristine: Dict[int, torch.Tensor] = {}
+    groups_per_feature: Dict[int, Set[int]] = {}
+    if input_feat_dict is not None:
+        for group_index, (_prev_op_name, group_layer_names, _scales, _loss) in enumerate(scales_list):
+            for layer_name in group_layer_names:
+                feature = input_feat_dict.get(layer_name)
+                if feature is not None:
+                    groups_per_feature.setdefault(id(feature), set()).add(group_index)
+
+    for group_index, (prev_op_name, layer_names, scales, _) in enumerate(scales_list):
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
 
@@ -165,7 +180,19 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 # Skip the modules that are not quantized
                 if layer_name in input_feat_dict:
                     inp = input_feat_dict[layer_name]
+                    previous_group = divided.get(id(inp))
+                    if previous_group == group_index:
+                        # A sibling in this group already applied the same scale.
+                        continue
+                    if previous_group is not None:
+                        backup = pristine.get(id(inp))
+                        if backup is not None:
+                            inp.copy_(backup)
+                    elif len(groups_per_feature.get(id(inp), ())) > 1:
+                        # Keep the pre-division value for the second group.
+                        pristine[id(inp)] = inp.clone()
                     inp.div_(scales.view(1, -1).to(inp.device))
+                    divided[id(inp)] = group_index
 
         move_to(prev_op, device=original_prev_device)
         for layer, original_device in zip(layers, original_layer_devices):

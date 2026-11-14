@@ -93,6 +93,7 @@ Its method, format, backend, and kernel layers are modular: method-specific cont
 GPTQ Hessian capture and repeated finalization are described in the [Hessian accumulation flow](docs/gptq-hessian-accumulation.md).
 Every supported quantization path ends with one [run summary](docs/quantize-run-summary.md) emitted after finalization.
 Disk-backed replay outputs use [bounded staging and shard verification on every read](docs/looper-checkpoint-redesign.md#disk-backed-layer-output-staging-and-reads).
+Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
