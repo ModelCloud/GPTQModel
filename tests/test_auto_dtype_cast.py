@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
 from types import SimpleNamespace
 
@@ -412,6 +413,15 @@ def test_w_wq_diff_prefers_the_fused_native_path(monkeypatch):
     assert seen == [(packed, wq)]
     assert "auto_dtype_cast_packed_source" not in named.state
     assert all(not tensor.numel() for tensor in packed.buffers())
+
+
+def test_gptq_process_routes_the_eora_diff_through_the_fused_helper():
+    """The processor must call the fused helper, not the dense expression."""
+
+    source = inspect.getsource(gptq_processor.GPTQProcessor.process)
+
+    assert "self._w_wq_diff(module, wq)" in source
+    assert "module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)" not in source
 
 
 def test_eora_forward_does_not_repack_the_restored_source(monkeypatch):

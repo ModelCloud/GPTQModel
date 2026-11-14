@@ -820,7 +820,7 @@ class GPTQProcessor(LoopProcessor):
 
         if self.calculate_w_wq_diff:
             # diff in float32
-            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            w_wq_diff = self._w_wq_diff(module, wq)
             # assert module.weight.data.dtype in (torch.float16, torch.bfloat16)
 
             with self.lock:

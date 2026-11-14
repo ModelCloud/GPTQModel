@@ -408,7 +408,7 @@ the large projections dominate the aggregate.
 
 End-to-end GPTQ + EoRA on Llama 3.2 1B with the same calibration set produced
 482/482 bit-identical model tensors and 224/224 bit-identical adapter tensors
-between AUTO_NF12 and OFF. The end-to-end peak was 4,129.6 MiB versus
-4,042.4 MiB because the packed source must stay resident through GPTQ's
-Hessian/inverse workspace; the 4 B/element saving applies to the diff step, not
-to that workspace-dominated peak.
+between AUTO_NF12 and OFF. Both policies peaked at 4,042.4 MiB: the packed
+source stays resident through GPTQ's Hessian/inverse workspace, but the fused
+store removes the FP32 source copy, so the diff step no longer adds to the
+workspace-dominated peak.
