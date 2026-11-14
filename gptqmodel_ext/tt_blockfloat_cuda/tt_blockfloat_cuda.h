@@ -59,7 +59,9 @@ cudaError_t blockfloat_decompose(const float* x, int bits, int64_t rows, int64_t
                                  cudaStream_t stream);
 
 // GEMM over the packed weights: ``out[m, n] = x[m, k] @ dequant(codes)[n, k]^T
-// + bias``.  ``x``, ``bias`` and ``out`` share ``dtype``; ``bias`` may be null.
+// + bias``.  ``x`` and ``out`` share ``dtype``; ``bias`` is float32 (the
+// checkpoint's dense bias precision, added to the float32 accumulator before
+// the single output cast) and may be null.
 cudaError_t blockfloat_linear(const void* x, int dtype,
                               const uint8_t* codes, const int8_t* exponents, int bits,
                               int64_t m, int64_t n, int64_t k,

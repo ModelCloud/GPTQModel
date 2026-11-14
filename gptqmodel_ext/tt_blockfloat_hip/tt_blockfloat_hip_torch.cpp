@@ -229,7 +229,11 @@ torch::Tensor linear_dispatch(torch::Tensor x, torch::Tensor codes,
     if (bias.has_value()) {
         TORCH_CHECK(bias->numel() == n, "tt_blockfloat: bias must have ", n,
                     " elements");
-        bias_c = bias->to(x.scalar_type()).contiguous();
+        // The stored bias is dense float32 state and the kernel epilogue
+        // accumulates in float32.  Keep it there instead of rounding it to the
+        // activation dtype: float16 cannot represent a large finite float32
+        // bias, and narrowing it first turns a cancelling result into inf.
+        bias_c = bias->to(at::kFloat).contiguous();
         TORCH_CHECK(bias_c.device() == x.device(),
                     "tt_blockfloat: bias must share the activation device");
         bias_ptr = bias_c.data_ptr();

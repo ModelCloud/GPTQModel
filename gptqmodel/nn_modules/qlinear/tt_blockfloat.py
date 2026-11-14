@@ -353,17 +353,37 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
             return self.empty_linear_output(x)
 
         out_dtype = x.dtype
-        bias = None if self.bias is None else self.bias.to(x.dtype)
+        # The stored bias is dense state, not a quantized payload, so keep its
+        # precision all the way into the epilogue.  Narrowing it to the
+        # activation dtype first rounds ordinary values and turns a finite
+        # float32 bias into inf in float16, which makes a cancelling result
+        # come back as 0.0 or -inf instead of the value the checkpoint
+        # describes.
+        bias = self.bias
         out = self._kernel_linear(x, bias)
         if out is None:
-            weight = self.dequantize(dtype=x.dtype)
-            out = F.linear(x, weight, bias)
+            # The dense fallback accumulates the block-float grid and the
+            # float32 bias in float32 and rounds once at the end.  Dequantising
+            # the weight to float16 first overflows the grid before the bias
+            # can cancel it, even when the final result is finite.
+            compute_dtype = (
+                torch.float32
+                if out_dtype in (torch.float16, torch.bfloat16)
+                else out_dtype
+            )
+            weight = self.dequantize(dtype=compute_dtype)
+            out = F.linear(
+                x.to(compute_dtype),
+                weight,
+                None if bias is None else bias.to(compute_dtype),
+            )
             # Release the temporary before the activation leaves this scope.
             del weight
 
+        out = out.to(out_dtype)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
-        return out.to(out_dtype)
+        return out
 
 
 class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
@@ -519,8 +539,19 @@ class TTBlockfloatTiedHead(nn.Module):
         kernel = embedding._kernel_linear(hidden_states)
         if kernel is not None:
             return kernel
-        weight = embedding.dequantize(dtype=hidden_states.dtype)
-        return F.linear(hidden_states, weight)
+        # The tied head has no bias, but its shared weight has the same range
+        # problem: the grid can exceed float16 even when the float32 dot is
+        # exactly zero.  Accumulate in float32 and round the result once.
+        out_dtype = hidden_states.dtype
+        compute_dtype = (
+            torch.float32
+            if out_dtype in (torch.float16, torch.bfloat16)
+            else out_dtype
+        )
+        weight = embedding.dequantize(dtype=compute_dtype)
+        out = F.linear(hidden_states.to(compute_dtype), weight)
+        del weight
+        return out.to(out_dtype)
 
     def tie_weights(self) -> None:
         """No-op: the tie is the shared storage, not a parameter copy."""

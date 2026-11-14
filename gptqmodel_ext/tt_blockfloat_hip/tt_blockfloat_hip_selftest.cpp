@@ -534,35 +534,30 @@ int main(int argc, char** argv) {
                 v = 0.01f * static_cast<float>(static_cast<int>(rng() % 200) - 100);
             }
             std::vector<__hip_bfloat16> act_b(m * k);
-            std::vector<__hip_bfloat16> bias_b(n);
             std::vector<__hip_bfloat16> out_b(m * n);
             std::vector<float> act_rounded(m * k);
-            std::vector<float> bias_rounded(n);
             for (size_t i = 0; i < act.size(); ++i) {
                 act_b[i] = from_float<__hip_bfloat16>(act[i]);
                 act_rounded[i] = to_float<__hip_bfloat16>(act_b[i]);
             }
-            for (size_t i = 0; i < bias_f.size(); ++i) {
-                bias_b[i] = from_float<__hip_bfloat16>(bias_f[i]);
-                bias_rounded[i] = to_float<__hip_bfloat16>(bias_b[i]);
-            }
+            // The bias stays float32: the kernel adds it to the fp32
+            // accumulator, so the reference uses the unrounded value.
             std::vector<float> ref;
             ref_linear(act_rounded, got_codes, got_exponents, bits, m, n, k,
-                       &bias_rounded, &ref);
+                       &bias_f, &ref);
             __hip_bfloat16* d_act_b = nullptr;
-            __hip_bfloat16* d_bias_b = nullptr;
+            float* d_bias_f = nullptr;
             __hip_bfloat16* d_out_b = nullptr;
             hipMalloc(&d_act_b, act_b.size() * sizeof(__hip_bfloat16));
-            hipMalloc(&d_bias_b, bias_b.size() * sizeof(__hip_bfloat16));
+            hipMalloc(&d_bias_f, bias_f.size() * sizeof(float));
             hipMalloc(&d_out_b, out_b.size() * sizeof(__hip_bfloat16));
             hipMemcpy(d_act_b, act_b.data(),
                       act_b.size() * sizeof(__hip_bfloat16),
                       hipMemcpyHostToDevice);
-            hipMemcpy(d_bias_b, bias_b.data(),
-                      bias_b.size() * sizeof(__hip_bfloat16),
+            hipMemcpy(d_bias_f, bias_f.data(), bias_f.size() * sizeof(float),
                       hipMemcpyHostToDevice);
             status = ttbf_linear(d_act_b, TTBF_DTYPE_BF16, d_codes, d_exp, bits,
-                                 m, n, k, d_bias_b, d_out_b, nullptr);
+                                 m, n, k, d_bias_f, d_out_b, nullptr);
             hipMemcpy(out_b.data(), d_out_b,
                       out_b.size() * sizeof(__hip_bfloat16),
                       hipMemcpyDeviceToHost);
@@ -585,13 +580,13 @@ int main(int argc, char** argv) {
             if (!dump_dir.empty() && bits == 4) {
                 write_bin(dump_dir + "/lin_bf16_x.bin", act_b.data(),
                           act_b.size() * sizeof(__hip_bfloat16));
-                write_bin(dump_dir + "/lin_bf16_bias.bin", bias_b.data(),
-                          bias_b.size() * sizeof(__hip_bfloat16));
+                write_bin(dump_dir + "/lin_bf16_bias.bin", bias_f.data(),
+                          bias_f.size() * sizeof(float));
                 write_bin(dump_dir + "/lin_bf16_out.bin", out_b.data(),
                           out_b.size() * sizeof(__hip_bfloat16));
             }
             hipFree(d_act_b);
-            hipFree(d_bias_b);
+            hipFree(d_bias_f);
             hipFree(d_out_b);
         }
 
