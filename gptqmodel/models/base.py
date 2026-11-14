@@ -14,7 +14,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -128,27 +128,109 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
-def _peak_vram_gib(quantize_config: object = None) -> Optional[float]:
-    """Peak allocated VRAM for a run that quantized on the GPU.
+def _torch_cuda_device(value: object) -> Optional[torch.device]:
+    """Resolve one pool entry to a concrete CUDA device, or None."""
 
-    Reported only when the run targeted CUDA: a CPU quantization on a machine
-    that happens to have a card still allocates a little while loading, and
-    quoting that as the run's peak would be misleading.
+    try:
+        if isinstance(value, torch.device):
+            device = value
+        elif hasattr(value, "to_torch_device"):
+            device = value.to_torch_device()
+        else:
+            device = torch.device(str(value))
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    if device.type != "cuda":
+        return None
+    if device.index is None:
+        try:
+            return torch.device("cuda", torch.cuda.current_device())
+        except Exception:  # pragma: no cover - driver/host edge cases
+            return None
+    return device
+
+
+def _quantize_vram_devices(quantize_config: object = None) -> List[torch.device]:
+    """Concrete CUDA devices whose peak counters describe this quantization run.
+
+    `quantize_config.device` names an accelerator family only (ordinals are
+    stripped by `normalize_device`), so the concrete devices are resolved from
+    the same pool the loopers use: every visible device of that family, narrowed
+    by `compute_device_filter` when the caller set one. A CPU run resolves to an
+    empty list, so it must not reset or read any CUDA peak counter.
     """
 
-    if not torch.cuda.is_available():
-        return None
-    if quantize_config is not None:
+    if quantize_config is None or not torch.cuda.is_available():
+        return []
+    raw_device = getattr(quantize_config, "device", None)
+    if raw_device is None:
+        # Auto selection on a CUDA host resolves to CUDA; keep reporting it.
+        family_type = "cuda"
+    else:
         try:
-            device = normalize_device(getattr(quantize_config, "device", None))
+            family_type = getattr(normalize_device(raw_device), "type", None)
         except Exception:
-            device = None
-        if getattr(device, "type", None) != "cuda":
-            return None
+            return []
+    if family_type != "cuda":
+        return []
     try:
-        return torch.cuda.max_memory_allocated() / (1024 ** 3)
+        device_count = int(torch.cuda.device_count())
     except Exception:  # pragma: no cover - driver/host edge cases
+        return []
+
+    candidates: List[object] = [torch.device("cuda", index) for index in range(device_count)]
+    compute_device_filter = getattr(quantize_config, "compute_device_filter", None)
+    if compute_device_filter is not None:
+        try:
+            filtered = compute_device_filter(candidates)
+        except Exception:
+            filtered = None
+        # The loopers keep the full pool when the filter rejects everything.
+        if filtered:
+            candidates = list(filtered)
+
+    devices: List[torch.device] = []
+    for candidate in candidates:
+        device = _torch_cuda_device(candidate)
+        if device is not None and device not in devices:
+            devices.append(device)
+    return devices
+
+
+def _reset_peak_vram_stats(devices: Sequence[torch.device]) -> None:
+    """Reset peak counters only for the devices this run quantizes on."""
+
+    for device in devices:
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:  # pragma: no cover - driver/host edge cases
+            continue
+
+
+def _peak_vram_gib(
+    quantize_config: object = None,
+    devices: Optional[Sequence[torch.device]] = None,
+) -> Optional[float]:
+    """Largest per-device peak allocation across the GPUs this run quantized on.
+
+    `torch.cuda.max_memory_allocated()` without a device reads the calling
+    thread's current device, which is not necessarily the card a quantization
+    worker used. Every tracked device is queried explicitly and the maximum is
+    reported, so the summary never hides the busiest card. Returns None when the
+    run did not quantize on CUDA.
+    """
+
+    if devices is None:
+        devices = _quantize_vram_devices(quantize_config)
+    if not devices:
         return None
+    peaks: List[float] = []
+    for device in devices:
+        try:
+            peaks.append(torch.cuda.max_memory_allocated(device) / (1024 ** 3))
+        except Exception:  # pragma: no cover - driver/host edge cases
+            continue
+    return max(peaks) if peaks else None
 
 
 class _QuantizedCheckpointSource:
@@ -1600,8 +1682,8 @@ class BaseQModel(nn.Module):
         fuse: Optional[bool] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         run_started = time.perf_counter()
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+        vram_devices = _quantize_vram_devices(self.quantize_config)
+        _reset_peak_vram_stats(vram_devices)
 
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
@@ -1974,7 +2056,7 @@ class BaseQModel(nn.Module):
             format_quantize_summary(
                 result,
                 elapsed_s=time.perf_counter() - run_started,
-                peak_vram_gib=_peak_vram_gib(self.quantize_config),
+                peak_vram_gib=_peak_vram_gib(devices=vram_devices),
             )
         )
 
