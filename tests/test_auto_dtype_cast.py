@@ -18,6 +18,7 @@ from torch import nn
 import gptqmodel.models.base as base_module
 import gptqmodel.quantization.nf12 as nf12_quantization
 from gptqmodel.looper import gptq_processor
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
@@ -1365,3 +1366,84 @@ def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(mon
     assert _bits_equal(model.embed_tokens(ids), expected_embedding)
     torch.testing.assert_close(model.proj(x), expected_proj, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(model.hooked(x), expected_hooked, rtol=2e-3, atol=2e-3)
+
+
+def test_native_processor_forward_forbids_auto_dtype_cast():
+    """The capture-only pass has no quantization task that restores the source."""
+
+    from gptqmodel.looper.native_processor import NativeProcessor
+
+    assert NativeProcessor.lifecycle.forward.allow_auto_dtype_cast is False
+
+
+def test_forward_only_processor_keeps_dense_modules_in_the_tree(monkeypatch):
+    """A capture-only forward must not leave an AUTO_NF12 wrapper behind.
+
+    ``NativeProcessor`` runs before the quantizer and never materializes a
+    quantization source, so swapping the live projection for a parameterless
+    ``AutoNF12HookedLinear`` made the next processor build ``NamedModule`` over
+    a module with no parameters (issue #4037).
+    """
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    class CaptureModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(64, 16, bias=True, dtype=torch.bfloat16)
+
+    class CaptureProcessor:
+        def __init__(self) -> None:
+            self.forward = ForwardConfig(
+                required=True,
+                replay_after_process=False,
+                all_modules_in_single_pass=True,
+                allow_auto_dtype_cast=False,
+            )
+            self.tasks = {}
+
+        def preprocess(self, named_module: NamedModule) -> None:
+            self.tasks[named_module.name] = SimpleNamespace(module=named_module.module)
+
+        def is_skipped(self, _named_module: NamedModule) -> bool:
+            return False
+
+    model = CaptureModel()
+    full = {"proj": model.proj}
+    processor = CaptureProcessor()
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = model
+    harness.quantize_config = QuantizeConfig(offload_to_disk=False)
+    harness._turtle_lock = threading.RLock()
+    harness.turtle_model = None
+    harness.auto_dtype_cast_events = []
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = harness
+    looper.input_embeddings_name = None
+    looper.output_embeddings_name = None
+    looper.layer_module_coverage = SimpleNamespace(
+        record_hit=lambda *_args: None,
+        record_miss=lambda *_args: None,
+    )
+
+    subset = looper.create_named_modules(
+        module=model,
+        full=full,
+        is_lm_head_module=False,
+        layer_index=0,
+        layers_prefix="layer",
+        names=["proj"],
+        processor=processor,
+        fallback=torch.device("cpu"),
+    )
+
+    assert type(model.proj) is nn.Linear
+    assert not isinstance(model.proj, NF12Linear)
+    assert subset["proj"].module is model.proj
+    assert subset["proj"].state["auto_dtype_cast_forward_disabled"] is True
+    assert "auto_dtype_cast_was_applied" not in subset["proj"].state
+    assert "auto_dtype_cast_source_spec" not in subset["proj"].state

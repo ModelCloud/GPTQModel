@@ -250,6 +250,9 @@ class ForwardConfig:
     | Native        | yes      | no                     | yes                       | no         | no                 |
     | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
+
+    ``Native`` is a forward-only capture: it never materializes a quantization
+    source, so it also disables ``allow_auto_dtype_cast``.
     """
 
     required: bool = True
@@ -264,6 +267,11 @@ class ForwardConfig:
     # forward, even when the authoritative next-layer cache is produced by a
     # later replay-after-process step.
     capture_layer_context: bool = False
+    # Whether the forward role may replace the dense module in the model tree
+    # with a packed AUTO_NF12 wrapper. Only a processor with a follow-up
+    # quantization task restores that dense source; a forward-only capture must
+    # keep the module in the tree so the next processor can wrap it.
+    allow_auto_dtype_cast: bool = True
 
 
 @dataclass(frozen=True)

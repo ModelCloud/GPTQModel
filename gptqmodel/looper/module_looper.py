@@ -2169,6 +2169,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
             else:
+                forward_policy = getattr(processor, "forward", None)
+                if forward_policy is not None and not getattr(
+                    forward_policy, "allow_auto_dtype_cast", True
+                ):
+                    # Forward-only capture: nothing restores a packed
+                    # AUTO_NF12 source afterwards, so the model tree keeps the
+                    # dense module the next processor will quantize.
+                    subset[name].state["auto_dtype_cast_forward_disabled"] = True
                 source_module = subset[name].module
                 # EoRA runs after quantization: its forward must consume the
                 # quantized module in the model tree, not a freshly packed
