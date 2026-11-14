@@ -151,6 +151,9 @@ documents fused low-precision bias addition and FP32 checkpoint bias handling.
 The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
 reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
 failure paths in one place.
+The [fused kernel dispatch and bias epilogues](docs/fused-kernel-epilogues.md)
+page covers live GPTQ dispatch metadata, BF16 fused dispatch, and the
+ExLlamaV2 FP32-output epilogue.
 The [FP16 inference overflow and bias epilogues](docs/inference-fp16-overflow-epilogues.md)
 page covers BF16-through-FP16 activation quantization and every kernel that now
 adds the stored bias before the final cast.

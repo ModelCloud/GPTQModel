@@ -296,18 +296,18 @@ class ExllamaV2Linear(GPTQQuantLinear):
             from ...utils.exllamav2 import exllamav2_clone_q_matrix
 
             handle, temporaries = exllamav2_clone_q_matrix(self, compact=True)
-        # The native kernel writes the activation dtype, so a pre-bias sum
-        # outside that range becomes inf before a cancelling bias is added.
-        # The extension's FP32 path keeps the reduction and the bias wide and
-        # only rounds the visible output.
-        wide_bias = self.bias is not None
-        kernel_input = (
-            x.to(torch.float32)
-            if wide_bias and x.dtype != torch.float32
-            else x
-        )
+        # Keep FP16 activations on the quantized kernel and request an FP32
+        # output when a bias must be applied before the single visible cast.
+        # Upcasting the activations would route through dense reconstruction.
+        wide_bias = self.bias is not None and x.dtype == torch.float16
         try:
-            out = self.ext_gemm_half_q_half(kernel_input, handle, self.out_features, force_cuda)
+            out = self.ext_gemm_half_q_half(
+                x,
+                handle,
+                self.out_features,
+                force_cuda,
+                out_dtype=torch.float32 if wide_bias else None,
+            )
         finally:
             if temporaries is not None:
                 from ...utils.exllamav2 import exllamav2_free_q_matrix
@@ -337,11 +337,15 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
 
-    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
+    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda, out_dtype=None):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.reshape(-1, x.shape[-1]).contiguous()
-        output = torch.empty((x.shape[0], q4_width), dtype=x.dtype, device=x.device)
+        output = torch.empty(
+            (x.shape[0], q4_width),
+            dtype=x.dtype if out_dtype is None else out_dtype,
+            device=x.device,
+        )
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 

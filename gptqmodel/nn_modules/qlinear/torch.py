@@ -264,9 +264,11 @@ class TorchLinear(PackableQuantLinear):
         self._lookahead_enabled = False
         self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
         self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
-        # Set by ``post_init`` once g_idx is final; the gather path is the
-        # safe default if a caller never materializes the module.
-        self._gptq_gemm_uniform_group = False
+        # Keyed by g_idx identity and version so a checkpoint load, move,
+        # deepcopy, or in-place write cannot leave a stale dispatch choice.
+        self._gptq_gemm_uniform_value = False
+        self._gptq_gemm_uniform_id = None
+        self._gptq_gemm_uniform_version = None
         self._lookahead_next = None
         self._weight_metadata = _LinearWeightMetadata(self)
         if bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0"))):
@@ -319,23 +321,20 @@ class TorchLinear(PackableQuantLinear):
 
         super().post_init()
 
+        # Packing often runs under InferenceMode, whose tensors have no version
+        # counter. Keep this tiny metadata tensor normal so the dispatch cache
+        # can cheaply detect in-place g_idx writes.
+        if self.g_idx.is_inference():
+            with torch.inference_mode(False):
+                self.g_idx = self.g_idx.clone()
+
         validate_g_idx_bounds(
             self.g_idx,
             self.scales,
             layer_name=type(self).__name__,
         )
 
-        # Cache whether the checkpoint's g_idx is the identity mapping
-        # ``arange // group_size``.  The fused small-M GEMM uses it to replace
-        # the per-row g_idx gather with one scale/zero row per K-tile.
-        expected_g_idx = (
-            torch.arange(self.in_features, device=self.g_idx.device, dtype=self.g_idx.dtype)
-            // self.group_size
-        )
-        self._gptq_gemm_uniform_group = bool(
-            torch.equal(self.g_idx, expected_g_idx)
-            and self.in_features % self.group_size == 0
-        )
+        self._gptq_gemm_uniform_group_for_current_g_idx()
 
         # torch benefits the most from torch.compile, enable it by default
         self.optimize()
@@ -474,7 +473,7 @@ class TorchLinear(PackableQuantLinear):
             out = gptq_gemm(
                 x, self.qweight, self.scales, self.qzeros, self.g_idx,
                 out_dtype=out_dtype, bits=self.bits,
-                uniform_group=self._gptq_gemm_uniform_group,
+                uniform_group=self._gptq_gemm_uniform_group_for_current_g_idx(),
             )
             out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
@@ -903,7 +902,52 @@ class TorchLinear(PackableQuantLinear):
 
     def clear_weight_cache(self):
         """Invalidate permitted zero-point and group-index metadata caches."""
+        self._gptq_gemm_uniform_value = False
+        self._gptq_gemm_uniform_id = None
+        self._gptq_gemm_uniform_version = None
         self._stream_reset_cache()
+
+    @property
+    def _gptq_gemm_uniform_group(self) -> bool:
+        return self._gptq_gemm_uniform_group_for_current_g_idx()
+
+    @_gptq_gemm_uniform_group.setter
+    def _gptq_gemm_uniform_group(self, value: bool) -> None:
+        self._gptq_gemm_uniform_value = bool(value)
+
+    def _gptq_gemm_uniform_group_for_current_g_idx(self) -> bool:
+        """Return the fused-GEMM layout flag for the current ``g_idx``.
+
+        The comparison itself is cheap, but it is still skipped on repeated
+        forwards. Identity notices replacement, move, and deepcopy; ``_version``
+        notices in-place writes.
+        """
+        g_idx = self.g_idx
+        try:
+            version = g_idx._version
+        except RuntimeError:
+            version = None
+        if (
+            id(g_idx) == self._gptq_gemm_uniform_id
+            and version == self._gptq_gemm_uniform_version
+        ):
+            return self._gptq_gemm_uniform_value
+
+        expected_g_idx = (
+            torch.arange(
+                self.in_features,
+                device=g_idx.device,
+                dtype=g_idx.dtype,
+            )
+            // self.group_size
+        )
+        self._gptq_gemm_uniform_value = bool(
+            torch.equal(g_idx, expected_g_idx)
+            and self.in_features % self.group_size == 0
+        )
+        self._gptq_gemm_uniform_id = id(g_idx)
+        self._gptq_gemm_uniform_version = version
+        return self._gptq_gemm_uniform_value
 
     def enable_lookahead(self, enabled: bool = True):
         """Compatibility shim: speculative dense-weight prefetching is disabled."""

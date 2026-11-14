@@ -353,7 +353,11 @@ class TorchAtenLinear(PackableQuantLinear):
             # bias add, so a pre-bias sum outside its range would become inf.
             # Keep biased layers on the FP32-reduce dense path unless the
             # fused op applies the bias itself.
-            and (self.bias is None or self._fused_op_handles_bias)
+            and (
+                self.bias is None
+                or self._fused_op_handles_bias
+                or x.dtype == torch.bfloat16
+            )
         ):
             capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
@@ -373,7 +377,10 @@ class TorchAtenLinear(PackableQuantLinear):
                     f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
-            out = self._fused_op_forward(x).reshape(out_shape)
+            out = self._fused_op_forward(x)
+            if self.bias is not None and not self._fused_op_handles_bias:
+                out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
+            out = out.reshape(out_shape)
         else:
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)

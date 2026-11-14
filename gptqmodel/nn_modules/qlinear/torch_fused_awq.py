@@ -340,9 +340,9 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and not x_flat.requires_grad
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
-            # The fused op writes the activation dtype before the bias add;
-            # keep biased layers on the FP32-reduce dense path.
-            and self.bias is None
+            # FP16 can overflow before a cancelling bias. BF16 has FP32's
+            # range, so it can use the fused op and add the bias once.
+            and (self.bias is None or x_flat.dtype == torch.bfloat16)
         ):
             capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)
@@ -357,6 +357,8 @@ class TorchFusedAwqLinear(AWQuantLinear):
         if self.linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
+            if self.bias is not None:
+                out = (out.float() + self.bias.to(out.device, torch.float32)).to(x_flat.dtype)
         else:
             # log.debug("awq dense path")
             weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)

@@ -21,6 +21,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -331,7 +332,14 @@ class TorchFusedLinear(PackableQuantLinear):
         input_dtype = x.dtype
         if input_dtype == torch.float32:
             x = x.to(torch.bfloat16)
-        if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
+        fused_bias_safe = self.bias is None or x.dtype == torch.bfloat16
+        if (
+            not self.training
+            and not x.requires_grad
+            and self.linear_mode is None
+            and TORCH_HAS_FUSED_OPS
+            and fused_bias_safe
+        ):
             # one-time transform per module for xpu aten fused ops
             capture_fused_train_state(self)
             self.transform(x.dtype, x.device.type)
@@ -345,16 +353,20 @@ class TorchFusedLinear(PackableQuantLinear):
             self.linear_mode = LinearMode.TRAIN
 
         if self.linear_mode == LinearMode.INFERENCE:
-            out = self._fused_op_forward(x).reshape(out_shape)
+            out = self._fused_op_forward(x)
+            if self.bias is not None:
+                # BF16 has FP32's range; add its bias before the visible cast.
+                out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
+            out = out.reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
-            out = torch.matmul(x, weights).reshape(out_shape)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x, weights, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x, weights).reshape(out_shape)
 
-        # Add bias and adapter
-        if self.bias is not None:
-            out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
