@@ -2022,6 +2022,33 @@ class TorchOpsJitExtension:
         return op
 
 
+def loaded_op(extension: "TorchOpsJitExtension", op_name: str):
+    """Return a handle from an already-loaded extension without touching the loader.
+
+    The dispatch wrappers call this on the hot path so a forward does not pay
+    for extension-name normalization, two ``import_module`` calls, the build
+    lock, support probes, or ``os.environ`` rebuild checks. ``None`` means the
+    extension has no live torch.ops namespace yet (or the op is not part of the
+    loaded library), and the caller must fall back to the loader.
+
+    ``TorchOpsJitExtension.clear_cache()`` resets ``_namespace_cache`` and
+    ``_op_cache``, so every ``clear_*_extension_cache()`` invalidates this fast
+    path as well.
+    """
+
+    namespace = getattr(extension, "_namespace_cache", None)
+    if namespace is None:
+        return None
+    op = extension._op_cache.get(op_name)
+    if op is not None:
+        return op
+    op = getattr(namespace, op_name, None)
+    if op is None:
+        return None
+    extension._op_cache[op_name] = op
+    return op
+
+
 def safe_load_cpp_ext(
         name,
         build_directory=None,

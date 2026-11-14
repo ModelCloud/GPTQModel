@@ -28,6 +28,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
     is_nvcc_compatible,
+    loaded_op,
     resolved_cuda_arch_flags,
 )
 from .env import env_flag
@@ -665,6 +666,21 @@ def _extension_api():
     return extension_api
 
 
+# Identity guard for the dispatch fast path: tests replace ``_extension_api``
+# with a fake, and the memoised torch.ops handles must not shadow that fake.
+_MACHETE_EXTENSION_API = _extension_api
+
+
+def _machete_op(op_name: str):
+    """Return the Machete torch.ops handle without re-resolving the loader."""
+
+    if _extension_api is _MACHETE_EXTENSION_API:
+        op = loaded_op(_MACHETE_TORCH_OPS_EXTENSION, op_name)
+        if op is not None:
+            return op
+    return _extension_api().op("machete", op_name)
+
+
 def _machete_static_runtime_error(device: Optional[torch.device] = None) -> str:
     if IS_ROCM:
         return "Machete kernel is not supported on ROCm."
@@ -794,7 +810,7 @@ def machete_prepack_B(
     b_type: ScalarType,
     group_scales_type: Optional[torch.dtype],
 ) -> torch.Tensor:
-    return _extension_api().op("machete", "machete_prepack_B")(
+    return _machete_op("machete_prepack_B")(
         weight,
         a_type,
         b_type.id,
@@ -811,7 +827,7 @@ def machete_supported_schedules(
     token_scales_type: Optional[torch.dtype] = None,
     out_type: Optional[torch.dtype] = None,
 ) -> List[str]:
-    return _extension_api().op("machete", "machete_supported_schedules")(
+    return _machete_op("machete_supported_schedules")(
         a_type,
         b_type.id,
         group_scales_type,
@@ -835,7 +851,7 @@ def machete_mm(
     out_type: Optional[torch.dtype] = None,
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
-    return _extension_api().op("machete", "machete_mm")(
+    return _machete_op("machete_mm")(
         a,
         b_q,
         b_type.id,

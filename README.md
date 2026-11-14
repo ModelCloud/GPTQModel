@@ -175,6 +175,7 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
+For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.

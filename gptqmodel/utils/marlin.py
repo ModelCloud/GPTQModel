@@ -23,6 +23,7 @@ from .cpp import (
     default_torch_ops_build_root,
     detected_cuda_wheel_include_paths,
     is_nvcc_compatible,
+    loaded_op,
 )
 from .marlin_scalar_type import ScalarType
 from .marlin_scratch import active_marlin_scratch_context
@@ -293,6 +294,11 @@ def _extension_api():
     return extension_api
 
 
+# Identity guard for the dispatch fast path: tests replace ``_extension_api``
+# with a fake, and the memoised torch.ops handles must not shadow that fake.
+_MARLIN_EXTENSION_API = _extension_api
+
+
 def _marlin_runtime_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
     return torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
 
@@ -337,7 +343,17 @@ def _marlin_resolve_op(
     dtype: Optional[torch.dtype],
     op_name: str,
 ):
-    return _extension_api().op(_marlin_kernel_name_for_dtype(dtype), op_name)
+    extension_name = _marlin_kernel_name_for_dtype(dtype)
+    if _extension_api is _MARLIN_EXTENSION_API:
+        extension = (
+            _MARLIN_BF16_TORCH_OPS_EXTENSION
+            if extension_name == "marlin_bf16"
+            else _MARLIN_FP16_TORCH_OPS_EXTENSION
+        )
+        op = loaded_op(extension, op_name)
+        if op is not None:
+            return op
+    return _extension_api().op(extension_name, op_name)
 
 
 def marlin_scratch_sizes(

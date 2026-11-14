@@ -165,8 +165,14 @@ class AwqGEMVFastLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
-        if not awq_runtime_available():
-            raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
+        # The availability probe resolves the JIT extension, so pay it once per
+        # module. A failed probe is never memoised.
+        if not getattr(self, "_runtime_ok", False):
+            if not awq_runtime_available():
+                raise ModuleNotFoundError(
+                    "AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error()
+                )
+            self._runtime_ok = True
 
         inputs = x
         inputs_dim = inputs.dim()
@@ -205,9 +211,14 @@ class AwqGEMVFastLinear(AWQuantLinear):
             )
 
         if self.bias is not None:
-            # Add before narrowing to the activation dtype so cancellation
-            # retains all precision available in the FP16 result and bias.
-            out = out.float() + self.bias.float()
+            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
+            # the single kernel is bitwise identical to widening both operands.
+            # Keep the wide path for BF16 and mixed dtypes: rounding either
+            # operand to BF16 before the add changes the result.
+            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
+                out = torch.add(out, self.bias)
+            else:
+                out = out.float() + self.bias.float()
         out = out.to(dtype=input_dtype)
 
         if self.adapter:
