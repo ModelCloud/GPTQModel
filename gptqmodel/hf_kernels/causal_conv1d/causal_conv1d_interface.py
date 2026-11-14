@@ -157,10 +157,20 @@ def causal_conv1d_update(
         x_new = torch.cat([prefix, x_weight_dtype], dim=-1)
 
         updated_state = selected_state.clone()
-        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(0)
+        # Only the newest ``state_len`` tokens can survive in a circular cache.
+        # Writing every token when ``seqlen > state_len`` repeats modulo
+        # indices, and CUDA scatter races on duplicates, which can leave the
+        # oldest token in a slot instead of the newest.  A contiguous run of
+        # at most ``state_len`` positions maps to unique indices.
+        keep = min(seqlen, state_len)
+        copy_idx = torch.arange(
+            seqlen - keep, seqlen, dtype=torch.long, device=x.device
+        ).unsqueeze(0)
         copy_idx = torch.remainder(copy_idx + cache_seqlens.unsqueeze(1), state_len)
         copy_idx = copy_idx.unsqueeze(1).expand(-1, dim, -1)
-        updated_state.scatter_(2, copy_idx, x.to(dtype=updated_state.dtype))
+        updated_state.scatter_(
+            2, copy_idx, x[..., seqlen - keep :].to(dtype=updated_state.dtype)
+        )
 
     if state_index is None:
         conv_state.copy_(updated_state)
