@@ -97,6 +97,7 @@ Disk-backed replay outputs use [bounded staging and shard verification on every 
 Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
 Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
+Transformers 5.22 model-family fixes for module trees, Defuser router shims, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
