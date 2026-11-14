@@ -247,13 +247,39 @@ class _RWLock:
             self.release_read()
 
 
+def _dedupe_lock_pairs(ordered_pairs: List[tuple[str, "_RWLock"]]) -> List[tuple[str, "_RWLock"]]:
+    """Collapse pairs that name the same lock object, keeping first-seen order.
+
+    A virtual pool key shares its parent's ``_RWLock`` (``self._locks[alias] is
+    self._locks[parent]``) while the family map lists both keys. A family or
+    "all" scope therefore contains the same lock more than once, and acquiring
+    it twice is a deadlock: ``_RWLock.acquire_read`` blocks new readers while a
+    writer waits, so the second acquisition waits for a writer that is itself
+    waiting for the reader's first acquisition to be released.
+    """
+
+    seen: set[int] = set()
+    deduped: List[tuple[str, "_RWLock"]] = []
+    for name, lock in ordered_pairs:
+        identity = id(lock)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append((name, lock))
+    return deduped
+
+
 class _LockGroup(contextlib.AbstractContextManager):
     """
     Acquire multiple device **write** locks in deterministic order to avoid deadlocks.
     Helpful for GC passes or any multi-device exclusive operation.
+
+    Pairs that name the same lock object are acquired once (see
+    :func:`_dedupe_lock_pairs`), so a virtual alias in the scope cannot make a
+    group acquire its parent's lock twice.
     """
     def __init__(self, ordered_pairs: List[tuple[str, _RWLock]]):
-        self._pairs = ordered_pairs
+        self._pairs = _dedupe_lock_pairs(ordered_pairs)
 
     def __enter__(self):
         for name, lk in self._pairs:
@@ -273,9 +299,14 @@ class _ReadLockGroup(contextlib.AbstractContextManager):
     """
     Acquire multiple device **read** locks in deterministic order.
     Useful for multi-device snapshots or read-only, consistent views.
+
+    Pairs that name the same lock object are acquired once (see
+    :func:`_dedupe_lock_pairs`). A shared virtual alias must not be read-locked
+    twice: the second acquisition would wait behind a queued writer while that
+    writer waits for the first acquisition to be released.
     """
     def __init__(self, ordered_pairs: List[tuple[str, _RWLock]]):
-        self._pairs = ordered_pairs
+        self._pairs = _dedupe_lock_pairs(ordered_pairs)
 
     def __enter__(self):
         for name, lk in self._pairs:
