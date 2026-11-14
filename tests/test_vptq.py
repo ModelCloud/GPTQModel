@@ -1849,6 +1849,41 @@ def test_vptq_materialize_hessian_is_idempotent_and_accumulates_later_batches():
     assert quantizer.nsamples == tokens.shape[0]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_repeat_materialization_honours_a_changed_target_device():
+    """A cached Hessian must move to an explicitly requested device (#3916).
+
+    Inspecting on CPU and then quantizing on GPU used to return the CPU tensor
+    from the repeat-materialization fast path, so the GPU pass received host
+    data. The cached statistics themselves must stay untouched.
+    """
+
+    qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
+
+    generator = torch.Generator().manual_seed(17)
+    rows = torch.randn(4, 6, generator=generator, dtype=torch.float64)
+    quantizer.add_batch(rows)
+
+    cpu_hessian = quantizer.materialize_hessian(torch.device("cpu"))
+    samples = quantizer.nsamples
+    assert cpu_hessian.device.type == "cpu"
+
+    gpu_hessian = quantizer.materialize_hessian(torch.device("cuda:0"))
+    assert gpu_hessian.device.type == "cuda"
+    assert quantizer.nsamples == samples
+    torch.testing.assert_close(gpu_hessian.cpu(), cpu_hessian, rtol=0.0, atol=0.0)
+
+    # The cached statistics stay on their original device and are still correct.
+    again = quantizer.materialize_hessian(torch.device("cpu"))
+    assert again.device.type == "cpu"
+    torch.testing.assert_close(again, cpu_hessian, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == samples
+
+    # A same-device request still returns the cached tensor itself.
+    assert quantizer.materialize_hessian(torch.device("cpu")) is again
+
+
 def test_vptq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
     """The per-device partial merge must not issue a raw cross-device copy.
 

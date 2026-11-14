@@ -305,7 +305,14 @@ class VPTQ:
         if pending_samples == 0:
             if self.H2 is not None:
                 self.nsamples = self._materialized_samples
-                return self.H2
+                # The cached Hessian is a read-only view of the statistics, so
+                # an explicit target device is honoured by moving the result
+                # rather than by relocating the cached state. A caller that
+                # inspects on CPU and then quantizes on GPU must not receive
+                # host data.
+                if self.H2.device == target_device and self.H2.dtype == _HESSIAN_DTYPE:
+                    return self.H2
+                return safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
             self._materialized_samples = 0
             total_samples = 0
             self.H2 = torch.zeros(

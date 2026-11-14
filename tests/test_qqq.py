@@ -181,6 +181,30 @@ class TestQQQHessian(unittest.TestCase):
         self.assertEqual(qqq.nsamples, samples)
         torch.testing.assert_close(first, self._reference_hessian(x), rtol=1e-4, atol=1e-5)
 
+    def test_repeat_materialization_honours_a_changed_target_device(self):
+        """A cached Hessian must move to an explicitly requested device (#3916)."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+
+        torch.manual_seed(42)
+        qqq = QQQ(torch.nn.Linear(16, 8, dtype=torch.float32))
+        x = torch.randn(4, 8, 16, dtype=torch.float32)
+        qqq.add_batch(x, None)
+
+        cpu_hessian = qqq.materialize_hessian(torch.device("cpu"))
+        samples = qqq.nsamples
+        self.assertEqual(cpu_hessian.device.type, "cpu")
+
+        gpu_hessian = qqq.materialize_hessian(torch.device("cuda:0"))
+        self.assertEqual(gpu_hessian.device.type, "cuda")
+        self.assertEqual(qqq.nsamples, samples)
+        torch.testing.assert_close(gpu_hessian.cpu(), cpu_hessian, rtol=0.0, atol=0.0)
+
+        # The cached statistics stay put and a same-device request reuses them.
+        again = qqq.materialize_hessian(torch.device("cpu"))
+        self.assertIs(again, cpu_hessian)
+        self.assertEqual(qqq.nsamples, samples)
+
     def test_batch_after_materialization_accumulates(self):
         """Batches added after a materialization extend the earlier statistics."""
         torch.manual_seed(42)

@@ -624,7 +624,12 @@ class QQQ:
         if pending_samples == 0:
             if getattr(self, "H", None) is not None:
                 self.nsamples = self._materialized_samples
-                return self.H
+                # The cached Hessian is a read-only view of the statistics, so
+                # an explicit target device is honoured by moving the result
+                # rather than by relocating the cached state.
+                if self.H.device == target_device and self.H.dtype == torch.float32:
+                    return self.H
+                return safe_move_to(self.H, target_device, dtype=torch.float32)
             self._materialized_samples = 0
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
             self.nsamples = 0
