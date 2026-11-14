@@ -212,7 +212,7 @@ class AwqMacheteLinear(AWQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
         group_scales = self.scales.to(dtype=input_2d.dtype)
         group_zeros = self.qzeros.to(dtype=input_2d.dtype)
 
