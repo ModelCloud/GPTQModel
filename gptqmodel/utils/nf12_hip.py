@@ -272,6 +272,29 @@ def available(device: torch.device | None = None) -> bool:
     return True
 
 
+def rowmajor_available(device: torch.device | None = None) -> bool:
+    """Return whether the row-major embedding operators can run on this device.
+
+    ``available()`` only proves the decode extension loaded. The row-major
+    wrappers resolve their dispatcher handle through ``_op``, which raises when
+    the extension cannot load and cannot bind an operator the build omitted, so
+    probe the two operators a row-major layout actually needs.
+    """
+
+    if not available(device):
+        return False
+    try:
+        namespace = getattr(torch.ops, "nf12_hip", None)
+    except Exception:  # noqa: BLE001 - optional extension namespace
+        return False
+    if namespace is None:
+        return False
+    return all(
+        callable(getattr(namespace, name, None))
+        for name in ("rowmajor_pack", "rowmajor_embedding")
+    )
+
+
 def last_error() -> str:
     return _EXTENSION.last_error_message()
 
@@ -407,6 +430,7 @@ __all__ = [
     "linear",
     "nf12_hip_supported",
     "prewarm_nf12_hip_extension",
+    "rowmajor_available",
     "rowmajor_embedding",
     "rowmajor_pack",
     "sub_fp32",

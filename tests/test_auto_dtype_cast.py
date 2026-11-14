@@ -219,9 +219,9 @@ def test_cpu_embedding_fallback_masks_out_of_range_ids(monkeypatch):
 def test_cuda_embedding_uses_only_packed_storage(monkeypatch):
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
 
-    from gptqmodel_nf12 import available
+    import gptqmodel_nf12
 
-    native = available()
+    native = gptqmodel_nf12.available()
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
     with torch.no_grad():
         source.weight.copy_(torch.randn_like(source.weight) * 0.02)
@@ -302,10 +302,14 @@ def test_cuda_row_major_embedding_dequantizes_to_cpu(monkeypatch):
 )
 def test_cuda_embedding_falls_back_when_native_nf12_is_unavailable(monkeypatch):
     import gptqmodel_nf12
-    from gptqmodel_nf12 import _library as nf12_library
+
+    nf12_library = gptqmodel_nf12._library
 
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
     monkeypatch.setattr(nf12_library, "_native_available", lambda: False)
+    # The layout probe asks for the specific row-major operators, which a
+    # previously loaded extension in this session may already have registered.
+    monkeypatch.setattr(gptqmodel_nf12, "available_ops", lambda *names: False)
     assert not gptqmodel_nf12.available()
 
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
@@ -346,7 +350,11 @@ def test_dense_embedding_fallback_masks_out_of_range_ids(monkeypatch):
 
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
     monkeypatch.setattr(auto_dtype_cast, "_rowmajor_ops", lambda _device: None)
-    monkeypatch.setattr(nf12_quantization, "available", lambda: False)
+    # ``AutoNF12Embedding.forward`` gates its CUDA fast path on the extension
+    # package, not on the quantizer module, so force the extension off there.
+    import gptqmodel_nf12
+
+    monkeypatch.setattr(gptqmodel_nf12, "available", lambda: False)
 
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
     with torch.no_grad():
@@ -386,9 +394,153 @@ def test_dense_embedding_fallback_masks_out_of_range_ids(monkeypatch):
     assert torch.count_nonzero(scalar) == 0
 
 
-def test_source_build_available_reports_missing_tools(monkeypatch):
-    from gptqmodel_nf12 import _jit
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
+    reason="requires NVIDIA SM80 or newer",
+)
+def test_cuda_embedding_falls_back_for_a_partial_preloaded_namespace(monkeypatch):
+    """A legacy namespace without the row-major operators must not be used (#3860).
 
+    ``gptqmodel_nf12.load()`` reuses any already-registered namespace, so
+    ``available()`` is true even when ``rowmajor_pack`` is absent. The layout
+    probe must ask for the row-major operators specifically, or the first pack
+    raises ``AttributeError`` and aborts the cast.
+    """
+
+    import gptqmodel_nf12
+
+    nf12_library = gptqmodel_nf12._library
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_library, "_loaded", threading.Event())
+    monkeypatch.setattr(
+        torch.ops,
+        "nf12",
+        SimpleNamespace(embedding=lambda *args: None, decode=lambda *args: None),
+        raising=False,
+    )
+    nf12_library.load()
+
+    # The namespace is considered usable, but it cannot serve this layout.
+    assert gptqmodel_nf12.available()
+    assert not gptqmodel_nf12.available_ops("rowmajor_pack", "rowmajor_embedding")
+
+    source = nn.Embedding(16, 64, dtype=torch.bfloat16, device="cuda:0")
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cuda:0")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    assert not packed.row_major
+    assert {name for name, _ in packed.named_buffers()} == {
+        "nf12_packed",
+        "nf12_escapes",
+        "nf12_exp_base",
+    }
+
+
+def test_hip_rowmajor_probe_checks_the_extension_not_the_wrapper(monkeypatch):
+    """``hasattr(nf12_hip, "rowmajor_pack")`` proves nothing (#3860).
+
+    The wrapper resolves its operator only when the optional extension loads, so
+    a supported RDNA4 device with an unavailable or broken extension must select
+    the generic layout instead of raising from the first pack call.
+    """
+
+    from gptqmodel.utils import nf12_hip
+
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    device = torch.device("cuda:0")
+
+    # The Python wrapper exists regardless of whether the extension can load.
+    assert hasattr(nf12_hip, "rowmajor_pack")
+
+    monkeypatch.setattr(nf12_hip, "rowmajor_available", lambda _device=None: False)
+    assert auto_dtype_cast._rowmajor_ops(device) is None
+
+    monkeypatch.setattr(nf12_hip, "rowmajor_available", lambda _device=None: True)
+    resolved = auto_dtype_cast._rowmajor_ops(device)
+    assert resolved is not None
+    assert resolved[0] is nf12_hip.rowmajor_pack
+
+
+@pytest.mark.parametrize("error", [AttributeError, RuntimeError, OSError], ids=["attribute", "runtime", "os"])
+def test_rowmajor_pack_failure_falls_back_to_the_generic_layout(monkeypatch, error):
+    """A failed row-major pack must not abort the cast (#3860).
+
+    A probe can be optimistic even when it checks the right operators, so the
+    constructor treats a failed pack as "use the generic packed layout" rather
+    than propagating the failure out of an otherwise supported quantization run.
+    """
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(auto_dtype_cast, "_ROWMAJOR_FALLBACK_REPORTED", set())
+
+    def failing_pack(*_args):
+        raise error("rowmajor_pack is unavailable")
+
+    monkeypatch.setattr(auto_dtype_cast, "_rowmajor_ops", lambda _device: (failing_pack, "nf12"))
+
+    source = nn.Embedding(16, 64, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+
+    assert not packed.row_major
+    assert {name for name, _ in packed.named_buffers()} == {
+        "nf12_packed",
+        "nf12_escapes",
+        "nf12_exp_base",
+    }
+    assert "nf12" in auto_dtype_cast._ROWMAJOR_FALLBACK_REPORTED
+    ids = torch.tensor([[0, 5, 15]])
+    assert _bits_equal(packed(ids), source(ids))
+
+
+def test_rowmajor_fallback_warns_exactly_once_across_failures(monkeypatch):
+    """The once-guard must suppress repeat warnings, not just repeat fallbacks (#3860).
+
+    A model casts one embedding module per layer, so an unguarded warning would
+    be emitted once per layer. Count the messages actually handed to the logger
+    instead of trusting that the guard exists.
+    """
+
+    emitted = []
+
+    class _Recorder:
+        def warn(self, message, *args):
+            emitted.append(message % args if args else message)
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    monkeypatch.setattr(auto_dtype_cast, "log", _Recorder())
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(auto_dtype_cast, "_ROWMAJOR_FALLBACK_REPORTED", set())
+
+    def failing_pack(*_args):
+        raise RuntimeError("rowmajor_pack is unavailable")
+
+    monkeypatch.setattr(auto_dtype_cast, "_rowmajor_ops", lambda _device: (failing_pack, "nf12"))
+
+    for _ in range(3):
+        source = nn.Embedding(16, 64, dtype=torch.bfloat16)
+        spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+        packed = auto_dtype_cast.cast_source_module(source, spec)
+        assert not packed.row_major
+
+    assert len(emitted) == 1
+    assert "generic packed layout" in emitted[0]
+
+
+def test_source_build_available_reports_missing_tools(monkeypatch):
+    import gptqmodel_nf12
+
+    _jit = gptqmodel_nf12._jit
     monkeypatch.setattr(_jit, "_architectures", lambda: [89])
     monkeypatch.setattr(_jit.shutil, "which", lambda _name: None)
     assert not _jit.source_build_available()
