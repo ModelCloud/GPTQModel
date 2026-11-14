@@ -211,17 +211,38 @@ inline bool is_meta(const Device& device) {
 
 inline bool is_meta(const Tensor& tensor) { return is_meta(tensor.device()); }
 
+/// Byte interval a tensor can occupy, from its storage start to its last
+/// element. `Tensor::is_alias_of` compares storage identity, which the stable
+/// surface does not expose; a stride-aware span is the conservative equivalent
+/// and never under-reports overlap. A plain `numel() * element_size()` interval
+/// does: a row-padded tensor (stride > size, which Marlin explicitly accepts)
+/// reaches past that interval, so a scratch view starting in those rows would
+/// look disjoint.
+inline std::pair<const char*, const char*> occupied_span(const Tensor& tensor) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return {nullptr, nullptr};
+  }
+  const int64_t element_size = static_cast<int64_t>(tensor.element_size());
+  int64_t reach = 1;
+  for (int64_t dim = 0; dim < tensor.dim(); ++dim) {
+    const int64_t stride = tensor.stride(dim);
+    const int64_t step = stride < 0 ? -stride : stride;
+    reach += (tensor.size(dim) - 1) * step;
+  }
+  // Include the storage prefix before the view so two views of one storage are
+  // rejected the way the storage-identity check rejected them.
+  const int64_t offset = tensor.storage_offset();
+  const auto* begin = static_cast<const char*>(tensor.data_ptr()) - offset * element_size;
+  return {begin, begin + (offset + reach) * element_size};
+}
+
 inline bool is_alias_of(const Tensor& lhs, const Tensor& rhs) {
-  if (!lhs.defined() || !rhs.defined()) {
+  const auto lhs_span = occupied_span(lhs);
+  const auto rhs_span = occupied_span(rhs);
+  if (lhs_span.first == nullptr || rhs_span.first == nullptr) {
     return false;
   }
-  const auto* lhs_begin = static_cast<const char*>(lhs.data_ptr());
-  const auto* rhs_begin = static_cast<const char*>(rhs.data_ptr());
-  const size_t lhs_bytes = static_cast<size_t>(lhs.numel()) * lhs.element_size();
-  const size_t rhs_bytes = static_cast<size_t>(rhs.numel()) * rhs.element_size();
-  const auto* lhs_end = lhs_begin + lhs_bytes;
-  const auto* rhs_end = rhs_begin + rhs_bytes;
-  return lhs_begin < rhs_end && rhs_begin < lhs_end;
+  return lhs_span.first < rhs_span.second && rhs_span.first < lhs_span.second;
 }
 
 inline bool is_floating_point(const Tensor& tensor) {
