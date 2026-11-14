@@ -4,10 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import difflib
 import hashlib
 import json
 import math
 import os.path
+import re
 import tempfile
 import threading
 import weakref
@@ -3270,6 +3272,95 @@ def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
     return patterns
 
 
+# Third-party producers record module exclusions outside `dynamic`.  AutoAWQ /
+# HF `AwqConfig` use `modules_to_not_convert`, llm-compressor uses `ignore`,
+# and Optimum's GPTQ path uses `modules_in_block_to_quantize` (an inclusion
+# list).  Fold the two exclusion lists into `-:` dynamic rules so the loader
+# has one authoritative decision surface; the inclusion list needs the module
+# tree and is applied by the loader.
+_EXTERNAL_EXCLUSION_KEYS = ("modules_to_not_convert", "ignore")
+_EXTERNAL_INCLUSION_KEY = "modules_in_block_to_quantize"
+
+
+def _external_string_list(value: Any) -> List[str]:
+    """Flatten a producer's string / list-of-strings / list-of-lists value."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            if item:
+                result.append(item)
+        elif isinstance(item, (list, tuple)):
+            result.extend(entry for entry in item if isinstance(entry, str) and entry)
+    return result
+
+
+def _external_exclusion_dynamic_pattern(pattern: str) -> Optional[str]:
+    """Translate one producer exclusion into a `dynamic` matching pattern.
+
+    AutoAWQ / HF / vLLM compare these entries as module-name substrings, while
+    `dynamic` rules are exact literals or start-anchored regexes.  Plain names
+    become a suffix regex (``.*(?:^|\\.)down_proj$``); anything that already
+    contains regex metacharacters is kept verbatim.
+    """
+
+    pattern = pattern.strip()
+    if not pattern:
+        return None
+    # A dot is ambiguous: it is both a module separator and a regex wildcard.
+    # Producer keys name modules, so treat dotted plain names as literals and
+    # only keep patterns with explicit regex syntax.
+    if any(character in pattern for character in "*+?[](){}|^$\\"):
+        try:
+            pcre.compile(pattern)
+            return pattern
+        except Exception:
+            # Producers also emit glob-style entries (e.g. `*.mlp.down_proj`).
+            # Fall back to a glob-to-regex suffix instead of rejecting the
+            # whole checkpoint over one unparsable pattern.
+            glob_parts = pattern.split("*")
+            return r".*(?:^|\.)" + r".*".join(re.escape(part) for part in glob_parts) + "$"
+    return r".*(?:^|\.)" + re.escape(pattern) + "$"
+
+
+def _apply_external_checkpoint_module_filters(
+    config: "BaseQuantizeConfig",
+    exclusion_patterns: List[str],
+    inclusion_patterns: Optional[List[str]],
+) -> None:
+    """Attach producer-declared exclusions/inclusions to a parsed config."""
+
+    patterns = list(dict.fromkeys(exclusion_patterns))
+    # `AWQConfig` keeps the compatibility field; preserve it as an exclusion
+    # source as well so a config constructed without the parser still honors it.
+    patterns = list(dict.fromkeys(
+        patterns + _external_string_list(getattr(config, "modules_to_not_convert", None))
+    ))
+    if patterns:
+        derived = []
+        for pattern in patterns:
+            dynamic_pattern = _external_exclusion_dynamic_pattern(pattern)
+            if dynamic_pattern is not None:
+                derived.append(dynamic_pattern)
+        if derived:
+            # Exclusions are authoritative and must win first-match resolution.
+            merged: Dict[str, Any] = {}
+            for dynamic_pattern in derived:
+                merged[f"-:{dynamic_pattern}"] = {}
+            for pattern, override in (config.dynamic or {}).items():
+                merged.setdefault(pattern, override)
+            config.dynamic = merged
+        config._external_exclusion_patterns = tuple(patterns)
+    if inclusion_patterns is not None:
+        config._external_module_inclusions = tuple(dict.fromkeys(inclusion_patterns))
+
+
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
     """Return the `dynamic` pattern that decides `module_name`'s override.
 
@@ -4001,7 +4092,50 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
     return {key: value for key, value in payload.items() if key in target_field_names}
 
 
+_QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS = frozenset({"weight_only"})
+# Serialized payloads can carry derived keys that are not dataclass fields.
+# Accept them for the factory so `QuantizeConfig(**config.to_dict())` keeps
+# working; the field they derive from is authoritative when both are present.
+_QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS = frozenset({"backend"})
+
+
+def _validate_quantize_config_factory_kwargs(target_cls, payload: Dict[str, Any]) -> None:
+    known_fields = _known_quantize_config_field_names()
+    allowed_keys = (
+        known_fields
+        | _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+        | _QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS
+    )
+    unknown = sorted(key for key in payload if key not in allowed_keys)
+    if unknown:
+        details = []
+        for key in unknown:
+            matches = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+            details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+        raise TypeError(
+            "QuantizeConfig: unexpected quantization config keyword(s): "
+            + ", ".join(details)
+            + f". `{target_cls.__name__}` accepts fields from the quantization config classes."
+        )
+
+    # Include init=False fields: the concrete class owns and normalises them,
+    # so passing one back from `to_dict` is not a foreign-method setting.
+    target_field_names = {field.name for field in fields(target_cls)}
+    ignored = sorted(
+        key
+        for key in payload
+        if key not in target_field_names and key not in _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+    )
+    if ignored:
+        log.warn(
+            f"QuantizeConfig: `{target_cls.__name__}` does not accept {ignored}; "
+            "these settings belong to another quantization method and are ignored. "
+            "Use the matching concrete config class to set them."
+        )
+
+
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_quantize_config_factory_kwargs(target_cls, payload)
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
@@ -4043,10 +4177,13 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
 
     normalized = dict(kwargs)
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
-        raise ValueError(
-            "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
-            "or `format=\"gptq\"` for new GPTQ quantization."
-        )
+        # Third-party AutoGPTQ checkpoints write `is_marlin_format: false`.
+        # Only the legacy `true` value requested the removed runtime layout.
+        if _is_truthy_compat_flag(normalized.pop(FORMAT_FIELD_COMPAT_MARLIN)):
+            raise ValueError(
+                "QuantizeConfig: `is_marlin_format: true` is no longer supported. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
+                "or `format=\"gptq\"` for new GPTQ quantization."
+            )
     if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
         normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
     normalized.pop(QUANT_METHOD_FIELD, None)
@@ -4054,7 +4191,34 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
+
+    # Serialized payloads also use the legacy `version`/`fmt` names for the
+    # checkpoint format and `wbits` for the bit width.
+    for legacy_key in ("version", "fmt"):
+        if legacy_key in normalized:
+            legacy_value = normalized.pop(legacy_key)
+            if FORMAT_FIELD_CODE not in normalized:
+                normalized[FORMAT_FIELD_CODE] = legacy_value
+    if "wbits" in normalized:
+        wbits = normalized.pop("wbits")
+        if BITS_FIELD_CODE not in normalized:
+            normalized[BITS_FIELD_CODE] = wbits
+
+    if "zero_point" in normalized:
+        zero_point = normalized.pop("zero_point")
+        if not isinstance(zero_point, bool):
+            raise TypeError("QuantizeConfig: `zero_point` must be a bool")
+        if SYMMETRIC_FIELD_CODE not in normalized:
+            normalized[SYMMETRIC_FIELD_CODE] = not zero_point
     return normalized
+
+
+def _is_truthy_compat_flag(value: Any) -> bool:
+    """Interpret a legacy boolean field, tolerating JSON strings."""
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 @dataclass
@@ -4363,13 +4527,55 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.offload_to_disk_path = self._offload_temp_dir.name
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
-    def __post_init__(self):
+    def _normalize_serialization_fields(self) -> None:
+        """Normalize fields that ``to_dict`` serializes with enum/dataclass assumptions.
+
+        Concrete configs that override ``__post_init__`` without delegating to
+        this base implementation must call this helper explicitly. The
+        ``test_every_concrete_config_normalizes_serialized_fields`` regression
+        covers that contract.
+        """
+
         try:
             self.auto_dtype_cast = AutoDtypeCast(self.auto_dtype_cast)
         except ValueError as exc:
             raise ValueError(
                 "auto_dtype_cast must be 'auto_nf12' or 'off'"
             ) from exc
+
+        if isinstance(self.telemetry, dict):
+            self.telemetry = TelemetryConfig(**self.telemetry)
+        elif not isinstance(self.telemetry, TelemetryConfig):
+            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
+
+        self.mse = _normalize_mse(self.mse)
+        # `sym: null` is written by some third-party configs; it means "use the
+        # default" rather than an unknown tri-state. Normalize before the bool
+        # field validation runs.
+        if self.sym is None:
+            self.sym = True
+
+    def _validate_bool_fields(self) -> None:
+        for field_name in (
+            "sym",
+            "true_sequential",
+            "lm_head",
+            "compile",
+            "offload_to_disk",
+            "keep_processor_logs",
+            "auto_forward_data_parallel",
+            "wait_for_submodule_finalizers",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"{self.__class__.__name__}: `{field_name}` must be a bool, "
+                    f"got {type(value).__name__} ({value!r})."
+                )
+
+    def __post_init__(self):
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -4447,7 +4653,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if self.desc_act is None:
             self.desc_act = self.default_desc_act()
         elif not isinstance(self.desc_act, bool):
-            self.desc_act = bool(self.desc_act)
+            raise TypeError(
+                f"{self.__class__.__name__}: `desc_act` must be a bool or None, "
+                f"got {type(self.desc_act).__name__} ({self.desc_act!r})."
+            )
 
         if self.activation is not None:
             activation = ActivationConfig.from_value(self.activation)
@@ -4475,12 +4684,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
-        if isinstance(self.telemetry, dict):
-            self.telemetry = TelemetryConfig(**self.telemetry)
-        elif not isinstance(self.telemetry, TelemetryConfig):
-            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
-
-        self.mse = _normalize_mse(self.mse)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -4540,6 +4743,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         sub_key: str = None,
     ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
+
+    def external_module_inclusions(self) -> Optional[Tuple[str, ...]]:
+        """Return Optimum's `modules_in_block_to_quantize` inclusion list.
+
+        `None` means the checkpoint did not declare one and every module in the
+        model tree is eligible.  A non-empty tuple restricts quantization to
+        modules whose block-relative name ends with one of the entries.
+        """
+
+        inclusions = getattr(self, "_external_module_inclusions", None)
+        return tuple(inclusions) if inclusions else None
 
     def resolve_module_config(self, module_name: str) -> ResolvedModuleConfig:
         """Snapshot the resolved dynamic rule for one quantizable module."""
@@ -4626,14 +4840,21 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         }
         format_field_present = format is not None
         legacy_checkpoint_format = None
+        external_exclusions: List[str] = []
+        external_inclusions: Optional[List[str]] = None
 
         for key, val in quantize_cfg.items():
             key = key.lower()
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
-                raise ValueError(
-                    "QuantizeConfig: `is_marlin_format` is no longer supported. Replace it with an explicit `format` field."
-                )
+                # Accept the `false` value that AutoGPTQ and hugging-quants
+                # checkpoints persist; only the removed `true` layout is an
+                # error.
+                if _is_truthy_compat_flag(val):
+                    raise ValueError(
+                        "QuantizeConfig: `is_marlin_format: true` is no longer supported. Replace it with an explicit `format` field."
+                    )
+                continue
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):
@@ -4649,6 +4870,15 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                         legacy_checkpoint_format = _normalize_format(val)
                 if legacy_checkpoint_format is not None:
                     checkpoint_format_hint = legacy_checkpoint_format
+                continue
+
+            if key in _EXTERNAL_EXCLUSION_KEYS:
+                external_exclusions.extend(_external_string_list(val))
+                if key == "ignore":
+                    # Not a config field; the derived `-:` rules carry it.
+                    continue
+            if key == _EXTERNAL_INCLUSION_KEY:
+                external_inclusions = _external_string_list(val)
                 continue
 
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -4731,6 +4961,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "mock_quantization": "mock_quantization",
             "act_group_aware": "act_group_aware",
             "true_sequential": "true_sequential",
+            "static_groups": "static_groups",
             "damp_percent": "damp_percent",
             "damp_auto_increment": "damp_auto_increment",
             "opt_rotation_epochs": "opt_rotation_epochs",
@@ -4831,7 +5062,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
-        return target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        config = target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        _apply_external_checkpoint_module_filters(
+            config,
+            external_exclusions,
+            external_inclusions,
+        )
+        return config
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
@@ -5304,10 +5541,25 @@ class AWQConfig(PreProcessorConfig):
         checkpoints produced by other tools, so it is preserved as well.
         """
 
-        patterns = _dynamic_exclusion_patterns(
-            self.dynamic,
-            sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
-        )
+        # Producer-declared exclusions are mirrored into `dynamic` as regex
+        # rules for the loader.  Emit the original spelling, not the derived
+        # regex, so a round-trip does not rewrite `down_proj` into a pattern.
+        external = tuple(getattr(self, "_external_exclusion_patterns", ()) or ())
+        derived = {
+            _external_exclusion_dynamic_pattern(pattern)
+            for pattern in external
+        }
+        patterns = [
+            pattern
+            for pattern in _dynamic_exclusion_patterns(
+                self.dynamic,
+                sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
+            )
+            if pattern not in derived
+        ]
+        for pattern in external:
+            if pattern not in patterns:
+                patterns.append(pattern)
         for pattern in self.modules_to_not_convert or ():
             if isinstance(pattern, str) and pattern and pattern not in patterns:
                 patterns.append(pattern)
@@ -6302,6 +6554,12 @@ class EXL3Config(PreProcessorConfig):
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
+        # EXL3 does not delegate to BaseQuantizeConfig.__post_init__, so it
+        # must run the serialization normalisation explicitly. Without it
+        # `to_dict()` sees raw strings/dicts for auto_dtype_cast, telemetry,
+        # and mse, and loaded checkpoints fail on re-save.
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)

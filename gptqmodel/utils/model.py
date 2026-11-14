@@ -45,7 +45,7 @@ from ..models._const import (
     EXPERT_INDEX_PLACEHOLDER,
     SUPPORTS_MODULE_TYPES,
 )
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from ..nn_modules.qlinear.marlin import MarlinLinear
@@ -915,7 +915,19 @@ def hf_convert_gptq_v1_to_v2_format(
     checkpoint_format: str,
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
-    if checkpoint_format == "gptq":
+    try:
+        source_format = resolve_quant_format(checkpoint_format, METHOD.GPTQ)
+    except (TypeError, ValueError):
+        source_format = None
+    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        # Optimum calls this before `save_pretrained()` can run. Record the
+        # on-disk layout here so the state-dict hook can undo the runtime v2
+        # conversion for a v1 checkpoint.
+        for module in model.modules():
+            if isinstance(module, GPTQQuantLinear):
+                module._checkpoint_format_on_disk = source_format
+
+    if source_format == FORMAT.GPTQ:
         # Skip v1 to v2 conversion when no loaded quant module requires v2.
         if not any(
             isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
@@ -925,8 +937,7 @@ def hf_convert_gptq_v1_to_v2_format(
 
         cfg = QuantizeConfig(bits=bits)
         return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    else:
-        return model, False
+    return model, False
 
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
@@ -1109,6 +1120,91 @@ def convert_gptq_v2_to_v1_format(
             convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model
+
+
+_RESAVE_CONVERTIBLE_GPTQ_FORMATS = (FORMAT.GPTQ, FORMAT.GPTQ_V2)
+_RESAVE_LAYOUT_FIELDS = ("bits", "group_size", "sym", "desc_act", "pack_dtype")
+
+
+def resolve_resave_format_conversion(quantize_config: QuantizeConfig) -> Optional[Tuple[FORMAT, FORMAT]]:
+    """Return ``(on_disk_format, target_format)`` when a re-save converts qzeros.
+
+    ``None`` means the checkpoint layout is unchanged.  A layout change that
+    cannot be represented by the v1/v2 qzero shift is rejected here, before a
+    writer emits a mislabelled checkpoint.
+    """
+
+    source_format = getattr(quantize_config, "_checkpoint_format_on_disk", None)
+    if source_format is None:
+        return None
+    target_format = resolve_quant_format(quantize_config.format, quantize_config.method)
+    if source_format == target_format:
+        return None
+
+    snapshot = getattr(quantize_config, "_checkpoint_layout_snapshot", None) or {}
+    changed = [
+        field
+        for field in _RESAVE_LAYOUT_FIELDS
+        if field in snapshot and getattr(quantize_config, field, None) != snapshot[field]
+    ]
+    if changed:
+        raise ValueError(
+            "Cannot change "
+            + ", ".join(changed)
+            + " while re-saving a loaded checkpoint: the packed weights would no longer "
+            "match the config. Re-quantize from the dense source instead."
+        )
+    if (
+        source_format in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+        and target_format in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+    ):
+        return source_format, target_format
+    raise ValueError(
+        "Cannot re-save a loaded checkpoint with a different quantization format "
+        f"(`{source_format}` -> `{target_format}`). Only GPTQ v1 <-> GPTQ v2 qzero "
+        "conversion is exact; every other layout change requires re-quantization "
+        "from the dense source checkpoint."
+    )
+
+
+def convert_loaded_qzeros_for_format_change(
+    model: nn.Module,
+    source_format: FORMAT,
+    target_format: FORMAT,
+) -> int:
+    """Rewrite loaded GPTQ qzeros from ``source_format`` to ``target_format``.
+
+    The source tensors are read raw from the checkpoint, so this is the only
+    place a format change can be applied before the writer copies them.
+    """
+
+    if source_format == target_format:
+        return 0
+    if (
+        source_format not in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+        or target_format not in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+    ):
+        raise ValueError(
+            f"Unsupported qzero format conversion: `{source_format}` -> `{target_format}`."
+        )
+
+    converted = 0
+    for module in model.modules():
+        if not isinstance(module, GPTQQuantLinear):
+            continue
+        qzeros = getattr(module, "qzeros", None)
+        if qzeros is None or qzeros.numel() == 0:
+            continue
+        bits = getattr(module, "bits", 4)
+        planar = bool(getattr(module, "planar", False))
+        if target_format == FORMAT.GPTQ_V2:
+            qzeros.data.copy_(_correct_gptq_v1_qzeros(qzeros.data, bits, planar=planar))
+            module.qzero_format(format=2)
+        else:
+            qzeros.data.copy_(_revert_gptq_v1_qzeros_correction(qzeros.data, bits, planar=planar))
+            module.qzero_format(format=1)
+        converted += 1
+    return converted
 
 
 def resolve_pack_device(
@@ -2591,7 +2687,22 @@ def _checkpoint_tensor_keys(
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+    # AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
+    # checkpoints expose the same `qweight` key as GPTQ.  Skipping validation
+    # for them let a module whose checkpoint tensor was never loaded keep its
+    # zero-filled placeholder and produce silent NaN output.
+    validated_formats = {
+        FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.GPTQ_P,
+        FORMAT.GEMM,
+        FORMAT.GEMV,
+        FORMAT.GEMV_FAST,
+        FORMAT.LLM_AWQ,
+        FORMAT.MARLIN,
+        FORMAT.BITBLAS,
+    }
+    if format not in validated_formats:
         return
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
@@ -2601,7 +2712,7 @@ def validate_checkpoint_qweights(
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
-        if isinstance(module, GPTQQuantLinear):
+        if isinstance(module, (GPTQQuantLinear, AWQuantLinear)):
             tensor_name = f"{name}.qweight" if name else "qweight"
             module_keys[id(module)].add(tensor_name)
             if callable(key_converter):

@@ -649,6 +649,64 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
     return expand_selector_device_family(selected)
 
 
+_ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
+
+
+def _is_accelerate_device_map_string(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered in _ACCELERATE_DEVICE_MAP_STRINGS or lowered.startswith("balanced_low_")
+
+
+def _validate_device_and_device_map_agree(device, device_map) -> None:
+    """Reject a `device` request that contradicts an explicit `device_map`."""
+
+    requested_family = selector_device_family(normalize_device_device_map(device, None))
+    mapped_family = selector_device_family(normalize_device_device_map(None, device_map))
+    if requested_family != mapped_family:
+        requested_name = requested_family.value if requested_family is not None else None
+        mapped_name = mapped_family.value if mapped_family is not None else None
+        raise ValueError(
+            f"`device={device!r}` conflicts with `device_map={device_map!r}`: "
+            f"`device` selects {requested_name} but `device_map` selects {mapped_name}. "
+            "Pass one placement argument, or make them agree."
+        )
+
+
+def _normalize_requested_device_map(device, device_map):
+    """Apply Hugging Face string shorthand and check device/device_map agreement.
+
+    Hugging Face accepts `device_map="cpu"` and `device_map="cuda:0"` as
+    shorthand for `{"": value}`. GPT-QModel used to reject those strings and
+    then let an explicit `device_map` silently replace `device`.
+    """
+
+    if device_map is None:
+        return None
+    if isinstance(device_map, str):
+        if _is_accelerate_device_map_string(device_map):
+            normalized = device_map
+        else:
+            try:
+                torch.device(device_map)
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    "If passing a string for `device_map`, choose 'auto', 'balanced', "
+                    "'balanced_low_0', 'sequential', or a concrete device such as 'cpu' "
+                    "or 'cuda:0'."
+                ) from exc
+            if device_map.strip().lower() in {"disk", "meta"}:
+                raise ValueError(
+                    "A full-model `device_map` cannot be an offload target; use a "
+                    "per-module map for 'disk' or 'meta' entries."
+                )
+            normalized = {"": device_map}
+    else:
+        normalized = dict(device_map)
+    if device is not None:
+        _validate_device_and_device_map_agree(device, normalized)
+    return normalized
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -734,11 +792,13 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.30`. Older releases do not split the
+# `requirements.txt` pins `defuser>=0.0.31`. Older releases do not split the
 # fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
 # experts stay fused and are silently left unquantized; the only symptom is a
-# "0 layer matches" line in the module-coverage report.
-DEFUSER_MIN_VERSION = "0.0.30"
+# "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
+# fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
+# 5.22 router tuple.
+DEFUSER_MIN_VERSION = "0.0.31"
 _defuser_version_warning_emitted = False
 
 
@@ -769,8 +829,8 @@ def _check_defuser_version() -> None:
         return
     log.error(
         "Loader: defuser %s is installed but >= %s is required. Fused 3-D expert "
-        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split, so their "
-        "routed experts are left unquantized; upgrade defuser.",
+        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split and the "
+        "GLM-4.x defused MoE blocks cannot run on Transformers 5.22; upgrade defuser.",
         outdated,
         DEFUSER_MIN_VERSION,
     )
@@ -779,6 +839,17 @@ def _check_defuser_version() -> None:
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+
+    # Defuser gates `convert_model()` on its own model registry. Model types
+    # that GPT-QModel supports through the generic Transformers experts
+    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+    # so run Defuser's generic replacement pass explicitly instead of leaving
+    # the fused 3-D expert parameters unquantized.
+    if not converted and getattr(cls, "defuser_generic_experts", False):
+        from defuser.modeling.update_module import update_module
+
+        update_module(model, cleanup_original=cleanup_original)
+        converted = True
 
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
     if defuser_module_paths:
@@ -1839,7 +1910,7 @@ def ModelLoader(cls):
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = device_map
+        requested_device_map = _normalize_requested_device_map(device, device_map)
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
         if max_memory is not None and explicit_device_map is not None:
             raise ValueError(
@@ -2019,6 +2090,18 @@ def ModelLoader(cls):
 
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
+        # Remember the layout the tensors actually have on disk.  A re-save
+        # after mutating `quantize_config.format` must convert qzeros instead
+        # of copying the old words under a new label.
+        qcfg._checkpoint_format_on_disk = format_code
+        qcfg._checkpoint_layout_snapshot = {
+            "format": format_code,
+            "bits": qcfg.bits,
+            "group_size": qcfg.group_size,
+            "sym": qcfg.sym,
+            "desc_act": qcfg.desc_act,
+            "pack_dtype": qcfg.pack_dtype,
+        }
         backend = normalize_backend(backend, quant_method=export_quant_method)
         backend = backend_for_activation(qcfg.activation_mode, backend)
         backend = _auto_select_mlx_backend(
@@ -2340,6 +2423,7 @@ def ModelLoader(cls):
                 )
 
                 simple_layer_modules = cls.simple_layer_modules(config, qcfg)
+            external_inclusions = qcfg.external_module_inclusions()
             for name in list(modules.keys()):
                 if input_embed_quantized and name == input_embed_name:
                     continue
@@ -2371,10 +2455,15 @@ def ModelLoader(cls):
                         for leaf in declared
                     )
                 )
+                inclusion_match = (
+                    external_inclusions is None
+                    or relative is None
+                    or any(relative.endswith(entry) for entry in external_inclusions)
+                )
                 if layer_prefix is None or any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")
                         for ignore_module in ignore_modules
-                ) or not relative_match:
+                ) or not relative_match or not inclusion_match:
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2913,6 +3002,14 @@ def ModelLoader(cls):
                     tokenizer.save_pretrained(temp_dir)
 
                     model, _ = load(temp_dir)
+
+        # Record the layout the tensors had on disk so a later
+        # `model.save_pretrained()` can emit checkpoint-layout qzeros instead of
+        # the kernel's converted runtime words.
+        if hasattr(model, "modules"):
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = format_code
 
         instance = cls(
             model,

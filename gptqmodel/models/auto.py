@@ -156,6 +156,7 @@ from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.kimi_k3 import KimiK3QModel, KimiLinearQModel  # noqa: E402
+from .definitions.kimi_linear import KimiLinearNativeQModel, is_kimi_k3_config  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
@@ -173,6 +174,7 @@ from .definitions.locateanything import LocateAnythingQModel  # noqa: E402
 from .definitions.mage_vl import MageVLQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.mimo_v2 import MimoV2QModel  # noqa: E402
+from .definitions.mimo_v2_flash import MimoV2FlashQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
@@ -419,6 +421,7 @@ MODEL_MAP = {
     "inkling_mm_model": InklingMMQModel,
     "mimo": MimoQModel,
     "mimo_v2": MimoV2QModel,
+    "mimo_v2_flash": MimoV2FlashQModel,
     "falcon_h1": FalconH1QModel,
     "zamba": ZambaQModel,
     "zamba2": Zamba2QModel,
@@ -633,7 +636,16 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
 
     # Unsupported model types use BaseQModel and fail closed unless the caller
     # supplies an explicit model definition/module tree.
-    return MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
+    # checkpoint that needs the bounded K3 runner, and native Transformers
+    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
+    # looper. Dispatch on config fields rather than on the registry key.
+    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
+        return KimiLinearNativeQModel
+
+    return definition
 
 
 def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
@@ -1052,10 +1064,33 @@ class GPTQModel:
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        if format == "hf":
+            # Export through the checkpoint-level dequantizer: it understands
+            # every stored layout (AWQ, GPTQ, quantized embeddings, legacy
+            # quantize_config.json) instead of assuming a TorchLinear runtime.
+            from ..utils.hub import snapshot_download
+            from ..utils.model_dequant import dequantize_model
+
+            source_path = model_id_or_path
+            if not isdir(source_path):
+                source_path = snapshot_download(repo_id=model_id_or_path)
+            from pathlib import Path
+
+            target = Path(target_path)
+            empty_existing = target.is_dir() and not any(target.iterdir())
+            dequantize_model(
+                source_path,
+                target_path,
+                trust_remote_code=trust_remote_code,
+                resume=empty_existing,
+            )
+            return
+
         # load config
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if not config.quantization_config:
+        if not getattr(config, "quantization_config", None):
             raise ValueError("Model is not quantized")
 
         gptq_config = config.quantization_config
@@ -1097,12 +1132,6 @@ class GPTQModel:
             save_model(target_path, mlx_weights, donate_model=True)
 
             save_config(mlx_config, config_path=target_path + "/config.json")
-        elif format == "hf":
-            from ..nn_modules.qlinear.torch import dequantize_model
-
-            dequantized_model = dequantize_model(gptq_model.model)
-            dequantized_model.save_pretrained(target_path)
-
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 

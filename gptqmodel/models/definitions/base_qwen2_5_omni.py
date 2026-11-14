@@ -111,7 +111,11 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     loader = AutoModelForTextToWaveform
 
     lm_head = "thinker.lm_head"
-    pre_lm_head_norm_module = "thinker.model.norm"
+    # transformers 5.22 nests the thinker decoder under `language_model`.
+    pre_lm_head_norm_module = [
+        "thinker.model.language_model.norm",
+        "thinker.model.norm",
+    ]
 
     require_pkgs = ["audioread>=3.1.0", "librosa>=0.11.0", "av>=16.0.1"]
 

@@ -14,6 +14,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.looper.linear_mode import LinearMode
 from gptqmodel.nn_modules.qlinear._numerics import matmul_fp32_reduce
 from gptqmodel.quantization import FORMAT
 
@@ -157,6 +158,34 @@ def test_cpu_bf16_biased_layers_keep_the_fused_path(cls_name):
         out.float(), torch.full_like(out.float(), expected), rtol=0, atol=0
     )
     assert module.linear_mode == "inference"
+
+
+@pytest.mark.parametrize(
+    "cls_name",
+    ["TorchAtenLinear", "TorchFusedLinear"],
+)
+def test_cpu_fp16_biased_layers_keep_the_fused_path(cls_name):
+    """An FP16 bias must not force the full-weight dequantization path."""
+
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import (
+        TorchAtenLinear,
+        _has_local_int4pack_cpu_ops,
+    )
+    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+
+    if not _has_local_int4pack_cpu_ops():
+        pytest.skip("PyTorch CPU int4pack ops unavailable")
+    classes = {
+        "TorchAtenLinear": TorchAtenLinear,
+        "TorchFusedLinear": TorchFusedLinear,
+    }
+    module = _gptq_fixture(classes[cls_name]).to(dtype=torch.float16).eval()
+    with torch.inference_mode():
+        out = module(_x())
+
+    assert out.dtype == torch.float16
+    assert torch.isfinite(out).all()
+    assert module.linear_mode in (LinearMode.INFERENCE, "inference")
 
 
 def test_cpu_awq_torch_adds_bias_before_the_cast():

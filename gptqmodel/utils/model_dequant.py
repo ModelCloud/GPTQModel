@@ -22,7 +22,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
-from ..quantization.config import dynamic_get
+from ..quantization.config import dynamic_get, quant_bits_width
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -1570,6 +1570,18 @@ def _awq_module_int(config: Optional[dict], prefix: str, key: str, default: int)
     return int(value)
 
 
+def _gptq_module_int(config: Optional[dict], prefix: str, key: str, default: int) -> int:
+    """Resolve a per-module GPTQ setting, honoring ``dynamic`` overrides."""
+
+    dynamic = (config or {}).get("dynamic")
+    value = dynamic_get(dynamic, prefix, key, default) if dynamic else default
+    # An excluded module (`bits: false`) or a rule that only sets another key is
+    # not a width; fall back to the checkpoint default instead of coercing to 0.
+    if value is False or value is None:
+        return int(default)
+    return int(value)
+
+
 def _awq_group_index(in_features: int, group_size: int, *, device=None) -> torch.Tensor:
     if group_size is None or int(group_size) <= 0:
         group_size = in_features
@@ -1812,7 +1824,7 @@ def convert_gptq_file(
         scales = buf["scales"]
         g_idx = buf["g_idx"].to(torch.long)
 
-        bits = config.get("bits", 4)
+        bits = _gptq_module_int(config, prefix, "bits", quant_bits_width(config.get("bits", 4)))
         format_value = str(
             config.get("checkpoint_format") or config.get("format") or ""
         ).strip().lower()
@@ -1924,8 +1936,13 @@ def copy_aux_files(
     *,
     dirs_exist_ok: bool = False,
 ) -> None:
+    skipped_dirs = {".cache", ".git", "__pycache__"}
     for item in model_path.iterdir():
         if item.name in skip:
+            continue
+        # Local snapshots can carry hub/VCS caches that are not model files and
+        # may be read-only; they are never part of the exported checkpoint.
+        if item.is_dir() and item.name in skipped_dirs:
             continue
         target = output_path / item.name
         if item.is_dir():
@@ -1952,6 +1969,16 @@ def dequantize_model(
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
+    # Legacy GPTQModel checkpoints persist the quantization payload only in
+    # quantize_config.json. Fill in whichever fields config.json lacks so the
+    # converter sees bits/format/dynamic instead of silently using defaults.
+    legacy_quant_cfg = load_json(model_path / "quantize_config.json")
+    if legacy_quant_cfg:
+        if not quant_cfg:
+            quant_cfg = legacy_quant_cfg
+        else:
+            quant_cfg = {**legacy_quant_cfg, **quant_cfg}
+        config["quantization_config"] = quant_cfg
     fmt = detect_format(model_path, config)
 
     files, index = list_safetensor_files(model_path)

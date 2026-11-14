@@ -338,7 +338,18 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
                              WARP_SIZE];
   int cta_offset_m = blockIdx_m * CTA_M;
   int cta_offset_n = blockIdx_n * CTA_N;
-  int cta_offset_k = blockIdx_z * (K / SPLITK);
+  // Split-K partitions whole CTA_K tiles, not raw columns. Dividing K by
+  // SPLITK is only tile-aligned when (K / CTA_K) is a multiple of SPLITK; for
+  // an odd tile count the tail tiles fell into the gap between splits and were
+  // never computed. Give each split ceil(tiles / SPLITK) consecutive tiles and
+  // let the last split take the remainder so every tile is covered once.
+  const int num_k_tiles = (K + CTA_K - 1) / CTA_K;
+  const int tiles_per_split = (num_k_tiles + SPLITK - 1) / SPLITK;
+  const int split_tile_begin = blockIdx_z * tiles_per_split;
+  const int k_tile_begin = split_tile_begin < num_k_tiles ? split_tile_begin : num_k_tiles;
+  const int k_tile_end =
+      k_tile_begin + tiles_per_split < num_k_tiles ? k_tile_begin + tiles_per_split : num_k_tiles;
+  int cta_offset_k = k_tile_begin * CTA_K;
   int warp_mn = threadIdx.y % NUM_WARPS_MN;
   int slice_id = threadIdx.y / NUM_WARPS_MN;
   int warp_offset_n = (warp_mn % (CTA_N / WARP_N)) * WARP_N;
@@ -348,7 +359,7 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
   for (int i = 0; i < CTA_M * CTA_N / CTA_SIZE_MN; i++)
     C_warp[i] = 0.0;
 
-  int gemm_iters = (K + CTA_K - 1) / CTA_K / SPLITK;
+  int gemm_iters = k_tile_end - k_tile_begin;
   int k_0_0_ld = 0;
   int k_0_0 = 0;
   constexpr int prologue_stages = STAGES == 1 ? 1 : STAGES - 1;

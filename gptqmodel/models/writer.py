@@ -24,7 +24,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
@@ -67,6 +67,7 @@ from ..utils.model import (
     TensorSource,
     _atomic_shard_path,
     _validate_offload_sources_outside_save_dir,
+    convert_loaded_qzeros_for_format_change,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -74,6 +75,7 @@ from ..utils.model import (
     get_state_dict_for_save,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
+    resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
@@ -1997,6 +1999,12 @@ def ModelWriter(cls):
         save_state_overlay = _validated_save_state_overlay(self)
         quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
         runtime_format = resolve_quant_format(quantize_config.format, quant_method)
+
+        # Fail before writing any config when a loaded checkpoint's format was
+        # changed to a layout that cannot be converted exactly.
+        if self.load_quantized_model:
+            resolve_resave_format_conversion(quantize_config)
+
         checkpoint_passthrough_plan = None
 
         if runtime_format == FORMAT.GPTQ_V2:
@@ -2023,8 +2031,12 @@ def ModelWriter(cls):
                 tensor_storage,
             )
 
+        # Build the save-time shell in a local. Replacing ``self.model`` would
+        # leave the caller's live model pointing at a CPU kernel that returns
+        # wrong logits after ``save()``.
+        model_for_save = self.model
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
-            self.model = self.get_model_with_quantize(
+            model_for_save = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
@@ -2040,7 +2052,7 @@ def ModelWriter(cls):
             quantize_config,
             runtime_format,
         )
-        self.model.config = config
+        model_for_save.config = config
 
         def strip_attention_impl_fields(target: Any) -> Dict[str, Any]:
             removed: Dict[str, Any] = {}
@@ -2054,28 +2066,28 @@ def ModelWriter(cls):
                         pass
             return removed
 
-        generation_config = getattr(self.model, "generation_config", None)
+        generation_config = getattr(model_for_save, "generation_config", None)
         removed_config_attention_attrs: Dict[str, Any] = {}
         removed_generation_attention_attrs: Dict[str, Any] = {}
 
         try:
-            removed_config_attention_attrs = strip_attention_impl_fields(self.model.config)
+            removed_config_attention_attrs = strip_attention_impl_fields(model_for_save.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
-            _normalize_legacy_tied_weights_keys(self.model)
+            _normalize_legacy_tied_weights_keys(model_for_save)
 
             # Save model metadata directly. Calling model.save_pretrained with
             # an empty state_dict deletes resumable shards in recent
             # Transformers releases because they are absent from the supplied
             # (empty) checkpoint.
             _save_model_configs_without_weights(
-                self.model,
+                model_for_save,
                 save_dir,
                 self.model_local_path,
             )
         finally:
             for attr, value in removed_config_attention_attrs.items():
-                setattr(self.model.config, attr, value)
+                setattr(model_for_save.config, attr, value)
             if generation_config is not None:
                 for attr, value in removed_generation_attention_attrs.items():
                     setattr(generation_config, attr, value)
@@ -2120,7 +2132,7 @@ def ModelWriter(cls):
             # those tensors by name would overwrite the packed codes, so leave
             # every module with a `QUANT_TYPE` to `get_state_dict_for_save`,
             # which restores it from the offload bundle the quantizer wrote.
-            quantized_module_types = _quantized_module_types(self.model)
+            quantized_module_types = _quantized_module_types(model_for_save)
             suspend_staging = getattr(
                 self.turtle_model, "suspend_active_source_staging", None
             )
@@ -2129,12 +2141,12 @@ def ModelWriter(cls):
             )
             with direct_source_scope:
                 alias_all_from_turtle_if_meta(
-                    shell_model=self.model,
+                    shell_model=model_for_save,
                     turtle_model=self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
                 materialized_layers = _materialize_meta_layers_from_turtle(
-                    self.model,
+                    model_for_save,
                     self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
@@ -2144,7 +2156,7 @@ def ModelWriter(cls):
                         materialized_layers,
                     )
                 restored_meta = _materialize_remaining_meta_params_from_turtle(
-                    self.model,
+                    model_for_save,
                     self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
@@ -2167,7 +2179,7 @@ def ModelWriter(cls):
                 validated_overlay=save_state_overlay,
             )
         else:
-            state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+            state_dict = get_state_dict_for_save(model_for_save, offload_root=offload_root)
         if checkpoint_passthrough_plan is None:
             state_dict.update(out_of_model_state_dict)
             out_of_model_state_dict.clear()
@@ -2206,7 +2218,7 @@ def ModelWriter(cls):
                 metadata=metadata_dict,
                 max_shard_size=max_shard_size_bytes,
                 layer_prefixes=self.extract_layers_node(),
-                model=self.model,
+                model=model_for_save,
             )
         else:
             expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
@@ -2329,6 +2341,7 @@ def ModelWriter(cls):
 
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
+            external_inclusions = qcfg.external_module_inclusions()
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
@@ -2352,10 +2365,15 @@ def ModelWriter(cls):
                     relative == leaf or (relative.startswith(f"{leaf}.") and EXPERT_INDEX_PLACEHOLDER in leaf)
                     for leaf in declared
                 )
+                inclusion_match = (
+                    external_inclusions is None
+                    or relative is None
+                    or any(relative.endswith(entry) for entry in external_inclusions)
+                )
                 if any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")
                         for ignore_module in ignore_modules
-                ) or not relative_match:
+                ) or not relative_match or not inclusion_match:
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2392,6 +2410,24 @@ def ModelWriter(cls):
                 # offload_state_dict=True,
                 # offload_buffers=True,
             )
+            resave_conversion = resolve_resave_format_conversion(qcfg)
+            if resave_conversion is not None:
+                source_format, target_format = resave_conversion
+                converted = convert_loaded_qzeros_for_format_change(
+                    model, source_format, target_format,
+                )
+                log.info(
+                    "Model: converted qzeros for format change `%s` -> `%s` on %s modules.",
+                    source_format,
+                    target_format,
+                    converted,
+                )
+            # The rebuilt shell now carries the target layout; do not convert
+            # again if its state dict is serialized directly.
+            target_format = resolve_quant_format(qcfg.format, qcfg.method)
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = target_format
         torch_empty_cache()
         return model
 

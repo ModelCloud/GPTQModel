@@ -201,7 +201,17 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
-        return _cpu_int4pack_mm(x, self.qweight, self.group_size, self.scales_and_zeros)
+        return _cpu_int4pack_mm(
+            x,
+            self.qweight,
+            self.group_size,
+            self.scales_and_zeros,
+            out_dtype=(
+                torch.float32
+                if self.bias is not None and x.dtype == torch.float16
+                else None
+            ),
+        )
 
     # The native affine operand is derived metadata, shared with GPTQ's ATen
     # implementation. Rebuild it after loads, moves or source mutations.
@@ -262,8 +272,12 @@ class TorchAtenAwqLinear(AWQuantLinear):
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
             # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused kernel and add the bias once.
-            and (self.bias is None or x.dtype == torch.bfloat16)
+            # range, so it can use the fused kernel and add the bias once. The
+            # CPU fused op returns an FP32 product for a biased FP16 layer.
+            and (
+                self.bias is None
+                or x.dtype in (torch.bfloat16, torch.float16)
+            )
         ):
             capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)

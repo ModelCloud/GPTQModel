@@ -3,10 +3,13 @@
 
 """Regression coverage for the nested thinker output head (issue #1841)."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
+from torch import nn
 from transformers import PreTrainedTokenizerFast, Qwen2_5OmniConfig, Qwen2_5OmniForConditionalGeneration
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
@@ -102,6 +105,22 @@ def test_thinker_text_prefix_resolves_to_the_decoder():
         prefix = thinker_text_prefix(node)
         assert prefix
         assert node.get_submodule(prefix) is thinker_text_model(node)
+
+
+def test_omni_pre_lm_head_norm_candidates_cover_both_layouts():
+    """The class declaration must resolve before `after_model_load` runs."""
+
+    model = _tiny_omni()
+    instance = object.__new__(Qwen2_5_OmniGPTQ)
+    nn.Module.__init__(instance)
+    instance.model = model
+    instance.quantize_config = SimpleNamespace(device=torch.device("cpu"))
+
+    resolved = instance._resolved_pre_lm_head_norm_candidates()
+
+    assert resolved
+    assert resolved[0][1] == "thinker.model.language_model.norm"
+    assert resolved[0][0] is thinker_text_model(model).norm
 
 
 def test_omni_conversion_map_resolves_thinker_runtime_paths():

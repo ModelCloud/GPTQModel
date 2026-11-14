@@ -1059,6 +1059,9 @@ class TorchLinear(PackableQuantLinear):
         return torch.cat(weights, dim=1)
 
 def dequantize_model(model: PreTrainedModel):
+    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
+    # bf16 checkpoints and their exported config.
+    target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchLinear):
             raise ValueError(
@@ -1067,14 +1070,21 @@ def dequantize_model(model: PreTrainedModel):
             )
 
         if isinstance(module, TorchLinear):
+            if target_dtype is None:
+                scales_dtype = getattr(module, "scales", None)
+                target_dtype = (
+                    scales_dtype.dtype
+                    if scales_dtype is not None and scales_dtype.is_floating_point()
+                    else torch.float16
+                )
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(
                 module.in_features, module.out_features,
                 bias=module.bias is not None,
             )
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", target_dtype))
             new_module.bias = (
-                nn.Parameter(module.bias.detach().to("cpu", torch.float16))
+                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
                 if module.bias is not None else None
             )
 

@@ -832,6 +832,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if torch.is_tensor(mask) and mask.ndim == 2
             else None
         )
+        # Routed-expert hooks need to know whether this batch contains padding
+        # before they scan a `[routed_rows, H]` activation for all-zero rows.
+        # Resolve it here, once per batch, instead of synchronizing per expert.
+        tls.mask_has_padding = (
+            not bool(mask.all())
+            if torch.is_tensor(mask) and mask.ndim == 2
+            else None
+        )
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""

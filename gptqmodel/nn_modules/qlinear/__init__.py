@@ -1243,6 +1243,43 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         self._qzeros_format = format
         return self._qzeros_format
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        self._write_checkpoint_layout_qzeros(destination, prefix)
+
+    def _write_checkpoint_layout_qzeros(self, destination, prefix: str) -> None:
+        """Emit qzeros in the checkpoint's format, not the kernel's runtime one.
+
+        Kernels that require v2 convert the loaded v1 words in place and keep
+        ``_qzeros_format == 2``.  The loader records the on-disk layout in
+        ``_checkpoint_format_on_disk``; ``transformers``' ``save_pretrained``
+        serializes these live buffers directly, so writing them unchanged would
+        mislabel v2 words as v1.
+        """
+
+        from ...utils.model_dequant import (
+            _correct_gptq_v1_qzeros,
+            _revert_gptq_v1_qzeros_correction,
+        )
+
+        qzeros = destination.get(prefix + "qzeros")
+        if qzeros is None or qzeros.numel() == 0:
+            return
+
+        checkpoint_format = getattr(self, "_checkpoint_format_on_disk", None)
+        if checkpoint_format is None:
+            return
+        runtime_format = self._qzeros_format
+        planar = bool(getattr(self, "planar", False))
+        if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
+            destination[prefix + "qzeros"] = _revert_gptq_v1_qzeros_correction(
+                qzeros, self.bits, planar=planar,
+            )
+        elif runtime_format == 1 and checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
+            destination[prefix + "qzeros"] = _correct_gptq_v1_qzeros(
+                qzeros, self.bits, planar=planar,
+            )
+
     def _load_from_state_dict(self, *args, **kwargs):
         super()._load_from_state_dict(*args, **kwargs)
         # `_qzeros_format` is not serialized; restore it from the checkpoint

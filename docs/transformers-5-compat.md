@@ -15,7 +15,7 @@ The sections below describe the shipped behaviour for the loader, the
 GPT-NeoX save path, the FalconMamba / Zamba / Nemotron-H patch guards, the
 Nemotron-H tree root, and the Falcon-H1 / FalconMamba buffer restoration.
 Sections E-I of issue #4040 (LFM2-MoE, GLM-4.x MoE, mllama, Kimi-Linear,
-HRM-Text, glmasr) are owned by a separate change and are not described here.
+HRM-Text, glmasr) are described after the A-D sections below.
 
 ## A. Checkpoint conversion maps are class-keyed
 
@@ -174,3 +174,185 @@ quality claims for full checkpoints.
 | `tests/module_tree/test_nemotron_h_model_tree.py` | real-model `model` tree root and native mixer projection coverage |
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
+
+## E-I. Definition and calibration fixes (issue #4040)
+
+The E-I fixes share one rule with A-D: a definition declares the *installed*
+layout, and a silent miss is a bug. A family whose routed experts cannot be
+resolved must not report success with only a coverage warning.
+
+## LFM2-MoE routed experts and attention output
+
+`gptqmodel/models/definitions/lfm2_moe.py` described the pre-5.22 module names.
+Transformers 5.22 names the attention output `out_proj` and Defuser splits the
+fused expert tensors into `gate_proj`/`up_proj`/`down_proj` per expert, while the
+dense MLP keeps `w1`/`w3`/`w2`.
+
+```mermaid
+flowchart TD
+    A["LFM2MoeQModel.module_tree"] --> B["self_attn specs"]
+    A --> C["feed_forward:moe specs"]
+    B --> D["q_proj / k_proj / v_proj"]
+    B --> E["out_proj :1"]
+    C --> F["gate :!"]
+    C --> G["dense MLP w1 / w3 / w2"]
+    C --> H["experts.#"]
+    H --> I["gate_proj :0"]
+    H --> J["up_proj :0"]
+    H --> K["down_proj :1"]
+    E --> L["51 of 51 decoder linears quantized"]
+    I --> L
+    J --> L
+    K --> L
+```
+
+| Area | Before (5.22 layout) | After |
+| --- | --- | --- |
+| attention output | `self_attn.o_proj` resolved on no layer | `self_attn.out_proj` |
+| routed experts | `experts.#.w1/w3/w2` resolved on no layer | `experts.#.gate_proj/up_proj/down_proj` |
+| lifecycle hooks | `W1W3W2MoELifecycleHooks` | `GateUpDownMoELifecycleHooks` |
+| dense MLP | `feed_forward.w1/w3/w2` | unchanged (dense layers still use `w1/w3/w2`) |
+
+`tests/module_tree/test_moe_expert_coverage.py` now includes `lfm2_moe` in
+`FIXED_MODELS`: every quantizable spec must resolve on at least one decoder
+layer after Defuser's expert expansion. The old tree failed that assertion
+because 13 of 51 linears (every routed expert plus the attention output) had no
+match.
+
+## GLM-4.x MoE router tuple
+
+Defuser 0.0.30 replaced the GLM-4.5/4.6/4.7 and GLM-4.7-Flash MoE block with a
+per-expert module whose `forward` passed the router result straight into
+`route_tokens_to_experts`, which calls `.sigmoid()`. Transformers 5.22 routers
+return `(router_logits, topk_weights, topk_indices)`, so the first MoE layer
+raised `AttributeError: 'tuple' object has no attribute 'sigmoid'`.
+
+Defuser 0.0.31 owns the fix: `route_tokens_to_experts` unwraps the tuple to the
+raw logits and keeps its own grouped top-k selection, so the routing math is
+byte-identical to the tensor path. GPT-QModel now requires `defuser>=0.0.31` and
+no longer installs a local compatibility shim.
+
+```mermaid
+flowchart TD
+    A["Transformers 5.22 router"] --> B["(router_logits, topk_weights, topk_indices)"]
+    B --> C["Defuser LinearGlm4MoeMoE / LinearGlm4MoeLiteMoE"]
+    C --> D["route_tokens_to_experts: unwrap [0]"]
+    D --> E["Defuser grouped top-k selection"]
+    E --> F["routed + shared experts"]
+```
+
+| Area | Before | After |
+| --- | --- | --- |
+| router input | 5.22 tuple reaches `.sigmoid()` | Defuser 0.0.31 unwraps `[0]` |
+| routing math | crashes before selection | Defuser's grouped top-k unchanged |
+| GPT-QModel | local `defuser_compat` shim | `defuser>=0.0.31` floor, no shim |
+
+## Text-only Mllama
+
+Transformers 5.22 ships `MllamaForCausalLM` for `MllamaTextConfig` but does not
+register that config with `AutoModelForCausalLM`. `mllama.py` now registers the
+pair and resolves the text-only layout (`model.model`) in addition to the two
+multimodal layouts.
+
+```mermaid
+flowchart LR
+    A["MllamaTextConfig"] --> B["AutoModelForCausalLM.register"]
+    B --> C["MllamaForCausalLM"]
+    C --> D["_resolve_language_model"]
+    D --> E["model.language_model (VL shell)"]
+    D --> F["language_model.model (legacy VL)"]
+    D --> G["model.model (text-only)"]
+```
+
+## Native Kimi-Linear dispatch
+
+`MODEL_MAP["kimi_linear"]` still names `KimiLinearQModel`, which describes the
+AttnRes/K3 `block_sparse_moe` checkpoint and requires the bounded K3 runner.
+Native Transformers 5.22 `KimiLinearForCausalLM` has no AttnRes state and uses
+`self_attn` plus `mlp.experts`/`mlp.shared_experts`. `check_and_get_model_definition`
+now dispatches on config fields.
+
+```mermaid
+flowchart TD
+    A["config.model_type == kimi_linear"] --> B{"use_attn_residuals or attn_res_block_size"}
+    B -->|"yes"| C["KimiLinearQModel"]
+    C --> D["bounded KimiK3Source runner"]
+    B -->|"no"| E["KimiLinearNativeQModel"]
+    E --> F["generic Defuser experts pass"]
+    F --> G["ordinary GPTQ looper"]
+```
+
+The native definition declares the linear-attention projections
+(`q/k/v/o_proj`, `b_proj`, `g_a/g_b_proj`, `forget_gate.f_a/f_b_proj`), the MLA
+projections (`q_a/q_b_proj`, `kv_a_proj_with_mqa`, `kv_b_proj`), and both MLP
+branches. `KimiLinearNativeQModel.defuser_generic_experts` makes the loader call
+Defuser's generic `update_module` pass, because Defuser has no registry entry for
+this model type.
+
+## HRM-Text recurrent calibration
+
+HRM-Text runs the L stack `H_cycles * L_cycles` times and the H stack
+`H_cycles` times. The flattened L0, L1, H0, H1 chain only saw the first
+invocation, and H0's real input is `z_H + final_norm(z_L)`, not the L1 output.
+`HrmTextQModel` now captures every invocation with full-model forward hooks and
+serves each layer its own invocation batches through `pre_quantize`.
+
+```mermaid
+flowchart TD
+    A["build_quantization_input_cache"] --> B["materialize base modules and every stack layer"]
+    B --> C["register forward pre-hooks on L and H layers"]
+    C --> D["run the real recurrent forward"]
+    D --> E["per layer: all L/H invocation inputs"]
+    E --> F["pre_quantize(layer) points the cache at that layer"]
+    F --> G["processor accumulates Hessians over every invocation"]
+    H["standard StageInputsCapture"] --> I["only layer 0, first invocation"]
+    I -.->|"removed for HRM-Text"| E
+```
+
+| Area | Before | After |
+| --- | --- | --- |
+| L stack inputs | first invocation only | `H_cycles * L_cycles` invocations |
+| H stack inputs | flattened L1 output | `z_H + final_norm(z_L)` per cycle |
+| Hessian coverage | one cycle | every invocation |
+
+Limitation: the capture materializes the complete HRM-Text model for one
+calibration pass. HRM-Text is a ~1B-parameter family, so this is bounded, but a
+larger recurrent family would need a streaming replay instead.
+
+## "Also" list
+
+| Family | Before | After |
+| --- | --- | --- |
+| GLM-ASR | `AutoModel` built `GlmAsrModel`, whose layers are `language_model.layers` and which has no `lm_head` | `AutoModelForMultimodalLM` builds `GlmAsrForConditionalGeneration`; tree is `model.language_model.layers`, `lm_head` is top-level |
+| Llama 4 | `lm_head` defaulted to `lm_head` | `Llama4QModel.lm_head = "language_model.lm_head"` |
+| Qwen2.5-Omni | `pre_lm_head_norm_module` was `thinker.model.norm` | candidate list covers `thinker.model.language_model.norm` and the legacy path |
+| MiMo-V2-Flash | Hub `model_type` `mimo_v2_flash` had no definition | `MimoV2FlashQModel` registered with the native `model.layers` tree and generic experts pass |
+| DeepSeek-V4 | GPTQ/AWQ/RTN target layers stayed META until the first subset forward | non-packed methods materialize the layer eagerly; EXL3 keeps the packed lazy boundary |
+
+DeepSeek-V4's remaining failure was `attn_hc`/`ffn_hc`/router-bias tensors plus
+every projection still on `meta` when the first subset rehomed the layer.
+`_keeps_packed_target_layer_lazy` restricts the lazy boundary to EXL3 and the
+auto-module decoder; GPTQ/AWQ/RTN now call `BaseQModel.pre_quantize`, which
+materializes the whole layer from LazyTurtle.
+
+## Validation
+
+Tiny random checkpoints were run end to end on the CUDA and ROCm venvs: GPTQ
+4-bit, `group_size=32`, `desc_act=False`, save, reload with `BACKEND.TORCH`,
+and logits against fp16 and an RTN baseline. Numbers below are the CUDA
+RTX 4090 run; the ROCm R9700 run matched within run-to-run noise.
+
+| Family | GPTQ vs fp16 | RTN vs fp16 | Quantized linears |
+| --- | --- | --- | --- |
+| LFM2-MoE | 0.0837 | 0.1213 | 51/51 decoder (13/51 before) |
+| GLM-4.5 MoE | 0.0158 | 0.0603 | 26/26 decoder |
+| Mllama text | 0.0242 | 0.0555 | 14/14 decoder |
+| Native Kimi-Linear | 0.0209 | 0.0541 | 32/32 decoder |
+| HRM-Text | 0.0008 | 0.0016 | 32/32 decoder |
+| GLM-ASR | 0.0162 | 0.0507 | 14/14 text decoder |
+| MiMo-V2-Flash | 0.0355 | 0.1134 | 23/23 decoder |
+| DeepSeek-V4 | 0.0249 | 0.0286 | 48/48 decoder |
+
+These are fixture checks, not quality claims for full checkpoints. The `lm_head`
+is excluded from the coverage counts because the default configuration does not
+quantize it.

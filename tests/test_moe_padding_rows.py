@@ -82,6 +82,52 @@ def test_2d_activations_without_a_matching_mask_are_untouched():
     torch.testing.assert_close(kept_inp, inp)
 
 
+def test_routed_expert_drops_zeroed_padding_rows():
+    """A natively routed expert sees zeroed padding rows; they must not count.
+
+    The MoE-root hook zeroes padded positions before routing, but the router
+    still routes them. An expert that only wins padding rows would otherwise
+    build an all-zero Hessian and have every weight column neutralized.
+    """
+
+    mask = torch.tensor([[True, True, False], [True, False, False]])
+    processor = _bare_processor(mask)
+    task = _RecordingTask(module=nn.Linear(4, 4))
+    processor.tasks["mlp.experts.1.gate_proj"] = task
+
+    # Five routed rows for a six-token batch: four real rows and one zeroed
+    # padding row. The row count is unrelated to `B*S`, as for native routing.
+    inp = torch.randn(5, 4)
+    inp[2] = 0
+    out = inp * 2
+    hook = processor.pre_process_fwd_hook("mlp.experts.1.gate_proj")
+    hook(nn.Linear(4, 4), (inp,), out)
+
+    assert len(task.batches) == 1
+    kept_inp, kept_out, _ = task.batches[0]
+    assert kept_inp.shape == (4, 4)
+    torch.testing.assert_close(kept_inp, inp[[0, 1, 3, 4]])
+    torch.testing.assert_close(kept_out, out[[0, 1, 3, 4]])
+
+
+def test_routed_expert_without_batch_padding_is_untouched():
+    """A full batch has no padding rows to drop, even if one row is zero."""
+
+    mask = torch.ones((2, 3), dtype=torch.bool)
+    processor = _bare_processor(mask)
+    task = _RecordingTask(module=nn.Linear(4, 4))
+    processor.tasks["mlp.experts.1.gate_proj"] = task
+
+    inp = torch.randn(5, 4)
+    inp[0] = 0
+    out = inp * 2
+    hook = processor.pre_process_fwd_hook("mlp.experts.1.gate_proj")
+    hook(nn.Linear(4, 4), (inp,), out)
+
+    kept_inp, _, _ = task.batches[0]
+    torch.testing.assert_close(kept_inp, inp)
+
+
 class _MoeBlock(nn.Module):
     """MoE block that records the input each routed expert receives."""
 
