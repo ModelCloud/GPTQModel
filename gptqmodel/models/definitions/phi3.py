@@ -16,7 +16,9 @@ class Phi3QModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("qkv_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         }
     ]

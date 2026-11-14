@@ -99,6 +99,7 @@ Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ run
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
 AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
 AWQ selects fold sources from declared data flow and skips sandwich post-norms and unresolvable gains; see the [AWQ normalization selection](docs/awq-norm-selection.md) flow.
+AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
 LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
