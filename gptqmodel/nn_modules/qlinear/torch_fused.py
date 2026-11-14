@@ -44,24 +44,41 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
-def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros):
-    """Run BF16 int4pack with FP32 operands without expanding stored weights."""
-    compute_dtype = torch.float32 if x.dtype == torch.bfloat16 else scales_and_zeros.dtype
+def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
+    """Run int4pack with FP32 operands without expanding stored weights.
+
+    BF16 inputs, and FP16 inputs whose caller requests an FP32 product,
+    accumulate in FP32. ``out_dtype`` lets a biased layer keep that product
+    until the bias has been added, so the epilogue rounds once instead of
+    overflowing or rounding the pre-bias sum.
+    """
+    compute_dtype = (
+        torch.float32
+        if x.dtype == torch.bfloat16 or out_dtype == torch.float32
+        else scales_and_zeros.dtype
+    )
     out = torch.ops.aten._weight_int4pack_mm_for_cpu(
         x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
     )
-    return out.to(x.dtype)
+    return out.to(x.dtype if out_dtype is None else out_dtype)
 
 
 class Int4PackedOp(torch.nn.Module):
-    def __init__(self, qweight_uint8, scales_and_zeros, group_size):
+    def __init__(self, qweight_uint8, scales_and_zeros, group_size, out_dtype=None):
         super().__init__()
         self.register_buffer("qweight_uint8", qweight_uint8, persistent=False)
         self.register_buffer("scales_and_zeros", scales_and_zeros, persistent=False)
         self.group_size = group_size
+        self.out_dtype = out_dtype
 
     def forward(self, x):
-        return _cpu_int4pack_mm(x, self.qweight_uint8, self.group_size, self.scales_and_zeros)
+        return _cpu_int4pack_mm(
+            x,
+            self.qweight_uint8,
+            self.group_size,
+            self.scales_and_zeros,
+            out_dtype=self.out_dtype,
+        )
 
 
 class TorchFusedLinear(PackableQuantLinear):
@@ -332,7 +349,9 @@ class TorchFusedLinear(PackableQuantLinear):
         input_dtype = x.dtype
         if input_dtype == torch.float32:
             x = x.to(torch.bfloat16)
-        fused_bias_safe = self.bias is None or x.dtype == torch.bfloat16
+        # The CPU fused op now returns FP32 when a bias is present, so both
+        # FP16 and BF16 can add the bias before the single output cast.
+        fused_bias_safe = self.bias is None or x.dtype in (torch.bfloat16, torch.float16)
         if (
             not self.training
             and not x.requires_grad
@@ -401,6 +420,13 @@ class TorchFusedLinear(PackableQuantLinear):
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             )
         elif x.device.type == "cpu":
+            # A biased FP16 layer keeps the FP32 product until the bias is
+            # added, then casts once; BF16 already has FP32's range.
+            self.torch_fused_op.out_dtype = (
+                torch.float32
+                if self.bias is not None and x.dtype == torch.float16
+                else None
+            )
             out = self.torch_fused_op(x)
         else:
             raise NotImplementedError

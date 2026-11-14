@@ -641,13 +641,17 @@ class AWQProcessor(LoopProcessor):
             inputs_list.append(feature)
             entry.setdefault("batch_indices", []).append(batch_index)
 
-    def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, int, int]]:
+    def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
 
         Masked captures build a fresh masked tensor per sibling, so they never
-        share. Tensors without a version counter (inference tensors) are excluded
-        too: their id could be recycled while an entry is still cached, and a
-        stale hit would hand a sibling the wrong activations.
+        share. Calibration runs under ``inference_mode``, so the captured tensor
+        is usually an inference tensor and ``_version`` raises. Keying on the
+        version alone therefore disabled sharing for every real calibration
+        capture. Use the storage pointer plus shape/stride/dtype instead; the
+        cached weakref still proves the hit is the same object, so a recycled
+        pointer cannot alias a different tensor. A real version counter is kept
+        when one exists so an in-place mutation still invalidates the host copy.
         """
 
         if getattr(getattr(self, "_mask_tls", None), "value", None) is not None:
@@ -655,10 +659,23 @@ class AWQProcessor(LoopProcessor):
         if not torch.is_tensor(feature):
             return None
         try:
-            version = int(feature._version)
+            data_ptr = feature.data_ptr()
         except Exception:
             return None
-        return (self.current_batch_index(), id(feature), version)
+        try:
+            version = int(feature._version)
+        except Exception:
+            # Inference tensors have no version counter and cannot be modified
+            # in place outside inference mode.
+            version = None
+        return (
+            self.current_batch_index(),
+            data_ptr,
+            tuple(feature.shape),
+            tuple(feature.stride()),
+            feature.dtype,
+            version,
+        )
 
     def _materialize_host_feature(self, feature: torch.Tensor) -> torch.Tensor:
         """Return the host copy of one captured input, reusing a sibling's copy.
