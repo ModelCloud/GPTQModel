@@ -628,7 +628,50 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
+# `requirements.txt` pins `defuser>=0.0.30`. Older releases do not split the
+# fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
+# experts stay fused and are silently left unquantized; the only symptom is a
+# "0 layer matches" line in the module-coverage report.
+DEFUSER_MIN_VERSION = "0.0.30"
+_defuser_version_warning_emitted = False
+
+
+def defuser_version_too_old(installed: Optional[str] = None) -> Optional[str]:
+    """Return the installed `defuser` version when it predates the supported floor."""
+
+    if installed is None:
+        try:
+            installed = version("defuser")
+        except PackageNotFoundError:
+            return None
+    try:
+        outdated = Version(installed) < Version(DEFUSER_MIN_VERSION)
+    except InvalidVersion:
+        return installed
+    return installed if outdated else None
+
+
+def _check_defuser_version() -> None:
+    """Report an unsupported `defuser` before its conversion silently no-ops."""
+
+    global _defuser_version_warning_emitted
+    if _defuser_version_warning_emitted:
+        return
+    _defuser_version_warning_emitted = True
+    outdated = defuser_version_too_old()
+    if outdated is None:
+        return
+    log.error(
+        "Loader: defuser %s is installed but >= %s is required. Fused 3-D expert "
+        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split, so their "
+        "routed experts are left unquantized; upgrade defuser.",
+        outdated,
+        DEFUSER_MIN_VERSION,
+    )
+
+
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
+    _check_defuser_version()
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())

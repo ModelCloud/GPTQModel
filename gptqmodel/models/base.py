@@ -4853,7 +4853,9 @@ class BaseQModel(nn.Module):
                 return False
             return input_width is None or weight.numel() == input_width
 
-        def _select_prev_op(input_width: int | None):
+        last_gain_norm = None
+
+        def _select_prev_op(input_width: int | None, allow_block_norm: bool = False):
             """Return the normalization that immediately feeds the consumer block.
 
             Consecutive non-quantized blocks can contain several modules: the
@@ -4862,6 +4864,12 @@ class BaseQModel(nn.Module):
             actually feeds it; earlier entries in the run belong to sibling
             branches (for example the router) or to a preceding residual.
             ``last_module`` remains the fallback when no norm matches.
+
+            ``allow_block_norm`` admits the last gain norm seen in the layer when
+            the run was already consumed by a sibling MoE block. A MoE gate/up
+            group always reads the MoE block input, so its fold source is that
+            norm even when the intervening routed-expert blocks cleared the run
+            (DeepSeek orders routed experts before ``shared_experts``).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -4870,7 +4878,96 @@ class BaseQModel(nn.Module):
                 # Folding into a post-norm corrupts the block output. With no
                 # data-flow source in this run, skip the scale instead.
                 return None
+            if allow_block_norm and last_gain_norm is not None and input_width is not None:
+                if _norm_width(last_gain_norm) == input_width:
+                    return last_gain_norm
+            # A fallback norm whose width differs from the consumer's input
+            # cannot absorb this scale: `scale_ln_fcs` would multiply a
+            # differently sized weight (or raise). DeepSeek MLA is the concrete
+            # case - `o_proj` reads the attention output, not the input norm, so
+            # the last-module fallback would fold a wrong-width scale into
+            # `input_layernorm`. Refuse the fold and leave that group unscaled.
+            if last_module is not None and _norm_width(last_module) is not None:
+                return last_module if _norm_width(last_module) == input_width else None
             return last_module
+
+        def _norm_width(candidate_module) -> int | None:
+            """Return the gain width of a norm-like module, else ``None``."""
+
+            weight = getattr(candidate_module, "weight", None)
+            if isinstance(weight, nn.Parameter) and weight.ndim == 1:
+                return int(weight.numel())
+            return None
+
+        def _norm_scale_consumers(prev_op_module, input_width: int | None, extra_names=()):
+            """Non-quantized modules in this run that read ``prev_op``'s output.
+
+            A MoE router (``mlp.gate``, ``router``) and Qwen2's
+            ``shared_expert_gate`` consume the same normed hidden state as the
+            quantized expert gate/up projections but are not part of the fold
+            group, so ``apply_scale`` has to multiply their input columns by the
+            same scale. Routers are not ``nn.Linear``; they own a 2-D ``weight``
+            of shape ``[experts, hidden]`` and apply it as a linear map, so both
+            shapes are accepted here and ``scale_input_columns`` performs the
+            multiplication.
+            """
+
+            width = _norm_width(prev_op_module)
+            if width is None or input_width is None or width != input_width:
+                return []
+            consumers = []
+            for candidate_name, candidate_module in pending_nonquant:
+                if candidate_module is prev_op_module or candidate_name in post_norm_modules:
+                    continue
+                if isinstance(candidate_module, nn.Linear):
+                    if candidate_module.in_features == width:
+                        consumers.append(candidate_name)
+                    continue
+                weight = getattr(candidate_module, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(candidate_name)
+            for extra_name in extra_names:
+                if extra_name not in consumers:
+                    consumers.append(extra_name)
+            return consumers
+
+        def _moe_block_consumers(block, width, excluded):
+            """Direct children of the MoE block that read its input.
+
+            Some definitions do not declare the router (DeepSeek V2/V3 trees list
+            only the projections), so the router cannot be found in the
+            non-quantized run. A router is always a direct child of the MoE block
+            with a 2-D ``weight`` of the block-input width; taking it from the
+            module hierarchy keeps the rule structural instead of name-based.
+            """
+
+            moe_root = None
+            for spec in plan.moe_roots():
+                template = spec.template
+                if any(
+                    strip_non_quantize_flags(name) == template
+                    or strip_non_quantize_flags(name).startswith(f"{template}.")
+                    for name in block
+                ):
+                    moe_root = template
+                    break
+            if moe_root is None:
+                return []
+            root_module, _ = get_module_by_name_prefix(module, moe_root)
+            if root_module is None:
+                return []
+            consumers = []
+            for child_name, child in root_module.named_children():
+                if any(child is excluded_module for excluded_module in excluded):
+                    continue
+                child_path = f"{moe_root}.{child_name}"
+                spec = plan.find(child_path)
+                if spec is not None and spec.quantize:
+                    continue
+                weight = getattr(child, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(child_path)
+            return consumers
 
         def _module_kwargs_for_feature(feature_name: str | None):
             kwargs_for_feature = dict(base_module_kwargs)
@@ -4903,6 +5000,8 @@ class BaseQModel(nn.Module):
                 resolved_module, _ = get_module_by_name_prefix(module, candidate_name)
                 if resolved_module is not None:
                     pending_nonquant.append((candidate_name, resolved_module))
+                    if _is_gain_norm(resolved_module, candidate_name, None):
+                        last_gain_norm = resolved_module
                 if not prev_not_quantized:
                     _try_update_last_module(candidate_name)
                 prev_not_quantized = True
@@ -4921,10 +5020,13 @@ class BaseQModel(nn.Module):
                 plan.is_expert(strip_non_quantize_flags(name))
                 for name in block
             )
-            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
-            is_moe_gate_up_block = is_moe_block and any(
-                "gate" in roles or "up" in roles for roles in block_roles.values()
+            is_moe_family = any(
+                plan.is_moe(strip_non_quantize_flags(name))
+                for name in block
             )
+            has_gate_up_roles = any("gate" in roles or "up" in roles for roles in block_roles.values())
+            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
+            is_moe_gate_up_block = is_moe_block and has_gate_up_roles
             skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
@@ -4954,10 +5056,22 @@ class BaseQModel(nn.Module):
             else:
                 # Normal execution subset
                 subset = []  # preserve execution order while collecting quantizable modules
+                subset_names = []
                 skip = False
                 for name in block:
                     if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
                         m, _ = get_module_by_name_prefix(module, name)
+                        if m is None:
+                            log.debug("awq_get_modules_for_scaling: skipping missing module `%s`", name)
+                            # Definitions with alternative layouts (DeepSeek MLA
+                            # ships `q_proj` only when `q_lora_rank` is unset)
+                            # declare every variant. `layer_modules_strict=False`
+                            # means the missing one is simply not executed, so it
+                            # must not drop the rest of the block.
+                            if self.layer_modules_strict:
+                                skip = True
+                                break
+                            continue
                         # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
                         if (self.awq_scale_optimize_shape_dependent_modules is not None
@@ -4967,11 +5081,8 @@ class BaseQModel(nn.Module):
                             # log.debug(f'"{name}" attention out skipped.')
                             skip = True
 
-                        if m is None:
-                            log.debug("awq_get_modules_for_scaling: skipping missing module `%s`", name)
-                            skip = True
-                            break
                         subset.append(m)
+                        subset_names.append(name)
 
                 if skip or not subset:
                     pending_nonquant.clear()
@@ -4981,6 +5092,7 @@ class BaseQModel(nn.Module):
                     # Match the activation bucket to the first quantized child in this block
                     feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
                     root_split = feature_name.split(".")
+                    root = None
                     module2inspect = None
                     if len(root_split) >= 2:
                         root = root_split[0]
@@ -5007,18 +5119,70 @@ class BaseQModel(nn.Module):
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
                         skip_block = True
 
+                input_width = None
+                scale_consumers = []
                 if not skip_block:
-                    prev_op = _select_prev_op(inp.shape[-1] if inp.dim() > 0 else None)
+                    input_width = inp.shape[-1] if inp.dim() > 0 else None
+                    allow_block_norm = is_moe_family and has_gate_up_roles
+                    prev_op = _select_prev_op(input_width, allow_block_norm=allow_block_norm)
+                    moe_consumers = (
+                        _moe_block_consumers(block, input_width, subset)
+                        if is_moe_family and input_width is not None
+                        else []
+                    )
+                    scale_consumers = _norm_scale_consumers(prev_op, input_width, extra_names=moe_consumers)
                     pending_nonquant.clear()
                     if prev_op is None:
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
                         skip_block = True
+
+                # One group shares one scale vector, so it can only contain
+                # consumers of the same tensor. A layer whose input width differs
+                # from the fold source reads another tensor (DeepSeek MLA:
+                # `q_b_proj` reads `q_a`, `kv_b_proj` reads `kv_a`), and
+                # multiplying it by this norm's scale would either raise in
+                # `scale_ln_fcs` or silently corrupt the layer. Keep those layers
+                # in their own quantized-but-unscaled group.
+                if not skip_block and input_width is not None:
+                    fold_subset, fold_names, foreign_layers = [], [], []
+                    for layer_module, layer_name in zip(subset, subset_names):
+                        weight = getattr(layer_module, "weight", None)
+                        if isinstance(weight, torch.Tensor) and weight.ndim == 2 and weight.shape[1] != input_width:
+                            foreign_layers.append(layer_name)
+                            continue
+                        fold_subset.append(layer_module)
+                        fold_names.append(layer_name)
+                    if foreign_layers:
+                        log.debug(
+                            "awq_get_modules_for_scaling: leaving %s unscaled; their input width "
+                            "differs from the %s-wide fold source",
+                            foreign_layers,
+                            input_width,
+                        )
+                    if not fold_subset:
+                        log.debug(
+                            "awq_get_modules_for_scaling: skipping block %s; no consumer matches the fold source width",
+                            block,
+                        )
+                        skip_block = True
+                    subset, subset_names = fold_subset, fold_names
+
+                # `_search_best_scale` scores a candidate scale by re-running
+                # `module2inspect`. A multi-module group needs a block forward;
+                # scoring a single member would miss the rest of the group.
+                if not skip_block and module2inspect is None and len(subset) > 1:
+                    common_parents = {strip_non_quantize_flags(name).rsplit(".", 1)[0] for name in subset_names}
+                    inspect_name = common_parents.pop() if len(common_parents) == 1 else root
+                    if inspect_name:
+                        module2inspect, _ = get_module_by_name_prefix(module, inspect_name)
 
                 if not skip_block:
                     n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=module2inspect)
                     n["_input_feature_name"] = feature_name
+                    if scale_consumers:
+                        n["_scale_consumers"] = scale_consumers
 
                     nodes.append(n)
 
@@ -5044,7 +5208,6 @@ class BaseQModel(nn.Module):
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
 
-        import torch
         def format_nodes(nodes):
             out = []
             for n in nodes:

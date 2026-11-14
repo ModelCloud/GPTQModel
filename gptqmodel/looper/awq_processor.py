@@ -1652,13 +1652,41 @@ class AWQProcessor(LoopProcessor):
             sample_groups,
         )
 
+        # Non-quantized consumers of a folded norm (MoE router, qwen2
+        # `shared_expert_gate`) must receive the same scale, or their output -
+        # and therefore the routing - changes. Collect them per fold source.
+        consumer_map: Dict[str, List[str]] = {}
+        scale_consumers_by_group: List[Optional[List[str]]] = []
+        for cfg in sanitized_module_config:
+            consumer_names = cfg.pop("_scale_consumers", None)
+            scale_consumers_by_group.append(consumer_names)
+            if not consumer_names:
+                continue
+            try:
+                prev_op_name = get_op_name(layer_module_ref, cfg.get("prev_op"))
+            except ValueError:
+                continue
+            consumer_map.setdefault(prev_op_name, [])
+            for consumer_name in consumer_names:
+                if consumer_name not in consumer_map[prev_op_name]:
+                    consumer_map[prev_op_name].append(consumer_name)
+
         scales_list = [
-            self._search_best_scale(layer_module_ref, **layer)
-            for layer in sanitized_module_config
+            self._search_best_scale(
+                layer_module_ref,
+                scale_consumers=scale_consumers,
+                **layer,
+            )
+            for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group)
         ]
 
         try:
-            apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
+            apply_scale(
+                layer_module_ref,
+                scales_list,
+                input_feat_dict=input_feat,
+                consumer_map=consumer_map,
+            )
         except RuntimeError as exc:
             debug_entries = []
             for prev_op_name, layer_names, scales, _loss in scales_list:
@@ -1769,11 +1797,16 @@ class AWQProcessor(LoopProcessor):
             module2inspect=None,
             kwargs={},
             bits: Optional[int] = None,
+            scale_consumers: Optional[List[str]] = None,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
         Unless explicitly overridden by ``bits``, evaluate each member at its
         own configured width, even though the group shares one channel scale.
+        ``scale_consumers`` names the non-quantized modules that read the same
+        normed input (MoE router, ``shared_expert_gate``). They are multiplied by
+        each candidate scale while the group is scored, so the search measures
+        the layer the model will actually run.
         """
 
         if module2inspect is None:
@@ -1873,6 +1906,12 @@ class AWQProcessor(LoopProcessor):
         }
         if any(module_format != default_format for module_format in formats):
             best_scale_kwargs["formats"] = formats
+
+        consumer_modules = None
+        if scale_consumers:
+            consumer_modules = [get_op_by_name(module, name) for name in scale_consumers]
+        if consumer_modules:
+            best_scale_kwargs["scale_consumers"] = consumer_modules
 
         best_scales, loss = self._compute_best_scale(
             inp,
@@ -2275,6 +2314,7 @@ class AWQProcessor(LoopProcessor):
         bits: Optional[int | List[int]] = None,
         group_sizes: Optional[int | List[int]] = None,
         formats: Optional[FORMAT | List[FORMAT]] = None,
+        scale_consumers: Optional[List[nn.Module]] = None,
     ):
         """
         Compute loss and select best scales
@@ -2284,6 +2324,10 @@ class AWQProcessor(LoopProcessor):
         X: inputs from calib dataset    | X
         W: original weights in FP16     | layer
         s: per channel scaling factor   | s^-1 * X
+
+        ``scale_consumers`` are non-quantized modules that read the same normed
+        input as ``linears2scale``. They are not quantized; they are multiplied
+        by the candidate scale so the scored block matches the folded layer.
         """
         n_grid = 20
         history = []
@@ -2331,12 +2375,26 @@ class AWQProcessor(LoopProcessor):
                 master = master.to("cpu").contiguous()
             orig_weights[fc] = master
 
+        consumer_masters: Dict[nn.Module, torch.Tensor] = {}
+        for consumer in scale_consumers or ():
+            weight = getattr(consumer, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+                continue
+            master = weight.detach().to(dtype=weight.dtype, copy=True)
+            if master_to_host:
+                master = master.to("cpu").contiguous()
+            consumer_masters[consumer] = master
+
         def restore_weights():
             for fc in linears2scale:
                 master = orig_weights[fc]
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
                 fc.weight.copy_(master)
+            for consumer, master in consumer_masters.items():
+                if master.device != consumer.weight.device or master.dtype != consumer.weight.dtype:
+                    master = master.to(device=consumer.weight.device, dtype=consumer.weight.dtype)
+                consumer.weight.copy_(master)
 
         def apply_scaled_weights(scales_view: torch.Tensor) -> None:
             """Restore the pristine master and apply the candidate scale in one pass.
@@ -2352,6 +2410,13 @@ class AWQProcessor(LoopProcessor):
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
                 torch.mul(master, scales_view, out=fc.weight)
+            # The router / shared-expert gate read the same normed input, so the
+            # candidate scale has to reach them too. Otherwise the search scores
+            # a block whose routing differs from the layer `apply_scale` produces.
+            for consumer, master in consumer_masters.items():
+                if master.device != consumer.weight.device or master.dtype != consumer.weight.dtype:
+                    master = master.to(device=consumer.weight.device, dtype=consumer.weight.dtype)
+                torch.mul(master, scales_view.to(master.dtype), out=consumer.weight)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -2503,6 +2568,7 @@ class AWQProcessor(LoopProcessor):
         # more to hand callers the pristine FP copy.
         restore_weights()
         orig_weights.clear()
+        consumer_masters.clear()
 
         best_error_value = best_error.item()
         if best_error_value == float("inf"):
