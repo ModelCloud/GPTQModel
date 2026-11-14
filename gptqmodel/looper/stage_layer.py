@@ -1091,6 +1091,13 @@ def run_layer_stage(
                             full_name=full_name,
                             layer_index=layer_index,
                         )
+                    # This replay only exists to advance calibration inputs past
+                    # an excluded layer, so its projections must stay in their
+                    # native dense form. A fully excluded layer never reaches
+                    # the `quant_source` role that restores a packed AUTO_NF12
+                    # source, so casting here would leave `nf12_*` buffers in
+                    # the model tree and serialize them in place of `weight`.
+                    named_native.state["auto_dtype_cast_forward_disabled"] = True
                     prepared_native = looper._prepare_named_module_for_forward(
                         named_module=named_native,
                         fallback_device=cur_layer_device,

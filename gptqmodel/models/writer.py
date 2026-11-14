@@ -404,6 +404,76 @@ def _tensor_matches_prefixes(tensor_name: str, prefixes: set[str]) -> bool:
     return tensor_name in prefixes or any(tensor_name.startswith(f"{prefix}.") for prefix in prefixes)
 
 
+# Buffers owned by AUTO_NF12 source storage. They are calibration scratch, not a
+# checkpoint layout: a saved model must carry the dense `weight` instead.
+_NF12_PAYLOAD_BUFFERS = (
+    "nf12_packed",
+    "nf12_escapes",
+    "nf12_exp_base",
+    "nf12_row_packed",
+    "nf12_row_escapes",
+)
+
+
+def _module_declares_nf12_checkpoint(quantize_config, module_name: str) -> bool:
+    """Report whether `module_name` is an NF12-quantized module for this config."""
+
+    if quantize_config is None:
+        return False
+    resolver = getattr(quantize_config, "resolve_module_config", None)
+    resolved = resolver(module_name) if callable(resolver) else None
+    if resolved is not None and resolved.excluded:
+        return False
+    module_format = getattr(quantize_config, "format", None)
+    if resolved is not None:
+        module_format = resolved.overrides.get("format", module_format)
+    return (
+        resolve_quant_format(module_format, getattr(quantize_config, "method", None))
+        == FORMAT.NF12
+    )
+
+
+def _validate_nf12_payload_ownership(owner, *, prefixes: Optional[List[str]] = None) -> None:
+    """Refuse to serialize AUTO_NF12 source buffers under unquantized modules.
+
+    `auto_dtype_cast` packs a dense source into `nf12_*` buffers for the length
+    of one calibration forward and restores the exact source before the
+    quantizer consumes it. A packed module that survives into `save()` is
+    silent corruption: the writer emits `nf12_*` tensors instead of `weight`
+    while `quantize_config.json` still describes the module as plain
+    unquantized, and the loader leaves the dense weight uninitialised (NaN
+    logits). Fail closed instead of publishing that checkpoint.
+    """
+
+    model = getattr(owner, "model", None)
+    if model is None:
+        return
+    quantize_config = getattr(owner, "quantize_config", None)
+    scope = set(prefixes) if prefixes else None
+    offenders = []
+    for module_name, module in model.named_modules():
+        buffers = getattr(module, "_buffers", None)
+        if not buffers or not any(name in buffers for name in _NF12_PAYLOAD_BUFFERS):
+            continue
+        if scope is not None and not _tensor_matches_prefixes(module_name, scope):
+            continue
+        if _module_declares_nf12_checkpoint(quantize_config, module_name):
+            continue
+        offenders.append(module_name or "<root>")
+    if not offenders:
+        return
+    sample = ", ".join(sorted(offenders)[:8])
+    if len(offenders) > 8:
+        sample += f", ... ({len(offenders)} total)"
+    raise ValueError(
+        "Save aborted: AUTO_NF12 source storage is still installed on modules the "
+        f"quantize config does not declare as NF12 (`{sample}`). Saving would write "
+        "`nf12_*` buffers in place of `weight` for those modules, and reloading the "
+        "checkpoint would leave their dense weights uninitialised (NaN logits). "
+        "Restore the dense source module before saving."
+    )
+
+
 def _module_name(model, target_module) -> Optional[str]:
     if target_module is None:
         return None
@@ -1605,6 +1675,7 @@ def ModelWriter(cls):
         })
         if not prefixes:
             raise ValueError("Module replacement save requires quantized module replacement prefixes.")
+        _validate_nf12_payload_ownership(self, prefixes=prefixes)
         checkpoint_source = self.turtle_model or getattr(self, "_module_replacement_source", None)
         if checkpoint_source is None or not hasattr(checkpoint_source, "_weight_map") or not hasattr(checkpoint_source, "model_local_path"):
             raise ValueError("Module replacement save requires a LazyTurtle checkpoint source.")
@@ -2030,6 +2101,7 @@ def ModelWriter(cls):
 
         # The layer split path writes into several subdirectories, so guard
         # references against the export root before any group can be written.
+        _validate_nf12_payload_ownership(self)
         _validate_offload_sources_outside_save_dir(state_dict, save_dir)
 
         model_base_name = "model"
