@@ -20,7 +20,7 @@ _PRE_NORM_TREE = [
     "#",
     {
         "self_attn_layer_norm": ("self_attn_layer_norm:!",),
-        "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+        "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "out_proj:1"),
         "final_layer_norm": ("final_layer_norm:!",),
         "fc1": ("fc1",),
         "fc2": ("fc2",),
@@ -37,7 +37,7 @@ _POST_NORM_TREE = [
     "layers",
     "#",
     {
-        "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+        "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "out_proj:1"),
         "self_attn_layer_norm": ("self_attn_layer_norm:!:nosrc",),
         "fc1": ("fc1",),
         "fc2": ("fc2",),
@@ -47,6 +47,8 @@ _POST_NORM_TREE = [
 
 
 class OptQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"opt"})
+
     fusable = FusableConfig("opt").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"

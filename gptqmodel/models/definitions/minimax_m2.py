@@ -87,8 +87,8 @@ class MiniMaxQModel(BaseQModel):
                 "o_proj:1",
                 # linear-attention ("lightning") layers
                 "qkv_proj:0",
-                "out_proj:1",
                 "output_gate:1",
+                "out_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {  # MoE module

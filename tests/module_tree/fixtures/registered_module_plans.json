@@ -273,10 +273,12 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.indexer.wq_b:!", "self_attn.indexer.wk:!", "self_attn.indexer.weights_proj:!"],
         ["self_attn.q_gate_proj", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
+        ["input_layernorm.mlp.fc1:!", "input_layernorm.mlp.fc2:!"],
         ["post_attention_layernorm:!"],
+        ["post_attention_layernorm.mlp.fc1:!", "post_attention_layernorm.mlp.fc2:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
         ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
@@ -449,7 +451,8 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.q_a_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -500,9 +503,9 @@
         ["attn_hc.input_norm:!"],
         ["input_layernorm:!"],
         ["self_attn:!"],
-        ["self_attn.q_a_norm:!", "self_attn.q_a_proj", "self_attn.q_b_norm:!", "self_attn.q_b_proj", "self_attn.o_a_proj:!", "self_attn.kv_norm:!", "self_attn.compressor:!", "self_attn.compressor.kv_norm:!", "self_attn.compressor.kv_proj:!", "self_attn.compressor.gate_proj:!", "self_attn.compressor.indexer:!", "self_attn.compressor.indexer.kv_norm:!", "self_attn.compressor.indexer.kv_proj:!", "self_attn.compressor.indexer.q_b_proj:!", "self_attn.compressor.indexer.gate_proj:!", "self_attn.compressor.indexer.scorer.weights_proj:!"],
+        ["self_attn.q_a_norm:!", "self_attn.q_a_proj", "self_attn.q_b_norm:!", "self_attn.o_a_proj:!", "self_attn.kv_norm:!", "self_attn.kv_proj", "self_attn.compressor:!", "self_attn.compressor.kv_norm:!", "self_attn.compressor.kv_proj:!", "self_attn.compressor.gate_proj:!", "self_attn.compressor.indexer:!", "self_attn.compressor.indexer.kv_norm:!", "self_attn.compressor.indexer.kv_proj:!", "self_attn.compressor.indexer.q_b_proj:!", "self_attn.compressor.indexer.gate_proj:!", "self_attn.compressor.indexer.scorer.weights_proj:!"],
+        ["self_attn.q_b_proj"],
         ["self_attn.o_b_proj"],
-        ["self_attn.kv_proj"],
         ["ffn_hc:!"],
         ["ffn_hc.input_norm:!"],
         ["post_attention_layernorm:!"],
@@ -694,7 +697,8 @@
       "layers": ["backbone.layers"],
       "blocks": [
         ["norm:!"],
-        ["mixer.in_proj", "mixer.x_proj"],
+        ["mixer.in_proj"],
+        ["mixer.x_proj"],
         ["mixer.out_proj"]
       ]
     },
@@ -1315,6 +1319,7 @@
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
+        ["mamba.x_proj"],
         ["mamba.out_proj"],
         ["pre_ff_layernorm:!"],
         ["feed_forward.router:!"],
@@ -1398,7 +1403,8 @@
       "layers": ["model.layers"],
       "blocks": [
         ["operator_norm:!"],
-        ["conv.in_proj", "conv.out_proj"],
+        ["conv.in_proj"],
+        ["conv.out_proj"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.out_proj"],
         ["ffn_norm:!"],
@@ -1685,7 +1691,8 @@
       "blocks": [
         ["input_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj"],
-        ["self_attn.o_proj", "self_attn.out_proj", "self_attn.output_gate"],
+        ["self_attn.o_proj", "self_attn.output_gate"],
+        ["self_attn.out_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
