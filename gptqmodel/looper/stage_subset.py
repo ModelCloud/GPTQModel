@@ -929,17 +929,14 @@ def _run_single_subset_pass(
                     named_module=named_module,
                     fallback_device=cur_layer_device,
                 )
-                # The layer inventory otherwise keeps the original dense
-                # module alive after AUTO_NF12 replaces it for this forward.
-                # Refresh its reference before the quantizer restores a dense
-                # source for the selected module.
-                # EoRA consumes per-module state through this wrapper, so keep
-                # it in the inventory when an adapter is generated.
-                if (
-                    named_module.state.get("auto_dtype_cast_source_spec") is not None
-                    and not getattr(looper.gptq_model, "_has_eora", False)
-                ):
-                    full[named_module.name] = named_module.module
+                # Keep the NamedModule in the layer inventory even after
+                # AUTO_NF12 swapped the live module for a packed wrapper.
+                # `prepare_layer_runtime_weights_for_forward` can only reach a
+                # processor's deferred replay state (EXL3's META placeholder,
+                # issue #4063) through the wrapper; a raw module in `full` is
+                # skipped and the next layer forward copies out of META.
+                # `_prepare_layer_direct_state_for_forward` already unwraps
+                # `.module`, so exclusion still targets the live tree module.
         # The layer forward executes every module, not only this subset.
         # Projections packed by an earlier subset still hold the processor's
         # META placeholder, so refresh the whole inventory before running.
@@ -1443,11 +1440,12 @@ def _run_single_subset_pass(
                 named_module=named_module,
                 fallback_device=cur_layer_device,
             )
-            auto_dtype_cast_was_applied = named_module.state.pop(
-                "auto_dtype_cast_was_applied", False
-            )
-            if auto_dtype_cast_was_applied and not getattr(looper.gptq_model, "_has_eora", False):
-                full[name] = named_module.module
+            # Keep the inventory entry as the NamedModule. Replacing it with
+            # the restored raw quant source made every AUTO_NF12 projection
+            # invisible to `prepare_layer_runtime_weights_for_forward`, which
+            # left EXL3's deferred replay weight on META for the next layer
+            # forward (issue #4063).
+            named_module.state.pop("auto_dtype_cast_was_applied", False)
         else:
             target_device = get_device(named_module.module)
             if target_device == META:
