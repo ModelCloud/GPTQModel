@@ -5,7 +5,7 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
-from ..moe_lifecycle import W1W3W2MoELifecycleHooks
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LFM2MoeQModel(BaseQModel):
@@ -16,8 +16,9 @@ class LFM2MoeQModel(BaseQModel):
     dynamic_expert_index = "num_experts"
     layer_modules_strict = False
 
-    # MoE lifecycle hooks for w1/w3/w2 pattern
-    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
+    # Transformers 5.22 splits the fused expert tensors into per-expert
+    # gate_proj/up_proj/down_proj linears (the dense MLP still uses w1/w3/w2).
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree= [
         "model",
@@ -26,13 +27,13 @@ class LFM2MoeQModel(BaseQModel):
         {
             "operator_norm": ("operator_norm:!",),
             "conv": ("in_proj", "out_proj"),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
             "ffn_norm": ("ffn_norm:!",),
             "feed_forward:moe": {
                 "gate": ("gate:!",),
                 "": ("w1:0", "w3:0", "w2:1"),
                 "experts": {
-                    "#": ("w1:0", "w3:0", "w2:1"),
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         }
