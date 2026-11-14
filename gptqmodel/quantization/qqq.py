@@ -357,6 +357,14 @@ class QQQ:
     def _validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)) and module.groups != 1:
+            raise ValueError(
+                "QQQ does not support grouped convolution capture: "
+                f"`{type(module).__name__}` has groups={module.groups}, but the "
+                "Hessian is built from the full unfolded input while the weight "
+                "width is per-group. Exclude grouped convolutions from QQQ "
+                "quantization or use an ungrouped equivalent."
+            )
 
     @staticmethod
     def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
@@ -382,7 +390,7 @@ class QQQ:
             mse_maxshrink = smooth_method.maxshrink
 
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d)):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
@@ -537,7 +545,19 @@ class QQQ:
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Unfold requires a 2-D spatial input, so add a singleton height
+            # dimension and unfold the length dimension only.
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=(0, self.layer.padding[0]),
+                stride=(1, self.layer.stride[0]),
+            )
+            inp = unfold(inp.unsqueeze(2))
+            inp = inp.permute([1, 0, 2])
+            inp = inp.flatten(1)
+        elif isinstance(self.layer, nn.Conv2d):
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
@@ -677,7 +697,7 @@ class QQQ:
         static_groups = self.qcfg.static_groups
 
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d)):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
