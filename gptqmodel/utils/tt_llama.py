@@ -60,8 +60,6 @@ P300C_DECODE_GRIDS = {
     "head": (8, 11),
 }
 
-_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
-
 
 @dataclass(frozen=True)
 class LlamaDims:
