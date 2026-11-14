@@ -933,7 +933,28 @@ class GPTQModel:
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
-            return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
+            if profile != PROFILE.AUTO:
+                raise ValueError(
+                    f"profile={profile.value} cannot be applied when redirecting an already-quantized "
+                    "checkpoint to from_quantized(); omit profile or call from_quantized() directly."
+                )
+            # Preserve every explicit load option on the redirect. The caller
+            # asked for this backend, placement, dtype, and fusion behavior;
+            # silently selecting different defaults can load the checkpoint on
+            # the wrong device or backend. `quantize_config` is a target
+            # quantization request and cannot apply to an already-quantized
+            # source, so it is intentionally not forwarded.
+            return cls.from_quantized(
+                model_id_or_path,
+                device_map=model_init_kwargs.pop("device_map", None),
+                device=model_init_kwargs.pop("device", None),
+                backend=backend,
+                adapter=model_init_kwargs.pop("adapter", None),
+                trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+                p2p=p2p,
+                **model_init_kwargs,
+            )
 
         if quantize_config is not None:
             _kick_quantize_prewarms(
