@@ -239,8 +239,10 @@
     "ApertusQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
+        ["attention_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
+        ["feedforward_layernorm:!"],
         ["mlp.up_proj"],
         ["mlp.down_proj"]
       ]
@@ -259,8 +261,10 @@
     "Apertus1p5TextQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
+        ["attention_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
+        ["feedforward_layernorm:!"],
         ["mlp.up_proj"],
         ["mlp.down_proj"]
       ]
@@ -344,6 +348,7 @@
     "CodeGenQModel/gptq": {
       "layers": ["transformer.h"],
       "blocks": [
+        ["ln_1:!"],
         ["attn.qkv_proj"],
         ["attn.out_proj"],
         ["mlp.fc_in"],
@@ -643,7 +648,7 @@
     "Exaone4QModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -1796,8 +1801,10 @@
     "MptQModel/gptq": {
       "layers": ["transformer.blocks"],
       "blocks": [
+        ["norm_1:!"],
         ["attn.Wqkv"],
         ["attn.out_proj"],
+        ["norm_2:!"],
         ["ffn.up_proj"],
         ["ffn.down_proj"]
       ]
@@ -1925,9 +1932,10 @@
     "OptQModel/gptq": {
       "layers": ["model.decoder.layers"],
       "blocks": [
-        ["final_layer_norm:!"],
+        ["self_attn_layer_norm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.out_proj"],
+        ["final_layer_norm:!"],
         ["fc1"],
         ["fc2"]
       ]
@@ -2025,11 +2033,8 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj"],
-        ["self_attn.k_proj"],
-        ["self_attn.v_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.dense"],
-        ["post_attention_layernorm:!"],
         ["mlp.fc1"],
         ["mlp.fc2"]
       ]
@@ -2037,8 +2042,10 @@
     "Phi3QModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
+        ["input_layernorm:!"],
         ["self_attn.qkv_proj"],
         ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
       ]

@@ -1538,10 +1538,14 @@ class AWQProcessor(LoopProcessor):
 
         if not module_config:
             log.warning(
-                "AWQProcessor: no module configuration generated for layer index %s; skipping quantization.",
+                "AWQProcessor: no module configuration generated for layer index %s; falling back to plain quantization.",
                 layer_index,
             )
-            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
+            self._quantize_layer_fallback(
+                layer_index,
+                state,
+                "no AWQ scaling groups were generated",
+            )
             return
 
         sanitized_module_config: List[Dict] = []
@@ -1625,10 +1629,14 @@ class AWQProcessor(LoopProcessor):
                 self._scale_feature_by_module[layer_name] = feature_name
         if not sanitized_module_config and not fallback_names:
             log.warning(
-                "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
+                "AWQProcessor: no valid scaling groups for layer %s after filtering; falling back to plain quantization.",
                 layer_index,
             )
-            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
+            self._quantize_layer_fallback(
+                layer_index,
+                state,
+                "no scaling group survived filtering",
+            )
             return
 
         sample_groups = []
@@ -3111,7 +3119,10 @@ class AWQProcessor(LoopProcessor):
             module.state.pop("w_wq_diff", None)
 
             if module.state.get("q_zeros") is None:
-                print("modddd", module.full_name)
+                raise RuntimeError(
+                    f"AWQProcessor: module `{module.full_name}` reached packing without "
+                    "quantized zero points; its layer was finalized without quantization."
+                )
             # need to clone to due to steamed pinned memory and access on diff thread
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()
