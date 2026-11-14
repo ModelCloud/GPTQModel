@@ -18,7 +18,9 @@ class FalconMambaQModel(BaseQModel):
         "#",
         {
             "norm": ("norm:!",),
-            "mixer": ("in_proj:0", "x_proj:0", "out_proj:1"),
+            # `x_proj` consumes the convolved `in_proj` output and `out_proj`
+            # consumes the SSM output built from `x_proj`.
+            "mixer": ("in_proj:0", "x_proj:1", "out_proj:2"),
         },
     ]
 

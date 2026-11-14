@@ -31,7 +31,10 @@ class DeepSeekV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "q_b_proj:0:in=q_a", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1"),
+            # Split the MLA projections the same way as DeepSeek-V3: q_a/kv_a
+            # produce the low-rank states, q_b/kv_b consume them, and o_proj
+            # consumes the attention output built from kv_b.
+            "self_attn": ("q_a_proj:0", "q_b_proj:1:in=q_a", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:1:in=kv_a", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),

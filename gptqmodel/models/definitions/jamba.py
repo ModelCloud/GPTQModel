@@ -38,7 +38,11 @@ class JambaQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "mamba": ("in_proj:0", "out_proj:1"),
+            # `x_proj` consumes the convolved `in_proj` output and `out_proj`
+            # consumes the SSM output built from `x_proj`. Declaring `x_proj`
+            # keeps it inside the quantization plan instead of silently
+            # leaving a called `nn.Linear` unquantized.
+            "mamba": ("in_proj:0", "x_proj:1", "out_proj:2"),
             "pre_ff_layernorm": ("pre_ff_layernorm:!",),
             # Expert layers route through `feed_forward.experts`, while dense
             # layers keep the projections directly on `feed_forward`. The

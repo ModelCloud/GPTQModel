@@ -20,7 +20,9 @@ class LFM2QModel(BaseQModel):
         "#",
         {
             "operator_norm": ("operator_norm:!",),
-            "conv": ("in_proj", "out_proj"),
+            # `out_proj` consumes the convolution output produced from
+            # `in_proj`, so it must not share the producer's subset.
+            "conv": ("in_proj:0", "out_proj:1"),
             "self_attn": (
                 "q_proj:0",
                 "k_proj:0",
