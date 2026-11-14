@@ -311,8 +311,14 @@ def _coerce_p2p_config(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfi
     )
 
 
-_CONFIG_LOCK = threading.Lock()
+# Reentrant because ``configure_p2p`` clears the cache while holding it, and
+# ``clear_p2p_cache`` is also called directly by tests and device hot-plug code.
+_CONFIG_LOCK = threading.RLock()
 _ACTIVE_CONFIG: P2PConfig = P2PConfig()
+# Monotonic identity of the active policy. Every replacement bumps it, so a
+# probe that started under an older policy can tell that its verdict describes a
+# configuration that is no longer active.
+_POLICY_GENERATION: int = 0
 
 
 def configure_p2p(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfig:
@@ -326,18 +332,24 @@ def configure_p2p(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfig:
     access.
     """
 
-    global _ACTIVE_CONFIG, _WARNED_DEGRADED
+    global _ACTIVE_CONFIG, _POLICY_GENERATION, _WARNED_DEGRADED
 
     resolved = _coerce_p2p_config(config)
     with _CONFIG_LOCK:
         changed = resolved != _ACTIVE_CONFIG
-        _ACTIVE_CONFIG = resolved
+        if changed:
+            _ACTIVE_CONFIG = resolved
+            _POLICY_GENERATION += 1
+            # Invalidate inside the same critical section that publishes the new
+            # policy. A probe that started under the previous generation can
+            # only publish if its generation is still current, so it cannot
+            # reintroduce an entry this clear removed.
+            clear_p2p_cache()
     if changed:
         # A new policy is a new run as far as the operator is concerned; let the
         # actionable warning fire again so a second configuration is not silent.
         with _WARN_LOCK:
             _WARNED_DEGRADED = False
-        clear_p2p_cache()
     return resolved
 
 
@@ -345,6 +357,38 @@ def get_p2p_config() -> P2PConfig:
     """Return the active P2P policy (never ``None``)."""
 
     return _ACTIVE_CONFIG
+
+
+def _policy_snapshot() -> tuple[int, P2PConfig]:
+    """Return the active policy and its generation as one atomic read.
+
+    ``enable_peer_access`` classifies a link from several policy fields (mode,
+    probe, ``min_gbps``, ``min_ratio``). Reading them one accessor at a time
+    could mix two policies; the snapshot binds the whole verdict to the
+    generation that produced it.
+    """
+
+    with _CONFIG_LOCK:
+        return _POLICY_GENERATION, _ACTIVE_CONFIG
+
+
+def _publish_status(
+    cache_key: tuple,
+    generation: int,
+    status: "PeerStatus",
+) -> bool:
+    """Cache ``status`` only if ``generation`` is still the active policy.
+
+    Returns ``True`` when the entry was published. A probe that finished after a
+    concurrent reconfiguration describes the old policy, so it is dropped
+    instead of becoming a stale verdict for the new one.
+    """
+
+    with _CONFIG_LOCK:
+        if _POLICY_GENERATION != generation:
+            return False
+        _STATUS_CACHE[cache_key] = status
+        return True
 
 
 STATE_ENABLED = "enabled"
@@ -359,7 +403,9 @@ STATE_UNVERIFIED = "unverified"
 
 _PEER_ALREADY_ENABLED = 704
 
-_STATUS_CACHE: dict[tuple[str, bool, tuple[int, ...]], "PeerStatus"] = {}
+# Keyed by (policy generation, mode, probe namespace, device indices) so a
+# verdict can never outlive the policy that produced it.
+_STATUS_CACHE: dict[tuple[int, str, bool, tuple[int, ...]], "PeerStatus"] = {}
 _BANDWIDTH_CACHE: dict[tuple[int, int], tuple[float | None, float | None]] = {}
 # Result of actually exercising the runtime peer-copy path for a directed pair:
 # ``(usable, direct_gbps, host_staged_gbps, reason)``. Capability bits and
@@ -476,32 +522,38 @@ class PeerStatus:
 def clear_p2p_cache() -> None:
     """Drop cached probe/bandwidth results (tests, device hot-plug)."""
     global _LAST_STATUS, _ROCM_VMM_PEER_COPY_WARNED, _PYTORCH_ENABLEMENT_WARNED
-    _STATUS_CACHE.clear()
-    _BANDWIDTH_CACHE.clear()
-    _PEER_VALIDATION_CACHE.clear()
-    _CAPABILITY_CACHE.clear()
-    _STAGED_DIRECTIONS.clear()
-    _LAST_STATUS = None
-    _ROCM_VMM_PEER_COPY_WARNED = False
-    _PYTORCH_ENABLEMENT_WARNED = False
+    with _CONFIG_LOCK:
+        _STATUS_CACHE.clear()
+        _BANDWIDTH_CACHE.clear()
+        _PEER_VALIDATION_CACHE.clear()
+        _CAPABILITY_CACHE.clear()
+        _STAGED_DIRECTIONS.clear()
+        _LAST_STATUS = None
+        _ROCM_VMM_PEER_COPY_WARNED = False
+        _PYTORCH_ENABLEMENT_WARNED = False
 
 
-def _cache_namespace() -> bool:
+def _policy_or_active(policy: P2PConfig | None) -> P2PConfig:
+    """Return ``policy`` or the live policy when the caller has no snapshot."""
+    return _ACTIVE_CONFIG if policy is None else policy
+
+
+def _cache_namespace(policy: P2PConfig | None = None) -> bool:
     """Cache bucket: probing and non-probing results must not be shared."""
-    return probe_enabled()
+    return _policy_or_active(policy).probe
 
 
-def p2p_mode() -> str:
+def p2p_mode(policy: P2PConfig | None = None) -> str:
     """Return the requested mode: ``auto``, ``on`` (force), or ``off``."""
-    return _ACTIVE_CONFIG.mode
+    return _policy_or_active(policy).mode
 
 
-def _min_gbps() -> float:
-    return _ACTIVE_CONFIG.min_gbps
+def _min_gbps(policy: P2PConfig | None = None) -> float:
+    return _policy_or_active(policy).min_gbps
 
 
-def _min_ratio() -> float:
-    return _ACTIVE_CONFIG.min_ratio
+def _min_ratio(policy: P2PConfig | None = None) -> float:
+    return _policy_or_active(policy).min_ratio
 
 
 def probe_enabled() -> bool:
@@ -1175,11 +1227,17 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     With ``strict=True`` an enablement failure raises; the default is
     best-effort and only logs one summary line. A cached best-effort failure
     still raises for a later ``strict=True`` request.
+
+    A verdict belongs to the policy that was active when the call started. If
+    another thread installs a different policy while a probe is running, the
+    result is not cached: the next call re-probes under the new policy instead
+    of inheriting gates that no longer apply.
     """
 
     global _LAST_STATUS
 
-    mode = p2p_mode()
+    generation, policy = _policy_snapshot()
+    mode = p2p_mode(policy)
     indices = _normalize_indices(devices)
     status = PeerStatus(mode=mode, devices=indices)
 
@@ -1189,8 +1247,8 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
         log.debug("%s", status.summary())
         return status
 
-    checking = _cache_namespace()
-    cache_key = (mode, checking, indices)
+    checking = _cache_namespace(policy)
+    cache_key = (generation, mode, checking, indices)
     cached = _STATUS_CACHE.get(cache_key)
     if cached is not None:
         _warn_degraded_once(cached)
@@ -1202,7 +1260,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
 
     if len(indices) < 2 or not torch.cuda.is_available():
         status.reason = "fewer than two CUDA/HIP devices"
-        _STATUS_CACHE[cache_key] = status
+        _publish_status(cache_key, generation, status)
         _LAST_STATUS = status
         log.debug("%s", status.summary())
         return status
@@ -1221,14 +1279,16 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
             for dst in indices:
                 if src != dst:
                     status.pairs[(src, dst)] = STATE_DEGRADED
-        _STATUS_CACHE[cache_key] = status
+        _publish_status(cache_key, generation, status)
         _LAST_STATUS = status
         _warn_rocm_vmm_peer_copy_once()
         log.info("%s", status.summary())
         return status
 
-    threshold = _min_gbps()
-    min_ratio = _min_ratio()
+    # Classify the link with the snapshot's gates, never with a later read: the
+    # verdict and the cache key must describe the same policy.
+    threshold = _min_gbps(policy)
+    min_ratio = _min_ratio(policy)
     diagnose = checking
     capability = peer_matrix(indices)
     try:
@@ -1360,7 +1420,16 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                 # original enablement error.
                 log.debug("failed to restore device %s: %s", original_device, exc)
 
-    _STATUS_CACHE[cache_key] = status
+    if not _publish_status(cache_key, generation, status):
+        # The policy changed while the link was being validated. The verdict
+        # describes gates that are no longer active, so it is returned to this
+        # caller but never cached; the next call re-probes under the new policy.
+        log.debug(
+            "P2P policy changed during link validation (generation %s -> %s); "
+            "not caching this verdict",
+            generation,
+            _POLICY_GENERATION,
+        )
     _LAST_STATUS = status
     asymmetric = status.asymmetric_pairs()
     if asymmetric:
@@ -1596,11 +1665,14 @@ def _cached_status_for(indices: tuple[int, ...]) -> PeerStatus | None:
     reuse a superset instead of re-probing the same links.
     """
 
-    mode = p2p_mode()
-    checking = _cache_namespace()
+    generation, policy = _policy_snapshot()
+    mode = p2p_mode(policy)
+    checking = _cache_namespace(policy)
     wanted = set(indices)
-    for (cached_mode, cached_checking, _), status in list(_STATUS_CACHE.items()):
-        if cached_mode != mode or cached_checking != checking:
+    for (cached_generation, cached_mode, cached_checking, _), status in list(_STATUS_CACHE.items()):
+        # A verdict from a previous policy generation describes gates that are no
+        # longer active, so it must never answer a current query.
+        if cached_generation != generation or cached_mode != mode or cached_checking != checking:
             continue
         if wanted.issubset(status.devices):
             return status
