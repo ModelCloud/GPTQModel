@@ -11,6 +11,7 @@ from __future__ import annotations
 import torch
 
 from ...ext import exllamav3_ext as ext
+from ...trellis import validate_trellis_k
 from ...util.tensor import g_tensor_cache
 from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
 
@@ -70,6 +71,11 @@ class LinearEXL3:
         self.mul1_tensor = mul1
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
+
+        # The native reconstruct op selects a kernel from K (1..8) and the
+        # mcg/mul1 variant. Reject a checkpoint that would index past the
+        # 24-entry table instead of launching a garbage function pointer.
+        validate_trellis_k(self.K, self.mcg, self.mul1)
 
         self.bsz1_xh_args = (self.trellis.device, (1, self.in_features), self.out_dtype)
         self.bc = ext.BC_LinearEXL3(

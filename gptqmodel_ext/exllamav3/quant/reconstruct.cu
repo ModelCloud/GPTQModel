@@ -113,6 +113,12 @@ void reconstruct
     TORCH_CHECK_SHAPES(unpacked, 1, packed, 1, 16);
     TORCH_CHECK_SIZE(packed, 2, 256 * K / 16);
     TORCH_CHECK_DTYPE(unpacked, kHalf);
+    // The trellis K selects one of 24 kernel instantiations (K in [1, 8] for
+    // each of plain/mcg/mul1). Out-of-range K indexed the table past its end
+    // and launched a garbage function pointer; match the GEMM path's contract.
+    TORCH_CHECK(K >= 1 && K <= 8 && !(mcg && mul1),
+                "EXL3 reconstruct requires 1 <= K <= 8 and not both mcg and mul1 (got K=", K,
+                ", mcg=", mcg, ", mul1=", mul1, ")");
 
     int rows = packed.size(0);
     int cols = packed.size(1);
@@ -123,6 +129,8 @@ void reconstruct
     int cbi = K - 1;
     if (mcg) cbi += 8;
     else if (mul1) cbi += 16;
+    TORCH_CHECK(cbi >= 0 && cbi < static_cast<int>(reconstruct_kernel_instances.size()),
+                "EXL3 reconstruct kernel index ", cbi, " is outside the 24-entry table");
 
     // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it to
     // a local identifier before the launch.
