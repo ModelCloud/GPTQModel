@@ -188,7 +188,9 @@ def cmd_passkey(args):
 
     tok = AutoTokenizer.from_pretrained(args.checkpoint)
     if args.filler:
-        filler = tok(open(args.filler).read(), add_special_tokens=False).input_ids
+        with open(args.filler, encoding="utf-8") as f:
+            filler_text = f.read()
+        filler = tok(filler_text, add_special_tokens=False).input_ids
     else:
         filler = tok("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ",
                      add_special_tokens=False).input_ids
