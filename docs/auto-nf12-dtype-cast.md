@@ -80,6 +80,43 @@ packed NF12 bytes resident; neither retains a dense weight cache.
 The probe is a property of the host, not a configuration switch. There is no
 `GPTQMODEL_*` override for it.
 
+### Preloaded operator namespaces
+
+An older standalone NF12 library, or GPTQModel's legacy runtime, can already own
+`torch.ops.nf12` with only a subset of the current operators. Loading a second
+library would fail registration, so the loader reuses whatever is registered.
+
+```mermaid
+flowchart TD
+    A["api call, e.g. embedding_repeat4"] --> B["load()"]
+    B --> C{"any nf12 op registered?"}
+    C -- Yes --> D["reuse the namespace, no build"]
+    C -- No --> E{"complete current operator set?"}
+    E -- Yes --> D
+    E -- No --> F["JIT build or packaged library"]
+    F --> G["torch.ops.load_library"]
+    D --> H["caller uses the operators it needs"]
+    G --> H
+    H --> I{"required op present?"}
+    I -- Yes --> OK["run"]
+    I -- No --> R["RuntimeError naming the missing operator"]
+    style R fill:#fee,stroke:#c00
+    style D fill:#dfd,stroke:#060
+```
+
+`embedding_repeat4` therefore keeps its documented fallback: with a legacy
+namespace that has `embedding` but not `embedding_repeat4`, it uses the
+single-copy lookup and repeats the result in Torch. `require()` and `has_ops()`
+let a caller name the operators it actually needs, and `available_ops()` answers
+the same question without loading anything.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Namespace has only `embedding`/`decode` | Rejected as incomplete, then a JIT build was attempted and raised `_MissingBuildTools` | Namespace reused; `embedding_repeat4` takes the single-copy fallback |
+| Namespace has the full current set | Reused | Reused (unchanged) |
+| Nothing registered, build tools present | Build | Build (unchanged) |
+| Required operator genuinely missing | Generic build error | `RuntimeError` naming the operator |
+
 ## Quantization handoff
 
 The processor creates its quantization task before the source is packed. The
