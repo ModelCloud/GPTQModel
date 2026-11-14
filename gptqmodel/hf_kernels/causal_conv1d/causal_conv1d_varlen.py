@@ -22,10 +22,16 @@ def causal_conv1d_varlen_states(x: Tensor, cu_seqlens: Tensor, state_len: int) -
     batch = cu_seqlens.shape[0] - 1
     states = torch.zeros(batch, state_len, dim, dtype=x.dtype, device=x.device).transpose(1, 2)
     cu_seqlens = cu_seqlens.to(device=x.device, dtype=torch.long)
+    offsets = [int(value) for value in cu_seqlens.tolist()]
 
     for i in range(batch):
-        end_idx = cu_seqlens[i + 1]
-        start_idx = torch.maximum(cu_seqlens[i], end_idx - state_len)
-        states[i, :, -(end_idx - start_idx):] = x[start_idx:end_idx].T
+        end_idx = offsets[i + 1]
+        start_idx = max(offsets[i], end_idx - state_len)
+        length = end_idx - start_idx
+        if length == 0:
+            # An empty sequence contributes no tokens. `-0` would select the
+            # whole state buffer, so leave the pre-zeroed row untouched.
+            continue
+        states[i, :, -length:] = x[start_idx:end_idx].T
 
     return states
