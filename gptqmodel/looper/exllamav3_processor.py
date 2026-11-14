@@ -26,6 +26,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     quantize_exl3,
     reconstruct_exl3_tensors,
+    validate_exl3_quantization_geometry,
 )
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
@@ -116,7 +117,7 @@ from ..utils.exl3_router_candidates import (
     has_learned_router_recovery,
     learned_router_ranked_choices,
 )
-from ..utils.exllamav3 import create_exllamav3_module
+from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
@@ -2146,6 +2147,13 @@ class EXL3Processor(LoopProcessor):
         if module_qcfg is None:
             return
 
+        in_features, out_features = _resolve_linear_shape(module)
+        validate_exl3_quantization_geometry(
+            in_features,
+            out_features,
+            label=f"EXL3 projection `{module.full_name}`",
+        )
+
         capture_qcfg = GPTQConfig(
             bits=max(1, module_qcfg.runtime_bits),
             group_size=-1,
@@ -2322,10 +2330,37 @@ class EXL3Processor(LoopProcessor):
         return quant_args
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
-        """Exports the captured dense weight matrix in EXL3 quantizer layout."""
+        """Exports the captured dense weight in EXL3's padded quantizer layout.
+
+        The quantizer expects ``(in_features, stored_out_features)`` with a
+        128-aligned output width. The extra output columns are zero and are
+        cropped by ``ExllamaV3Linear.forward`` after reconstruction.
+        """
 
         normalized = capture.clone_module(copy=True, device=device)
-        return normalized.t().contiguous().to(torch.float32)
+        weight = normalized.t().contiguous().to(torch.float32)
+        in_features, out_features = int(weight.shape[0]), int(weight.shape[1])
+        named_module = getattr(capture, "_named_module", None)
+        label = (
+            f"EXL3 projection `{named_module.full_name}`"
+            if isinstance(named_module, NamedModule)
+            else "EXL3 projection"
+        )
+        stored_outputs = validate_exl3_quantization_geometry(
+            in_features,
+            out_features,
+            label=label,
+        )
+        if stored_outputs == out_features:
+            return weight
+        padded = torch.zeros(
+            (in_features, stored_outputs),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        padded[:, :out_features].copy_(weight)
+        del weight
+        return padded
 
     def _restore_module_weight(
         self, module: NamedModule, quantized_weight: torch.Tensor
@@ -2335,10 +2370,16 @@ class EXL3Processor(LoopProcessor):
         target = module.module if isinstance(module, NamedModule) else module
 
         if isinstance(target, transformers.Conv1D):
-            return quantized_weight.contiguous().view_as(target.weight.data)
+            stored = quantized_weight
+            if stored.shape[1] > target.weight.shape[1]:
+                stored = stored[:, : target.weight.shape[1]]
+            return stored.contiguous().view_as(target.weight.data)
 
         if isinstance(target, (torch.nn.Linear, _ConvNd)):
-            return quantized_weight.t().contiguous().view_as(target.weight.data)
+            stored = quantized_weight
+            if stored.shape[1] > target.weight.shape[0]:
+                stored = stored[:, : target.weight.shape[0]]
+            return stored.t().contiguous().view_as(target.weight.data)
 
         raise NotImplementedError(
             f"Unsupported EXL3 module type: {target.__class__.__name__}"

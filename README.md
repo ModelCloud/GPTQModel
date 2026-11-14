@@ -306,6 +306,11 @@ columns at a time and never retains a dense dequantized weight;
 `get_weight_tensor()` materializes one on demand for export and tests. Set
 `GPTQMODEL_EXL3_CPU_BF16X3=0` to disable the BF16x3 path.
 
+The [EXL3 runtime weight lifecycle](docs/exl3-runtime-weights.md) describes how
+deferred dense replay weights are refreshed before every layer forward, why the
+generic path zero-pads output columns to 128 and rejects unaligned input
+features before calibration.
+
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
 Native backend availability, shape validation, wide activation inputs, and
