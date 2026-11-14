@@ -16,7 +16,8 @@ facts that the model tree alone does not encode:
 Both decisions were previously made from the wrong signal: a fixed class list
 for the gain offset and the first block of a non-quantized run for `prev_op`.
 
-Introduced by the fix for issue #3973.
+Introduced by the fix for issue #3973 in
+[PR #3989](https://github.com/ModelCloud/GPTQModel/pull/3989).
 
 ## Folding flow
 
