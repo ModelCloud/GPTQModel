@@ -74,7 +74,7 @@ class Olmo3QModel(BaseQModel):
             ),
             # OLMo 3 adds the normalized attention output to the residual, so
             # the norm does not feed the MLP directly.
-            "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
             "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },

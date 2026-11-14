@@ -55,6 +55,15 @@ linear in tree order" fallback available for the next block instead of leaving
 
 ## Declared non-sources
 
+Two flags declare data flow:
+
+- `:postnorm` (shared with [AWQ normalization selection](awq-norm-selection.md))
+  marks a sandwich post-norm whose output is consumed by a residual add. It is
+  checked during `prev_op` selection.
+- `:nosrc` marks any other leaf whose output is not the direct input of the
+  following scaling consumer. It is checked after selection by
+  `_filter_awq_scaling_sources`, so it also covers quantized linears.
+
 A `nosrc` flag on a tree leaf means: *this module's output is not the direct
 input of the following scaling consumer*. Folding a scale into it changes the
 decoder layer output because of one of:
@@ -76,7 +85,7 @@ the emitted block list (the compiler drops non-`!`/`?` flags from block names).
 
 | Definition | Declared non-sources | Why |
 | --- | --- | --- |
-| `olmo2`, `olmo3`, `exaone4` | `post_attention_layernorm` | the norm output is added to the residual; the MLP consumes the sum |
+| `olmo2`, `olmo3`, `exaone4` | `post_attention_layernorm` (`:postnorm`) | the norm output is added to the residual; the MLP consumes the sum |
 | `opt` (post-norm, `do_layer_norm_before=False`) | `self_attn_layer_norm` | the normed value is also the MLP residual |
 | `phi` | `input_layernorm`, `self_attn.dense`, `mlp.fc1` | attention and the MLP are parallel branches; `dense` crosses the residual; `fc1` crosses the GELU |
 | `gptj` | `ln_1`, `attn.out_proj`, `mlp.fc_in` | parallel branches, residual crossing, GELU |

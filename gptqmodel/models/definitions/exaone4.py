@@ -32,7 +32,7 @@ class Exaone4QModel(BaseQModel):
             # Skip post_attention_layernorm (RMSNorm, too small). Exaone4 adds
             # the normalized attention output to the residual, so the norm does
             # not feed the MLP directly and cannot be an AWQ scale source.
-            "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             # Skip post_feedforward_layernorm (RMSNorm, too small)
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
