@@ -98,8 +98,11 @@ AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
 AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
+AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
+GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
+3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
