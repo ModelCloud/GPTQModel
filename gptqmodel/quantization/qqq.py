@@ -716,7 +716,11 @@ class QQQ:
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
-        self.materialize_hessian()
+        # Consume the Hessian this pass asks for. A previous explicit
+        # materialization may have left `self.H` on another device, and the
+        # cached branch returns a device-corrected value without moving the
+        # cache, so the return value is the one to quantize with.
+        self.H = self.materialize_hessian(self.layer.weight.device)
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
