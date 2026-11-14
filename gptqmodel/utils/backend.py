@@ -169,6 +169,9 @@ _LEGACY_BACKEND_BY_METHOD = {
     "qqq": {
         BACKEND.TORCH: BACKEND.QQQ_TORCH,
     },
+    # GGUF owns four engines, so the generic aliases must name the matching
+    # engine explicitly. They cannot reach the GPTQ-only ``TorchLinear``:
+    # ``get_kernel_for_backend`` filters candidates by ``SUPPORTS_METHODS``.
     "gguf": {
         BACKEND.TORCH: BACKEND.GGUF_TORCH,
         BACKEND.TRITON: BACKEND.GGUF_TRITON,

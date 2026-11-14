@@ -33,7 +33,7 @@ from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
-from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.backend import BACKEND, normalize_backend
 from gptqmodel.utils.importer import (
     AUTO_BACKEND_KERNEL_MAPPING,
     _iter_dynamic_contracts,
@@ -1236,19 +1236,32 @@ def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):
     assert auto_select_device(None, BACKEND.TORCH_FUSED_AWQ) is DEVICE.CPU
 
 
-def test_gguf_does_not_accept_generic_torch_backend():
-    with pytest.raises(ValueError, match="Unsupported backend"):
-        select_quant_linear(
-            bits=4,
-            group_size=-1,
-            desc_act=False,
-            sym=True,
-            device=DEVICE.CPU,
-            backend=BACKEND.TORCH,
-            format=FORMAT.GGUF,
-            quant_method=METHOD.GGUF,
-            pack_dtype=torch.int32,
-        )
+def test_gguf_accepts_generic_torch_backend_as_gguf_torch_kernel():
+    """The generic ``torch`` alias must resolve to GGUF's own torch kernel.
+
+    ``TorchLinear`` only declares ``METHOD.GPTQ``, so the selector can never
+    serve a GGUF checkpoint from the generic Torch kernel. The legacy alias
+    therefore resolves to the GGUF-specific torch kernel instead of raising
+    the misleading ``Unsupported backend: BACKEND.TORCH`` error.
+    """
+
+    assert METHOD.GGUF not in TorchLinear.SUPPORTS_METHODS
+    assert normalize_backend(BACKEND.TORCH, quant_method=METHOD.GGUF) is BACKEND.GGUF_TORCH
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.TORCH,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFTorchLinear
+    assert qlinear_cls is not TorchLinear
 
 
 def test_iter_dynamic_contracts_yields_base_and_distinct_overrides():
