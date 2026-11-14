@@ -20,6 +20,8 @@ This page documents the ownership rule that the writer now follows, the
 forward-only AUTO_NF12 boundary that shares the same failure shape, and the
 FOEM block-boundary correction that was dead code.
 
+Introduced by PR #4046 (issue #4037).
+
 ## The rule
 
 1. A module that declares `QUANT_TYPE` owns its direct tensors. Save-time
