@@ -212,6 +212,7 @@ For a checkpoint that lives in a repository subfolder, see [quantized checkpoint
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
 For how each decoder layer is replayed with the attention mask and rotary embeddings of its own `config.layer_types` entry, see [calibration layer replay](docs/calibration-replay.md).
+For the base-type mask, the `super()` contract for definition replay overrides, and AWQ's typed rotary call, see [layer-type replay masks](docs/layer-type-replay-masks.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.

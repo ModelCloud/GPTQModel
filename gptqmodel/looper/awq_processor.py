@@ -2815,7 +2815,11 @@ class AWQProcessor(LoopProcessor):
                     module_kwargs["position_ids"] = pos_for_rotary
 
             x_for_rotary = x if rotary_device is None else x.to(rotary_device)
-            module_kwargs["position_embeddings"] = rotary(x_for_rotary, pos_for_rotary)
+            module_kwargs["position_embeddings"] = rotary(
+                x_for_rotary,
+                pos_for_rotary,
+                **self._rotary_layer_type_kwargs(rotary, module),
+            )
         elif supports_position_ids and seq_len is not None and "position_ids" not in module_kwargs:
             pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
             if x.dim() >= 2:
@@ -2826,6 +2830,37 @@ class AWQProcessor(LoopProcessor):
             x = x.to(target_device)
 
         return x, module_kwargs
+
+    @staticmethod
+    def _rotary_layer_type_kwargs(
+            rotary: nn.Module, module: torch.nn.Module
+    ) -> Dict[str, Any]:
+        """Return the per-layer-type selector a typed rotary needs.
+
+        Gemma 3/4 and OLMo 3 rotary embeddings take a required ``layer_type``
+        (OLMo 3 spells it ``attention_type``) so each attention type gets its
+        own cos/sin pair. AWQ scales one decoder layer at a time, so the
+        selector comes from the attention module being inspected. Rotaries
+        without that parameter get an empty mapping and are called as before.
+        """
+
+        try:
+            parameters = inspect.signature(rotary.forward).parameters
+        except (TypeError, ValueError):
+            return {}
+        for name in ("layer_type", "attention_type"):
+            if name not in parameters:
+                continue
+            value = getattr(module, name, None)
+            if value is None:
+                value = getattr(
+                    module,
+                    "attention_type" if name == "layer_type" else "layer_type",
+                    None,
+                )
+            if isinstance(value, str):
+                return {name: value}
+        return {}
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
         """Rows per scale-search replay forward.
