@@ -124,7 +124,7 @@ def test_source_deferred_experts_one_active_reader_and_f32_indexer(tmp_path, mon
         opens.append(Path(path).name)
         return original(path, **kwargs)
     monkeypatch.setattr(safetensors, "safe_open", observed)
-    source = k31.KimiK31Source(snapshot, reference_root=tmp_path)
+    source = k31.KimiK31Source(snapshot, reference_root=tmp_path, trust_remote_code=True)
     block = source.load_block(3, "cpu", include_experts=False)
     assert block.block_sparse_moe.experts[0].w1.weight.is_meta
     assert block.self_attn.indexer.wk.weight.dtype == torch.float32

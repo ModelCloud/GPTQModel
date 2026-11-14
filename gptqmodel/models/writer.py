@@ -55,7 +55,7 @@ from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
     ensure_qwen_drive_registered,
-    prepare_remote_code_compat,
+    normalize_hf_config_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
     suspend_hf_weight_init,
@@ -2158,9 +2158,9 @@ def ModelWriter(cls):
         ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
             model_id_or_path,
-            trust_remote_code=True,
+            trust_remote_code=self.trust_remote_code,
         )
-        prepare_remote_code_compat(config)
+        normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
 
         with suspend_hf_weight_init():
             model = self.loader.from_config(

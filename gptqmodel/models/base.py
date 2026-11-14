@@ -754,7 +754,7 @@ class BaseQModel(nn.Module):
         self.quant_log = []
 
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.require_trust_remote_code)
+            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:

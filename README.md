@@ -651,6 +651,11 @@ result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
 ```
 
+Loading, saving and dequantizing a checkpoint only execute its bundled Python
+when you pass `trust_remote_code=True`; see the
+[trusted remote-code boundary](docs/trust-remote-code-isolation.md) for the
+enforced flow.
+
 On Apple Silicon, install the optional MLX runtime with `pip install "gptqmodel[mlx]"`.
 `GPTQModel.load(..., backend=BACKEND.AUTO)` selects MLX Metal for supported 4-bit
 GPTQ and AWQ GEMM checkpoints when the model architecture is supported by MLX-LM.

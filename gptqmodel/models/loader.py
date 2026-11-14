@@ -1310,7 +1310,9 @@ def ModelLoader(cls):
         defuser.replace_fused_blocks(config.model_type)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(model_local_path, config)
+        prepare_remote_model_init_compat(
+            model_local_path, config, trust_remote_code=trust_remote_code
+        )
 
         from ..utils.mimo import is_mimo_mixed_source
 
@@ -1798,7 +1800,9 @@ def ModelLoader(cls):
         defuser.replace_fused_blocks(config.model_type)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(model_local_path, config)
+        prepare_remote_model_init_compat(
+            model_local_path, config, trust_remote_code=trust_remote_code
+        )
 
         if cls.require_dtype:
             dtype = cls.require_dtype

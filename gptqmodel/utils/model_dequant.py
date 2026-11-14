@@ -325,15 +325,18 @@ def _discover_compressed_tensors_module_schemes(
     quant_config,
     *,
     deps: dict,
+    trust_remote_code: bool = False,
 ) -> Dict[str, "QuantizationScheme"]:
     AutoConfig = deps["AutoConfig"]
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
-    from .hf import prepare_remote_code_compat
+    from .hf import normalize_hf_config_compat
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    prepare_remote_code_compat(config)
+    config = AutoConfig.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     loader_candidates = (
         deps["AutoModelForCausalLM"],
@@ -351,7 +354,7 @@ def _discover_compressed_tensors_module_schemes(
             try:
                 model = loader.from_config(
                     config,
-                    trust_remote_code=True,
+                    trust_remote_code=trust_remote_code,
                     dtype=torch.float32,
                 )
             except Exception as exc:  # pragma: no cover - depends on available loaders
@@ -383,7 +386,7 @@ def _discover_compressed_tensors_module_schemes(
 
 
 def _prepare_compressed_tensors_context(
-    model_path: Path, quant_cfg: dict
+    model_path: Path, quant_cfg: dict, *, trust_remote_code: bool = False
 ) -> tuple["QuantizationConfig", Dict[str, "QuantizationScheme"], "BaseCompressor"]: # noqa
     deps = _get_compressed_tensors_dependencies()
 
@@ -397,7 +400,10 @@ def _prepare_compressed_tensors_context(
         )
 
     module_to_scheme = _discover_compressed_tensors_module_schemes(
-        model_path, quant_config, deps=deps
+        model_path,
+        quant_config,
+        deps=deps,
+        trust_remote_code=trust_remote_code,
     )
 
     BaseCompressor = deps["BaseCompressor"]
@@ -1764,6 +1770,7 @@ def dequantize_model(
     target_dtype: torch.dtype = torch.bfloat16,
     device: Optional[str] = None,
     resume: bool = False,
+    trust_remote_code: bool = False,
 ) -> None:
     model_path = Path(model_path)
     output_path = Path(output_path)
@@ -1804,7 +1811,7 @@ def dequantize_model(
                 "compressed-tensors model requires a populated 'quantization_config' entry."
             )
         _, compressed_module_to_scheme, compressed_compressor = _prepare_compressed_tensors_context(
-            model_path, quant_cfg
+            model_path, quant_cfg, trust_remote_code=trust_remote_code
         )
         LOG.debug(
             "Prepared compressed-tensors context with %d modules",
