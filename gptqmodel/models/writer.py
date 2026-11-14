@@ -315,7 +315,36 @@ def _save_model_configs_without_weights(
         generation_config.save_pretrained(save_dir)
 
 
-def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtle_model) -> int:
+def _quantized_module_types(model: torch.nn.Module) -> tuple[type, ...]:
+    """Return the module classes in `model` that own a packed quantization payload.
+
+    LazyTurtle's save-time materialization resolves tensors by checkpoint name.
+    A quantized module stores its packed codes in a buffer whose leaf name can
+    match the source checkpoint tensor (`weight`), so aliasing it from the
+    source would replace the packed payload with the original dense weight.
+    The on-disk offload bundle written from `module.state_dict()` is
+    authoritative for those modules, and `get_state_dict_for_save` restores
+    them from there.
+    """
+
+    return tuple(
+        sorted(
+            {
+                type(module)
+                for module in model.modules()
+                if getattr(module, "QUANT_TYPE", None) is not None
+            },
+            key=lambda cls: (cls.__module__, cls.__qualname__),
+        )
+    )
+
+
+def _materialize_remaining_meta_params_from_turtle(
+    model: torch.nn.Module,
+    turtle_model,
+    *,
+    skip_module_types: tuple[type, ...] = (),
+) -> int:
     """Best-effort fallback for meta params that survive normal turtle sync."""
 
     if (
@@ -334,6 +363,8 @@ def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtl
             continue
 
         module_path, leaf = full_name.rsplit(".", 1)
+        if skip_module_types and isinstance(model.get_submodule(module_path), skip_module_types):
+            continue
         resolved_name, expert_index, split_index, split_dim = turtle_model._resolve_checkpoint_tensor_source(module_path, leaf)
         if resolved_name is None:
             continue
@@ -381,7 +412,12 @@ def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtl
     return restored
 
 
-def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -> int:
+def _materialize_meta_layers_from_turtle(
+    model: torch.nn.Module,
+    turtle_model,
+    *,
+    skip_module_types: tuple[type, ...] = (),
+) -> int:
     if turtle_model is None or not hasattr(turtle_model, "materialize_submodule"):
         return 0
 
@@ -405,6 +441,7 @@ def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -
                 target_submodule=submodule,
                 device=torch.device("cpu"),
                 non_blocking=False,
+                skip_module_types=skip_module_types,
             )
             materialized += 1
         except Exception as exc:
@@ -2078,6 +2115,12 @@ def ModelWriter(cls):
         # their authoritative source names and therefore deliberately skips
         # this memory-heavy conversion step.
         if not self.load_quantized_model and checkpoint_passthrough_plan is None:
+            # A quantized module owns its packed payload, which can share the
+            # `weight` leaf with the dense source checkpoint tensor. Aliasing
+            # those tensors by name would overwrite the packed codes, so leave
+            # every module with a `QUANT_TYPE` to `get_state_dict_for_save`,
+            # which restores it from the offload bundle the quantizer wrote.
+            quantized_module_types = _quantized_module_types(self.model)
             suspend_staging = getattr(
                 self.turtle_model, "suspend_active_source_staging", None
             )
@@ -2088,10 +2131,12 @@ def ModelWriter(cls):
                 alias_all_from_turtle_if_meta(
                     shell_model=self.model,
                     turtle_model=self.turtle_model,
+                    skip_module_types=quantized_module_types,
                 )
                 materialized_layers = _materialize_meta_layers_from_turtle(
                     self.model,
                     self.turtle_model,
+                    skip_module_types=quantized_module_types,
                 )
                 if materialized_layers:
                     log.info(
@@ -2101,6 +2146,7 @@ def ModelWriter(cls):
                 restored_meta = _materialize_remaining_meta_params_from_turtle(
                     self.model,
                     self.turtle_model,
+                    skip_module_types=quantized_module_types,
                 )
                 if restored_meta:
                     log.info(
