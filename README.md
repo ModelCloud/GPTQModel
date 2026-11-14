@@ -312,7 +312,7 @@ or native TTNN (`BACKEND.GPTQ_TTNN`, opt-in), with optional multi-card
 execution. `BACKEND.GPTQ_TT_BF8` explicitly converts GPTQ weights to `bf8_b`
 for hardware-native unpacking. See the [Tenstorrent execution guide](docs/tenstorrent.md)
 for runtime pins, numerical results, and backend constraints, and the
-[validated hardware inventory](hw/tenstorrent.md) for Blackhole measurements.
+[validated hardware inventory](hw/tenstorrent.md) for Blackhole measurements. Out-axis block-float Llama checkpoints are served fully on device with a paged KV cache and chunked prefill; see [Tenstorrent Llama serving](docs/tt-llama-paged-serving.md).
 Install the runtime from [`requirements/tenstorrent-py312.txt`](requirements/tenstorrent-py312.txt);
 the PJRT plugin is not on the default PyPI index.
 

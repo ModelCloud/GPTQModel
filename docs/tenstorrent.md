@@ -610,27 +610,22 @@ than something this change claims to have delivered.
 
 ## Device-resident Llama decode
 
-`gptqmodel/utils/tt_llama.py` (`TTLlamaDecoder`) runs a whole Llama decode step on
-the chip for a block-float checkpoint written with `block_axis="out"`: embedding,
-RMSNorm, fused QKV, HF RoPE, KV-cache update, flash-decode SDPA, gate/up with SiLU
-fused into the multiply, down, residuals, final norm, the tied bf8 head and argmax.
-The step is captured once as a trace and replayed. `scripts/tt_llama_decode.py`
-wraps it (`generate`, `bench`, `parity`).
+`gptqmodel/utils/tt_llama.py` (`TTLlama`) runs Llama prefill and decode on the
+chip for a block-float checkpoint written with `block_axis="out"`. The flow,
+storage lifecycle, paged KV cache, active-row attention and the 8k-64k
+measurements are in [Tenstorrent Llama serving](tt-llama-paged-serving.md).
+`scripts/tt_llama_decode.py` wraps it (`generate`, `bench`, `passkey`).
 
-Measured on 4x p300c with Llama-3.2-1B-Instruct (bf8 attention/down, bf4 gate/up,
-bf8 tied head; HiFi4, bf16 KV cache), 32 users per card, one process per card:
+Short-context throughput, 4x p300c, 32 users per card, one process per card
+(measured with the contiguous-cache runner in #3998):
 
-| context position | per card, traced | 4 cards, traced | 4 cards, host loop with readback |
-| --- | --- | --- | --- |
-| 0 | ~3,700 tok/s | 14,840 tok/s | 12,544 tok/s |
-| 512 | ~3,050 tok/s | 12,181 tok/s | 10,330 tok/s |
-| 1024 | ~2,650 tok/s | 10,625 tok/s | 9,775 tok/s |
+| context position | per card, traced | 4 cards, traced |
+| --- | --- | --- |
+| 0 | ~3,700 tok/s | 14,840 tok/s |
+| 512 | ~3,050 tok/s | 12,181 tok/s |
+| 1024 | ~2,650 tok/s | 10,625 tok/s |
 
-Upload drift is 0 on all 81 block-float tensors; teacher-forced top-1 agreement
-with the CPU fp32 model on the same checkpoint is 97.5 % (CPU bf16 against fp32:
-98.4 %).
-
-What was measured to matter, in order:
+What was measured to matter:
 
 | lever | effect |
 | --- | --- |
@@ -639,16 +634,9 @@ What was measured to matter, in order:
 | trace capture | 16.1 -> 9.2 ms per step before grid tuning |
 | HiFi4 vs HiFi2 | +2 % step time, top-1 96.8 -> 98.1 % |
 | one process per card vs a 1x4 `MeshDevice` | linear scaling vs ~2x slower per step on the mesh |
+| attention over active rows only | one user at 16k: 54 -> 13.5 ms per step |
 | fused gate/up | no gain over two tuned matmuls, not used |
-| bf8 KV cache | up to 1.6x faster SDPA at long context, -0.6 pp top-1; opt-in |
-
-The embedding lookup keeps the checkpoint's bf8 grid values in a row-major bf16
-table: `ttnn.embedding` over a bf8 tile table is exact but took 2.05 ms per step
-against 18 us. A tied table can sit on the bf8 grid in only one orientation, and
-the head (`E^T`) is the one that is bf8 on device.
-
-Prompts are currently fed through the decode path one position per step;
-batched prefill is not implemented yet.
+| bf8 KV cache | 16k full batch 96 -> 61 ms per step; opt-in |
 
 ## GPTQ kernel conversion matrix
 
