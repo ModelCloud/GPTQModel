@@ -29,7 +29,7 @@ from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import mse_optimal_quant, smooth_block
+from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -1572,6 +1572,24 @@ class GPTQ:
         scale_chunks = []
         zero_chunks = []
 
+        def _affine_quantize(block_mod, lo, hi, scale_min):
+            """Quantize one group against a range that includes zero.
+
+            ``lo``/``hi`` are the strategy's desired endpoints. Extending them
+            to include zero keeps the derived integer zero point inside
+            ``[0, maxq]`` instead of clamping a positive-only group to zero and
+            shifting every value by roughly the group minimum.
+            """
+
+            lo, hi = affine_range_with_zero(lo, hi)
+            scale = _floor_scale_for_storage(
+                _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
+                scale_min,
+            )
+            zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
+            q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
+            return (q - zero) * scale, scale, zero
+
         for start in range(0, self.columns, effective_group_size):
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
@@ -1600,58 +1618,32 @@ class GPTQ:
                 if strategy == FallbackStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
-                    mid = (w_max + w_min) / 2.0
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale(torch.clamp((w_max - w_min) / maxq, min=1e-8)),
-                        scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, w_min, w_max, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mid) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mid / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale((2 * max_dev) / maxq), scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, mean - max_dev, mean + max_dev, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mean) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mean / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale((2 * max_dev) / maxq), scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, median - max_dev, median + max_dev, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - median) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (median / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     std = block_mod.std(dim=1, keepdim=True, unbiased=False)
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
-                        scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, lo, hi, scale_min
                     )
-                    zero = torch.round(-lo / scale)
-                    zero = torch.clamp(zero, 0, maxq)
-                    q = torch.round(block_mod / scale + zero)
-                    q = torch.clamp(q, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.RTN:
                     self.quantizer.find_params(
                         block_mod, weight=True,
