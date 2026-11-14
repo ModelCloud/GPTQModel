@@ -4067,6 +4067,18 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default=None,
         metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"},
     )
+
+    # Opt-in: run downstream processors inside their producer's frame so their
+    # intermediates are never staged on the module. This changes the calibration
+    # trajectory of the fused consumer, so it stays off by default.
+    processor_fusion: bool = field(
+        default=False,
+        metadata={
+            "help": "Fuse downstream processors (for example EoRA) into their producer "
+            "so intermediate weights are not staged. Changes the calibration trajectory."
+        },
+    )
+
     _offload_temp_dir: Optional[_SharedTemporaryDirectory] = field(default=None, init=False, repr=False, compare=False)
 
     # Keep the per-processor log file that a quantization run writes to `logs/`.

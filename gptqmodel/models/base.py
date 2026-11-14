@@ -2323,11 +2323,17 @@ class BaseQModel(nn.Module):
                 from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 
                 install_w4a_llama_replay(self.model, self.quantize_config)
+            # Processor fusion is opt-in. Enabling it changes EoRA's calibration
+            # trajectory: the fused schedule no longer replays the corrected
+            # upstream weights that the separate EoRA pass would install.
             module_looper = ModuleLooper(
                 self, processors=processors, embed_quant_config=embed_quant_config,
                 extensions=(extension,) if extension is not None else (),
                 disk_write_expected=(
                     bool(self.quantize_config.offload_to_disk) or checkpoint is not None
+                ),
+                processor_fusion=bool(
+                    getattr(self.quantize_config, "processor_fusion", False)
                 ),
             )
             use_cache = getattr(self.model.config, "use_cache", False)

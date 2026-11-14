@@ -37,6 +37,7 @@ from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
+from .processor_fusion import compose_forward_hooks
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -652,6 +653,7 @@ def build_layer_subset_plans(
     layers_prefix: Optional[str],
     fallback,
     embedding_module_name: Optional[str] = None,
+    inline_processors: tuple = (),
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
@@ -678,6 +680,7 @@ def build_layer_subset_plans(
             names,
             processor,
             fallback,
+            inline_processors=inline_processors,
             layer_module=module,
         )
         # Skip empty subsets caused by per-layer structure differences or dynamic
@@ -855,6 +858,7 @@ def _run_single_subset_pass(
     return_outputs: bool = False,
     disable_moe_hooks: bool = False,
     execute_forward: Optional[bool] = None,
+    inline_processors: tuple = (),
 ) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]], bool]:
     """Execute forward and quantization for a specific subset/chunk.
 
@@ -995,8 +999,19 @@ def _run_single_subset_pass(
             # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
             is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
 
+            # Fused consumers observe this same forward pass. Their hooks are
+            # composed into the producer's hook because HookedLinear raises the
+            # early-stop exception from inside forward(), before ordinary
+            # post-forward hooks run.
+            original_hook = compose_forward_hooks(
+                processor,
+                processor.pre_process_fwd_hook(name),
+                m,
+                name,
+                inline_processors,
+            )
+
             if hasattr(subset[name], "forward_hook"):
-                original_hook = processor.pre_process_fwd_hook(name)
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
                     subset[name].forward_hook = looper._masked_pre_hook_wrapper(
@@ -1013,7 +1028,6 @@ def _run_single_subset_pass(
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
             else:
-                original_hook = processor.pre_process_fwd_hook(name)
                 # Use pre-hook registration for MoE modules
                 if is_moe_module:
                     handle.append(
@@ -1426,11 +1440,21 @@ def _run_single_subset_pass(
         has_task = bool(task_map and task_map.get(name) is not None)
 
         if has_task:
+            module_before_prepare = named_module.module
             target_device = looper._prepare_named_module_for_quantization(
                 processor=processor,
                 named_module=named_module,
                 fallback_device=cur_layer_device,
             )
+            # Module materialization may replace the wrapped module. Fused
+            # consumers must rebind placement, but this runs after the
+            # calibration forward, so re-running preprocess would discard the
+            # statistics they just accumulated.
+            if named_module.module is not module_before_prepare:
+                for inline in inline_processors:
+                    if inline is processor:
+                        continue
+                    inline.on_inline_source_replaced(named_module)
             auto_dtype_cast_was_applied = named_module.state.pop(
                 "auto_dtype_cast_was_applied", False
             )
@@ -1617,6 +1641,7 @@ def run_subset_stage(
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
+    inline_processors: tuple = (),
 ) -> SubsetStageResult:
     """Process one subset using a precomputed plan.
 
@@ -1674,6 +1699,7 @@ def run_subset_stage(
     common_args = {
         "looper": looper,
         "processor": processor,
+        "inline_processors": inline_processors,
         "module": module,
         "layer_inputs": layer_inputs,
         "layer_input_kwargs": layer_input_kwargs,

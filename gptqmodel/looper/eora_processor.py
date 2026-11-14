@@ -11,15 +11,22 @@ import torch
 from torch.nn import Module
 
 from ..adapter.adapter import Lora
-from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
+from ..eora.eora import (
+    eora_compute_lora,
+    eora_process_input,
+    merge_eora_segments,
+    module_weight_residual,
+)
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
     CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
+    InlineConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
+    ProcessorStages,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -43,6 +50,15 @@ log = setup_logger()
 
 class EoraProcessor(LoopProcessor):
     """Builds LoRA-style error adapters from dequantization residuals and activations."""
+
+    inline = InlineConfig(
+        producer=frozenset({"gptq", "gptaq", "foem"}),
+        stage=ProcessorStages.POST_QUANTIZE,
+        forward_hooks=True,
+        # EoRA derives ``w - wq`` itself; producers publish only weights.
+        consumes=("wq", "w"),
+        produces=("adapter",),
+    )
 
     lifecycle = ProcessorLifecycleConfig(
         checkpointing=CheckpointSupport.SECONDARY,
@@ -142,7 +158,37 @@ class EoraProcessor(LoopProcessor):
         """Reports whether EoRA was disabled for this module by dynamic config."""
 
         # dynamic override removed eora processing for this module
-        return module.adapter_cfg in [None, {}]
+        return getattr(module, "adapter_cfg", None) in [None, {}]
+
+    def can_fuse_with(self, producer) -> bool:
+        """Only fuse when both processors prepared the same calibration data.
+
+        A separate ``adapter_calibration_dataset`` produces a different
+        ``CalibrationConfig.dataset``, so identity is the precise test.
+        """
+
+        calibration = getattr(self, "calibration", None)
+        producer_calibration = getattr(producer, "calibration", None)
+        if calibration is None or producer_calibration is None:
+            return False
+        dataset = getattr(calibration, "dataset", None)
+        return dataset is not None and dataset is getattr(
+            producer_calibration, "dataset", None
+        )
+
+    def on_inline_source_replaced(self, module: NamedModule) -> None:
+        """Refresh placement without discarding collected statistics.
+
+        The producer may replace the wrapped module after the calibration
+        forward (AUTO_NF12 restoration, for example). Re-running ``preprocess``
+        here would clear ``_segment_accumulators`` for a module whose segments
+        are already captured.
+        """
+
+        target_device = get_device(module.module)
+        if target_device.type == "meta":
+            target_device = torch.device("cpu")
+        self._module_target_devices[module.name] = torch.device(target_device)
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that accumulates EoRA activation statistics."""
@@ -256,6 +302,41 @@ class EoraProcessor(LoopProcessor):
 
         return merge_eora_segments(segment_pairs)
 
+    def _resolve_residual(self, module, wq, *, scope, target_device) -> torch.Tensor:
+        """Derive the FP32 ``w - wq`` residual this processor consumes.
+
+        Producers publish the weights they own; EoRA owns the subtraction. A
+        producer that still precomputes ``w_wq_diff`` keeps working through the
+        fallback branch.
+        """
+
+        if scope is not None:
+            return module_weight_residual(
+                scope.get("w"),
+                wq,
+                packed_source=scope.try_get("w_packed_source"),
+            ).to(dtype=torch.float32, device=target_device)
+
+        if "w" in module.state:
+            source = module.state.pop("w").to(device=target_device)
+            packed_source = module.state.pop("auto_dtype_cast_packed_source", None)
+            try:
+                return module_weight_residual(
+                    source,
+                    wq.to(device=target_device),
+                    packed_source=packed_source,
+                ).to(dtype=torch.float32)
+            finally:
+                if packed_source is not None:
+                    from ..utils.auto_dtype_cast import release_packed_source_storage
+
+                    release_packed_source_storage(packed_source)
+
+        return module.state.pop("w_wq_diff").to(
+            dtype=torch.float32,
+            device=target_device,
+        )
+
     def process(
         self,
         module: NamedModule,
@@ -264,6 +345,7 @@ class EoraProcessor(LoopProcessor):
         previous_subset: Optional[Dict[str, NamedModule]] = None,
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
+        scope=None,
     ):
         """Computes and installs the LoRA correction for one quantized module."""
 
@@ -284,19 +366,22 @@ class EoraProcessor(LoopProcessor):
 
         target_device = module.weight.data.device
 
-        w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(
-            dtype=torch.float32,
-            device=target_device,
+        wq: torch.Tensor = (
+            scope.get("wq") if scope is not None else module.state["wq"]
         )
+        w_wq_delta = self._resolve_residual(
+            module,
+            wq,
+            scope=scope,
+            target_device=target_device,
+        )
+
         if pad_cols:
             valid_cols = original_cols + pad_cols
             w_wq_delta = w_wq_delta[:, :valid_cols]
 
-        wq: torch.Tensor = module.state["wq"]
         if pad_cols:
             wq = wq[:, :valid_cols]
-
-        wq_device = wq.to(device=target_device, dtype=module.module_dtype)
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
         assert w_wq_delta.dtype == torch.float32, f"w_wq_delta dtype: {w_wq_delta.dtype}"
@@ -313,26 +398,33 @@ class EoraProcessor(LoopProcessor):
 
         del eigen_scaling_diag_matrix
 
-        # wq with A/B applied
-        computed_wq = (wq_device + (B @ A)).to(dtype=wq.dtype, device=target_device)
+        wq_trim = wq[:, :original_cols] if pad_cols else wq
 
-        if pad_cols:
-            computed_wq_trim = computed_wq[:, :original_cols]
-            wq_trim = wq[:, :original_cols]
+        if scope is not None:
+            # Fused: the packer consumes the pre-correction weight and the
+            # adapter is applied at inference. Installing the corrected dense
+            # weight here would change later subsets' activations, so we keep
+            # the exact unfused schedule.
+            module.state.update({
+                "wq": move_to(wq_trim, device=CPU),
+            })
         else:
-            computed_wq_trim = computed_wq
-            wq_trim = wq
+            wq_device = wq.to(device=target_device, dtype=module.module_dtype)
+            # wq with A/B applied
+            computed_wq = (wq_device + (B @ A)).to(dtype=wq.dtype, device=target_device)
+            computed_wq_trim = (
+                computed_wq[:, :original_cols] if pad_cols else computed_wq
+            )
 
-        module.state.update({
-            "wq": move_to(wq_trim, device=CPU),
-        })
+            assert computed_wq.dtype in (torch.float16, torch.bfloat16)
 
-        assert computed_wq.dtype in (torch.float16, torch.bfloat16)
+            module.state.update({
+                "wq": move_to(wq_trim, device=CPU),
+            })
+            # override module weight with computed weight with B@A delta
+            module.weight.data = computed_wq_trim.to(dtype=module.weight.data.dtype, device=target_device)
 
-        # override module weight with computed weight with B@A delta
-        module.weight.data = computed_wq_trim.to(dtype=module.weight.data.dtype, device=target_device)
-
-        del wq_device, computed_wq
+            del wq_device, computed_wq
 
         # for assert weight
         # module.state.update({
@@ -394,7 +486,9 @@ class EoraProcessor(LoopProcessor):
         """Stores the finalized adapter object in the processor result map."""
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        self.result_save(module.full_name, module.state.pop("adapter"))
+        adapter = module.state.pop("adapter", None)
+        if adapter is not None:
+            self.result_save(module.full_name, adapter)
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Releases accumulators and attaches the collected adapters to the model."""

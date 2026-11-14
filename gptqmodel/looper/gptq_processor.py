@@ -22,6 +22,7 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
+    ProcessorStages,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
@@ -184,6 +185,11 @@ def clone_gptq_config_for_module(
 
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
+
+    # Data GPTQ owns. The residual ``w - wq`` is EoRA's derivation, so this
+    # processor never computes or publishes it.
+    emits = ("wq", "w")
+    stages = (ProcessorStages.POST_QUANTIZE,)
 
     lifecycle = ProcessorLifecycleConfig(
         forward=ForwardConfig(
@@ -626,36 +632,6 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
-    def _w_wq_diff(self, module: NamedModule, wq: torch.Tensor) -> torch.Tensor:
-        """Build the FP32 ``w - wq`` EoRA consumes.
-
-        When AUTO_NF12 kept the packed source alive, fuse the widening decode
-        with the subtraction so the source is never materialized as FP32. The
-        packed bytes are released in all cases; an unavailable native path falls
-        back to the dense expression.
-        """
-
-        packed_source = module.state.pop("auto_dtype_cast_packed_source", None)
-        if packed_source is not None:
-            fused = None
-            try:
-                from ..utils.auto_dtype_cast import fused_w_minus_wq
-
-                # ``wq`` is GPTQ's reconstruction in the source dtype; the
-                # fused op needs an FP32 operand. The original tensor stays
-                # untouched for replay and packing.
-                wq_fp32 = wq if wq.dtype == torch.float32 else wq.to(dtype=torch.float32)
-                fused = fused_w_minus_wq(packed_source, wq_fp32)
-            except Exception:  # noqa: BLE001 - fall back to the dense expression
-                fused = None
-            finally:
-                from ..utils.auto_dtype_cast import release_packed_source_storage
-
-                release_packed_source_storage(packed_source)
-            if fused is not None:
-                return fused
-        return module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
-
     def process(
         self,
         module: NamedModule,
@@ -822,27 +798,49 @@ class GPTQProcessor(LoopProcessor):
 
         g.log_workspace_stats(context="gptq_process")
 
-        if self.calculate_w_wq_diff:
-            # diff in float32
-            w_wq_diff = self._w_wq_diff(module, wq)
-            # assert module.weight.data.dtype in (torch.float16, torch.bfloat16)
-
+        if self.inline_processors:
+            # Publish only the data this processor owns: the reconstructed
+            # weight, the source weight it is about to replace, and its packed
+            # source when one exists. The consumer derives what it needs; EoRA
+            # computes ``w - wq`` itself rather than receiving it precomputed.
+            packed_source = module.state.pop("auto_dtype_cast_packed_source", None)
             with self.lock:
-                module.state.update({
-                    "w_wq_diff": w_wq_diff,
-                })
+                self.tasks[module.name].free()
+            try:
+                with self.publish(module, ProcessorStages.POST_QUANTIZE) as scope:
+                    scope.publish("wq", lambda: wq)
+                    scope.publish("w", lambda: module.weight.data)
+                    if packed_source is not None:
+                        scope.publish("w_packed_source", lambda: packed_source)
+                    self.dispatch_inline(
+                        module,
+                        scope,
+                        subset=subset,
+                        previous_subset=previous_subset,
+                        subset_index=subset_index,
+                        subset_total=subset_total,
+                    )
+                    wq = scope.get("wq")
+            finally:
+                if packed_source is not None:
+                    from ..utils.auto_dtype_cast import release_packed_source_storage
 
-        with self.lock:
-            self.tasks[module.name].free()
+                    release_packed_source_storage(packed_source)
+        else:
+            with self.lock:
+                self.tasks[module.name].free()
 
-            # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-            if self.calculate_w_wq_diff:
-                module.state.update({
-                    # The following EoRA pass rematerializes the dense module.
-                    # Preserve GPTQ's reconstructed weight in independent
-                    # storage before exposing ``wq`` through the parameter.
-                    "wq": snapshot_eora_reconstructed_weight(wq),
-                })
+                # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+                if self.calculate_w_wq_diff:
+                    # Stage the weights a downstream adapter pass derives from.
+                    # The residual itself is never computed here.
+                    module.state.update({
+                        "w": module.weight.data.detach().to(device=CPU, copy=True),
+                        # The following EoRA pass rematerializes the dense module.
+                        # Preserve GPTQ's reconstructed weight in independent
+                        # storage before exposing ``wq`` through the parameter.
+                        "wq": snapshot_eora_reconstructed_weight(wq),
+                    })
 
         # single largest deallocation of vram happens here
         module.weight.data = wq
@@ -893,7 +891,13 @@ class GPTQProcessor(LoopProcessor):
         # these locks in the opposite order. EoRA enables this path through
         # calculate_w_wq_diff, so the mixed order can deadlock multi-GPU runs.
         if self.calculate_w_wq_diff:
-            module.weight.data = module.state.pop("wq").to(CPU)
+            wq_snapshot = module.state.pop("wq", None)
+            if wq_snapshot is not None:
+                module.weight.data = wq_snapshot.to(CPU)
+            else:
+                # Fused module where the consumer was skipped: no staged
+                # snapshot exists, so move the installed weight directly.
+                module.weight.data = module.weight.data.to(CPU)
 
         module.state.pop("w", None)  #
         module.state.pop("w_wq_diff", None)

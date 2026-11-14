@@ -19,6 +19,12 @@ from torch.nn import Module
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
+from ..looper.processor_fusion import (
+    ArtifactScope,
+    InlineConfig,
+    ProcessorFusionError,
+    ProcessorStages,
+)
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -298,6 +304,14 @@ def get_resolved_module_config(module):
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
+
+    # Fusion contract. A processor publishes these artifacts at one of its
+    # stages; a downstream processor declares an InlineConfig to consume them
+    # inside this processor's execution frame instead of through module.state.
+    emits: Tuple[str, ...] = ()
+    stages: Tuple[ProcessorStages, ...] = ()
+    inline: Optional[InlineConfig] = None
+    inline_processors: Tuple["LoopProcessor", ...] = ()
 
     @property
     def forward(self) -> ForwardConfig:
@@ -1170,6 +1184,37 @@ class LoopProcessor:
         """Override point for the main per-module quantization or capture step."""
 
         pass
+
+    def publish(self, module: NamedModule, stage: ProcessorStages, *, consumers=None):
+        """Open a borrowed artifact scope for one module at ``stage``."""
+
+        if consumers is None:
+            consumers = self.inline_processors
+        return ArtifactScope(self, module, stage, consumers=consumers)
+
+    def dispatch_inline(self, module: NamedModule, scope: ArtifactScope, **kwargs) -> None:
+        """Run every fused consumer in this processor's frame.
+
+        Consumers execute synchronously on the producing device worker thread,
+        so they may not submit to ``DEVICE_THREAD_POOL`` and wait.
+        """
+
+        for consumer in scope.consumers:
+            is_skipped = getattr(consumer, "is_skipped", None)
+            if callable(is_skipped) and is_skipped(module):
+                continue
+            try:
+                consumer.process(module, scope=scope, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - re-raised with attribution
+                raise ProcessorFusionError(self, consumer, module, exc) from exc
+
+    def on_inline_source_replaced(self, module: NamedModule) -> None:
+        """Rebind a fused consumer after the producer replaced its module.
+
+        This runs after the calibration forward, so an override must refresh
+        placement or module references without resetting state the consumer
+        accumulated during that forward pass.
+        """
 
     def prepare_layer_replay(
         self,
