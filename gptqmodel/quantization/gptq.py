@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
@@ -27,6 +28,7 @@ from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
+from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -594,6 +596,11 @@ class GPTQ:
     def validate_module(module):
         assert isinstance(module, (nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)):
+            # Resolve the padding contract before calibration: a setting whose
+            # im2col geometry cannot be reproduced must not silently capture a
+            # Hessian for a different operator.
+            conv_padding_pairs(module)
 
     # def has_hessian_issues(self) -> bool:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
@@ -971,10 +978,20 @@ class GPTQ:
                     inp.shape[2],
                     1,
                 )
+                # `nn.Unfold` only accepts integer zero padding, so apply the
+                # layer's own padding (including its mode) and unfold the
+                # already-padded input. `padding="same"` is resolved to
+                # PyTorch's asymmetric split by `conv_padding_pairs`.
+                (left, right), = conv_padding_pairs(self.module)
+                reshaped_inp = F.pad(
+                    reshaped_inp,
+                    (0, 0, left, right),
+                    mode=pad_mode(self.module.padding_mode),
+                )
                 unfold = nn.Unfold(
                     self.module.kernel_size + (1,),
                     dilation=self.module.dilation + (1,),
-                    padding=self.module.padding + (0,),
+                    padding=0,
                     stride=self.module.stride + (1,),
                 )
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
@@ -986,10 +1003,16 @@ class GPTQ:
                     inp.shape[2],
                     inp.shape[3],
                 )
+                (left, right), (top, bottom) = conv_padding_pairs(self.module)
+                reshaped_inp = F.pad(
+                    reshaped_inp,
+                    (left, right, top, bottom),
+                    mode=pad_mode(self.module.padding_mode),
+                )
                 unfold = nn.Unfold(
                     self.module.kernel_size,
                     dilation=self.module.dilation,
-                    padding=self.module.padding,
+                    padding=0,
                     stride=self.module.stride,
                 )
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
