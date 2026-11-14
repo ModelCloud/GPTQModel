@@ -30,80 +30,40 @@ __device__ __forceinline__ Pair decode(uint16_t meta, uint32_t lows,
   return Pair{lo, hi};
 }
 
-template <typename T, bool CacheGlobal>
-__device__ __forceinline__ T load_packed(const T* src) {
-  if constexpr (CacheGlobal) return __ldcg(src);
-  return __ldg(src);
-}
-
-template <bool CacheGlobal>
-__device__ __forceinline__ void store_output(uint4* dst, uint4 value) {
-  if constexpr (CacheGlobal) __stcg(dst, value);
-  else *dst = value;
-}
-
-// 0: prior 8 lanes, 1: 4 lanes, 2: 4 lanes with streaming stores,
-// 3: 4 lanes with L2-only packed loads, 4: both L2-only loads/stores,
-// 5: 2 lanes, 6: 2 lanes with streaming stores.
-template <typename Id, int IdsPerCTA, int Mode>
+// Production lookup geometry: four lanes per 64-column row block, one atom
+// per lane, streaming stores. The experimental lane/store variants were
+// removed after the production binding settled on this schedule.
+template <typename Id, int IdsPerCTA>
 __global__ void rowmajor_kernel(const Id* __restrict__ ids,
                                 const uint8_t* __restrict__ packed,
                                 const uint64_t* __restrict__ escapes,
                                 int64_t num_escapes, uint32_t base,
                                 int64_t n, int64_t k, int64_t m,
                                 uint64_t* __restrict__ out) {
-  constexpr int lanes_per_block = Mode == 0 ? 8 : (Mode >= 5 ? 2 : 4);
-  const int groups_per_id = (blockDim.x / lanes_per_block) / IdsPerCTA;
-  const int group = threadIdx.x / lanes_per_block;
+  constexpr int kLanesPerBlock = 4;
+  const int groups_per_id = (blockDim.x / kLanesPerBlock) / IdsPerCTA;
+  const int group = threadIdx.x / kLanesPerBlock;
   const int64_t i = static_cast<int64_t>(blockIdx.x) * IdsPerCTA + group / groups_per_id;
   const int64_t kb = static_cast<int64_t>(blockIdx.y) * groups_per_id + group % groups_per_id;
   if (i >= m || kb >= k / 64) return;
-  const int lane = threadIdx.x & (lanes_per_block - 1);
+  const int lane = threadIdx.x & (kLanesPerBlock - 1);
   const int64_t row = static_cast<int64_t>(ids[i]);
   const bool valid = row >= 0 && row < n;
-  if constexpr (Mode == 0) {
-    uint64_t first = 0, second = 0;
-    if (valid) {
-      const uint8_t* src = packed + (row * (k / 64) + kb) * 96;
-      const uint32_t mm = __ldg(reinterpret_cast<const uint32_t*>(src) + lane);
-      const uint64_t ll = __ldg(reinterpret_cast<const uint64_t*>(src + 32) + lane);
-      const Pair a = decode(static_cast<uint16_t>(mm), static_cast<uint32_t>(ll),
-                            escapes, num_escapes, base);
-      const Pair b = decode(static_cast<uint16_t>(mm >> 16), static_cast<uint32_t>(ll >> 32),
-                            escapes, num_escapes, base);
-      first = static_cast<uint64_t>(a.lo) | (static_cast<uint64_t>(b.lo) << 32);
-      second = static_cast<uint64_t>(a.hi) | (static_cast<uint64_t>(b.hi) << 32);
-    }
-    uint64_t* dst = out + (i * k + kb * 64) / 4;
-    const int off = (lane / 2) * 4 + (lane & 1);
-    dst[off] = first;
-    dst[off + 2] = second;
-  } else {
-    const uint8_t* src = valid ? packed + (row * (k / 64) + kb) * 96 : nullptr;
-    uint4* dst = reinterpret_cast<uint4*>(out + (i * k + kb * 64) / 4);
-    constexpr int atoms_per_lane = Mode >= 5 ? 2 : 1;
-#pragma unroll
-    for (int atom = 0; atom < atoms_per_lane; ++atom) {
-      const int atom_index = lane * atoms_per_lane + atom;
-      uint2 mm2 = make_uint2(0, 0);
-      uint4 low = make_uint4(0, 0, 0, 0);
-      if (valid) {
-        mm2 = load_packed<uint2, Mode == 3 || Mode == 4>(
-            reinterpret_cast<const uint2*>(src) + atom_index);
-        low = load_packed<uint4, Mode == 3 || Mode == 4>(
-            reinterpret_cast<const uint4*>(src + 32) + atom_index);
-      }
-      const uint64_t mm = static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-      const Pair a = valid ? decode(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : Pair{0, 0};
-      const Pair b = valid ? decode(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : Pair{0, 0};
-      const Pair c = valid ? decode(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : Pair{0, 0};
-      const Pair d = valid ? decode(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : Pair{0, 0};
-      store_output<Mode == 2 || Mode == 4 || Mode == 6>(
-          dst + 2 * atom_index, make_uint4(a.lo, b.lo, c.lo, d.lo));
-      store_output<Mode == 2 || Mode == 4 || Mode == 6>(
-          dst + 2 * atom_index + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
-    }
+  const uint8_t* src = valid ? packed + (row * (k / 64) + kb) * 96 : nullptr;
+  uint2 mm2 = make_uint2(0, 0);
+  uint4 low = make_uint4(0, 0, 0, 0);
+  if (valid) {
+    mm2 = __ldg(reinterpret_cast<const uint2*>(src) + lane);
+    low = __ldg(reinterpret_cast<const uint4*>(src + 32) + lane);
   }
+  const uint64_t mm = static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
+  const Pair a = valid ? decode(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : Pair{0, 0};
+  const Pair b = valid ? decode(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : Pair{0, 0};
+  const Pair c = valid ? decode(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : Pair{0, 0};
+  const Pair d = valid ? decode(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : Pair{0, 0};
+  uint4* dst = reinterpret_cast<uint4*>(out + (i * k + kb * 64) / 4) + 2 * lane;
+  __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
+  __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
 }
 
 // A one-token decode launch has only one ID. Keep one CTA resident and walk
@@ -151,78 +111,6 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
         reinterpret_cast<uint4*>(out + (kb * 64) / 4) + 2 * lane;
     __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
     __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
-  }
-}
-
-template <int StorePolicy>
-__device__ __forceinline__ void store_repeat4(uint4* dst, uint4 value) {
-  if constexpr (StorePolicy == 1) __stcg(dst, value);
-  else if constexpr (StorePolicy == 2) __stcs(dst, value);
-  else *dst = value;
-}
-
-__device__ __forceinline__ uint4 shuffle4(uint4 value, int source_lane, uint32_t mask) {
-  return make_uint4(__shfl_sync(mask, value.x, source_lane, 4),
-                    __shfl_sync(mask, value.y, source_lane, 4),
-                    __shfl_sync(mask, value.z, source_lane, 4),
-                    __shfl_sync(mask, value.w, source_lane, 4));
-}
-
-// Decode one packed row block once and write four exact BF16 activation copies.
-// This remains an experiment: canonical NF12 repeat4 owns production dispatch.
-template <typename Id, int IdsPerCTA, int StorePolicy>
-__global__ void rowmajor_repeat4_kernel(const Id* __restrict__ ids,
-                                        const uint8_t* __restrict__ packed,
-                                        const uint64_t* __restrict__ escapes,
-                                        int64_t num_escapes, uint32_t base,
-                                        int64_t n, int64_t k, int64_t m,
-                                        uint4* __restrict__ out) {
-  const int groups_per_id = (blockDim.x / 4) / IdsPerCTA;
-  const int group = threadIdx.x / 4;
-  const int64_t i = int64_t(blockIdx.x) * IdsPerCTA + group / groups_per_id;
-  const int64_t kb = int64_t(blockIdx.y) * groups_per_id + group % groups_per_id;
-  if (i >= m || kb >= k / 64) return;
-  const int atom = threadIdx.x & 3;
-  const int64_t row = int64_t(ids[i]);
-  const bool valid = row >= 0 && row < n;
-  uint2 mm2 = make_uint2(0, 0);
-  uint4 low = make_uint4(0, 0, 0, 0);
-  if (valid) {
-    const uint8_t* src = packed + (row * (k / 64) + kb) * 96;
-    mm2 = __ldg(reinterpret_cast<const uint2*>(src) + atom);
-    low = __ldg(reinterpret_cast<const uint4*>(src + 32) + atom);
-  }
-  const uint64_t mm = uint64_t(mm2.x) | (uint64_t(mm2.y) << 32);
-  const Pair a = valid ? decode(uint16_t(mm), low.x, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair b = valid ? decode(uint16_t(mm >> 16), low.y, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair c = valid ? decode(uint16_t(mm >> 32), low.z, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair d = valid ? decode(uint16_t(mm >> 48), low.w, escapes, num_escapes, base) : Pair{0, 0};
-  const uint4 first = make_uint4(a.lo, b.lo, c.lo, d.lo);
-  const uint4 second = make_uint4(a.hi, b.hi, c.hi, d.hi);
-  uint4* dst = out + i * (k / 8) * 4 + kb * 8;
-  if constexpr (StorePolicy >= 3) {
-    // Exchange decoded atoms within each four-lane group so every store
-    // instruction writes adjacent 16-byte chunks across its four lanes.
-    const uint32_t mask = 15u << (threadIdx.x & 28);
-    const uint4 f0 = shuffle4(first, atom >> 1, mask);
-    const uint4 s0 = shuffle4(second, atom >> 1, mask);
-    const uint4 f1 = shuffle4(first, 2 + (atom >> 1), mask);
-    const uint4 s1 = shuffle4(second, 2 + (atom >> 1), mask);
-    const uint4 first_half = (atom & 1) ? s0 : f0;
-    const uint4 second_half = (atom & 1) ? s1 : f1;
-#pragma unroll
-    for (int rep = 0; rep < 4; ++rep) {
-      uint4* copy = dst + rep * (k / 8) + atom;
-      store_repeat4<StorePolicy == 3 ? 2 : 1>(copy, first_half);
-      store_repeat4<StorePolicy == 3 ? 2 : 1>(copy + 4, second_half);
-    }
-  } else {
-#pragma unroll
-    for (int rep = 0; rep < 4; ++rep) {
-      uint4* copy = dst + rep * (k / 8) + atom * 2;
-      store_repeat4<StorePolicy>(copy, first);
-      store_repeat4<StorePolicy>(copy + 1, second);
-    }
   }
 }
 
@@ -342,57 +230,6 @@ __global__ void split_row_escapes(const uint4* __restrict__ source,
 
 }  // namespace
 
-template <typename Id, int StorePolicy>
-void launch_rowmajor_repeat4(const Id* ids, const uint8_t* packed,
-                             const uint64_t* escapes, int64_t num_escapes,
-                             uint32_t base, int64_t n, int64_t k, int64_t m,
-                             uint4* out, int threads, int ids_per_cta,
-                             cudaStream_t stream) {
-#define LAUNCH_REPEAT4(PACK) { \
-  const int groups_per_id = (threads / 4) / PACK; \
-  const dim3 grid(static_cast<unsigned>((m + PACK - 1) / PACK), \
-                  static_cast<unsigned>((k / 64 + groups_per_id - 1) / groups_per_id)); \
-  rowmajor_repeat4_kernel<Id, PACK, StorePolicy><<<grid, threads, 0, stream>>>( \
-      ids, packed, escapes, num_escapes, base, n, k, m, out); \
-  break; \
-}
-  switch (ids_per_cta) {
-    case 1: LAUNCH_REPEAT4(1)
-    case 2: LAUNCH_REPEAT4(2)
-    case 4: LAUNCH_REPEAT4(4)
-    case 8: LAUNCH_REPEAT4(8)
-    case 16: LAUNCH_REPEAT4(16)
-  }
-#undef LAUNCH_REPEAT4
-}
-
-extern "C" int nf12_rowmajor_repeat4_lookup(const void* ids, const uint8_t* packed,
-                                             const uint64_t* escapes, int64_t num_escapes,
-                                             int64_t n, int64_t k, uint32_t base,
-                                             int64_t m, uint4* out, int id_bytes,
-                                             int threads, int ids_per_cta,
-                                             int store_policy, cudaStream_t stream) {
-  if (!ids || !packed || !out || num_escapes < 0 || n <= 0 || k <= 0 || k % 64 ||
-      base > 120 || m < 0 || (id_bytes != 4 && id_bytes != 8) ||
-      (threads != 64 && threads != 128 && threads != 256) ||
-      (ids_per_cta != 1 && ids_per_cta != 2 && ids_per_cta != 4 &&
-       ids_per_cta != 8 && ids_per_cta != 16) || ids_per_cta > threads / 4 ||
-      store_policy < 0 || store_policy > 4) return cudaErrorInvalidValue;
-  if (m == 0) return cudaSuccess;
-#define DISPATCH_REPEAT4(ID) \
-  switch (store_policy) { \
-    case 0: launch_rowmajor_repeat4<ID, 0>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 1: launch_rowmajor_repeat4<ID, 1>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 2: launch_rowmajor_repeat4<ID, 2>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 3: launch_rowmajor_repeat4<ID, 3>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 4: launch_rowmajor_repeat4<ID, 4>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-  }
-  if (id_bytes == 4) { DISPATCH_REPEAT4(int32_t) }
-  else { DISPATCH_REPEAT4(int64_t) }
-#undef DISPATCH_REPEAT4
-  return cudaGetLastError();
-}
-
 extern "C" int nf12_rowmajor_count(const uint8_t* source, int64_t n, int64_t k,
                                    int32_t* counts, cudaStream_t stream) {
   if (!source || !counts || n <= 0 || n % 16 || k <= 0 || k % 64)
@@ -425,17 +262,16 @@ extern "C" int nf12_rowmajor_pack(const uint8_t* source,
   return cudaGetLastError();
 }
 
-template <typename Id, int Mode>
+template <typename Id>
 void launch_kernel(const Id* ids, const uint8_t* packed, const uint64_t* escapes,
                    int64_t num_escapes, uint32_t base, int64_t n, int64_t k,
                    int64_t m, uint64_t* out, int threads, int ids_per_cta,
                    cudaStream_t stream) {
 #define LAUNCH(PACK) { \
-  constexpr int lanes_per_block = Mode == 0 ? 8 : (Mode >= 5 ? 2 : 4); \
-  const int groups_per_id = (threads / lanes_per_block) / PACK; \
+  const int groups_per_id = (threads / 4) / PACK; \
   const dim3 grid(static_cast<unsigned>((m + PACK - 1) / PACK), \
                   static_cast<unsigned>((k / 64 + groups_per_id - 1) / groups_per_id)); \
-  rowmajor_kernel<Id, PACK, Mode><<<grid, threads, 0, stream>>>( \
+  rowmajor_kernel<Id, PACK><<<grid, threads, 0, stream>>>( \
       ids, packed, escapes, num_escapes, base, n, k, m, out); \
   break; \
 }
@@ -453,14 +289,14 @@ extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
                                     const uint64_t* escapes, int64_t num_escapes,
                                     int64_t n, int64_t k, uint32_t base,
                                     int64_t m, uint64_t* out, int id_bytes,
-                                    int threads, int ids_per_cta, int mode,
+                                    int threads, int ids_per_cta,
                                     cudaStream_t stream) {
   if (!ids || !packed || !out || n <= 0 || k <= 0 || k % 64 || base > 120 ||
       m < 0 || (id_bytes != 4 && id_bytes != 8) ||
       (threads != 64 && threads != 128 && threads != 256 && threads != 512) ||
       (ids_per_cta != 1 && ids_per_cta != 2 && ids_per_cta != 4 &&
        ids_per_cta != 8 && ids_per_cta != 16) ||
-      mode < 0 || mode > 6 || ids_per_cta > threads / (mode == 0 ? 8 : (mode >= 5 ? 2 : 4)))
+      ids_per_cta > threads / 4)
     return cudaErrorInvalidValue;
   if (m == 0) return cudaSuccess;
   if (m == 1 && k <= 2048) {
@@ -475,18 +311,14 @@ extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
     }
     return cudaGetLastError();
   }
-#define DISPATCH_MODE(ID) \
-  switch (mode) { \
-    case 0: launch_kernel<ID, 0>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 1: launch_kernel<ID, 1>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 2: launch_kernel<ID, 2>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 3: launch_kernel<ID, 3>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 4: launch_kernel<ID, 4>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 5: launch_kernel<ID, 5>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
-    case 6: launch_kernel<ID, 6>(static_cast<const ID*>(ids), packed, escapes, num_escapes, base, n, k, m, out, threads, ids_per_cta, stream); break; \
+  if (id_bytes == 4) {
+    launch_kernel<int32_t>(static_cast<const int32_t*>(ids), packed, escapes,
+                           num_escapes, base, n, k, m, out, threads, ids_per_cta,
+                           stream);
+  } else {
+    launch_kernel<int64_t>(static_cast<const int64_t*>(ids), packed, escapes,
+                           num_escapes, base, n, k, m, out, threads, ids_per_cta,
+                           stream);
   }
-  if (id_bytes == 4) { DISPATCH_MODE(int32_t) }
-  else { DISPATCH_MODE(int64_t) }
-#undef DISPATCH_MODE
   return cudaGetLastError();
 }
