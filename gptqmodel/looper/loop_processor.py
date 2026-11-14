@@ -84,6 +84,49 @@ DEFAULT_LOG_COLUMNS: List[str] = [
 ]
 
 
+def prepare_layer_runtime_weights_for_forward(
+    *,
+    processors,
+    full: Dict[str, object],
+    fallback_device: torch.device,
+) -> int:
+    """Materialize deferred dense replay weights for every module in one layer.
+
+    A processor may pack a projection and replace its dense weight with a META
+    placeholder until the layer's next full forward. Subset execution prepares
+    only the modules in the current subset, so projections packed by earlier
+    subsets still hold META when the layer forward runs for every module.
+    Offer the whole layer inventory to the processors before each forward.
+
+    Returns the number of modules that a processor materialized.
+    """
+
+    prepared = 0
+    for named_module in full.values():
+        # Deferred replay state lives on the NamedModule wrapper. A raw module
+        # in the inventory is either untouched native state or already packed.
+        if not isinstance(named_module, NamedModule):
+            continue
+        for processor in processors:
+            prepare_runtime = getattr(
+                processor, "prepare_runtime_weight_for_forward", None
+            )
+            if not callable(prepare_runtime):
+                continue
+            materialized = prepare_runtime(
+                module=named_module,
+                target_device=fallback_device,
+            )
+            if materialized is None:
+                continue
+            named_module.module = materialized
+            setattr(named_module, "target_device", fallback_device)
+            setattr(materialized, "target_device", fallback_device)
+            prepared += 1
+            break
+    return prepared
+
+
 def _format_gib(value: float) -> str:
     """Formats a GiB value without unnecessary trailing zeros."""
 

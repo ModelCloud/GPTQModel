@@ -45,6 +45,7 @@ from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .extension import LoopPlan, LoopStep
 from .input_cache import TensorLifetimeDiagnostic
+from .loop_processor import prepare_layer_runtime_weights_for_forward
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 
@@ -313,6 +314,15 @@ def _replay_layer_outputs(
     replay_pb.title(replay_msg).subtitle(
         f"Forward replay Row 0/{replay_total_rows}"
     ).draw()
+
+    # Replay runs the whole layer after the last subset's process() call, so
+    # every projection packed in this layer must be back in dense form even
+    # though only the final subset was prepared by its subset stage.
+    prepare_layer_runtime_weights_for_forward(
+        processors=getattr(looper, "processors", ()),
+        full=full,
+        fallback_device=cur_layer_device,
+    )
 
     replay_prev_devices: Dict[str, torch.device] = {}
     if replay_modules is not None and replay_forward_device_map:
