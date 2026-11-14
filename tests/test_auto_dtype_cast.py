@@ -344,11 +344,9 @@ def test_dense_embedding_fallback_masks_out_of_range_ids(monkeypatch):
     fallback is exercised on hosts that do have the extension built.
     """
 
-    import gptqmodel_nf12
-
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
     monkeypatch.setattr(auto_dtype_cast, "_rowmajor_ops", lambda _device: None)
-    monkeypatch.setattr(gptqmodel_nf12, "available", lambda: False)
+    monkeypatch.setattr(nf12_quantization, "available", lambda: False)
 
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
     with torch.no_grad():
