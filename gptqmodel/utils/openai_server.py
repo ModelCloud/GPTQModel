@@ -148,7 +148,7 @@ class BodySizeLimitMiddleware:
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
-                return
+                return None
             body.extend(message.get("body", b""))
             if len(body) > self.max_bytes:
                 return await self._reject(scope, receive, send)
