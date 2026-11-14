@@ -2848,18 +2848,29 @@ class AWQProcessor(LoopProcessor):
             parameters = inspect.signature(rotary.forward).parameters
         except (TypeError, ValueError):
             return {}
+        # `module` is normally the attention block, but a later AWQ group whose
+        # root was already consumed (for example `o_proj`) falls back to the
+        # decoder layer. Look through both shapes.
+        candidates = (
+            module,
+            getattr(module, "self_attn", None),
+            getattr(module, "attention", None),
+        )
         for name in ("layer_type", "attention_type"):
             if name not in parameters:
                 continue
-            value = getattr(module, name, None)
-            if value is None:
-                value = getattr(
-                    module,
-                    "attention_type" if name == "layer_type" else "layer_type",
-                    None,
-                )
-            if isinstance(value, str):
-                return {name: value}
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                value = getattr(candidate, name, None)
+                if value is None:
+                    value = getattr(
+                        candidate,
+                        "attention_type" if name == "layer_type" else "layer_type",
+                        None,
+                    )
+                if isinstance(value, str):
+                    return {name: value}
         return {}
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
