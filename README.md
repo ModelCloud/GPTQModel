@@ -105,6 +105,7 @@ AWQ scale folding resolves offset gains from the norm's live forward and picks t
 AWQ selects fold sources from declared data flow and skips sandwich post-norms and unresolvable gains; see the [AWQ normalization selection](docs/awq-norm-selection.md) flow.
 MoE AWQ folds also scale the router and `shared_expert_gate`, and calibration padding is kept out of expert Hessians; see the [MoE AWQ scale folding and calibration row ownership](docs/moe-awq-calibration.md) flow.
 Padding-only MoE experts stay on the RTN fallback, sibling AWQ captures share one host copy under `inference_mode`, and FP16 CPU fused kernels keep their bias epilogue; see the [MoE padding ownership and calibration capture lifetimes](docs/moe-padding-and-awq-dedup.md) flow.
+Every AWQ module packs bounded token rows across all variable-length calibration captures and fallback coverage is checked per layer; see the [AWQ calibration aggregation](docs/awq-calibration-aggregation.md) flow.
 AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
 LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.

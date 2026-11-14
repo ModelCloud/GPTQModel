@@ -1527,11 +1527,19 @@ class AWQProcessor(LoopProcessor):
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
     ) -> bool:
-        """Returns whether a scaling group lacks enough captured activations for AWQ."""
+        """Returns whether any layer in a scaling group lacks enough activations.
+
+        Coverage is evaluated per layer. Summing retained tokens over the
+        group's siblings let q/k/v (3x) and gate/up (2x) pass a percentage
+        threshold while a lone down_proj fell below it and silently became
+        RTN (#4063). A group shares one scale vector, so one starved member
+        still has to fall back.
+        """
 
         from ..utils.fallback import should_use_fallback
 
-        captured_tokens = 0
+        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+        expected = float(expected_tokens) if expected_tokens else None
         for name in layer_names:
             feat = input_feat.get(name)
             if feat is None or feat.numel() == 0:
@@ -1543,22 +1551,20 @@ class AWQProcessor(LoopProcessor):
                 # this module", so compare the raw routed token count against
                 # the expected corpus total. Token-row retention is a deliberate
                 # sampling bound and must not trigger low-coverage fallback.
-                captured_tokens += int(feature_stat["raw_tokens"])
+                captured_tokens = int(feature_stat["raw_tokens"])
             elif "retained_tokens" in feature_stat:
                 # Other modes must measure the rows that scale search actually
                 # receives. In particular, latest-batch aggregation discards
                 # earlier variable-length captures.
-                captured_tokens += int(feature_stat["retained_tokens"])
+                captured_tokens = int(feature_stat["retained_tokens"])
             else:
                 hidden = feat.shape[-1] if feat.dim() >= 1 else 1
-                captured_tokens += feat.numel() // max(hidden, 1)
+                captured_tokens = feat.numel() // max(hidden, 1)
 
-        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
-        return should_use_fallback(
-            self.fallback,
-            float(captured_tokens),
-            float(expected_tokens) if expected_tokens else None,
-        )
+            if should_use_fallback(self.fallback, float(captured_tokens), expected):
+                return True
+
+        return False
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         """Runs the AWQ scaling, clipping, and quantization flow for one layer."""

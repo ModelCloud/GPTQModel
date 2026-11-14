@@ -4783,7 +4783,17 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
-        """Declare bounded token-row aggregation for pointwise MoE modules."""
+        """Declare bounded token-row aggregation for every AWQ module.
+
+        Variable-length calibration captures cannot be concatenated on the
+        batch axis. Before #4063 only MoE modules opted into token-row packing;
+        every dense module fell back to the latest (shortest, because
+        calibration is sorted by length) capture, so AWQ scale search saw less
+        than one percent of the calibration tokens. Token-row packing is the
+        default for every module and keeps a bounded, deterministic sample of
+        all captures. MoE roots additionally capture their shared pre-router
+        input for the gate/up scaling group.
+        """
 
         if not isinstance(module_name, str):
             return None
@@ -4800,7 +4810,9 @@ class BaseQModel(nn.Module):
                     "mode": "token_rows",
                 }
 
-        return None
+        return {
+            "mode": "token_rows",
+        }
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
