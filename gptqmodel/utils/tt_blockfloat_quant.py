@@ -951,7 +951,8 @@ def _quantize_sequential(
                 try:
                     runner(window)
                 except _StopForward:
-                    pass
+                    # Expected: pre-hook raises this to stop forward once inputs are captured.
+                    continue
     finally:
         handle.remove()
     if len(captured) != len(windows):
