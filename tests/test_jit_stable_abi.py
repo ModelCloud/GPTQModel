@@ -24,7 +24,6 @@ from gptqmodel.utils import (
     exllamav2,
     hadamard,
     machete,
-    marlin,
     nf12_hip,
     paroquant,
     qqq,
@@ -82,14 +81,6 @@ def test_awq_uses_stable_abi():
 
 def test_paroquant_uses_stable_abi():
     _assert_stable(paroquant._PAROQUANT_ROTATION_EXTENSION)
-
-
-def test_marlin_fp16_uses_stable_abi():
-    _assert_stable(marlin._MARLIN_FP16_TORCH_OPS_EXTENSION)
-
-
-def test_marlin_bf16_uses_stable_abi():
-    _assert_stable(marlin._MARLIN_BF16_TORCH_OPS_EXTENSION)
 
 
 def test_exllamav2_gptq_uses_stable_abi():
@@ -164,6 +155,13 @@ def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
 def test_every_jit_loader_declares_the_stable_abi():
     """Any product JIT loader must opt into the stable ABI."""
 
+    # Marlin is deferred: its caller-owned output/scratch lifetime relies on
+    # `Tensor::record_stream`, which the stable ABI does not expose. Replacing
+    # it in-tree needed a custom event pool/reaper that could not be qualified
+    # for concurrent multi-GPU execution, so Marlin stays on the unstable ABI
+    # until the stable surface grows a record_stream hook.
+    deferred = {"gptqmodel/utils/marlin.py"}
+
     root = Path(__file__).resolve().parents[1] / "gptqmodel"
     missing = []
     for path in root.rglob("*.py"):
@@ -171,6 +169,8 @@ def test_every_jit_loader_declares_the_stable_abi():
         if "TorchOpsJitExtension(" not in text:
             continue
         relative = path.relative_to(root.parent).as_posix()
+        if relative in deferred:
+            continue
         for match in re.finditer(r"TorchOpsJitExtension\(", text):
             depth = 0
             index = match.end() - 1

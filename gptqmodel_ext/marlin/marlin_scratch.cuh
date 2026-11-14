@@ -1,4 +1,3 @@
-#include "../torch_stable_compat.h"
 #pragma once
 
 #include <algorithm>
@@ -6,6 +5,7 @@
 #include <limits>
 #include <tuple>
 
+#include <c10/util/Exception.h>
 
 namespace marlin {
 
