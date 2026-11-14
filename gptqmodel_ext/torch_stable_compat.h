@@ -45,14 +45,26 @@
 // build implements the `*_cuda_*` ABI inside libtorch_hip, so one source tree
 // serves CUDA and HIP. Only the runtime types (streams, device properties)
 // differ, and those are aliased below.
-#if defined(USE_ROCM) || defined(__HIP_PLATFORM_AMD__)
+//
+// `USE_CUDA` (or a device compiler) marks a device build; the loader sets it
+// for every CUDA and ROCm kernel. torch also defines `__HIP_PLATFORM_AMD__` for
+// CPU-only translation units on a ROCm host, so HIP cannot be detected from the
+// platform macro alone: a CPU kernel must not be forced to include the HIP
+// runtime.
+#if defined(USE_CUDA) || defined(__CUDACC__) || defined(__HIPCC__)
+#define GPTQMODEL_DEVICE_BUILD 1
+#else
+#define GPTQMODEL_DEVICE_BUILD 0
+#endif
+
+#if GPTQMODEL_DEVICE_BUILD && (defined(USE_ROCM) || defined(__HIP_PLATFORM_AMD__))
 #define GPTQMODEL_STABLE_HIP 1
 #include <hip/hip_runtime.h>
 #else
 #define GPTQMODEL_STABLE_HIP 0
 #endif
 
-#if defined(USE_CUDA) || defined(__CUDACC__) || GPTQMODEL_STABLE_HIP
+#if GPTQMODEL_DEVICE_BUILD
 #define GPTQMODEL_STABLE_DEVICE 1
 // The generated "cuda" op shims are declared the same way on ROCm; the
 // symbols live in libtorch_hip there.
