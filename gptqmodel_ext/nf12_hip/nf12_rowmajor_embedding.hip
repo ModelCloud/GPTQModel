@@ -10,6 +10,7 @@
 // and materializes collision escapes so every BF16 bit remains exact.
 // ---------------------------------------------------------------------------
 #include "nf12_format_hip.cuh"
+#include "rowmajor_format.cuh"
 
 #include <cstdint>
 #include <limits>
@@ -21,72 +22,13 @@ constexpr int kRowBlockBytes = 96;
 constexpr int kRowMetaBytes = 32;
 constexpr int kPackThreads = 128;
 
-struct Pair {
-  uint32_t lo;
-  uint32_t hi;
-};
-
-__device__ __forceinline__ Pair decode_pair(uint16_t meta, uint32_t lows,
-                                            const uint64_t* __restrict__ escapes,
-                                            uint32_t num_escapes,
-                                            uint32_t base) {
-  if (meta == 0u) {
-    if (lows < num_escapes && escapes != nullptr) {
-      const uint64_t value = escapes[lows];
-      return Pair{static_cast<uint32_t>(value),
-                  static_cast<uint32_t>(value >> 32)};
-    }
-    return Pair{0u, 0u};
-  }
-
-  const uint32_t m0 = meta & 0xffu;
-  const uint32_t m2 = meta >> 8;
-  const uint32_t h0 = ((m0 & 0x87u) + base) & 0xffu;
-  const uint32_t h1 = ((((m0 << 1) & 0x80u) | ((m0 >> 3) & 7u)) + base) & 0xffu;
-  const uint32_t h2 = ((m2 & 0x87u) + base) & 0xffu;
-  const uint32_t h3 = ((((m2 << 1) & 0x80u) | ((m2 >> 3) & 7u)) + base) & 0xffu;
-  const uint32_t lo = ((h0 << 8) | (lows & 0xffu)) |
-                      (((h1 << 8) | ((lows >> 8) & 0xffu)) << 16);
-  const uint32_t hi = ((h2 << 8) | ((lows >> 16) & 0xffu)) |
-                      (((h3 << 8) | ((lows >> 24) & 0xffu)) << 16);
-  return Pair{lo, hi};
-}
-
-__device__ __forceinline__ int collision_count(uint32_t meta) {
-  if (meta == 0u) return 0;
-  const bool lower = (meta & 0x00ff00ffu) == 0u;
-  const bool upper = (meta & 0xff00ff00u) == 0u;
-  return static_cast<int>(lower) + static_cast<int>(upper);
-}
-
-__device__ __forceinline__ uint16_t selected_meta(uint32_t meta, int upper) {
-  return static_cast<uint16_t>(
-      ((meta >> (8 * upper)) & 0xffu) |
-      (((meta >> (16 + 8 * upper)) & 0xffu) << 8));
-}
-
-__device__ __forceinline__ uint32_t selected_lows(uint32_t lo0, uint32_t lo1,
-                                                  int upper) {
-  return ((lo0 >> (16 * upper)) & 0xffffu) |
-         (((lo1 >> (16 * upper)) & 0xffffu) << 16);
-}
-
-__device__ __forceinline__ uint64_t collision_escape(uint32_t lows,
-                                                     uint32_t base) {
-  const uint64_t high = static_cast<uint64_t>(base) << 8;
-  return (high | (lows & 0xffu)) |
-         ((high | ((lows >> 8) & 0xffu)) << 16) |
-         ((high | ((lows >> 16) & 0xffu)) << 32) |
-         ((high | ((lows >> 24) & 0xffu)) << 48);
-}
-
 __global__ void count_row_collisions(const uint8_t* __restrict__ source,
                                      int32_t* __restrict__ counts) {
   const int64_t tile = blockIdx.x;
   const int tid = threadIdx.x;
   const uint32_t meta =
       reinterpret_cast<const uint32_t*>(source + tile * kSuperAtomBytes)[tid];
-  const int count = collision_count(meta);
+  const int count = nf12_rowmajor::collision_count(meta);
   if (count != 0) {
     atomicAdd(counts + tile, count);
   }
@@ -111,12 +53,12 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
       reinterpret_cast<const uint32_t*>(src + plane * kPlaneBytes);
   const uint32_t lo0 = lows_plane[lo_index];
   const uint32_t lo1 = lows_plane[lo_index + 1];
-  const uint16_t lower_meta = selected_meta(meta, 0);
-  const uint16_t upper_meta = selected_meta(meta, 1);
+  const uint16_t lower_meta = nf12_rowmajor::selected_meta(meta, 0);
+  const uint16_t upper_meta = nf12_rowmajor::selected_meta(meta, 1);
   const bool lower_collision = meta != 0u && lower_meta == 0u;
   const bool upper_collision = meta != 0u && upper_meta == 0u;
 
-  int warp_prefix = collision_count(meta);
+  int warp_prefix = nf12_rowmajor::collision_count(meta);
 #pragma unroll
   for (int offset = 1; offset < kWarpSize; offset *= 2) {
     const int other = __shfl_up(warp_prefix, offset);
@@ -137,7 +79,7 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
       prior_warps += warp_totals[warp];
     }
   }
-  const int count = collision_count(meta);
+  const int count = nf12_rowmajor::collision_count(meta);
   const int64_t prior_tiles = tile != 0 ? prefix[tile - 1] : 0;
   const uint32_t first_collision = static_cast<uint32_t>(
       2 * original_escapes + prior_tiles + prior_warps + warp_prefix - count);
@@ -153,7 +95,7 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
 #pragma unroll
   for (int upper = 0; upper < 2; ++upper) {
     const uint16_t selected = upper != 0 ? upper_meta : lower_meta;
-    const uint32_t normal_lows = selected_lows(lo0, lo1, upper);
+    const uint32_t normal_lows = nf12_rowmajor::selected_lows(lo0, lo1, upper);
     const bool collision = upper != 0 ? upper_collision : lower_collision;
     const uint32_t escape_index =
         first_collision + (upper != 0 ? static_cast<int>(lower_collision) : 0);
@@ -166,7 +108,7 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
     reinterpret_cast<uint16_t*>(dst)[group] = selected;
     reinterpret_cast<uint32_t*>(dst + kRowMetaBytes)[group] = out_lows;
     if (collision) {
-      dest_escapes[escape_index] = collision_escape(normal_lows, base);
+      dest_escapes[escape_index] = nf12_rowmajor::collision_escape(normal_lows, base);
     }
   }
 }
@@ -216,22 +158,22 @@ __global__ void rowmajor_lookup_kernel(
   const uint64_t meta_bits =
       static_cast<uint64_t>(meta.x) | (static_cast<uint64_t>(meta.y) << 32);
   const bool valid = row >= 0 && row < n;
-  const Pair a =
-      valid ? decode_pair(static_cast<uint16_t>(meta_bits),
+  const nf12_rowmajor::Pair a =
+      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits),
                           lows.x, escapes, num_escapes, base)
-            : Pair{0u, 0u};
-  const Pair b =
-      valid ? decode_pair(static_cast<uint16_t>(meta_bits >> 16),
+            : nf12_rowmajor::Pair{0u, 0u};
+  const nf12_rowmajor::Pair b =
+      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 16),
                           lows.y, escapes, num_escapes, base)
-            : Pair{0u, 0u};
-  const Pair c =
-      valid ? decode_pair(static_cast<uint16_t>(meta_bits >> 32),
+            : nf12_rowmajor::Pair{0u, 0u};
+  const nf12_rowmajor::Pair c =
+      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 32),
                           lows.z, escapes, num_escapes, base)
-            : Pair{0u, 0u};
-  const Pair d =
-      valid ? decode_pair(static_cast<uint16_t>(meta_bits >> 48),
+            : nf12_rowmajor::Pair{0u, 0u};
+  const nf12_rowmajor::Pair d =
+      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 48),
                           lows.w, escapes, num_escapes, base)
-            : Pair{0u, 0u};
+            : nf12_rowmajor::Pair{0u, 0u};
 
   uint4* dst = reinterpret_cast<uint4*>(
       reinterpret_cast<__hip_bfloat16*>(out) +

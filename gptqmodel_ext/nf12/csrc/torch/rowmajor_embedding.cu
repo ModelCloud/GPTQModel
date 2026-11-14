@@ -4,31 +4,9 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+#include "../common/rowmajor_format.cuh"
+
 namespace {
-
-struct Pair { uint32_t lo, hi; };
-
-__device__ __forceinline__ Pair decode(uint16_t meta, uint32_t lows,
-                                       const uint64_t* __restrict__ escapes,
-                                       int64_t num_escapes, uint32_t base) {
-  if (meta == 0) {
-    if (lows < num_escapes) {
-      const uint64_t v = __ldg(escapes + lows);
-      return Pair{static_cast<uint32_t>(v), static_cast<uint32_t>(v >> 32)};
-    }
-    return Pair{0, 0};
-  }
-  const uint32_t m0 = meta & 0xffu, m2 = meta >> 8;
-  const uint32_t h0 = ((m0 & 0x87u) + base) & 0xffu;
-  const uint32_t h1 = ((((m0 << 1) & 0x80u) | ((m0 >> 3) & 7u)) + base) & 0xffu;
-  const uint32_t h2 = ((m2 & 0x87u) + base) & 0xffu;
-  const uint32_t h3 = ((((m2 << 1) & 0x80u) | ((m2 >> 3) & 7u)) + base) & 0xffu;
-  const uint32_t lo = ((h0 << 8) | (lows & 0xffu)) |
-                      (((h1 << 8) | ((lows >> 8) & 0xffu)) << 16);
-  const uint32_t hi = ((h2 << 8) | ((lows >> 16) & 0xffu)) |
-                      (((h3 << 8) | ((lows >> 24) & 0xffu)) << 16);
-  return Pair{lo, hi};
-}
 
 // Production lookup geometry: four lanes per 64-column row block, one atom
 // per lane, streaming stores. The experimental lane/store variants were
@@ -57,10 +35,10 @@ __global__ void rowmajor_kernel(const Id* __restrict__ ids,
     low = __ldg(reinterpret_cast<const uint4*>(src + 32) + lane);
   }
   const uint64_t mm = static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-  const Pair a = valid ? decode(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair b = valid ? decode(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair c = valid ? decode(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : Pair{0, 0};
-  const Pair d = valid ? decode(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : Pair{0, 0};
+  const nf12_rowmajor::Pair a = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair b = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair c = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair d = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
   uint4* dst = reinterpret_cast<uint4*>(out + (i * k + kb * 64) / 4) + 2 * lane;
   __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
   __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
@@ -91,22 +69,22 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
     }
     const uint64_t mm =
         static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-    const Pair a = valid
-                       ? decode(static_cast<uint16_t>(mm), low.x, escapes,
+    const nf12_rowmajor::Pair a = valid
+                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes,
                                 num_escapes, base)
-                       : Pair{0, 0};
-    const Pair b = valid
-                       ? decode(static_cast<uint16_t>(mm >> 16), low.y, escapes,
+                       : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair b = valid
+                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes,
                                 num_escapes, base)
-                       : Pair{0, 0};
-    const Pair c = valid
-                       ? decode(static_cast<uint16_t>(mm >> 32), low.z, escapes,
+                       : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair c = valid
+                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes,
                                 num_escapes, base)
-                       : Pair{0, 0};
-    const Pair d = valid
-                       ? decode(static_cast<uint16_t>(mm >> 48), low.w, escapes,
+                       : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair d = valid
+                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes,
                                 num_escapes, base)
-                       : Pair{0, 0};
+                       : nf12_rowmajor::Pair{0, 0};
     uint4* dst =
         reinterpret_cast<uint4*>(out + (kb * 64) / 4) + 2 * lane;
     __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
@@ -118,41 +96,17 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
 // row records. Each of 128 threads owns one canonical eight-value group.
 // Count only selected-half zero-sentinel collisions; original escapes already
 // have indices in the canonical table.
-__device__ __forceinline__ int collision_count(uint32_t meta) {
-  if (meta == 0) return 0;
-  const bool lower = (meta & 0x00ff00ffu) == 0;
-  const bool upper = (meta & 0xff00ff00u) == 0;
-  return int(lower) + int(upper);
-}
-
 __global__ void count_row_collisions(const uint8_t* __restrict__ source,
                                      int32_t* __restrict__ counts) {
   const int tile = blockIdx.x;
   const int tid = threadIdx.x;
   const uint32_t* meta = reinterpret_cast<const uint32_t*>(source + int64_t(tile) * 1536);
-  const int count = collision_count(meta[tid]);
+  const int count = nf12_rowmajor::collision_count(meta[tid]);
   const int warp_sum = __reduce_add_sync(0xffffffffu, count);
   __shared__ int warp_counts[4];
   if ((tid & 31) == 0) warp_counts[tid >> 5] = warp_sum;
   __syncthreads();
   if (tid == 0) counts[tile] = warp_counts[0] + warp_counts[1] + warp_counts[2] + warp_counts[3];
-}
-
-__device__ __forceinline__ uint16_t selected_meta(uint32_t meta, int upper) {
-  return uint16_t(((meta >> (8 * upper)) & 255u) |
-                  (((meta >> (16 + 8 * upper)) & 255u) << 8));
-}
-
-__device__ __forceinline__ uint32_t selected_lows(uint32_t lo0, uint32_t lo1, int upper) {
-  return ((lo0 >> (16 * upper)) & 65535u) | (((lo1 >> (16 * upper)) & 65535u) << 16);
-}
-
-__device__ __forceinline__ uint64_t collision_escape(uint32_t lows, uint32_t base) {
-  const uint64_t high = uint64_t(base) << 8;
-  return (high | (lows & 255u)) |
-         ((high | ((lows >> 8) & 255u)) << 16) |
-         ((high | ((lows >> 16) & 255u)) << 32) |
-         ((high | ((lows >> 24) & 255u)) << 48);
 }
 
 __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
@@ -172,8 +126,8 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
   const uint32_t* lows_plane = reinterpret_cast<const uint32_t*>(src + plane * 512);
   const uint32_t lo0 = lows_plane[lo_index];
   const uint32_t lo1 = lows_plane[lo_index + 1];
-  const uint16_t lower_meta = selected_meta(meta, 0);
-  const uint16_t upper_meta = selected_meta(meta, 1);
+  const uint16_t lower_meta = nf12_rowmajor::selected_meta(meta, 0);
+  const uint16_t upper_meta = nf12_rowmajor::selected_meta(meta, 1);
   const bool lower_collision = meta != 0 && lower_meta == 0;
   const bool upper_collision = meta != 0 && upper_meta == 0;
   const int count = int(lower_collision) + int(upper_collision);
@@ -205,7 +159,7 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
 #pragma unroll
   for (int upper = 0; upper < 2; ++upper) {
     const uint16_t selected = upper ? upper_meta : lower_meta;
-    const uint32_t normal_lows = selected_lows(lo0, lo1, upper);
+    const uint32_t normal_lows = nf12_rowmajor::selected_lows(lo0, lo1, upper);
     const bool collision = upper ? upper_collision : lower_collision;
     const uint32_t escape_index = first_collision + (upper ? int(lower_collision) : 0);
     const uint32_t out_lows = meta == 0 ? uint32_t(lo0 * 2 + upper) :
@@ -214,7 +168,7 @@ __global__ void pack_rowmajor(const uint8_t* __restrict__ source,
     uint8_t* dst = dest + (row * k_blocks + kb) * 96;
     reinterpret_cast<uint16_t*>(dst)[group] = selected;
     reinterpret_cast<uint32_t*>(dst + 32)[group] = out_lows;
-    if (collision) dest_escapes[escape_index] = collision_escape(normal_lows, base);
+    if (collision) dest_escapes[escape_index] = nf12_rowmajor::collision_escape(normal_lows, base);
   }
 }
 

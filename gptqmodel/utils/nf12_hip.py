@@ -56,6 +56,12 @@ _SOURCE_FILES = (
     "nf12_validation.cuh",
 )
 
+# Portable format helpers shared with the CUDA kernels. The HIP build stages
+# them beside the kernels so the include stays backend-local.
+_SHARED_SOURCES = (
+    ("../nf12/csrc/common/rowmajor_format.cuh", "rowmajor_format.cuh"),
+)
+
 
 def _staging_root() -> Path:
     """Writable directory that receives a copy of the kernel sources."""
@@ -90,6 +96,11 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"NF12 HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
+    for relative, staged_name in _SHARED_SOURCES:
+        source = originals / relative
+        if not source.exists():
+            raise FileNotFoundError(f"NF12 HIP shared source is missing: {source}")
+        (stage / staged_name).write_bytes(source.read_bytes())
     # Derived from _SOURCE_FILES so a new kernel cannot be staged but silently
     # left out of the build. Headers are staged above but are not sources.
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
