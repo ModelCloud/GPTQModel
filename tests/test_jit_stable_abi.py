@@ -212,3 +212,25 @@ def test_nf12_jit_cache_key_ignores_torch_version(monkeypatch):
     monkeypatch.setattr(_jit.torch, "__version__", "2.15.0.dev20260928+cu130")
 
     assert _jit._cache_key(source, [80]) == fingerprint
+
+
+def test_stable_abi_empty_uses_the_direct_allocation_shim():
+    """`at::empty` must not pay the boxed aten::empty dispatcher per call.
+
+    Every kernel materialises sentinel and output buffers on each invocation,
+    so routing allocation through the boxed dispatcher made small (decode
+    shaped) launches measurably slower. The direct AOTI shim keeps the same
+    stable-ABI surface without that overhead; options it cannot represent
+    (non-strided layout, pinned memory, an unset dtype) still fall back.
+    """
+
+    header = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "torch_stable_compat.h"
+    ).read_text(encoding="utf-8")
+    start = header.index("inline Tensor empty(")
+    end = header.index("inline Tensor zeros(", start)
+    body = header[start:end]
+    assert "aoti_torch_empty_strided(" in body
+    assert "torch::stable::empty(" in body
