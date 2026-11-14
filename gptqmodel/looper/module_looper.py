@@ -1306,6 +1306,40 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         setattr(named_module.module, "target_device", target_device)
         return prepared
 
+    def _lm_head_is_tied(self) -> bool:
+        """Return whether `lm_head` shares its source weight with another module.
+
+        `find_tied_parameters` only compares materialized parameters. A lazily
+        loaded shell keeps both sides as independent META parameters until the
+        loader ties them, so identity never matches and quantization continues
+        until the source reload fails with a misleading "missing checkpoint
+        tensors" error. Detect that shape from the checkpoint instead: a tied
+        HF checkpoint omits `lm_head.weight`, so the head has no independent
+        source tensor to quantize.
+        """
+
+        model = self.gptq_model.model
+        lm_head_name = self.gptq_model.lm_head
+        if any(
+            f"{lm_head_name}.weight" in names
+            for names in find_tied_parameters(model)
+        ):
+            return True
+        if not bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
+            return False
+        lm_head_module = get_module(model, key=lm_head_name)
+        if lm_head_module is None:
+            return False
+        weight = getattr(lm_head_module, "weight", None)
+        if not torch.is_tensor(weight) or not getattr(weight, "is_meta", False):
+            # A materialized head either has its own storage or shares it; the
+            # identity check above already covered the shared case.
+            return False
+        checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
+        if not callable(checker):
+            return False
+        return not checker(target_model=model, target_submodule=lm_head_module)
+
     def _prepare_layer_direct_state_for_forward(
         self,
         module: torch.nn.Module,
@@ -1793,10 +1827,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if self.gptq_model.quantize_config.lm_head:
             # Composite models can keep both the head and tying configuration
             # below the root. Check actual sharing by the fully qualified name.
-            if any(
-                f"{self.gptq_model.lm_head}.weight" in names
-                for names in find_tied_parameters(self.gptq_model.model)
-            ):
+            if self._lm_head_is_tied():
                 raise NotImplementedError(
                     "quantization of `lm_head` layer with tied weights is not supported. "
                     "Untie the model weights before quantization."

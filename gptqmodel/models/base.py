@@ -3937,6 +3937,13 @@ class BaseQModel(nn.Module):
         # quantized layer that already lives in the model tree. Re-packing the
         # restored dense source here would replace that layer for the forward.
         full_name = getattr(named_module, "full_name", None)
+        # The lm_head is its own quantization stage rather than a decoder
+        # projection. It is quantized from a dense CPU source that must stay
+        # the module in the tree, so packing it as an NF12 forward wrapper both
+        # saves nothing (the dense source is required anyway) and detaches the
+        # head from the tree that `post_quantize` moves back to CPU.
+        if full_name is not None and full_name == getattr(self, "lm_head", None):
+            return module
         if full_name:
             try:
                 live = self.model.get_submodule(full_name)
