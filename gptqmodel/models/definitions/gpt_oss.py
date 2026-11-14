@@ -25,7 +25,9 @@ class GPTOSSGPTQ(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "experts": {
-                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+                    # `(clamp(up) + 1) * glu` is not homogeneous in up_proj, so
+                    # a scale folded into up_proj does not reach down_proj.
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x:nosrc", "down_proj:1"),
                 },
             }
         }

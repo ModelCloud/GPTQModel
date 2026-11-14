@@ -4872,8 +4872,17 @@ class BaseQModel(nn.Module):
             return input_width is None or weight.numel() == input_width
 
         last_gain_norm = None
+        # The last norm-like module, even when it cannot absorb a fold (a
+        # weightless or gated norm). A MoE gate/up block reads this module's
+        # output; resolving to it lets the foldability filter drop the group
+        # instead of folding into an unrelated preceding linear.
+        last_norm_candidate = None
 
-        def _select_prev_op(input_width: int | None, allow_block_norm: bool = False):
+        def _select_prev_op(
+            input_width: int | None,
+            allow_block_norm: bool = False,
+            shared_source: nn.Module | None = None,
+        ):
             """Return the normalization that immediately feeds the consumer block.
 
             Consecutive non-quantized blocks can contain several modules: the
@@ -4888,6 +4897,12 @@ class BaseQModel(nn.Module):
             group always reads the MoE block input, so its fold source is that
             norm even when the intervening routed-expert blocks cleared the run
             (DeepSeek orders routed experts before ``shared_experts``).
+
+            ``shared_source`` is the source of an earlier block whose consumers
+            declare the same ``:in=<tag>`` input. Parallel decoder blocks (for
+            example Cohere/Cohere2 attention and MLP) read one norm without an
+            intervening norm block, so the consumer's input tag is the only
+            declaration that both branches share the same source.
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -4896,9 +4911,19 @@ class BaseQModel(nn.Module):
                 # Folding into a post-norm corrupts the block output. With no
                 # data-flow source in this run, skip the scale instead.
                 return None
-            if allow_block_norm and last_gain_norm is not None and input_width is not None:
-                if _norm_width(last_gain_norm) == input_width:
-                    return last_gain_norm
+            if allow_block_norm and last_gain_norm is not None:
+                # A MoE gate/up block always reads the block input norm. Return
+                # it even when it is not foldable or its width differs; the
+                # foldability/width filters drop the group rather than folding a
+                # scale into an unrelated preceding linear (for example the last
+                # routed expert's down projection). The most recent gain norm wins
+                # over a shared `:in=` source because a sequential MoE block reads
+                # its post-attention norm, not the attention input norm.
+                return last_gain_norm
+            if allow_block_norm and last_norm_candidate is not None:
+                return last_norm_candidate
+            if shared_source is not None and _norm_width(shared_source) == input_width:
+                return shared_source
             # A fallback norm whose width differs from the consumer's input
             # cannot absorb this scale: `scale_ln_fcs` would multiply a
             # differently sized weight (or raise). DeepSeek MLA is the concrete
@@ -4917,7 +4942,7 @@ class BaseQModel(nn.Module):
                 return int(weight.numel())
             return None
 
-        def _norm_scale_consumers(prev_op_module, input_width: int | None, extra_names=()):
+        def _norm_scale_consumers(prev_op_module, input_width: int | None, extra_names=(), block=()):
             """Non-quantized modules in this run that read ``prev_op``'s output.
 
             A MoE router (``mlp.gate``, ``router``) and Qwen2's
@@ -4928,6 +4953,10 @@ class BaseQModel(nn.Module):
             of shape ``[experts, hidden]`` and apply it as a linear map, so both
             shapes are accepted here and ``scale_input_columns`` performs the
             multiplication.
+
+            Non-quantized siblings declared in the same block (for example
+            Laguna's ``self_attn.g_proj:!``) read the same normed input too, so
+            they are collected from ``block`` as well.
             """
 
             width = _norm_width(prev_op_module)
@@ -4936,6 +4965,22 @@ class BaseQModel(nn.Module):
             consumers = []
             for candidate_name, candidate_module in pending_nonquant:
                 if candidate_module is prev_op_module or candidate_name in post_norm_modules:
+                    continue
+                if isinstance(candidate_module, nn.Linear):
+                    if candidate_module.in_features == width:
+                        consumers.append(candidate_name)
+                    continue
+                weight = getattr(candidate_module, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(candidate_name)
+            for raw_name in block:
+                if all(flag not in raw_name for flag in NON_QUANTIZE_FLAGS):
+                    continue
+                candidate_name = strip_non_quantize_flags(raw_name)
+                if candidate_name in consumers:
+                    continue
+                candidate_module, _ = get_module_by_name_prefix(module, candidate_name)
+                if candidate_module is None or candidate_module is prev_op_module:
                     continue
                 if isinstance(candidate_module, nn.Linear):
                     if candidate_module.in_features == width:
@@ -5003,6 +5048,11 @@ class BaseQModel(nn.Module):
         # Non-quantized blocks seen since the last quantized block. The run is
         # resolved at the consumer, where the input width is known.
         pending_nonquant = []
+        # Source norm recorded for each declared ``:in=<tag>`` input. Parallel
+        # decoder blocks consume one norm through two quantized branches; the
+        # second branch reuses the first branch's source instead of folding into
+        # the previous branch's output projection.
+        shared_input_sources: Dict[str, nn.Module] = {}
         prev_not_quantized = False
         for block in full_layer_modules:
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
@@ -5020,6 +5070,8 @@ class BaseQModel(nn.Module):
                     pending_nonquant.append((candidate_name, resolved_module))
                     if _is_gain_norm(resolved_module, candidate_name, None):
                         last_gain_norm = resolved_module
+                    if candidate_name not in post_norm_modules and norm_type_of(resolved_module) is not None:
+                        last_norm_candidate = resolved_module
                 if not prev_not_quantized:
                     _try_update_last_module(candidate_name)
                 prev_not_quantized = True
@@ -5045,6 +5097,13 @@ class BaseQModel(nn.Module):
             has_gate_up_roles = any("gate" in roles or "up" in roles for roles in block_roles.values())
             is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
             is_moe_gate_up_block = is_moe_block and has_gate_up_roles
+            block_input_tags = set()
+            for name in block:
+                if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
+                    spec = plan.find(self._parse_module_flags(name)[0])
+                    if spec is not None:
+                        block_input_tags.update(flag[3:] for flag in spec.flags if flag.startswith("in="))
+            shared_tag = next(iter(block_input_tags)) if len(block_input_tags) == 1 else None
             skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
@@ -5142,13 +5201,29 @@ class BaseQModel(nn.Module):
                 if not skip_block:
                     input_width = inp.shape[-1] if inp.dim() > 0 else None
                     allow_block_norm = is_moe_family and has_gate_up_roles
-                    prev_op = _select_prev_op(input_width, allow_block_norm=allow_block_norm)
+                    shared_source = shared_input_sources.get(shared_tag) if shared_tag else None
+                    prev_op = _select_prev_op(
+                        input_width,
+                        allow_block_norm=allow_block_norm,
+                        shared_source=shared_source,
+                    )
                     moe_consumers = (
                         _moe_block_consumers(block, input_width, subset)
                         if is_moe_family and input_width is not None
                         else []
                     )
-                    scale_consumers = _norm_scale_consumers(prev_op, input_width, extra_names=moe_consumers)
+                    scale_consumers = _norm_scale_consumers(
+                        prev_op,
+                        input_width,
+                        extra_names=moe_consumers,
+                        block=block,
+                    )
+                    if (
+                        prev_op is not None
+                        and shared_tag
+                        and _is_gain_norm(prev_op, "", input_width)
+                    ):
+                        shared_input_sources[shared_tag] = prev_op
                     pending_nonquant.clear()
                     if prev_op is None:
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
@@ -5246,7 +5321,67 @@ class BaseQModel(nn.Module):
             return out
 
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
+        nodes = self._merge_shared_source_nodes(module, nodes)
         return self._filter_awq_scaling_sources(module, nodes)
+
+    def _merge_shared_source_nodes(self, layer_module, nodes):
+        """Fold every group that shares one gain norm into a single scale group.
+
+        Routed experts and ``shared_experts`` read the same post-attention norm,
+        and parallel decoder blocks read one input norm from two quantized
+        branches. Folding those as separate groups divides that norm once per
+        group, so each fold leaves the other group's consumers unscaled. One
+        norm is divided exactly once, so it can have exactly one scale group.
+        """
+
+        merged = []
+        index_by_source: Dict[int, int] = {}
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            gain = getattr(prev_op, "weight", None)
+            if not isinstance(prev_op, nn.Module) or not isinstance(gain, torch.Tensor) or gain.ndim != 1:
+                merged.append(node)
+                continue
+            key = id(prev_op)
+            existing = index_by_source.get(key)
+            if existing is None:
+                index_by_source[key] = len(merged)
+                merged.append(node)
+                continue
+            base = merged[existing]
+            base_layers = list(base.get("layers") or [])
+            for layer in node.get("layers") or []:
+                if all(layer is not known for known in base_layers):
+                    base_layers.append(layer)
+            base["layers"] = base_layers
+            consumers = list(base.get("_scale_consumers") or [])
+            for consumer in node.get("_scale_consumers") or []:
+                if consumer not in consumers:
+                    consumers.append(consumer)
+            if consumers:
+                base["_scale_consumers"] = consumers
+            # The merged group needs one forward that executes every member, so
+            # re-anchor the inspection module on the deepest common ancestor of
+            # all consumers (routed + shared experts resolve to the MoE root).
+            try:
+                names = [get_op_name(layer_module, layer) for layer in base_layers]
+            except ValueError:
+                names = []
+            inspect_name = ""
+            if names:
+                inspect_name = names[0].rsplit(".", 1)[0] if "." in names[0] else ""
+                for name in names[1:]:
+                    parent = name.rsplit(".", 1)[0] if "." in name else ""
+                    while inspect_name and not (parent == inspect_name or parent.startswith(f"{inspect_name}.")):
+                        inspect_name = inspect_name.rsplit(".", 1)[0] if "." in inspect_name else ""
+            # With no shared ancestor the branches live under different roots
+            # (attention + MoE); keep the inspection module the first group
+            # already resolved instead of widening it to the whole layer.
+            if inspect_name:
+                inspect_module, _ = get_module_by_name_prefix(layer_module, inspect_name)
+                if inspect_module is not None:
+                    base["module2inspect"] = inspect_module
+        return merged
 
     def _filter_awq_scaling_sources(self, layer_module, nodes):
         """Drop scaling groups whose ``prev_op`` cannot be folded without changing the layer output.

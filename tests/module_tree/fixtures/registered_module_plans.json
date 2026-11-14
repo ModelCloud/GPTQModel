@@ -38,7 +38,7 @@
     "exaone4": "Exaone4QModel",
     "exaone4_5": "Exaone4_5QModel",
     "exaone4_5_text": "Exaone4QModel",
-    "falcon": "RwgQModel",
+    "falcon": "FalconQModel",
     "falcon_h1": "FalconH1QModel",
     "falcon_mamba": "FalconMambaQModel",
     "flint": "FlintQModel",
@@ -214,10 +214,12 @@
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["pre_mlp_layernorm:!"],
         ["mlp:?"],
         ["mlp.router.gate:!"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj", "mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.shared_experts.down_proj", "mlp.experts.{expert_index}.down_proj", "mlp.down_proj"]
+        ["mlp.shared_experts.down_proj", "mlp.experts.{expert_index}.down_proj", "mlp.down_proj"],
+        ["post_mlp_layernorm:!"]
       ]
     },
     "AgnesQModel/gptq": {
@@ -387,6 +389,8 @@
         ["mlp.gate:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
         ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
       ]
@@ -678,6 +682,17 @@
         ["mlp.dense_4h_to_h"]
       ]
     },
+    "FalconQModel/gptq": {
+      "layers": ["transformer.h"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attention.query_key_value"],
+        ["self_attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp.dense_h_to_4h"],
+        ["mlp.dense_4h_to_h"]
+      ]
+    },
     "FalconH1QModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
@@ -686,6 +701,7 @@
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
         ["mamba.out_proj"],
+        ["pre_ff_layernorm:!"],
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"]
       ]
@@ -1684,8 +1700,8 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj"],
-        ["self_attn.o_proj", "self_attn.out_proj", "self_attn.output_gate"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj", "self_attn.output_gate:!"],
+        ["self_attn.o_proj", "self_attn.out_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
@@ -1910,7 +1926,7 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],

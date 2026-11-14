@@ -33,11 +33,11 @@ class OlmoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "q_proj:0",
+                "q_norm:0:!",
                 "k_proj:0",
+                "k_norm:0:!",
                 "v_proj:0",
                 "o_proj:1",
-                "q_norm:!",
-                "k_norm:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {

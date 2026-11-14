@@ -17,6 +17,7 @@ class GptBigCodeQModel(BaseQModel):
             "ln_1": ("ln_1:!",),
             "attn": ("c_attn:0", "c_proj:1"),
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            # GELU between the two projections is not positively homogeneous.
+            "mlp": ("c_fc:0:nosrc", "c_proj:1"),
         }
     ]

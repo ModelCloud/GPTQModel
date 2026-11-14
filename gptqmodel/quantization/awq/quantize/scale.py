@@ -47,12 +47,26 @@ try:
 except Exception:  # pragma: no cover - older transformers builds do not expose Cohere Compass yet
     CohereCompassLayerNorm = None
 
+try:
+    from transformers.models.cohere2.modeling_cohere2 import Cohere2LayerNorm
+except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2 yet
+    Cohere2LayerNorm = None
+
+try:
+    from transformers.models.cohere2_moe.modeling_cohere2_moe import Cohere2MoeLayerNorm
+except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2-MoE yet
+    Cohere2MoeLayerNorm = None
+
 
 allowed_norms = [nn.LayerNorm, LlamaRMSNorm, GemmaRMSNorm, Gemma2RMSNorm, CohereLayerNorm]
 if Gemma4RMSNorm is not None:
     allowed_norms.append(Gemma4RMSNorm)
 if CohereCompassLayerNorm is not None:
     allowed_norms.append(CohereCompassLayerNorm)
+if Cohere2LayerNorm is not None:
+    allowed_norms.append(Cohere2LayerNorm)
+if Cohere2MoeLayerNorm is not None:
+    allowed_norms.append(Cohere2MoeLayerNorm)
 allowed_act_fns = [
     nn.GELU,
     BloomGelu,
@@ -60,6 +74,28 @@ allowed_act_fns = [
     GELUTanh,
     GELUActivation,
 ]
+
+
+def is_foldable_source(prev_op: nn.Module) -> bool:
+    """Whether ``prev_op`` can absorb a consumer input scale without changing its output.
+
+    A definition can still name a module the fold cannot use: a weightless norm
+    (OLMo, HRM), a norm with an input-dependent gate (A.X-K2), a ``Conv1D``
+    (GPT-2), or a HyperConnection. Those groups are skipped instead of raising
+    in ``apply_scale``; the consumer then falls back to plain quantization.
+    """
+
+    if isinstance(prev_op, nn.Linear):
+        return True
+    if any(isinstance(prev_op, t) for t in allowed_act_fns):
+        return True
+    is_norm = any(isinstance(prev_op, t) for t in allowed_norms) or "rmsnorm" in str(
+        prev_op.__class__
+    ).lower()
+    if not is_norm:
+        return False
+    weight = getattr(prev_op, "weight", None)
+    return isinstance(weight, torch.Tensor) and weight.ndim == 1
 
 
 def _norm_gain_offset(ln: nn.Module) -> float:
@@ -164,6 +200,17 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
     applied_norm_scales = {}
     for group_index, (prev_op_name, layer_names, scales, _) in enumerate(scales_list):
         prev_op = get_op_by_name(module, prev_op_name)
+        if not is_foldable_source(prev_op):
+            # A weightless norm, a gated norm, Conv1D, or a HyperConnection has
+            # no plain gain to divide. Skipping keeps the layer quantized plainly
+            # instead of mutating a tensor that does not represent the source.
+            log.warning(
+                "AWQ: skipping scale group %s -> %s: %s is not a foldable scale source",
+                prev_op_name,
+                layer_names,
+                type(prev_op).__name__,
+            )
+            continue
         layers = [get_op_by_name(module, name) for name in layer_names]
 
         original_prev_device = get_device(prev_op)

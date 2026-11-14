@@ -18,6 +18,7 @@ class GPTNeoXQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "attention": ("query_key_value:0", "dense:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+            # GELU between the two projections is not positively homogeneous.
+            "mlp": ("dense_h_to_4h:0:nosrc", "dense_4h_to_h:1"),
         }
     ]
