@@ -17,7 +17,7 @@
 accelerate==1.15.0
 click==8.3.1
 datasets==5.2.0
-defuser==0.0.29
+defuser==0.0.30
 device-smi==0.5.7
 dill==0.4.1
 filelock==4.2.10

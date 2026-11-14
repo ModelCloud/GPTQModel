@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pcre
 import pytest
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from gptqmodel.models import loader
 from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
@@ -86,3 +88,36 @@ def test_phi4_ci_deps_cover_required_packages():
     assert "scipy" in pkgs
     for requirement in Phi4MMGPTQ.require_pkgs:
         assert requirement in pkgs
+
+
+def test_tenstorrent_manifest_defuser_satisfies_the_project_requirement():
+    """The pinned TT defuser must satisfy requirements.txt.
+
+    Below 0.0.30 the Granite MoE SWA routed experts stay packed, so
+    ``tests/module_tree/test_granite_swa_model_tree.py`` cannot expose the
+    quantizable expert projections.
+    """
+
+    repo = Path(__file__).resolve().parents[1]
+    project = (repo / "requirements.txt").read_text(encoding="utf-8")
+    requirements = [
+        line.strip()
+        for line in project.splitlines()
+        if line.strip().startswith("defuser")
+    ]
+    assert len(requirements) == 1, requirements
+    specifier = SpecifierSet(requirements[0].removeprefix("defuser"))
+
+    manifest = (repo / "requirements" / "tenstorrent-py312.txt").read_text(encoding="utf-8")
+    pins = [
+        line.strip()
+        for line in manifest.splitlines()
+        if line.strip().startswith("defuser==")
+    ]
+    assert len(pins) == 1, pins
+    pinned = Version(pins[0].split("==", 1)[1])
+
+    assert specifier.contains(pinned), (
+        f"Tenstorrent manifest pins defuser=={pinned}, which does not satisfy "
+        f"{requirements[0]}; Granite MoE SWA routed experts stay packed below 0.0.30"
+    )
