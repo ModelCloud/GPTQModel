@@ -95,7 +95,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iters", type=int, default=60)
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit 0.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # A real run always allocates the L2 flush buffer and reports the hot and
+    # flushed medians separately, so odd iterations are the flushed samples.
+    # Fewer than two iterations leaves one of those medians undefined.
+    if args.iters < 2:
+        parser.error(
+            f"--iters must be at least 2 (got {args.iters}): the benchmark reports "
+            "a hot median from even iterations and a flushed median from odd ones"
+        )
+    if args.warmup < 0:
+        parser.error(f"--warmup cannot be negative (got {args.warmup})")
+    return args
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -183,6 +194,15 @@ class L2Flush:
 
 
 def _timed_us(device: torch.device, fn, *, warmup: int, iters: int, l2: L2Flush | None) -> tuple[float, float | None]:
+    # Name the degenerate count instead of letting ``statistics.median`` raise
+    # ``StatisticsError: no median for empty data`` from a partition below.
+    if iters < 1:
+        raise ValueError(f"_timed_us needs at least one iteration, got iters={iters}")
+    if l2 is not None and iters < 2:
+        raise ValueError(
+            "_timed_us needs at least two iterations when an L2 flush is used: "
+            f"odd iterations are the flushed samples, got iters={iters}"
+        )
     with torch.inference_mode():
         for _ in range(warmup):
             fn()
