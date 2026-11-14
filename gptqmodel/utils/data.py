@@ -267,8 +267,12 @@ def get_dataloader(
     :param kwargs: additional keyword arguments will be passed to torch's `DataLoader` initialization,
         note values of `batch_size`, `shuffle` and `collate_fn` will always be overridden to fixed value
     :return: torch.utils.data.DataLoader
+
+    Streaming datasets (``IterableDataset``/``IterableDatasetDict``) are not
+    supported because the sampling and packing pipeline needs random access and
+    a known length; materialize the split before calling this helper.
     """
-    from datasets import DatasetDict, IterableDatasetDict, load_dataset
+    from datasets import DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
 
     if not load_fn_kwargs:
         load_fn_kwargs = {}
@@ -288,6 +292,18 @@ def get_dataloader(
         else:
             ds = ds["train"]
 
+    if isinstance(ds, IterableDataset):
+        raise TypeError(
+            "get_dataloader does not support streaming/IterableDataset inputs "
+            f"(got {type(ds).__name__}); materialize the split first, for example "
+            "with `Dataset.from_list(list(ds))`"
+        )
+
+    preprocess = (
+        partial(preprocess_fn, **preprocess_fn_kwargs)
+        if callable(preprocess_fn)
+        else None
+    )
     ds = ds.select(
         indices=random.sample(range(len(ds)), min(len(ds), num_samples)),
         keep_in_memory=True,
@@ -304,7 +320,7 @@ def get_dataloader(
             "prompt_col_name": prompt_col_name,
             "label_col_name": label_col_name,
             "tokenizer": tokenizer,
-            "preprocess_fn": partial(preprocess_fn, **preprocess_fn_kwargs),
+            "preprocess_fn": preprocess,
             "sample_max_len": sample_max_len,
             "block_max_len": block_max_len,
             "add_eos_token": add_eos_token,
