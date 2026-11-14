@@ -21,6 +21,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
 
@@ -348,6 +349,11 @@ class TorchAtenLinear(PackableQuantLinear):
             and self._cpu_fused_available()
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
+            # The fused kernel writes the activation dtype before a separate
+            # bias add, so a pre-bias sum outside its range would become inf.
+            # Keep biased layers on the FP32-reduce dense path unless the
+            # fused op applies the bias itself.
+            and (self.bias is None or self._fused_op_handles_bias)
         ):
             capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
@@ -355,6 +361,12 @@ class TorchAtenLinear(PackableQuantLinear):
         elif self.linear_mode is None:
             self.linear_mode = "train"
 
+        # A fused op or a dense matmul both write the activation dtype before a
+        # separate bias add. Keep the biased product in FP32 instead so a
+        # pre-bias sum outside the dtype range can still cancel.
+        add_bias_in_product = self.bias is not None and not (
+            self.linear_mode == "inference" and self._fused_op_handles_bias
+        )
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
@@ -365,12 +377,10 @@ class TorchAtenLinear(PackableQuantLinear):
         else:
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
-            out = torch.matmul(x, weights).reshape(out_shape)
-
-        if self.bias is not None and not (
-            self.linear_mode == "inference" and self._fused_op_handles_bias
-        ):
-            out.add_(self.bias)
+            if add_bias_in_product:
+                out = matmul_fp32_reduce(x, weights, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x, weights).reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

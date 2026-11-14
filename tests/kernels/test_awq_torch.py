@@ -81,7 +81,6 @@ def test_awq_torch_matches_manual_dequant(dtype):
     output_first = module(x)
     output_second = module(x)
 
-    bias_expected = module.bias.to(dtype=dtype)
     dequant_weight = dequantize_gemm(
         qweight=module.qweight,
         qzeros=module.qzeros,
@@ -89,8 +88,10 @@ def test_awq_torch_matches_manual_dequant(dtype):
         bits=bits,
         group_size=group_size,
     ).to(dtype=dtype)
-    expected = torch.matmul(x.to(dtype), dequant_weight)
-    expected = expected + bias_expected
+    # The biased path keeps the product and the bias in FP32 and rounds once
+    # (issue #3977). A low-precision matmul followed by a low-precision add
+    # rounds twice and can differ by one output ulp, so use an FP64 oracle.
+    expected = (x.double() @ dequant_weight.double() + module.bias.double()).to(dtype)
 
     assert output_first.dtype == dtype
     assert output_second.dtype == dtype

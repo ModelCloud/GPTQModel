@@ -16,6 +16,7 @@ from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._fused_train_state import capture_fused_train_state
+from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
 
@@ -290,12 +291,13 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             out = self._fused_op_forward(x_flat).reshape(out_shape)
         else:
             weight = self.dequantize_weight().to(x_flat.dtype)
-            out = torch.matmul(x_flat, weight).reshape(out_shape)
             if self.bias is not None:
-                # transform_cpu() keeps the fused kernel's bias in FP32. Add it
-                # in place so PyTorch computes the sum in FP32 and rounds once
-                # to the output dtype, matching the ATen path.
-                out.add_(self.bias)
+                # transform_cpu() keeps the fused kernel's bias in FP32. Keep
+                # the product and the bias in FP32 so a cancelling bias is
+                # applied before the single output cast.
+                out = matmul_fp32_reduce(x_flat, weight, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x_flat, weight).reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

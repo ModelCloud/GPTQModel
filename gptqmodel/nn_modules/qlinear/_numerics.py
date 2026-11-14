@@ -46,11 +46,11 @@ def _can_fuse_hip_bias(
     """Whether ``addmm`` must replace the separate bias add on this platform.
 
     HIP keeps the low-precision output because the wide FP32 request is
-    CUDA-only, so a separate add rounds (and can overflow) the partial sum
-    before the bias cancels it; ``addmm`` matches ``(x @ w + bias)`` in FP32 on
-    HIP bitwise. The branch is deliberately scoped to ROCm low-precision
-    activations: NVIDIA FP32 inputs never round before the add, so their
-    expression stays unchanged.
+    CUDA-only, and CPU's low-precision matmul also rounds its accumulator, so a
+    separate add rounds (and can overflow) the partial sum before the bias
+    cancels it; ``addmm`` keeps ``(x @ w + bias)`` in FP32 on both platforms.
+    The branch is scoped to ROCm and CPU low-precision activations: NVIDIA FP32
+    inputs never round before the add, so their expression stays unchanged.
 
     Two shapes of input keep the unfused expression:
 
@@ -60,9 +60,15 @@ def _can_fuse_hip_bias(
     * a bias that needs broadcasting beyond the flattened output shape cannot
       be expressed by the 2D ``addmm`` input.
     """
-    if bias is None or not IS_ROCM or x.device.type != "cuda":
+    if bias is None:
+        return False
+    if x.device.type == "cpu":
+        pass
+    elif not (IS_ROCM and x.device.type == "cuda"):
         return False
     if x.dtype not in (torch.float16, torch.bfloat16) or bias.dtype != x.dtype:
+        return False
+    if weight.dtype != x.dtype:
         return False
     if bias.device != x.device or autocast_active(x.device.type):
         return False

@@ -407,10 +407,12 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     with torch.inference_mode():
         out = kernel(x)
 
-    x_fp16 = x.to(torch.float16).float()
-    absmax = x_fp16.abs().amax(dim=1)
+    # The INT8 path computes the row scale in FP32 from the source dtype; an
+    # intermediate FP16 cast would overflow any magnitude above 65504.
+    x_fp32 = x.float()
+    absmax = x_fp32.abs().amax(dim=1)
     x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
-    x_int8 = (x_fp16 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    x_int8 = (x_fp32 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
     weight_scale = kernel.weight_scb.float() / 127.0
     expected = (
         (x_int8.float() @ kernel.weight.float().t())

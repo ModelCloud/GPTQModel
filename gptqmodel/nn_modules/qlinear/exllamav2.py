@@ -296,8 +296,18 @@ class ExllamaV2Linear(GPTQQuantLinear):
             from ...utils.exllamav2 import exllamav2_clone_q_matrix
 
             handle, temporaries = exllamav2_clone_q_matrix(self, compact=True)
+        # The native kernel writes the activation dtype, so a pre-bias sum
+        # outside that range becomes inf before a cancelling bias is added.
+        # The extension's FP32 path keeps the reduction and the bias wide and
+        # only rounds the visible output.
+        wide_bias = self.bias is not None
+        kernel_input = (
+            x.to(torch.float32)
+            if wide_bias and x.dtype != torch.float32
+            else x
+        )
         try:
-            out = self.ext_gemm_half_q_half(x, handle, self.out_features, force_cuda)
+            out = self.ext_gemm_half_q_half(kernel_input, handle, self.out_features, force_cuda)
         finally:
             if temporaries is not None:
                 from ...utils.exllamav2 import exllamav2_free_q_matrix
@@ -305,7 +315,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
                 exllamav2_free_q_matrix(handle)
 
         if self.bias is not None:
-            out.add_(self.bias)
+            out = out + self.bias.to(device=out.device, dtype=torch.float32)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

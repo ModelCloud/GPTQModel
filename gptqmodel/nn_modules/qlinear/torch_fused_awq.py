@@ -24,6 +24,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
@@ -339,6 +340,9 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and not x_flat.requires_grad
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
+            # The fused op writes the activation dtype before the bias add;
+            # keep biased layers on the FP32-reduce dense path.
+            and self.bias is None
         ):
             capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)
@@ -356,10 +360,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
         else:
             # log.debug("awq dense path")
             weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
-            out = torch.matmul(x_flat, weight)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            else:
+                out = torch.matmul(x_flat, weight)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
 

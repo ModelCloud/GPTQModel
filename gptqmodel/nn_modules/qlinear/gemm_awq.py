@@ -109,6 +109,18 @@ class AwqGemmFn(torch.autograd.Function):
             if bias is not None:
                 out = out + bias.to(torch.float32)
             out = out.to(dtype=x.dtype)
+        elif bias is not None:
+            # The split-K partials are already FP32. Ask for an FP32 result and
+            # add the stored bias there, so a finite sum that overflows the
+            # activation dtype is not rounded before the bias cancels it.
+            out = _awq_cuda_gemm_forward_fp32_reduce(
+                x_2d,
+                qweight,
+                scales,
+                qzeros,
+                8,
+            )
+            out = (out + bias.float()).to(dtype=x.dtype)
         else:
             out = _awq_cuda_gemm_forward(
                 x_2d,
@@ -118,8 +130,6 @@ class AwqGemmFn(torch.autograd.Function):
                 8,
                 fp32_accum=fp32_accum,
             )
-            if bias is not None:
-                out = out + bias
 
         out = out.reshape(out_shape)
         return out
