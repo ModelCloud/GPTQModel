@@ -156,7 +156,7 @@ __global__ void __launch_bounds__(Warps * 32) small_m_direct_kernel(
 }
 
 using Kernel = void (*)(const __nv_bfloat16*, int64_t, int, const uint8_t*, const uint4*,
-                        uint32_t, int, int, const __nv_bfloat16*, __nv_bfloat16*, int64_t, bool);
+                        uint32_t, uint32_t, int, int, const __nv_bfloat16*, __nv_bfloat16*, int64_t, bool);
 
 template <WeightSource S>
 Kernel select_kernel(const SmallMDirectConfig& config) {

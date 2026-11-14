@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_one_row(
   }
 }
 
-using Kernel = void (*)(const __nv_bfloat16*, const uint8_t*, const uint4*, uint32_t,
+using Kernel = void (*)(const __nv_bfloat16*, const uint8_t*, const uint4*, uint32_t, uint32_t,
                         int, const __nv_bfloat16*, __nv_bfloat16*, bool);
 
 template <WeightSource S>
