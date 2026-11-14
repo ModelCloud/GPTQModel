@@ -235,21 +235,32 @@ class Lora(Adapter):
         elif self.rank != lora_cfg.r:
             raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
-        weight_key = weight_key.lower()
+        def _extract_lora(module_key: str):
+            suffix_a = f"{module_key}.lora_A.weight"
+            suffix_b = f"{module_key}.lora_B.weight"
+            found_a = found_b = None
+            found_keys = []
+            for k, v in lora_weights.items():
+                if k.endswith(suffix_a):
+                    found_a = v.T
+                    found_keys.append(k)
+                elif k.endswith(suffix_b):
+                    found_b = torch.clone(v.T, memory_format=torch.contiguous_format)
+                    found_keys.append(k)
+            return found_a, found_b, found_keys
 
-        # hack for HF Auto compat
-        lora_A_weight_key = f"{weight_key}.lora_A.weight"
-        lora_B_weight_key = f"{weight_key}.lora_B.weight"
-
-
-        pop_keys = []
-        for k, v in lora_weights.items():
-            if k.endswith(lora_A_weight_key):
-                lora_A = v.T
-                pop_keys.append(k)
-            elif k.endswith(lora_B_weight_key):
-                lora_B = torch.clone(v.T, memory_format=torch.contiguous_format)
-                pop_keys.append(k)
+        # HF/PEFT safetensors keys are case-sensitive: MPT's `Wqkv` and
+        # Baichuan's `W_pack` must match the module name exactly.
+        lora_A, lora_B, pop_keys = _extract_lora(weight_key)
+        if lora_A is None or lora_B is None:
+            # Legacy GPT-QModel exports lowercased module names. Retry with the
+            # historical spelling, but keep the canonical case for new exports.
+            legacy_key = weight_key.lower()
+            if legacy_key != weight_key:
+                legacy_a, legacy_b, legacy_keys = _extract_lora(legacy_key)
+                if legacy_a is not None and legacy_b is not None:
+                    lora_A, lora_B, pop_keys = legacy_a, legacy_b, legacy_keys
+                    weight_key = legacy_key
 
         if pop_keys:
             for k in pop_keys:

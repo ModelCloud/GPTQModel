@@ -1528,7 +1528,9 @@ def ModelWriter(cls):
             # convert the dict into safetensors compatible dict
             for key, adapter in self.lora_results.items():
                 assert isinstance(adapter, Lora)
-                key = key.lower()
+                # PEFT matches module names case-sensitively; MPT (`Wqkv`) and
+                # Baichuan (`W_pack`) must keep their canonical casing in both
+                # the tensor keys and `target_modules`.
                 simple_module_name = key.split(".")[-1] # mlp.gate_proj => gate_proj
                 target_modules.add(simple_module_name)
 
