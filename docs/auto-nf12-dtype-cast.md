@@ -395,9 +395,9 @@ the diff is built.
 | --- | --- | --- |
 | Source read | 2 B/element | 1.5 B/element (packed) |
 | FP32 source copy | 4 B/element | none |
-| `wq` read | 4 B/element | 4 B/element |
+| `wq` FP32 operand | 4 B/element | 4 B/element |
 | Result write | 4 B/element | 4 B/element |
-| Peak for the diff step | 8 B/element | 4 B/element |
+| Peak for the diff step | 12 B/element | 8 B/element |
 
 Measured on an RTX 4090 with resident inputs, median of 30 trials:
 
@@ -408,6 +408,10 @@ Measured on an RTX 4090 with resident inputs, median of 30 trials:
 | `8192×2048` | 325.58 µs | 184.22 µs | 1.77× | 64 MiB |
 | `2048×8192` | 324.66 µs | 184.22 µs | 1.76× | 64 MiB |
 | `128256×2048` | 5,027.84 µs | 2,712.77 µs | 1.85× | 1,002 MiB |
+
+The benchmark dense side uses an already-FP32 `wq`. Production GPTQ returns a
+BF16/FP16 reconstruction, so both paths add a `wq.to(float32)` copy and the
+absolute peak is 12 vs 8 B/element; the 4 B/element saving is unchanged.
 
 Across the 112 Llama 3.2 1B projections plus the vocabulary projection the diff
 falls from 21.98 ms to 13.02 ms (1.69×), and 4,714 MiB of FP32 source traffic is
