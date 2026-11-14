@@ -25,6 +25,34 @@ from ..utils.torch import TORCH_GTE_210
 
 log = setup_logger()
 
+
+def module_weight_residual(
+        source_weight: Tensor,
+        wq: Tensor,
+        *,
+        packed_source=None,
+) -> Tensor:
+    """Return the FP32 ``w - wq`` residual EoRA needs for one module.
+
+    EoRA owns this derivation: producers publish the weights they manage, never
+    a precomputed difference. When the module kept an AUTO_NF12 packed source,
+    fuse the widening decode with the subtraction so the source is never
+    materialized as FP32; otherwise use the dense expression.
+    """
+
+    if packed_source is not None:
+        try:
+            from ..utils.auto_dtype_cast import fused_w_minus_wq
+
+            wq_fp32 = wq if wq.dtype is torch.float32 else wq.to(dtype=torch.float32)
+            fused = fused_w_minus_wq(packed_source, wq_fp32)
+        except Exception:  # noqa: BLE001 - an unavailable native path falls back
+            fused = None
+        if fused is not None:
+            return fused
+    return source_weight.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
+
 def eora_process_input(
         input: Tensor,
         name: str,

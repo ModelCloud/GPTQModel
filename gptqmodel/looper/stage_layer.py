@@ -851,7 +851,10 @@ def run_layer_stage(
                 )
             continue
 
-        for p_index, processor in enumerate(looper.processors):
+        execution_stages = looper.execution_stages
+        for p_index, stage in enumerate(execution_stages):
+            processor = stage.processor
+            inline_processors = stage.inline
             if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
                 from ..nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
                 from .native_processor import NativeProcessor
@@ -886,7 +889,7 @@ def run_layer_stage(
             )
             model_output_required = (
                 not is_lm_head_module
-                and p_index == len(looper.processors) - 1
+                and p_index == len(execution_stages) - 1
                 and callable(output_requirement)
                 and output_requirement(
                     layer_index=layer_index,
@@ -896,7 +899,7 @@ def run_layer_stage(
             )
             boundary_output_required = (
                 not is_lm_head_module
-                and p_index == len(looper.processors) - 1
+                and p_index == len(execution_stages) - 1
                 and layer_boundary_checkpoint is not None
             )
             output_required = model_output_required or boundary_output_required
@@ -917,6 +920,7 @@ def run_layer_stage(
                 subset_plans = build_layer_subset_plans(
                     looper,
                     processor=processor,
+                    inline_processors=inline_processors,
                     module=module,
                     layer_modules=layer_modules,
                     planning_layer_modules=planning_layer_modules,
@@ -990,6 +994,7 @@ def run_layer_stage(
                     looper=looper,
                     plan=subset_plan,
                     processor=processor,
+                    inline_processors=inline_processors,
                     module=module,
                     layer_inputs=layer_inputs,
                     layer_input_kwargs=layer_input_kwargs,
@@ -1158,8 +1163,8 @@ def run_layer_stage(
                     attention_masks=attention_masks,
                 )
 
-            # Finalize module after last processor
-            if p_index == len(looper.processors) - 1:
+            # Finalize module after last stage
+            if p_index == len(execution_stages) - 1:
                 torch_sync()
 
                 prepare_layer_post_quantize = getattr(
@@ -1200,7 +1205,7 @@ def run_layer_stage(
                 layer_inputs = processor.inputs_cache.layer_inputs
                 pb.title(layer_title).subtitle("").draw()
 
-            if p_index == len(looper.processors) - 1:
+            if p_index == len(execution_stages) - 1:
                 torch_sync()
 
                 # Gather finalize tasks (can offload to disk); run them via the pool

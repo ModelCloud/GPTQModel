@@ -13,7 +13,8 @@ from torch import nn
 
 import gptqmodel.models.base as base_module
 import gptqmodel.quantization.nf12 as nf12_quantization
-from gptqmodel.looper import gptq_processor
+from gptqmodel.eora.eora import module_weight_residual
+from gptqmodel.looper import eora_processor, gptq_processor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
@@ -356,46 +357,18 @@ def test_quant_source_keeps_packed_source_when_eora_needs_the_diff(monkeypatch):
     assert any(tensor.numel() for tensor in packed.buffers())
 
 
-def test_w_wq_diff_falls_back_and_releases_packed_source(monkeypatch):
-    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
-    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+def test_module_weight_residual_falls_back_to_the_dense_expression():
+    source = torch.randn(16, 64, dtype=torch.bfloat16)
+    wq = torch.randn(16, 64, dtype=torch.float32)
 
-    source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
-    with torch.no_grad():
-        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
-    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
-    assert spec is not None
-    packed = auto_dtype_cast.cast_source_module(source, spec)
-    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
+    residual = module_weight_residual(source, wq)
 
-    named = NamedModule(restored, name="proj", full_name="proj", layer_index=0)
-    named.state["auto_dtype_cast_packed_source"] = packed
-    wq = torch.randn_like(restored.weight, dtype=torch.float32)
-    processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
-    processor.calculate_w_wq_diff = True
-
-    diff = processor._w_wq_diff(named, wq)
-
-    expected = restored.weight.detach().to(torch.float32) - wq
-    assert torch.equal(diff, expected)
-    assert "auto_dtype_cast_packed_source" not in named.state
-    assert all(not tensor.numel() for tensor in packed.buffers())
+    assert torch.equal(residual, source.to(torch.float32) - wq)
 
 
-def test_w_wq_diff_prefers_the_fused_native_path(monkeypatch):
-    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
-    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
-
-    source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
-    with torch.no_grad():
-        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
-    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
-    assert spec is not None
-    packed = auto_dtype_cast.cast_source_module(source, spec)
-    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
-    named = NamedModule(restored, name="proj", full_name="proj", layer_index=0)
-    named.state["auto_dtype_cast_packed_source"] = packed
-    wq = torch.randn_like(restored.weight, dtype=torch.float32)
+def test_module_weight_residual_prefers_the_fused_native_path(monkeypatch):
+    source = torch.randn(16, 64, dtype=torch.bfloat16)
+    wq = torch.randn(16, 64, dtype=torch.float32)
     sentinel = torch.zeros_like(wq)
     seen = []
 
@@ -404,24 +377,22 @@ def test_w_wq_diff_prefers_the_fused_native_path(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(auto_dtype_cast, "fused_w_minus_wq", fake_fused)
-    processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
-    processor.calculate_w_wq_diff = True
+    packed = object()
 
-    diff = processor._w_wq_diff(named, wq)
+    residual = module_weight_residual(source, wq, packed_source=packed)
 
-    assert diff is sentinel
+    assert residual is sentinel
     assert seen == [(packed, wq)]
-    assert "auto_dtype_cast_packed_source" not in named.state
-    assert all(not tensor.numel() for tensor in packed.buffers())
 
 
-def test_gptq_process_routes_the_eora_diff_through_the_fused_helper():
-    """The processor must call the fused helper, not the dense expression."""
+def test_gptq_publishes_weights_and_never_computes_the_eora_residual():
+    """The residual is EoRA's derivation; GPTQ only publishes its own weights."""
 
     source = inspect.getsource(gptq_processor.GPTQProcessor.process)
 
-    assert "self._w_wq_diff(module, wq)" in source
-    assert "module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)" not in source
+    assert "w_wq_diff" not in source
+    assert "self._w_wq_diff" not in source
+    assert gptq_processor.GPTQProcessor.emits == ("wq", "w")
 
 
 def test_eora_forward_does_not_repack_the_restored_source(monkeypatch):
@@ -875,15 +846,27 @@ def test_gptq_process_uses_the_fused_diff_with_a_bf16_reconstruction(monkeypatch
 
     processor.process(named, device=device)
 
-    diff = named.state["w_wq_diff"]
+    # GPTQ publishes only the weights it owns; the residual is EoRA's job.
+    assert "w_wq_diff" not in named.state
+    assert calls == []
+    assert named.state["wq"].dtype is torch.bfloat16
+    assert named.state["wq"].device.type == "cpu"
+    assert named.state["w"].dtype is torch.bfloat16
+    assert named.state["w"].device.type == "cpu"
+
+    eora = eora_processor.EoraProcessor.__new__(eora_processor.EoraProcessor)
+    diff = eora._resolve_residual(
+        named,
+        named.state["wq"],
+        scope=None,
+        target_device=device,
+    )
     expected = source.to(torch.float32) - wq.to(torch.float32)
     assert calls == [(torch.float32, True)]
     assert diff.dtype is torch.float32
     assert torch.equal(diff.view(torch.int32), expected.view(torch.int32))
     assert "auto_dtype_cast_packed_source" not in named.state
     assert all(not tensor.numel() for tensor in packed.buffers())
-    assert named.state["wq"].dtype is torch.bfloat16
-    assert named.state["wq"].device.type == "cpu"
 
 
 def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):

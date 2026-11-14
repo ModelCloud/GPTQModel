@@ -81,6 +81,7 @@ from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
+from .processor_fusion import plan_processor_fusion
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
@@ -195,10 +196,21 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         *,
         extensions=(),
         disk_write_expected: bool = False,
+        processor_fusion: bool = False,
     ):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
+        # Fuse downstream processors into their producer when both declare a
+        # compatible artifact contract. Fused processors keep their own
+        # finalize lifecycle but lose their separate execution stage.
+        # The declarations decide *whether* fusion is possible; the caller opts
+        # in explicitly, and staged-artifact runs never fuse.
+        self.processor_fusion_plan = plan_processor_fusion(
+            processors,
+            enabled=bool(processor_fusion) and not disk_write_expected,
+        )
+        self.execution_stages = self.processor_fusion_plan.stages
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
         self.layer_module_coverage = LayerModuleCoverageTracker()
@@ -1825,6 +1837,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         region_timer = getattr(self.gptq_model, "quant_region_timer", None)
 
         for p_index, processor in enumerate(self.processors):
+            if processor in self.processor_fusion_plan.fused:
+                # A fused consumer observes the producer's forward pass, so its
+                # own input cache would be an unused calibration replay.
+                continue
             if not processor.verify_calibration_dataset(p_index):
                 if isinstance(processor, EoraProcessor) or\
                         (isinstance(processor, GPTQProcessor) and getattr(self.gptq_model.quantize_config, "gptaq", None) is not None) or\
@@ -2079,7 +2095,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         return total_log
 
-    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
+    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None, inline_processors=()) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
 
         region_timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -2138,6 +2154,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
             else:
+                # Fused consumers prepare per-module state here so their
+                # forward hooks and inline process() see it before dispatch.
+                for inline in inline_processors:
+                    if inline is processor:
+                        continue
+                    inline.preprocess(subset[name], fallback=fallback)
                 source_module = subset[name].module
                 # EoRA runs after quantization: its forward must consume the
                 # quantized module in the model tree, not a freshly packed
