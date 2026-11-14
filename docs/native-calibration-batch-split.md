@@ -8,7 +8,7 @@ store one entry per **forward batch**. The two lists were only aligned at
 batch tensor and the remaining samples pop from an empty list.
 
 This page describes the split that keeps the capture and consumer aligned. It
-was introduced with PR #3981 (issue #3978).
+was introduced with PR #3995 (issue #3978).
 
 ## New flow
 

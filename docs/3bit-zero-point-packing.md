@@ -9,7 +9,7 @@ Both now fail closed with `ValueError`, matching `pack_block` and the CPU
 extension, so `hf_pack_layer(pack_impl="auto")` cannot write a truncated
 checkpoint.
 
-This page describes the width contract. It was introduced with PR #3981
+This page describes the width contract. It was introduced with PR #3995
 (issue #3978).
 
 ## New flow
