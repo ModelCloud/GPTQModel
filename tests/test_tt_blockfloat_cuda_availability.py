@@ -41,6 +41,7 @@ def _patch_gate(
     """Install one synthetic availability state on the extension probe."""
 
     _set_family(monkeypatch, None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(bf_cuda, "supported", lambda device=None: supported)
     monkeypatch.setattr(bf_cuda._EXTENSION, "loadable_without_build", lambda: loadable)
     monkeypatch.setattr(bf_cuda._EXTENSION, "configured_prebuilt_library", lambda: prebuilt)
