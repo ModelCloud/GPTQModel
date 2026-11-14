@@ -81,6 +81,12 @@ class Olmo3QModel(BaseQModel):
     ]
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        # Consume the base-type replay metadata (mask and per-type rotary) first;
+        # otherwise the private capture key leaks into the decoder layer and the
+        # full-attention layers keep layer 0's sliding mask.
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_olmo3_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
 

@@ -3578,7 +3578,7 @@ class BaseQModel(nn.Module):
         )
 
         by_type: Dict[str, Dict[str, Any]] = {}
-        for layer_type in sorted(set(layer_types) - {base_type}):
+        for layer_type in sorted(set(layer_types)):
             entry: Dict[str, Any] = {}
             layer_type_mask = self._build_layer_type_attention_mask(
                 text_config=text_config,
@@ -3589,7 +3589,11 @@ class BaseQModel(nn.Module):
             )
             if layer_type_mask is not _LAYER_TYPE_MASK_UNSUPPORTED:
                 entry["attention_mask"] = layer_type_mask
-            if rotary is not None:
+            # The first declared type already owns the captured rotary tuple, but
+            # its mask is still needed: `support_batch_quantize=False` replay
+            # forces `attention_mask=None`, so only a rebuilt base-type mask can
+            # restore the sliding/chunked window HF applies to those layers.
+            if rotary is not None and layer_type != base_type:
                 entry["position_embeddings"] = self._build_layer_type_position_embeddings(
                     rotary=rotary,
                     layer_type=layer_type,
@@ -3597,7 +3601,8 @@ class BaseQModel(nn.Module):
                     position_ids=position_ids,
                     target_device=batch_device,
                 )
-            by_type[layer_type] = entry
+            if entry:
+                by_type[layer_type] = entry
 
         return {
             "base_type": base_type,
@@ -3696,11 +3701,12 @@ class BaseQModel(nn.Module):
         if not by_type:
             return
         layer_type = self._resolve_layer_replay_type(layer, layer_types)
-        if layer_type is None or layer_type == layer_type_kwargs.get("base_type"):
+        if layer_type is None:
             return
         entry = by_type.get(layer_type)
         if not entry:
             return
+        is_base_type = layer_type == layer_type_kwargs.get("base_type")
 
         # A `None` layer-0 mask can mean "causal skip" rather than "masks are
         # disabled", so a later layer type that needs a materialized mask (for
@@ -3708,14 +3714,26 @@ class BaseQModel(nn.Module):
         # receive it. Only skip the write when both sides are `None`.
         if "attention_mask" in entry:
             layer_type_mask = entry["attention_mask"]
-            if layer_type_mask is not None or additional_inputs.get("attention_mask") is not None:
+            if is_base_type:
+                # The base type's captured mask is discarded by
+                # `support_batch_quantize=False`; apply the rebuilt mask whenever
+                # one exists instead of leaving the layer in full causal mode.
+                if layer_type_mask is not None:
+                    additional_inputs["attention_mask"] = move_to(
+                        layer_type_mask, device=target_device
+                    )
+            elif layer_type_mask is not None or additional_inputs.get("attention_mask") is not None:
                 additional_inputs["attention_mask"] = (
                     None
                     if layer_type_mask is None
                     else move_to(layer_type_mask, device=target_device)
                 )
         position_embeddings = entry.get("position_embeddings")
-        if position_embeddings is not None and additional_inputs.get("position_embeddings") is not None:
+        if (
+            not is_base_type
+            and position_embeddings is not None
+            and additional_inputs.get("position_embeddings") is not None
+        ):
             additional_inputs["position_embeddings"] = self._move_position_embeddings(
                 position_embeddings, target_device
             )
