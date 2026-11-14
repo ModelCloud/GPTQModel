@@ -343,6 +343,8 @@ class QQQ:
         self.H: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        # Samples already folded into `H` by a previous materialization.
+        self._materialized_samples = 0
         self._gsq_moments = {}
         from .gsq_scalar import gsq_enabled_for
 
@@ -590,8 +592,20 @@ class QQQ:
             target_device = self.dev
         target_device = torch.device(target_device)
 
-        total_samples = sum(self._device_sample_counts.values())
+        pending_samples = sum(self._device_sample_counts.values())
+        total_samples = self._materialized_samples + pending_samples
         if total_samples == 0:
+            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+            self.nsamples = 0
+            return self.H
+
+        # A repeat materialization with no new batches returns the existing
+        # Hessian unchanged instead of clearing the statistics.
+        if pending_samples == 0:
+            if getattr(self, "H", None) is not None:
+                self.nsamples = self._materialized_samples
+                return self.H
+            self._materialized_samples = 0
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
             self.nsamples = 0
             return self.H
@@ -599,7 +613,14 @@ class QQQ:
         # Merge per-device partials into a single Hessian on the target device.
         # Pop and delete each partial as it is added so the peak memory stays
         # at result + one partial instead of result + all partials.
-        result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+        if self._materialized_samples and getattr(self, "H", None) is not None:
+            # `H` stores `2 * sum(x^T x) / samples`, so scale it back to the
+            # sample sum before adding the new partials.
+            result = safe_move_to(self.H, target_device, dtype=torch.float32)
+            result = result * (float(self._materialized_samples) * 0.5)
+        else:
+            self._materialized_samples = 0
+            result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
         while self._device_hessian_partials:
             dev, partial = self._device_hessian_partials.popitem()
             if partial.device == target_device and partial.dtype == torch.float32:
@@ -614,6 +635,7 @@ class QQQ:
         result.mul_(2.0 / float(total_samples))
         self.H = result
         self.nsamples = total_samples
+        self._materialized_samples = total_samples
         self._device_sample_counts.clear()
         return self.H
 
@@ -698,6 +720,9 @@ class QQQ:
 
         H = self.H
         del self.H
+        # The quantizer consumes and mutates this Hessian; it is no longer the
+        # materialized calibration state, so later batches start a fresh merge.
+        self._materialized_samples = 0
         _neutralize_dead_columns(H, W)
 
         g_idx = []
@@ -1023,6 +1048,7 @@ class QQQ:
             self.inp1 = None
             self.out1 = None
         self.H = None
+        self._materialized_samples = 0
         self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
         self.Losses = None

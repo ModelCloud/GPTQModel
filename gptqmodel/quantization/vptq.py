@@ -233,6 +233,8 @@ class VPTQ:
         self.H2: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        # Samples already folded into `H2` by a previous materialization.
+        self._materialized_samples = 0
 
         self.fallback = getattr(self.qcfg, "fallback", None)
         self.fallback_used = False
@@ -250,6 +252,7 @@ class VPTQ:
 
     def free(self) -> None:
         self.H2 = None
+        self._materialized_samples = 0
         self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
 
@@ -288,7 +291,8 @@ class VPTQ:
             target_device = self.dev
         target_device = torch.device(target_device)
 
-        total_samples = sum(self._device_sample_counts.values())
+        pending_samples = sum(self._device_sample_counts.values())
+        total_samples = self._materialized_samples + pending_samples
         if total_samples == 0:
             self.H2 = torch.zeros(
                 (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
@@ -296,7 +300,31 @@ class VPTQ:
             self.nsamples = 0
             return self.H2
 
-        merged = torch.zeros((self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device)
+        # A repeat materialization with no new batches returns the existing
+        # Hessian unchanged instead of clearing the statistics.
+        if pending_samples == 0:
+            if self.H2 is not None:
+                self.nsamples = self._materialized_samples
+                return self.H2
+            self._materialized_samples = 0
+            total_samples = 0
+            self.H2 = torch.zeros(
+                (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
+            )
+            self.nsamples = 0
+            return self.H2
+
+        # Rebuild the unnormalized sum from the previously materialized mean so
+        # batches captured after a materialization extend it rather than
+        # replacing it.
+        if self._materialized_samples and self.H2 is not None:
+            merged = safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
+            # `H2` is a mean, so scale it back to the sample sum before adding
+            # the new partials; the final divide renormalizes over all samples.
+            merged = merged * float(self._materialized_samples)
+        else:
+            self._materialized_samples = 0
+            merged = torch.zeros((self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device)
         while self._device_hessian_partials:
             dev, partial = self._device_hessian_partials.popitem()
             if partial.device == target_device and partial.dtype == _HESSIAN_DTYPE:
@@ -314,6 +342,7 @@ class VPTQ:
         merged.div_(float(total_samples))
         self.H2 = merged
         self.nsamples = total_samples
+        self._materialized_samples = total_samples
         self._device_sample_counts.clear()
         return self.H2
 
