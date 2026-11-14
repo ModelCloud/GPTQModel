@@ -107,6 +107,12 @@ def _rowmajor_ops(device: torch.device):
         return None
     import gptqmodel_nf12 as nf12
 
+    # A supported compute capability does not prove the row-major extension is
+    # usable: a source checkout still has to build it on first use. Choose the
+    # generic packed layout unless the native kernels are actually available so
+    # an eligible embedding never aborts quantization on a missing toolkit.
+    if not nf12.available():
+        return None
     return (
         lambda packed, escapes, base: nf12.rowmajor_pack(nf12.NF12Weight(packed, escapes, base)),
         "nf12",
@@ -188,14 +194,15 @@ class AutoNF12Embedding(nn.Module):
         elif ids.is_cuda:
             import gptqmodel_nf12 as nf12
 
-            try:
-                weight = nf12.NF12Weight(self.nf12_packed, self.nf12_escapes, base)
-                output = nf12.embedding(ids, weight)
-                return output if output.dtype == self.output_dtype else output.to(self.output_dtype)
-            except (RuntimeError, OSError):
-                # The vendored extension is optional; the packed representation
-                # stays resident even when a device cannot build its kernel.
-                pass
+            if nf12.available():
+                try:
+                    weight = nf12.NF12Weight(self.nf12_packed, self.nf12_escapes, base)
+                    output = nf12.embedding(ids, weight)
+                    return output if output.dtype == self.output_dtype else output.to(self.output_dtype)
+                except (RuntimeError, OSError):
+                    # The vendored extension is optional; the packed representation
+                    # stays resident even when a device cannot build its kernel.
+                    pass
         dense = self.dequantize_weight(device=ids.device, dtype=torch.bfloat16)
         return torch.nn.functional.embedding(ids, dense).to(self.output_dtype)
 

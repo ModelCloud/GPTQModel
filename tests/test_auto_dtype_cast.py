@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -180,9 +184,12 @@ def test_exact_fp16_embedding_keeps_source_dtype(monkeypatch):
     not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
     reason="requires NVIDIA SM80 or newer",
 )
-def test_cuda_embedding_uses_only_row_major_packed_storage(monkeypatch):
+def test_cuda_embedding_uses_only_packed_storage(monkeypatch):
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
 
+    from gptqmodel_nf12 import available
+
+    native = available()
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
     with torch.no_grad():
         source.weight.copy_(torch.randn_like(source.weight) * 0.02)
@@ -197,18 +204,115 @@ def test_cuda_embedding_uses_only_row_major_packed_storage(monkeypatch):
     valid = (ids >= 0) & (ids < source.num_embeddings)
     oracle[valid] = source(ids[valid])
 
-    assert packed.row_major
-    assert {name for name, _ in packed.named_buffers()} == {
-        "nf12_row_packed",
-        "nf12_row_escapes",
-        "nf12_exp_base",
-    }
-    assert packed.nf12_row_packed.nbytes + packed.nf12_row_escapes.nbytes < source.weight.nbytes
+    if native:
+        assert packed.row_major
+        assert {name for name, _ in packed.named_buffers()} == {
+            "nf12_row_packed",
+            "nf12_row_escapes",
+            "nf12_exp_base",
+        }
+        assert packed.nf12_row_packed.nbytes + packed.nf12_row_escapes.nbytes < source.weight.nbytes
+    else:
+        assert not packed.row_major
+        assert {name for name, _ in packed.named_buffers()} == {
+            "nf12_packed",
+            "nf12_escapes",
+            "nf12_exp_base",
+        }
+        assert packed.nf12_packed.nbytes + packed.nf12_escapes.nbytes < source.weight.nbytes
     assert _bits_equal(actual, oracle)
 
     restored = auto_dtype_cast.restore_source_module(packed, spec, device="cuda:0")
     assert restored.weight.dtype is torch.bfloat16
     assert _bits_equal(restored.weight, source.weight)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
+    reason="requires NVIDIA SM80 or newer",
+)
+def test_cuda_embedding_falls_back_when_native_nf12_is_unavailable(monkeypatch):
+    import gptqmodel_nf12
+    from gptqmodel_nf12 import _library as nf12_library
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_library, "_native_available", lambda: False)
+    assert not gptqmodel_nf12.available()
+
+    source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+        source.weight[5, 3] = -0.0
+    ids = torch.tensor([[0, 5, 31]], dtype=torch.int64, device="cuda:0")
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cuda:0")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+
+    assert not packed.row_major
+    assert {name for name, _ in packed.named_buffers()} == {
+        "nf12_packed",
+        "nf12_escapes",
+        "nf12_exp_base",
+    }
+    assert not hasattr(packed, "weight")
+    assert _bits_equal(packed(ids), source(ids))
+
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cuda:0")
+    assert _bits_equal(restored.weight, source.weight)
+
+
+def test_source_build_available_reports_missing_tools(monkeypatch):
+    from gptqmodel_nf12 import _jit
+
+    monkeypatch.setattr(_jit, "_architectures", lambda: [89])
+    monkeypatch.setattr(_jit.shutil, "which", lambda _name: None)
+    assert not _jit.source_build_available()
+
+    monkeypatch.setattr(_jit.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert _jit.source_build_available()
+
+    monkeypatch.setattr(_jit, "_architectures", lambda: [70])
+    assert not _jit.source_build_available()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
+    reason="requires NVIDIA SM80 or newer",
+)
+def test_cuda_embedding_cast_survives_missing_build_tools(tmp_path):
+    """The issue repro: a supported CUDA device with no toolkit must not abort."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script = """
+import torch
+from torch import nn
+from gptqmodel.utils.auto_dtype_cast import eligible_source_module, cast_source_module
+
+source = nn.Embedding(16, 64, device="cuda", dtype=torch.bfloat16)
+spec = eligible_source_module(source, torch.device("cuda"))
+assert spec is not None
+packed = cast_source_module(source, spec)
+ids = torch.tensor([[0, 3, 15]], device="cuda")
+out = packed(ids)
+assert out.dtype is torch.bfloat16 and tuple(out.shape) == (1, 3, 64)
+print("CAST_OK")
+"""
+    env = dict(os.environ)
+    env["PATH"] = "/usr/bin:/bin"
+    env["CUDA_HOME"] = "/nonexistent"
+    env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+    env["PYTHONPATH"] = str(repo_root)
+    env.pop("CUDACXX", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "CAST_OK" in result.stdout
 
 
 def test_forward_role_packs_and_quant_source_role_restores_dense(monkeypatch):
