@@ -611,14 +611,16 @@ AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
 Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
 load time and asks you to upgrade.
 
-PyTorch **>= 2.13.0** is required. Importing GPT-QModel on `torch <= 2.12.1`
-raises `UnsafeTorchVersionError` because that range is affected by
-[GHSA-rrmf-rvhw-rf47](https://github.com/pytorch/pytorch/security/advisories/GHSA-rrmf-rvhw-rf47)
-(CVE-2025-3000, memory corruption in `torch.jit.script`). The check runs before
-the CUDA allocator is initialized. See
-[PyTorch runtime safety gate](docs/torch-runtime-safety-gate.md) for the
-affected range, the bypass, and why the comparison uses the PEP 440 public
-version.
+PyTorch **2.13.x or >= 2.15.0** is required. Importing GPT-QModel on a `torch`
+release below `2.13.0` raises `UnsafeTorchVersionError` because that range
+is affected by [GHSA-rrmf-rvhw-rf47](https://github.com/advisories/GHSA-rrmf-rvhw-rf47)
+(CVE-2025-3000, memory corruption in `torch.jit.script`), and `2.14.x` raises because it is affected by
+[GHSA-v32g-mr63-3j83](https://github.com/pytorch/pytorch/security/advisories/GHSA-v32g-mr63-3j83)
+(`torch.load(weights_only=True)` arbitrary file read, patched in `2.15.0`). The check runs before the
+CUDA allocator is initialized. Python 3.10 has no patched wheel and therefore installs the
+`2.13.x` line. See
+[PyTorch runtime safety gate](docs/torch-runtime-safety-gate.md) for the affected ranges, the
+bypass, and why the comparison uses the PEP 440 public version.
 
 ### Install from source 🛠️
 
