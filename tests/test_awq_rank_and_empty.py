@@ -128,32 +128,59 @@ def test_awq_gemm_empty_input_skips_forward_and_backward_backends(
 
 
 @pytest.mark.parametrize(
-    "backend, threshold, shape",
+    "backend, shape, expect_dequant",
     [
-        ("jit", 1024, (1023, 32)),
-        ("jit", 1024, (1024, 32)),
-        ("jit", 1024, (1025, 32)),
-        ("jit", 1024, (32, 32, 32)),
-        ("triton", 128, (127, 32)),
-        ("triton", 128, (128, 32)),
-        ("triton", 128, (129, 32)),
-        ("triton", 128, (8, 16, 32)),
+        # The JIT path switches at rows >= 640 when fp32 accumulation is on,
+        # and keeps the historical rows > 1024 dispatch otherwise.
+        ("jit", (639, 32), False),
+        ("jit", (640, 32), True),
+        ("jit", (1024, 32), True),
+        ("jit", (1025, 32), True),
+        ("jit", (32, 32, 32), True),
+        ("triton", (127, 32), False),
+        ("triton", (128, 32), False),
+        ("triton", (129, 32), True),
+        ("triton", (8, 16, 32), False),
     ],
 )
 def test_awq_gemm_heuristic_uses_logical_rows_at_threshold(
-    monkeypatch, backend, threshold, shape
+    monkeypatch, backend, shape, expect_dequant
 ):
     calls = {"dequant": 0, "gemm": 0}
     fn = _patch_backend(monkeypatch, backend, calls)
     qweight, scales, qzeros = _fake_quant_tensors()
     x = torch.ones(shape, dtype=torch.float16)
-    rows = x.numel() // x.shape[-1]
 
     out = fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8)
     assert out.shape == shape[:-1] + (8,)
     assert calls == {
-        "dequant": int(rows > threshold),
-        "gemm": int(rows <= threshold),
+        "dequant": int(expect_dequant),
+        "gemm": int(not expect_dequant),
+    }
+
+
+@pytest.mark.parametrize(
+    "shape, expect_dequant",
+    [
+        ((639, 32), False),
+        ((640, 32), False),
+        ((1024, 32), False),
+        ((1025, 32), True),
+    ],
+)
+def test_awq_jit_heuristic_respects_fp32_accum_opt_out(
+    monkeypatch, shape, expect_dequant
+):
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, "jit", calls)
+    qweight, scales, qzeros = _fake_quant_tensors()
+    x = torch.ones(shape, dtype=torch.float16)
+
+    fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8, "cuda", False)
+
+    assert calls == {
+        "dequant": int(expect_dequant),
+        "gemm": int(not expect_dequant),
     }
 
 
