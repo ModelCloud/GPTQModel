@@ -8,7 +8,7 @@ BF16/FP32 activations to FP16 before quantizing them, so any magnitude above
 65504 became `inf` or `NaN`.
 
 This page describes the contract these paths now follow. It was introduced in
-PR #3996 (issue #3977).
+PR #4001 (issue #3977).
 
 ## Contract
 
