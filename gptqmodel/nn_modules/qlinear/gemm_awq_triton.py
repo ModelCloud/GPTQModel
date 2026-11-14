@@ -186,6 +186,10 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    # `post_init` only narrows the scale buffer with Torch ops; the Triton
+    # kernel runs after Accelerate materializes the layer on the execution
+    # device, so a CPU-mapped layer loads correctly.
+    SUPPORTS_CPU_OFFLOAD = True
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]

@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from typing import Optional
 
 import torch
 
 from ...adapter.adapter import Adapter
 from ...looper.linear_mode import LinearMode
+from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -26,7 +28,7 @@ from ._fused_train_state import (
 )
 from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
-from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
+from .torch_fused import Int4PackedOp, TorchFusedLinear, _validate_cpu_int4pack_group_size, pack_scales_and_zeros
 
 
 log = setup_logger()
@@ -119,6 +121,42 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_group_size(
+            cls, group_size=group_size, in_features=in_features, device=device
+        )
 
     def post_init(self):
         super().post_init()

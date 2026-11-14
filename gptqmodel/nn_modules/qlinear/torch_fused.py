@@ -4,13 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...looper.linear_mode import LinearMode
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
@@ -26,6 +28,48 @@ from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
 log = setup_logger()
+
+# ``aten::_weight_int4pack_mm_for_cpu`` accepts only these group sizes. A
+# per-channel checkpoint (``group_size == -1``) is packed as one group per
+# input row, so its resolved group size is ``in_features``. Declaring -1/16 as
+# supported without this check let AUTO select this kernel on CPU for a
+# checkpoint whose first forward then raised inside the aten op.
+CPU_INT4PACK_GROUP_SIZES = (32, 64, 128, 256)
+
+
+def _validate_cpu_int4pack_group_size(
+    cls,
+    *,
+    group_size: int,
+    in_features: Optional[int],
+    device: Optional[DEVICE | torch.device],
+):
+    """Reject a CPU group size the packed int4 kernel cannot consume.
+
+    XPU keeps the declared -1/16 support: its fused op is a different kernel
+    with a different contract.
+    """
+    if device is None or normalize_device(device) != DEVICE.CPU:
+        return True, None
+    if group_size == -1:
+        if in_features is None:
+            # The model-wide selector runs before a module's in_features is
+            # known. Per-module selection re-validates with the resolved size,
+            # so defer the decision instead of rejecting every per-channel
+            # checkpoint here.
+            return True, None
+        resolved = in_features
+    else:
+        resolved = group_size
+    if resolved in CPU_INT4PACK_GROUP_SIZES:
+        return True, None
+    return False, NotImplementedError(
+        f"{cls}: CPU int4pack only supports group_size "
+        f"{list(CPU_INT4PACK_GROUP_SIZES)}, or a per-channel group equal to "
+        f"in_features: resolved group_size = `{resolved}`. Select "
+        "`backend=\"gptq_torch\"` for this checkpoint on CPU."
+    )
+
 
 # TODO: CPU works, not yet working for cuda fused int4 ops
 def pack_scales_and_zeros(scales, zeros):
@@ -120,6 +164,42 @@ class TorchFusedLinear(PackableQuantLinear):
 
         self.linear_mode = None # either train or inference
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
+
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_group_size(
+            cls, group_size=group_size, in_features=in_features, device=device
+        )
 
     def post_init(self):
         super().post_init()

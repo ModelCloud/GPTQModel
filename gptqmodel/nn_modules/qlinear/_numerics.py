@@ -91,6 +91,12 @@ class _CudaWideMatmul(torch.autograd.Function):
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is None:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
+        elif torch.compiler.is_compiling():
+            # Inductor cannot lower `addmm(..., out_dtype=...)` (torch 2.15
+            # raises `tuned_addmm() takes 3 positional arguments but 4 were
+            # given`), which breaks a compiled static-cache decode. Keep the
+            # wide GEMM and add the FP32 bias as a separate elementwise op.
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32) + bias.float()
         else:
             output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
         return output.to(x.dtype).reshape(x.shape[:-1] + (weight.shape[-1],))
@@ -143,7 +149,14 @@ def matmul_fp32_reduce(
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is not None and (bias.dim() == 1 or bias.shape == shape):
             flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-            output = torch.addmm(flat_bias.float(), flat_x, weight, out_dtype=torch.float32)
+            if torch.compiler.is_compiling():
+                # Inductor (torch 2.15) cannot lower `addmm` with `out_dtype`.
+                # The eager `addmm` branch is left unchanged so its rounding
+                # stays bitwise identical to the pre-fix path; the compiled
+                # path uses a wide GEMM plus a separate FP32 add.
+                output = torch.mm(flat_x, weight, out_dtype=torch.float32) + flat_bias.float()
+            else:
+                output = torch.addmm(flat_bias.float(), flat_x, weight, out_dtype=torch.float32)
         elif bias is not None:
             # A bias that broadcasts beyond the flattened output shape cannot
             # be expressed by the 2D `addmm` input; add it after reshaping.
