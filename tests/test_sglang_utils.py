@@ -293,6 +293,11 @@ def test_sampling_params_merge_stop_ids_and_force_determinism():
         ]
         == 0.0
     )
+    stop_params = sglang_utils._build_sglang_sampling_params(
+        {"stop": ["stop1"]},
+        {"stop_strings": ["stop2", "stop3"]},
+    )
+    assert stop_params["stop"] == ["stop1", "stop2", "stop3"]
 
 
 def test_sampling_params_reject_bad_aliases_and_lengths():

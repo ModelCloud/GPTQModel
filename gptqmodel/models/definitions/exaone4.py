@@ -23,14 +23,16 @@ class Exaone4QModel(BaseQModel):
             # Skip q_norm and k_norm (too small, RMSNorm layers)
             "self_attn": (
                 "q_proj:0",
+                "q_norm:0:!",
                 "k_proj:0",
+                "k_norm:0:!",
                 "v_proj:0",
                 "o_proj:1",
-                "q_norm:!",
-                "k_norm:!"
             ),
-            # Skip post_attention_layernorm (RMSNorm, too small)
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # Skip post_attention_layernorm (RMSNorm, too small). Exaone4 adds
+            # the normalized attention output to the residual, so the norm does
+            # not feed the MLP directly and cannot be an AWQ scale source.
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             # Skip post_feedforward_layernorm (RMSNorm, too small)
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
