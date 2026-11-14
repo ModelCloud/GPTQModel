@@ -87,6 +87,38 @@ which is the failure mode the repeat-materialization fix removed. A caller that
 inspects on CPU and then quantizes on GPU therefore receives GPU data without
 disturbing the statistics.
 
+### Consumers
+
+Because the cached branch returns a *copy* rather than relocating `self.H`, a
+quantization pass must use the value it asked for. `materialize_hessian` is
+therefore a producer of the device-correct Hessian, and the quantizer is its
+consumer:
+
+```mermaid
+flowchart TD
+    A["QQQ._quantize_impl"] --> B["self.H = materialize_hessian(layer.weight.device)"]
+    B --> C{"pending samples?"}
+    C -- Yes --> D["merge sets self.H on the layer device"]
+    C -- No --> E["cached branch returns a copy on the layer device"]
+    D --> F["H = self.H; del self.H"]
+    E --> F
+    F --> G["_neutralize_dead_columns(H, W) with W on the layer device"]
+    style G fill:#dfd,stroke:#060
+```
+
+| Caller | Before | After |
+| --- | --- | --- |
+| `QQQ._quantize_impl` | `self.materialize_hessian()` — return value discarded, then `H = self.H` | `self.H = self.materialize_hessian(self.layer.weight.device)` |
+| `VPTQ.quantize` | `hessian = self.materialize_hessian(self.dev)` — already used the return value | unchanged |
+
+Discarding the return value left `self.H` on whichever device an earlier
+explicit inspection materialized it, so a CPU layer that had been inspected on
+GPU failed inside quantization with
+`expected self and mask to be on the same device, but got mask on cuda:0 and self on cpu`.
+Requesting the layer's own device at the consume site is also what makes a
+post-construction device move safe: the weight is cloned from the layer, so the
+Hessian must come from the same place.
+
 ## Previous behavior
 
 | Mechanism | Previous behavior | New behavior |
@@ -118,6 +150,8 @@ reachable only after the first call had already consumed the partials.
 | `tests/test_qqq.py::TestQQQHessian::test_batch_after_materialization_accumulates` | Merged Hessian equals the closed-form reference over both batches |
 | `tests/test_vptq.py::test_vptq_repeat_materialization_honours_a_changed_target_device` | A CPU-inspected capture returns GPU data on request and keeps its cache |
 | `tests/test_qqq.py::TestQQQHessian::test_repeat_materialization_honours_a_changed_target_device` | Same contract for QQQ |
+| `tests/test_hessian_device_consumption.py::test_qqq_quantize_uses_the_layer_device_after_a_foreign_materialization` | A GPU inspection does not make a CPU quantization pass consume GPU data |
+| `tests/test_hessian_device_consumption.py::test_vptq_quantize_uses_the_layer_device_after_a_foreign_materialization` | VPTQ keeps consuming the device-corrected return value |
 
 Measured on an R9700 (gfx1201, torch 2.16.0.dev+rocm10.1):
 `tests/test_qqq.py -k TestQQQHessian` reports 7 passed, and the two lifecycle
