@@ -172,3 +172,18 @@ def test_pad_token_falls_back_to_the_tokenizer(generate):
 
     assert engine.seen_prompt_token_ids == [[7], [21, 22, 23, 24]]
     assert output.tolist() == [[0, 0, 7, 101, 102, 0], [21, 22, 23, 24, 101, 102]]
+
+
+def test_stop_strings_forwarded_to_vllm_sampling_params(monkeypatch):
+    class _FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(vllm_module, "_require_vllm", lambda: None)
+    monkeypatch.setattr(vllm_module, "SamplingParams", _FakeSamplingParams)
+
+    params = vllm_module._build_sampling_params(None, {"stop_strings": ["Question:", "Human:"]})
+    assert params.kwargs["stop"] == ["Question:", "Human:"]
+
+    params_scalar = vllm_module._build_sampling_params(None, {"stop_strings": "Question:"})
+    assert params_scalar.kwargs["stop"] == "Question:"

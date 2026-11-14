@@ -123,6 +123,21 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
         for source, target in field_map.items()
         if hf_params.get(source) is not None
     }
+    stop_entries = []
+    if hf_params.get("stop") is not None:
+        val = hf_params["stop"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if hf_params.get("stop_strings") is not None:
+        val = hf_params["stop_strings"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if stop_entries:
+        sampling_kwargs["stop"] = stop_entries if len(stop_entries) > 1 else stop_entries[0]
     if hf_params.get("eos_token_id") is not None:
         eos_token_ids = _normalize_eos_token_ids(hf_params["eos_token_id"])
         existing_stop_ids = sampling_kwargs.get("stop_token_ids") or []
@@ -308,6 +323,7 @@ def _build_sampling_params(value: Any, kwargs: Mapping[str, Any]):
             "presence_penalty",
             "ignore_eos",
             "stop",
+            "stop_strings",
             "stop_token_ids",
             "seed",
             "do_sample",

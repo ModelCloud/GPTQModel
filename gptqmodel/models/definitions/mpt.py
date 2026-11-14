@@ -14,7 +14,12 @@ class MptQModel(BaseQModel):
         "blocks",
         "#",
         {
+            # MPT normalizes before attention and before the FFN; the tree used
+            # to omit both norms, so AWQ could not build a single group. The FFN
+            # output projection follows the GELU.
+            "norm_1": ("norm_1:!",),
             "attn": ("Wqkv:0", "out_proj:1"),
-            "ffn": ("up_proj:0", "down_proj:1"),
+            "norm_2": ("norm_2:!",),
+            "ffn": ("up_proj:0:nosrc", "down_proj:1"),
         }
     ]
