@@ -119,6 +119,18 @@ def batched_conversations(iterable, batch_size: int, process_func=None):
     yield from batched(iterable, batch_size, process_func=normalize_and_process)
 
 
+def _iter_calibration_rows(dataset):
+    """Yield every ``(input_ids, attention_mask)`` row of a normalized dataset.
+
+    Items may hold one row or several (2-D ``input_ids``). The concatenation
+    path must consume all of them, otherwise every row after the first is
+    silently dropped from the Hessian.
+    """
+
+    for example in dataset:
+        yield from zip(example["input_ids"], example["attention_mask"])
+
+
 def prepare_calibration_dataset(
     qmodel,
     calibration_dataset: CalibrationInputType,
@@ -538,9 +550,7 @@ def prepare_calibration_dataset(
             attention_mask_buff = []
             current_length = 0
 
-        for example in new_calibration_dataset:
-            row_ids = example["input_ids"][0]
-            row_mask = example["attention_mask"][0]
+        for row_ids, row_mask in _iter_calibration_rows(new_calibration_dataset):
             position = 0
             row_length = len(row_ids)
 
