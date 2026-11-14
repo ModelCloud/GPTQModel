@@ -9,6 +9,8 @@ line is the one a user pastes into a report, so its formatting and its
 "did this run touch the GPU" decision are both asserted here.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from gptqmodel.utils.logger import format_duration, format_quantize_summary
@@ -164,3 +166,219 @@ def test_cpu_run_never_touches_cuda_peak_counters(monkeypatch):
     assert devices == []
     base._reset_peak_vram_stats(devices)
     assert base._peak_vram_gib(config) is None
+
+
+def _advancing_fuse(clock, events, *, error=None):
+    """Stand-in for `BaseQModel.fuse` that spends measurable time."""
+
+    def fuse(*args, **kwargs):
+        events.append("fuse")
+        clock["now"] += 7.0
+        if error is not None:
+            raise error
+
+    return fuse
+
+
+def _stub_quantize_model(
+    monkeypatch,
+    *,
+    clock,
+    events,
+    config,
+    fuse,
+    weight_only_result=None,
+    rotation_error=None,
+):
+    """Build the smallest `BaseQModel` that runs the real `quantize()` orchestration.
+
+    The quantization run itself is stubbed; the phases around it
+    (`after_quantize`, rotation setup, fusion) are what these tests pin.
+    """
+
+    import gptqmodel.models.base as base
+
+    lines = []
+    real_format = base.format_quantize_summary
+
+    def capture(result, **kwargs):
+        events.append("summary")
+        line = real_format(result, **kwargs)
+        lines.append(line)
+        return line
+
+    def rotation(*args, **kwargs):
+        events.append("rotation")
+        if rotation_error is not None:
+            raise rotation_error
+
+    monkeypatch.setattr(base.time, "perf_counter", lambda: clock["now"])
+    monkeypatch.setattr(base, "format_quantize_summary", capture)
+    monkeypatch.setattr(base, "require_fusable_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(base, "_setup_rotation_online_had", rotation)
+
+    qmodel = object.__new__(base.BaseQModel)
+    qmodel.model = SimpleNamespace(config=SimpleNamespace(model_type="llama"))
+    qmodel.quantize_config = config
+    qmodel.quantized = False
+    qmodel.support_batch_quantize = True
+    qmodel._auto_fusion = True
+    qmodel.quant_region_timer = None
+    qmodel.after_quantize = lambda: events.append("after_quantize")
+    qmodel.fuse = fuse
+    qmodel.module_plan = lambda: None
+    qmodel.extract_layers_node = lambda: ["model.layers"]
+    qmodel._warn_fused_unit_dynamic_overrides = lambda: None
+    qmodel._quantize_weight_only = lambda **kwargs: weight_only_result
+    return qmodel, lines
+
+
+def test_summary_is_logged_after_finalization(monkeypatch):
+    """A success line must describe the finished run, not the pre-fusion state."""
+    from gptqmodel.quantization.config import NF12Config
+
+    clock = {"now": 100.0}
+    events = []
+    result = {"model.layers.0": [{}, {}], "model.layers.1": [{}]}
+    qmodel, lines = _stub_quantize_model(
+        monkeypatch,
+        clock=clock,
+        events=events,
+        config=NF12Config(device="cpu"),
+        fuse=_advancing_fuse(clock, events),
+        weight_only_result=result,
+    )
+
+    assert qmodel.quantize() == result
+    assert events == ["after_quantize", "rotation", "fuse", "summary"]
+    # 7s is the time the finalization step spent; it must be included.
+    assert lines == ["Quantize summary: 2 layer(s), 3 module(s), 7s"]
+
+
+def test_summary_is_not_logged_when_fusion_raises(monkeypatch):
+    from gptqmodel.quantization.config import NF12Config
+
+    clock = {"now": 100.0}
+    events = []
+    qmodel, lines = _stub_quantize_model(
+        monkeypatch,
+        clock=clock,
+        events=events,
+        config=NF12Config(device="cpu"),
+        fuse=_advancing_fuse(clock, events, error=RuntimeError("fusion failed")),
+        weight_only_result={"model.layers.0": [{}]},
+    )
+
+    with pytest.raises(RuntimeError, match="fusion failed"):
+        qmodel.quantize()
+
+    assert lines == []
+    assert events == ["after_quantize", "rotation", "fuse"]
+
+
+def test_summary_is_not_logged_when_rotation_setup_raises(monkeypatch):
+    from gptqmodel.quantization.config import NF12Config
+
+    clock = {"now": 100.0}
+    events = []
+    qmodel, lines = _stub_quantize_model(
+        monkeypatch,
+        clock=clock,
+        events=events,
+        config=NF12Config(device="cpu"),
+        fuse=_advancing_fuse(clock, events),
+        weight_only_result={"model.layers.0": [{}]},
+        rotation_error=RuntimeError("rotation setup failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="rotation setup failed"):
+        qmodel.quantize()
+
+    assert lines == []
+
+
+def _staged_gsq_config():
+    from gptqmodel.quantization.config import GPTQConfig, GSQTrainingConfig
+
+    return GPTQConfig(
+        bits=4,
+        group_size=128,
+        device="cpu",
+        gsq_training=GSQTrainingConfig(enabled=True),
+    )
+
+
+def _staged_gsq_blocks():
+    return [
+        {"layer_index": 0, "stages": {"q_proj": {}, "k_proj": {}}},
+        {"layer_index": 1, "stages": {"q_proj": {}}},
+    ]
+
+
+def test_staged_gsq_summary_counts_blocks_as_layers(monkeypatch):
+    """The staged-GSQ path must end with the same summary, counted by block."""
+    import gptqmodel.looper.gsq_training_model as gsq_training_model
+
+    clock = {"now": 100.0}
+    events = []
+    blocks = _staged_gsq_blocks()
+
+    def fake_gsq_public(*args, **kwargs):
+        events.append("gsq_run")
+        return {"gsq_training": blocks}
+
+    monkeypatch.setattr(gsq_training_model, "quantize_llama_gsq_public", fake_gsq_public)
+    qmodel, lines = _stub_quantize_model(
+        monkeypatch,
+        clock=clock,
+        events=events,
+        config=_staged_gsq_config(),
+        fuse=_advancing_fuse(clock, events),
+    )
+
+    assert qmodel.quantize() == {"gsq_training": blocks}
+    assert events == ["gsq_run", "after_quantize", "fuse", "summary"]
+    assert lines == ["Quantize summary: 2 layer(s), 3 module(s), 7s"]
+
+
+def test_staged_gsq_summary_is_not_logged_when_finalization_raises(monkeypatch):
+    import gptqmodel.looper.gsq_training_model as gsq_training_model
+
+    clock = {"now": 100.0}
+    events = []
+    monkeypatch.setattr(
+        gsq_training_model,
+        "quantize_llama_gsq_public",
+        lambda *args, **kwargs: {"gsq_training": _staged_gsq_blocks()},
+    )
+    qmodel, lines = _stub_quantize_model(
+        monkeypatch,
+        clock=clock,
+        events=events,
+        config=_staged_gsq_config(),
+        fuse=_advancing_fuse(clock, events, error=RuntimeError("fusion failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="fusion failed"):
+        qmodel.quantize()
+
+    assert lines == []
+
+
+def test_gsq_summary_counts_map_each_block_to_a_layer():
+    import gptqmodel.models.base as base
+
+    result = {
+        "gsq_training": [
+            {"layer_index": 3, "stages": {"q_proj": {}, "o_proj": {}}},
+            {"layer_index": 4, "stages": {}},
+        ]
+    }
+
+    assert base._quantize_summary_counts(result) == {
+        "layer.3": ("q_proj", "o_proj"),
+        "layer.4": (),
+    }
+    # Ordinary results and unexpected shapes pass through untouched.
+    assert base._quantize_summary_counts({"model.layers.0": [{}]}) == {"model.layers.0": [{}]}
+    assert base._quantize_summary_counts(None) is None

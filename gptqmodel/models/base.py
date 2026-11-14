@@ -233,6 +233,49 @@ def _peak_vram_gib(
     return max(peaks) if peaks else None
 
 
+def _quantize_summary_counts(result: object) -> object:
+    """Normalize a `quantize()` result to the layer -> modules mapping the summary counts.
+
+    The staged-GSQ helper returns `{'gsq_training': [block, ...]}`: one record
+    per decoder layer, whose `stages` are that layer's projections. The generic
+    formatter would count that single top-level key as one layer, so map every
+    block to its own layer entry instead.
+    """
+
+    if not isinstance(result, dict) or set(result) != {"gsq_training"}:
+        return result
+    blocks = result["gsq_training"]
+    if not isinstance(blocks, (list, tuple)):
+        return result
+    counts: Dict[str, Tuple[Any, ...]] = {}
+    for position, block in enumerate(blocks):
+        if isinstance(block, dict):
+            stages = block.get("stages")
+            index = block.get("layer_index", position)
+        else:
+            stages = None
+            index = position
+        counts[f"layer.{index}"] = tuple(stages or ())
+    return counts
+
+
+def _log_quantize_summary(
+    result: object,
+    *,
+    run_started: float,
+    vram_devices: Sequence[torch.device],
+) -> None:
+    """Log the end-of-run summary for a run that finished its finalization."""
+
+    log.info(
+        format_quantize_summary(
+            _quantize_summary_counts(result),
+            elapsed_s=time.perf_counter() - run_started,
+            peak_vram_gib=_peak_vram_gib(devices=vram_devices),
+        )
+    )
+
+
 class _QuantizedCheckpointSource:
     """Expose an on-disk quantized checkpoint through the shard-map interface.
 
@@ -1751,6 +1794,11 @@ class BaseQModel(nn.Module):
                     self.fuse()
                 if timer is not None:
                     timer.flush()
+                _log_quantize_summary(
+                    result,
+                    run_started=run_started,
+                    vram_devices=vram_devices,
+                )
                 return result
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
@@ -2052,14 +2100,6 @@ class BaseQModel(nn.Module):
         if timer is not None:
             timer.flush()
 
-        log.info(
-            format_quantize_summary(
-                result,
-                elapsed_s=time.perf_counter() - run_started,
-                peak_vram_gib=_peak_vram_gib(devices=vram_devices),
-            )
-        )
-
         _setup_rotation_online_had(
             self.model,
             self.quantize_config.rotation,
@@ -2070,6 +2110,12 @@ class BaseQModel(nn.Module):
             log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
         if self._auto_fusion:
             self.fuse()
+
+        _log_quantize_summary(
+            result,
+            run_started=run_started,
+            vram_devices=vram_devices,
+        )
         return result
 
     @staticmethod
