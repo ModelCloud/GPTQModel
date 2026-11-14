@@ -68,9 +68,13 @@ template <> struct RotateAccess<float> {
     }
   }
 
-  template <int CTA_M, int ROW_STRIDE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void apply_one(float *__restrict__ x_grp, const int ij, const float theta) {
-    int16_t i = ij & 0xFFFF, j = ij >> 16;
+    // Pair values come from the checkpoint. Mask them into the group so a
+    // crafted (or corrupt) pair cannot index shared memory out of bounds;
+    // load-time validation rejects such checkpoints, this is the last guard.
+    const uint16_t i = static_cast<uint16_t>(ij & 0xFFFF) % GROUP_SIZE;
+    const uint16_t j = static_cast<uint16_t>((ij >> 16) & 0xFFFF) % GROUP_SIZE;
     float s_, c_;
     __sincosf(theta, &s_, &c_);
 #pragma unroll
@@ -142,10 +146,11 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
     }
   }
 
-  template <int CTA_M, int ROW_STRIDE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void apply_one(HalfT *__restrict__ x_grp, const int ij, const float theta) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
-    int16_t i = ij & 0xFFFF, j = ij >> 16;
+    const uint16_t i = static_cast<uint16_t>(ij & 0xFFFF) % GROUP_SIZE;
+    const uint16_t j = static_cast<uint16_t>((ij >> 16) & 0xFFFF) % GROUP_SIZE;
     float s_, c_;
     __sincosf(theta, &s_, &c_);
 

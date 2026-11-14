@@ -116,6 +116,50 @@ def build_identity_rotation_buffers(
     return pairs.contiguous(), theta.contiguous(), channel_scales.contiguous()
 
 
+def validate_rotation_buffers(
+    pairs: torch.Tensor,
+    theta: Optional[torch.Tensor],
+    channel_scales: Optional[torch.Tensor],
+    *,
+    group_size: int,
+    in_features: int,
+    krot: int,
+    layer_name: str = "ParoQuant",
+) -> None:
+    """Reject checkpoint rotation pairs that index outside their group.
+
+    The fused CUDA rotation uses the int16 pair values to read and write a
+    ``group_size``-row shared-memory tile. Valid pairs are ``[0, group_size)``;
+    a crafted checkpoint otherwise writes out of bounds.
+    """
+
+    if pairs is None or pairs.device.type == "meta":
+        return
+    if pairs.dtype != torch.int16 or pairs.dim() != 2 or tuple(pairs.shape) != (krot, in_features):
+        raise ValueError(
+            f"{layer_name}: rotation pairs must be int16 [{krot}, {in_features}], got "
+            f"{pairs.dtype} {tuple(pairs.shape)}"
+        )
+    low = int(pairs.min())
+    high = int(pairs.max())
+    if low < 0 or high >= group_size:
+        raise ValueError(
+            f"{layer_name}: rotation pair {high if high >= group_size else low} is outside "
+            f"[0, {group_size}); the kernel would index shared memory out of bounds"
+        )
+    if theta is not None and theta.device.type != "meta":
+        if theta.dim() != 2 or tuple(theta.shape) != (krot, in_features // 2):
+            raise ValueError(
+                f"{layer_name}: rotation theta must be [{krot}, {in_features // 2}], got "
+                f"{tuple(theta.shape)}"
+            )
+    if channel_scales is not None and channel_scales.numel() not in (0, in_features):
+        raise ValueError(
+            f"{layer_name}: rotation scales must have {in_features} values, got "
+            f"{channel_scales.numel()}"
+        )
+
+
 def is_identity_rotation(theta: torch.Tensor, channel_scales: Optional[torch.Tensor]) -> bool:
     """Check whether a ParoQuant rotation reduces to a no-op."""
     if theta is None:

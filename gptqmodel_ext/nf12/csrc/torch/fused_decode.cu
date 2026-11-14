@@ -168,7 +168,7 @@ __global__ void __launch_bounds__(256) gate_kernel(GateParams p) {
             for (int l = 0; l < T::kLoads; ++l)
               planes[l] = ld_shared_v4(src + d * T::kSuperAtomBytes + l * nf12::kPlaneBytes);
             uint32_t a[4][4];
-            T::fragments(planes, codec.base_x4, codec.escapes, a);
+            T::fragments(planes, codec.base_x4, codec.escapes, codec.num_escapes, a);
             const uint32_t xoff = (s & 1) * kXStride + (u + d - u0) * 128;
             uint32_t b[8];
             ldmatrix_x4(*reinterpret_cast<uint32_t (*)[4]>(&b[0]), xaddr + xoff);
@@ -189,7 +189,7 @@ __global__ void __launch_bounds__(256) gate_kernel(GateParams p) {
         for (int d = 0; d < 2; ++d) {
           if (j + d < j1) {
             uint32_t a[4][4];
-            T::fragments(ring[d], codec.base_x4, codec.escapes, a);
+            T::fragments(ring[d], codec.base_x4, codec.escapes, codec.num_escapes, a);
             if (j + d + 2 < wcnt) {
               const uint8_t* src = wp + int64_t{j + d + 2} * (Parts * T::kSuperAtomBytes);
 #pragma unroll
@@ -300,7 +300,7 @@ __global__ void __launch_bounds__(128) down_kernel(DownParams p) {
     // kc=1: never reduce different experts as K partials. The callback writes
     // each pair over its own retired core partials, with no cross-pair alias.
     small_m_core<S, 1, Warps, Stages, Parts>(
-        region, shared, wp, kb, codec.base_x4, codec.escapes, 1, kSlice, kXStride, 1, 0,
+        region, shared, wp, kb, codec.base_x4, codec.escapes, codec.num_escapes, 1, kSlice, kXStride, 1, 0,
         [&](int) { return xrow; }, [] {},
         [&](int, int rp, float2 sum) {
           partial[2 * rp] = round_assignment(sum.x, scale);

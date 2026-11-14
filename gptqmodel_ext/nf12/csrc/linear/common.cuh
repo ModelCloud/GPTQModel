@@ -146,7 +146,8 @@ struct WeightTraits<WeightSource::kNF12, CoherentWeights> {
   // plane 0 = metas of atoms 0..3; plane 1 = (L0, L1) of atoms 0, 1;
   // plane 2 = (L0, L1) of atoms 2, 3. Requires full-warp participation.
   __device__ __forceinline__ static void fragments(const uint4 (&p)[kLoads], uint32_t base_x4,
-                                                   const uint4* __restrict__ escapes, uint32_t (&a)[4][4]) {
+                                                   const uint4* __restrict__ escapes, uint32_t num_escapes,
+                                                   uint32_t (&a)[4][4]) {
     const Group g0{p[0].x, p[1].x, p[1].y};
     const Group g1{p[0].y, p[1].z, p[1].w};
     const Group g2{p[0].z, p[2].x, p[2].y};
@@ -163,10 +164,10 @@ struct WeightTraits<WeightSource::kNF12, CoherentWeights> {
     const bool any_esc = __any_sync(0xffffffffu, esc);
 #endif
     if (any_esc && esc) {
-      decode_group_any_lane<CoherentWeights>(g0, base_x4, escapes, a[0]);
-      decode_group_any_lane<CoherentWeights>(g1, base_x4, escapes, a[1]);
-      decode_group_any_lane<CoherentWeights>(g2, base_x4, escapes, a[2]);
-      decode_group_any_lane<CoherentWeights>(g3, base_x4, escapes, a[3]);
+      decode_group_any_lane<CoherentWeights>(g0, base_x4, escapes, num_escapes, a[0]);
+      decode_group_any_lane<CoherentWeights>(g1, base_x4, escapes, num_escapes, a[1]);
+      decode_group_any_lane<CoherentWeights>(g2, base_x4, escapes, num_escapes, a[2]);
+      decode_group_any_lane<CoherentWeights>(g3, base_x4, escapes, num_escapes, a[3]);
     }
   }
 };
@@ -177,7 +178,7 @@ struct WeightTraits<WeightSource::kBF16T, CoherentWeights> {
   static constexpr int kSuperAtomBytes = kSuperAtomBytesBf16t;
 
   __device__ __forceinline__ static void fragments(const uint4 (&p)[kLoads], uint32_t, const uint4* __restrict__,
-                                                   uint32_t (&a)[4][4]) {
+                                                   uint32_t, uint32_t (&a)[4][4]) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       a[j][0] = p[j].x;

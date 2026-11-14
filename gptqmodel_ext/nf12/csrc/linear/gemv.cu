@@ -50,7 +50,8 @@ __device__ __forceinline__ float bf16_fma(uint32_t weight, uint32_t x, float sum
 
 template <WeightSource S>
 __device__ __forceinline__ void fragments(const uint4 (&p)[WeightTraits<S>::kLoads],
-                                        uint32_t base, const uint4* escapes, uint32_t (&a)[4][4]) {
+                                        uint32_t base, const uint4* escapes, uint32_t num_escapes,
+                                        uint32_t (&a)[4][4]) {
   if constexpr (S == WeightSource::kNF12) {
     const Group groups[4] = {{p[0].x, p[1].x, p[1].y}, {p[0].y, p[1].z, p[1].w},
                              {p[0].z, p[2].x, p[2].y}, {p[0].w, p[2].z, p[2].w}};
@@ -58,10 +59,11 @@ __device__ __forceinline__ void fragments(const uint4 (&p)[WeightTraits<S>::kLoa
     for (int j = 0; j < 4; ++j) decode_bulk(groups[j], base, a[j]);
     if ((p[0].x == 0u) | (p[0].y == 0u) | (p[0].z == 0u) | (p[0].w == 0u)) {
 #pragma unroll
-      for (int j = 0; j < 4; ++j) decode_group_any_lane<true>(groups[j], base, escapes, a[j]);
+      for (int j = 0; j < 4; ++j)
+        decode_group_any_lane<true>(groups[j], base, escapes, num_escapes, a[j]);
     }
   } else {
-    WeightTraits<S, true>::fragments(p, base, escapes, a);
+    WeightTraits<S, true>::fragments(p, base, escapes, num_escapes, a);
   }
 }
 
@@ -69,7 +71,7 @@ __device__ __forceinline__ void fragments(const uint4 (&p)[WeightTraits<S>::kLoa
 // adjacent row, while each lane accumulates the two rows eight apart.
 template <WeightSource S, int Warps>
 __global__ void __launch_bounds__(Warps * 32) gemv_four_rows(
-    const __nv_bfloat16* x, const uint8_t* weights, const uint4* escapes, uint32_t base,
+    const __nv_bfloat16* x, const uint8_t* weights, const uint4* escapes, uint32_t base, uint32_t num_escapes,
     int kb, const __nv_bfloat16* bias, __nv_bfloat16* output, bool weights_ready) {
   using T = WeightTraits<S, true>;
   constexpr int Parts = Warps * 4;
@@ -94,7 +96,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_four_rows(
 #endif
   for (int p = part; p < kb; p += Parts) {
     uint32_t values[4][4];
-    fragments<S>(loaded, base, escapes, values);
+    fragments<S>(loaded, base, escapes, num_escapes, values);
     if (p + Parts < kb) {
 #pragma unroll
       for (int j = 0; j < T::kLoads; ++j)
@@ -141,7 +143,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_four_rows(
 
 template <WeightSource S>
 __device__ __forceinline__ void row_fragments(const uint4 (&planes)[WeightTraits<S>::kLoads],
-                                            uint32_t base, const uint4* escapes, bool upper,
+                                            uint32_t base, const uint4* escapes, uint32_t num_escapes, bool upper,
                                             uint32_t (&values)[4][2]) {
   if constexpr (S == WeightSource::kNF12) {
     const Group groups[4] = {
@@ -155,7 +157,7 @@ __device__ __forceinline__ void row_fragments(const uint4 (&planes)[WeightTraits
       const uint32_t b = (((g.meta << 1) & 0x80808080u) | ((g.meta >> 3) & 0x07070707u)) + base;
       values[j][0] = byte_perm(g.lo0, byte_perm(a, b, 0x5140), selector);
       values[j][1] = byte_perm(g.lo1, byte_perm(a, b, 0x7362), selector);
-      if (g.meta == 0) {
+      if (g.meta == 0 && g.lo0 < num_escapes) {
         const uint4 original = load_global_u4<true>(escapes + g.lo0);
         values[j][0] = upper ? original.y : original.x;
         values[j][1] = upper ? original.w : original.z;
@@ -173,7 +175,7 @@ __device__ __forceinline__ void row_fragments(const uint4 (&planes)[WeightTraits
 // A narrow output needs more CTAs. Decode only the selected row of each group.
 template <WeightSource S, int Warps>
 __global__ void __launch_bounds__(Warps * 32) gemv_one_row(
-    const __nv_bfloat16* x, const uint8_t* weights, const uint4* escapes, uint32_t base,
+    const __nv_bfloat16* x, const uint8_t* weights, const uint4* escapes, uint32_t base, uint32_t num_escapes,
     int kb, const __nv_bfloat16* bias, __nv_bfloat16* output, bool weights_ready) {
   using T = WeightTraits<S, true>;
   constexpr int Parts = Warps * 8;
@@ -193,7 +195,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_one_row(
 #pragma unroll
     for (int j = 0; j < T::kLoads; ++j)
       loaded[j] = load_global_u4<true>(reinterpret_cast<const uint4*>(first + part * T::kSuperAtomBytes + j * kPlaneBytes));
-    row_fragments<S>(loaded, base, escapes, upper, values);
+    row_fragments<S>(loaded, base, escapes, num_escapes, upper, values);
   }
 #if __CUDA_ARCH__ >= 900
   if (weights_ready) asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -215,7 +217,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_one_row(
       sums[2] = bf16_fma<false>(values[j][1], b, sums[2]);
       sums[3] = bf16_fma<true>(values[j][1], b, sums[3]);
     }
-    if (p + Parts < kb) row_fragments<S>(loaded, base, escapes, upper, values);
+    if (p + Parts < kb) row_fragments<S>(loaded, base, escapes, num_escapes, upper, values);
   }
   float sum = sums[0];
 #pragma unroll
@@ -234,7 +236,7 @@ __global__ void __launch_bounds__(Warps * 32) gemv_one_row(
   }
 }
 
-using Kernel = void (*)(const __nv_bfloat16*, const uint8_t*, const uint4*, uint32_t,
+using Kernel = void (*)(const __nv_bfloat16*, const uint8_t*, const uint4*, uint32_t, uint32_t,
                         int, const __nv_bfloat16*, __nv_bfloat16*, bool);
 
 template <WeightSource S>
@@ -307,7 +309,7 @@ cudaError_t linear_gemv(const LinearArgs& a, const GemvConfig& config) {
     launch.numAttrs = 1;
   }
   const bool weights_ready = a.source == WeightSource::kNF12 && a.weights_ready;
-  return cudaLaunchKernelEx(&launch, kernel, a.x, a.weight, a.escapes, exp_base_x4(a.exp_base),
+  return cudaLaunchKernelEx(&launch, kernel, a.x, a.weight, a.escapes, exp_base_x4(a.exp_base), a.num_escapes,
                             static_cast<int>(a.k / 64), a.bias, a.y, weights_ready);
 }
 
