@@ -12,11 +12,16 @@ accelerators: the visible-device count is monkeypatched.
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.models.loader import (
+    _assign_greedy_device_ids,
+    _device_map_uses_cpu,
     _explicit_layerwise_devices,
     _explicit_requested_devices,
     _layerwise_device_count,
     _layerwise_device_strings,
+    _module_tensor_bytes,
+    _normalize_max_memory,
     _resolve_default_layerwise_device,
 )
 from gptqmodel.utils import importer
@@ -119,6 +124,61 @@ def test_mixed_concrete_and_abstract_devices_fail_before_broadening(monkeypatch,
         _layerwise_device_strings(requested, 4)
     with pytest.raises(ValueError, match="cannot mix concrete accelerator ordinals"):
         _resolve_default_layerwise_device(requested, BACKEND.AUTO)
+
+
+def test_normalize_max_memory_maps_ordinals_and_cpu():
+    from accelerate.utils import convert_file_size_to_int
+
+    budgets = _normalize_max_memory(
+        {1: "4GiB", "cpu": "8GiB"}, DEVICE.CUDA
+    )
+
+    assert budgets == [
+        ("cuda:1", convert_file_size_to_int("4GiB")),
+        ("cpu", convert_file_size_to_int("8GiB")),
+    ]
+
+
+def test_normalize_max_memory_accepts_concrete_device_strings():
+    assert _normalize_max_memory({"cuda:0": 1024}, DEVICE.CUDA) == [("cuda:0", 1024)]
+
+
+def test_normalize_max_memory_rejects_an_unknown_device_key():
+    with pytest.raises(ValueError, match="unsupported device key"):
+        _normalize_max_memory({"tpu": "1GiB"}, DEVICE.CUDA)
+
+
+def test_normalize_max_memory_rejects_non_positive_budgets():
+    with pytest.raises(ValueError, match="greater than zero"):
+        _normalize_max_memory({0: "0GiB"}, DEVICE.CUDA)
+
+
+def test_assign_greedy_device_ids_fills_devices_in_order():
+    budgets = [10, 100]
+
+    assert _assign_greedy_device_ids([4, 4, 4], budgets) == [0, 0, 1]
+    assert budgets == [2, 96]
+
+
+def test_assign_greedy_device_ids_reports_a_unit_that_does_not_fit():
+    with pytest.raises(ValueError, match="cannot hold `model.layers.0`"):
+        _assign_greedy_device_ids([11], [10], ["model.layers.0"])
+
+
+def test_device_map_uses_cpu_detects_only_real_cpu_entries():
+    assert _device_map_uses_cpu({"a": "cuda:0", "b": "cpu"})
+    assert _device_map_uses_cpu({"a": torch.device("cpu")})
+    assert not _device_map_uses_cpu({"a": "cuda:0", "b": 1})
+    assert not _device_map_uses_cpu({"a": "disk"})
+    assert not _device_map_uses_cpu(None)
+
+
+def test_module_tensor_bytes_counts_parameters_and_buffers():
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(torch.zeros((4, 4), dtype=torch.float32))
+    module.register_buffer("packed", torch.zeros((2,), dtype=torch.int32))
+
+    assert _module_tensor_bytes(module) == 4 * 4 * 4 + 2 * 4
 
 
 def test_requested_devices_are_concrete_torch_devices():

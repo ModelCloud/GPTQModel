@@ -321,3 +321,24 @@ def test_fp8_pack_is_bit_exact_with_fp8_token_qdq(rows, width, dtype):
 
     dequantized = (codes.float() * scales[:, None]).to(x.dtype)
     assert torch.equal(dequantized, fp8_token_qdq(x))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+def test_w4afp8_linear_runs_under_torch_compile():
+    """Inductor codegens the Gluon kernel without ``gl`` and raises NameError.
+
+    ``W4AFP8Linear.forward`` is ``torch.compiler.disable``-d so the launch stays
+    eager inside an otherwise compiled model (for example a static-cache
+    decode graph).
+    """
+    module = _packed_linear(device="cuda")
+    x = torch.randn((2, 3, 128), device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        eager = module(x)
+        compiled = torch.compile(module, backend="inductor")
+        actual = compiled(x)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, eager, rtol=2e-3, atol=2e-3)

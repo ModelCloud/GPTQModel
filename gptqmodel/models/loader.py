@@ -527,6 +527,112 @@ def _native_ttnn_backend(backend: BACKEND) -> bool:
     return backend in (BACKEND.GPTQ_TTNN,)
 
 
+def _module_tensor_bytes(module: torch.nn.Module) -> int:
+    """Return the resident bytes of a module's own parameters and buffers.
+
+    Meta tensors keep their shape and element size, so the estimate works
+    before the checkpoint is materialized. A tied weight is one tensor object
+    and is counted once.
+    """
+    seen = set()
+    total = 0
+    for tensor in chain(module.parameters(), module.buffers()):
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        key = id(tensor)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
+    """Normalize an Accelerate-style ``max_memory`` map into ordered budgets.
+
+    Keys are integer accelerator ordinals, ``"cpu"``, or concrete device
+    strings; values are byte counts or size strings such as ``"4GiB"``. The
+    returned order is the caller's insertion order and is also the placement
+    priority.
+    """
+    if not isinstance(max_memory, dict) or not max_memory:
+        raise TypeError("`max_memory` must be a non-empty dict of device -> size.")
+
+    from accelerate.utils import convert_file_size_to_int
+
+    family = selector_device_family(device) or DEVICE.CPU
+    budgets: List[tuple[str, int]] = []
+    seen = set()
+    for key, value in max_memory.items():
+        if isinstance(key, int):
+            name = f"{family.type}:{key}"
+        else:
+            name = str(key).strip().lower()
+            if name != "cpu":
+                try:
+                    name = str(torch.device(name))
+                except (RuntimeError, ValueError) as exc:
+                    raise ValueError(
+                        f"`max_memory` has an unsupported device key `{key}`."
+                    ) from exc
+        if name in seen:
+            raise ValueError(f"`max_memory` names `{name}` more than once.")
+        seen.add(name)
+        try:
+            budget = convert_file_size_to_int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"`max_memory[{key!r}]` is not a valid size: {value!r}."
+            ) from exc
+        if budget <= 0:
+            raise ValueError(f"`max_memory[{key!r}]` must be greater than zero.")
+        budgets.append((name, budget))
+    return budgets
+
+
+def _device_map_uses_cpu(device_map) -> bool:
+    """Whether a placement map contains a CPU-resident entry."""
+    if not isinstance(device_map, dict):
+        return False
+    for value in device_map.values():
+        if value is None or isinstance(value, int):
+            continue
+        try:
+            if torch.device(value).type == "cpu":
+                return True
+        except (RuntimeError, ValueError):
+            continue
+    return False
+
+
+def _assign_greedy_device_ids(
+    sizes: Sequence[int],
+    budgets: List[Optional[int]],
+    labels: Optional[Sequence[str]] = None,
+) -> List[int]:
+    """Place each unit on the first device that still has room, in order.
+
+    ``budgets`` is mutated so the caller can keep reserving room for the
+    embedding and output head. A unit that does not fit anywhere is an error:
+    silently exceeding a memory cap is what the caller asked us not to do.
+    """
+    cursor = 0
+    assignments: List[int] = []
+    for index, size in enumerate(sizes):
+        while cursor < len(budgets) and budgets[cursor] is not None and budgets[cursor] < size:
+            cursor += 1
+        if cursor >= len(budgets):
+            label = labels[index] if labels is not None else f"unit {index}"
+            raise ValueError(
+                f"`max_memory` cannot hold `{label}` ({size} bytes); increase a "
+                "device budget or add a `cpu` entry."
+            )
+        assignments.append(cursor)
+        if budgets[cursor] is not None:
+            budgets[cursor] -= size
+    return assignments
+
+
 def _resolve_default_layerwise_device(device, backend: BACKEND):
     """Keep explicit device sequences intact instead of collapsing singletons."""
     requested = _explicit_requested_devices(device)
@@ -1802,12 +1908,25 @@ def ModelLoader(cls):
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
+        max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = _normalize_requested_device_map(device, device_map)
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+        if max_memory is not None and explicit_device_map is not None:
+            raise ValueError(
+                "Pass either an explicit `device_map` dict or `max_memory`, not both."
+            )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
+
+        # A CPU-resident layer runs `post_init` on CPU. AUTO must therefore not
+        # select a CUDA-only kernel for a map that offloads some layers.
+        cpu_offload = _device_map_uses_cpu(explicit_device_map)
+        if max_memory is not None and any(
+            str(key).strip().lower() == "cpu" for key in max_memory
+        ):
+            cpu_offload = True
 
         if requested_device_map is None:
             explicit_device = None
@@ -2397,6 +2516,7 @@ def ModelLoader(cls):
                     device=device,
                     dtype=dtype,
                     is_sharded=is_sharded,
+                    cpu_offload=cpu_offload,
                 )
 
         validate_checkpoint_qweights(
@@ -2424,6 +2544,7 @@ def ModelLoader(cls):
                 layers: List[torch.nn.Module],
                 ignore_modules: List[torch.nn.Module],
                 num_gpus: Optional[int] = None,
+                max_memory=None,
         ) -> Dict[str, str]:
             """
             Build a deterministic alternating device_map for multi-GPU loading.
@@ -2444,11 +2565,23 @@ def ModelLoader(cls):
                 family = selector_device_family(device) or DEVICE.CPU
                 raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
 
+            if max_memory is not None:
+                # A memory cap names the devices that may be used. It replaces
+                # the visible-device round-robin so an unlisted GPU is never
+                # touched, and a `cpu` entry becomes the offload target.
+                max_memory_budgets = _normalize_max_memory(max_memory, device)
+                device_strs = [name for name, _ in max_memory_budgets]
+                device_budgets: Optional[List[Optional[int]]] = [
+                    budget for _, budget in max_memory_budgets
+                ]
+                num_gpus = len(device_strs)
+            else:
+                device_budgets = None
+                device_strs = _layerwise_device_strings(device, num_gpus, backend)
+
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
-
-            device_strs = _layerwise_device_strings(device, num_gpus, backend)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -2456,6 +2589,18 @@ def ModelLoader(cls):
                 name = mod2name.get(mod)
                 if name is not None:
                     device_map[name] = device_strs[device_id]
+
+            def default_fallback_device_id() -> int:
+                if device_budgets is None:
+                    return device_ids[-1]
+                # A parameterless module (rotary embeddings, for example)
+                # cannot carry an Accelerate CPU-offload hook: its
+                # `pre_forward` reads `next(module.parameters())`. Keep the
+                # structural modules on an accelerator when one is budgeted.
+                return next(
+                    (index for index, name in enumerate(device_strs) if name != "cpu"),
+                    device_ids[-1],
+                )
 
             # -------------------------------------------------------------
             # 1–3. Assign input embeddings, layers, and ignored modules
@@ -2466,17 +2611,33 @@ def ModelLoader(cls):
             except NotImplementedError:
                 log.warning("Model does not implement get_input_embeddings. Skipping input embeddings assignment.")
                 in_emb = None
-            assign(in_emb, device_ids[0])
 
             # Alternating layers
             layer_name2devid: Dict[str, int] = {}
+            in_emb_device_id: Optional[int] = None
 
-            for i, layer in enumerate(layers):
-                gpu = device_ids[i % num_gpus]
-                assign(layer, gpu)
-                lname = mod2name.get(layer)
-                if lname is not None:
-                    layer_name2devid[lname] = gpu
+            if device_budgets is not None:
+                units = ([in_emb] if in_emb is not None else []) + list(layers)
+                sizes = [_module_tensor_bytes(unit) for unit in units]
+                labels = [mod2name.get(unit, "<unnamed>") for unit in units]
+                placements = _assign_greedy_device_ids(sizes, device_budgets, labels)
+                for unit, dev_id in zip(units, placements):
+                    assign(unit, dev_id)
+                    if unit is in_emb:
+                        in_emb_device_id = dev_id
+                    lname = mod2name.get(unit)
+                    if lname is not None:
+                        layer_name2devid[lname] = dev_id
+            else:
+                assign(in_emb, device_ids[0])
+                if in_emb is not None:
+                    in_emb_device_id = device_ids[0]
+                for i, layer in enumerate(layers):
+                    gpu = device_ids[i % num_gpus]
+                    assign(layer, gpu)
+                    lname = mod2name.get(layer)
+                    if lname is not None:
+                        layer_name2devid[lname] = gpu
 
             # Ignored modules - skip input embeddings to avoid overriding GPU 0 assignment
             # Iterate over modules that should be ignored during default layer-wise mapping
@@ -2498,9 +2659,9 @@ def ModelLoader(cls):
                     if "." not in owner:
                         break
                     owner = owner.rsplit(".", 1)[0]
-                # If no ancestor is found, fall back to the last GPU
+                # If no ancestor is found, fall back to the default device
                 if dev_id is None:
-                    dev_id = device_ids[-1]
+                    dev_id = default_fallback_device_id()
                 # Assign the current module to the determined device
                 assign(mod, dev_id)
             # -------------------------------------------------------------
@@ -2515,14 +2676,19 @@ def ModelLoader(cls):
                         break
 
             if head is not None:
-                assign(head, device_ids[-1])
-                # If weight-tied, co-locate on GPU 0
                 tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
-                if (
-                    in_emb is not None
-                    and tie_cfg
-                ):
-                    assign(head, device_ids[0])
+                if in_emb is not None and tie_cfg:
+                    # A tied head is the same tensor as the input embedding, so
+                    # it follows that placement instead of consuming budget.
+                    assign(head, in_emb_device_id if in_emb_device_id is not None else device_ids[0])
+                elif device_budgets is not None:
+                    head_size = _module_tensor_bytes(head)
+                    placement = _assign_greedy_device_ids(
+                        [head_size], device_budgets, [mod2name.get(head, "<head>")]
+                    )
+                    assign(head, placement[0])
+                else:
+                    assign(head, device_ids[-1])
 
             # -------------------------------------------------------------
             # 5. Safety check: ensure all params are covered
@@ -2533,8 +2699,8 @@ def ModelLoader(cls):
             ]
             module_names = set(mod2name.values())
             if missing:
-                # map any leftover params (rare) to last GPU
-                fallback_device = device_ids[-1]
+                # map any leftover params (rare) to the default device
+                fallback_device = default_fallback_device_id()
                 for param_name in missing:
                     owner = param_name
                     while owner and owner not in module_names:
@@ -2569,7 +2735,7 @@ def ModelLoader(cls):
             ]
             # If any tensors remain unmapped, assign them to the last GPU as a fallback
             if missing_after_prune:
-                fallback_device = device_ids[-1]
+                fallback_device = default_fallback_device_id()
                 for param_name in missing_after_prune:
                     # Walk up the module tree until we find a module name that exists in module_names
                     owner = param_name
@@ -2605,7 +2771,10 @@ def ModelLoader(cls):
             else:
                 layers, _ = get_layers_with_prefixes(model, extract_layers_node)
                 num_gpus = _layerwise_device_count(device, backend)
-                device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+                device_map = build_layerwise_device_map(
+                    model, device, layers, ignore_modules, num_gpus,
+                    max_memory=max_memory,
+                )
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")
@@ -2790,6 +2959,7 @@ def ModelLoader(cls):
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
                 is_sharded=is_sharded,
+                cpu_offload=cpu_offload,
             )
 
         # == step4: set seqlen == #

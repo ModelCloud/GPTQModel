@@ -5589,24 +5589,34 @@ class BaseQModel(nn.Module):
             )
 
     ## overrides nn.module.train()
-    # def train(self, mode=True):
-    #     old_mode = self.training
-    #     # Call the parent class's train() method to set the training mode
-    #     super().train(mode)
-    #
-    #     if old_mode == mode:
-    #         return
-    #
-    #     # Custom behavior when switching to training mode
-    #     if mode:
-    #         if not self.SUPPORTS_TRAINING:
-    #             err = f"{self.__class__.__name__}: MODEL switching to training mode."
-    #             log.error(err)
-    #             raise NotImplementedError(err)
-    #         else:
-    #             log.info(f"{self.__class__.__name__}: MODEL switching to training mode.")
-    #     else:
-    #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
+    def train(self, mode: bool = True):
+        """Switch training mode without leaving a partially-updated model.
+
+        ``nn.Module.train`` recurses into every child, and each inference-only
+        quant kernel raises from its own ``train``. By then the modules visited
+        earlier are already in training mode, so a retry starts from mixed
+        state. Reject the switch before touching any child.
+        """
+        if mode:
+            model = getattr(self, "_modules", {}).get("model")
+            if model is not None:
+                unsupported = [
+                    name
+                    for name, module in model.named_modules()
+                    if isinstance(module, BaseQuantLinear)
+                    and not module.SUPPORTS_TRAINING
+                    and not module.training
+                ]
+                if unsupported:
+                    raise NotImplementedError(
+                        f"{self.__class__.__name__}: {len(unsupported)} inference-only "
+                        f"quant kernel(s) cannot switch to training mode (first: "
+                        f"`{unsupported[0]}`). Reload the model with "
+                        '`backend="auto_trainable"` or a trainable backend for this '
+                        "quantization method before fine-tuning."
+                    )
+        return super().train(mode)
+
     @classmethod
     def _build_layer_modules_for_tree(cls, tree, include_capture_only: bool = False):
         """

@@ -1288,6 +1288,7 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
         is_sharded: bool = False,
+        cpu_offload: bool = False,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if isinstance(format, str):
         format = FORMAT(format.lower())
@@ -1345,6 +1346,25 @@ def select_quant_linear(
         # A kernel selected for a multi-GPU model must be valid on every target
         # ordinal.  Validate each exact target so device-sensitive kernels query
         # the correct capability rather than the process's current device.
+        if cpu_offload:
+            # A device map with CPU entries runs `post_init` on the
+            # CPU-resident layers; Accelerate only moves them to the execution
+            # device for `forward`. A kernel that needs CUDA during
+            # `post_init` (Marlin, ExLlamaV2, ...) would load and then fail, so
+            # reject it here. The declaration is separate from
+            # `SUPPORTS_DEVICES`: Triton V2 needs CUDA to execute but its
+            # `post_init` is CPU-safe.
+            device_support = getattr(cls, "SUPPORTS_DEVICES", [])
+            if (
+                DEVICE.ALL not in device_support
+                and DEVICE.CPU not in device_support
+                and not getattr(cls, "SUPPORTS_CPU_OFFLOAD", False)
+            ):
+                return False, NotImplementedError(
+                    f"{cls} cannot run `post_init` on a CPU-offloaded layer; "
+                    "select a portable `*Torch` backend or a kernel that "
+                    "declares `SUPPORTS_CPU_OFFLOAD`."
+                )
         if selector_targets is None:
             return validate_quant_linear(cls, **kwargs, device=None)
         last_result = (True, None)
@@ -1495,6 +1515,7 @@ def select_quant_linear(
         dtype=dtype,
         dynamic=dynamic,
         trainable=trainable,
+        adapter=adapter,
     )
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")

@@ -248,6 +248,13 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
+    # Whether `post_init()` can run while the layer is CPU-offloaded.
+    # Accelerate moves a CPU-mapped layer to the execution device only for
+    # `forward`, so a kernel that needs CUDA during `post_init` must stay
+    # False. Kernels that declare DEVICE.CPU are implicitly safe; a CUDA-only
+    # kernel with a CPU-safe `post_init` sets this explicitly.
+    SUPPORTS_CPU_OFFLOAD: bool = False
+
     SUPPORTS_DTYPES: List[t.dtype] = None
 
     REQUIRES_FORMAT_V2: bool = False
@@ -948,7 +955,7 @@ class GroupedQuantLinear(BaseQuantLinear):
             return False, NotImplementedError(err)
 
         if desc_act not in cls.SUPPORTS_DESC_ACT:
-            err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
+            err = f"{cls} only supports desc_act `{cls.SUPPORTS_DESC_ACT}`: actual desc_act = `{desc_act}`"
             return False, NotImplementedError(err)
 
         if dynamic is not None:
@@ -965,7 +972,7 @@ class GroupedQuantLinear(BaseQuantLinear):
                 dynamic_sym[pattern] = pattern_dict.get("sym", sym)
             for layer, layer_sym in dynamic_sym.items():
                 if layer_sym not in cls.SUPPORTS_SYM:
-                    err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{layer_sym}` for layer `{layer}`"
+                    err = f"{cls} only supports sym `{cls.SUPPORTS_SYM}`: actual sym = `{layer_sym}` for layer `{layer}`"
                     return False, NotImplementedError(err)
 
             dynamic_desc_act = {}
@@ -973,7 +980,7 @@ class GroupedQuantLinear(BaseQuantLinear):
                 dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
             for layer, layer_desc_act in dynamic_desc_act.items():
                 if layer_desc_act not in cls.SUPPORTS_DESC_ACT:
-                    err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{layer_desc_act}` for layer `{layer}`"
+                    err = f"{cls} only supports desc_act `{cls.SUPPORTS_DESC_ACT}`: actual desc_act = `{layer_desc_act}` for layer `{layer}`"
                     return False, NotImplementedError(err)
 
         if in_features is not None:

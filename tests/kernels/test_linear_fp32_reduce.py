@@ -6,12 +6,21 @@ import weakref
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce, linear_wide_bias
+from gptqmodel.nn_modules.qlinear._numerics import (
+    linear_fp32_reduce,
+    linear_wide_bias,
+    matmul_fp32_reduce,
+)
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+from gptqmodel.utils.rocm import IS_ROCM
 from tests.test_torch_weight_storage import state_tensors
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+# The wide FP32-output GEMM branch (`_wants_fp32_reduce`) is NVIDIA CUDA only.
+requires_cuda_wide_reduce = pytest.mark.skipif(
+    IS_ROCM, reason="wide FP32 reduce is NVIDIA CUDA only"
+)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -422,3 +431,67 @@ def test_fp4_accelerator_forward_is_graph_capturable(dtype):
     with torch.inference_mode():
         traced = compiled(x)
     torch.testing.assert_close(traced, expected, rtol=0, atol=0)
+
+
+def _bias_case(dtype, rows=6, in_features=896):
+    generator = torch.Generator(device="cuda").manual_seed(2026)
+    x = torch.randn((rows, in_features), device="cuda", dtype=dtype, generator=generator)
+    weight = torch.randn((in_features, in_features), device="cuda", dtype=dtype, generator=generator)
+    bias = torch.randn((in_features,), device="cuda", dtype=torch.float32, generator=generator)
+    return x, weight, bias
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@requires_cuda_wide_reduce
+def test_bias_path_eager_output_is_bitwise_unchanged(dtype):
+    """The eager expression must stay the pre-fix ``addmm(..., out_dtype=...)``.
+
+    The compiler-safe branch is selected only while Dynamo traces, so eager
+    rounding is bitwise identical to the implementation before the fix.
+    """
+    x, weight, bias = _bias_case(dtype)
+
+    actual = matmul_fp32_reduce(x, weight, bias)
+    expected = torch.addmm(bias, x, weight, out_dtype=torch.float32).to(dtype)
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@requires_cuda_wide_reduce
+def test_compiled_bias_path_uses_a_lowerable_gemm(dtype):
+    """Inductor 2.15 cannot lower ``addmm(..., out_dtype=...)``.
+
+    Pin the compiled graph to the wide ``mm`` plus FP32 bias expression so a
+    future edit cannot reintroduce the unsupported op into a static-cache
+    decode graph.
+    """
+    graphs = []
+
+    def backend(graph_module, example_inputs):
+        graphs.append(graph_module)
+        return graph_module.forward
+
+    x, weight, bias = _bias_case(dtype)
+    compiled = torch.compile(
+        lambda a, b, c: matmul_fp32_reduce(a, b, c),
+        backend=backend,
+        fullgraph=True,
+    )
+    output = compiled(x, weight, bias)
+
+    assert output.dtype is dtype
+    assert graphs, "Dynamo did not produce a graph"
+    assert "addmm" not in graphs[0].code
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@requires_cuda_wide_reduce
+def test_compiled_bias_path_matches_eager(dtype):
+    x, weight, bias = _bias_case(dtype)
+    eager = matmul_fp32_reduce(x, weight, bias)
+    compiled = torch.compile(
+        lambda a, b, c: matmul_fp32_reduce(a, b, c), backend="inductor", fullgraph=True
+    )(x, weight, bias)
+
+    torch.testing.assert_close(compiled, eager, rtol=2e-3, atol=2e-3)
