@@ -219,18 +219,27 @@ Nsight Systems attributed about 590 ms of the original 4K quantization run to
 
 ```mermaid
 flowchart TD
-    A[Quantized layer on accelerator] --> B{Tensor at least 8 MiB?}
-    B -- No --> C[Pageable CPU tensor]
-    B -- Yes --> D[Allocate pinned CPU result]
-    D --> E[Queue bounded D2H chunks]
-    E --> F[Next tensor on same device stream]
-    F --> G{Module apply complete?}
-    G -- No --> B
-    G -- Yes --> H[Synchronize once per device stream]
-    H --> I[Layer is ready for finalize or disk offload]
+    A[Quantized layer on accelerator] --> B{Device type}
+    B -- meta --> C[Meta tensor stays]
+    B -- "XPU / MPS / NPU / XLA / CPU" --> D[Ordinary tensor.to CPU]
+    B -- "CUDA / HIP" --> E{Tensor at least 8 MiB?}
+    E -- No --> F[Pageable CPU tensor]
+    E -- Yes --> G[Allocate pinned CPU result]
+    G --> H[Queue bounded D2H chunks]
+    H --> I[Next tensor on same device stream]
+    I --> J{Module apply complete?}
+    J -- No --> E
+    J -- Yes --> K[Synchronize once per device stream]
+    C --> L[Layer ready for finalize or disk offload]
+    D --> L
+    F --> L
+    K --> L
 ```
 
-Small tensors remain pageable to avoid pinning metadata and scalar state.
+XPU, MPS, NPU, XLA and CPU take the ordinary CPU move, so layer offload still
+happens off the CUDA/HIP path. Meta tensors stay in place because they have no
+storage. Small CUDA/HIP tensors remain pageable to avoid pinning metadata and
+scalar state.
 Queued copies use the same current stream and are synchronized once at the
 module boundary, before any CPU consumer can read them.
 
