@@ -360,6 +360,28 @@ threaded path because it cannot describe the lifecycle of existing allocations.
 3. Repeat it several times. A single PASS is not evidence.
 4. Add the row above, with the workaround if the result is not SAFE.
 
+## CI enforcement
+
+A `3.14t` job that does not set `PYTHON_GIL=0` can re-enable the GIL while
+importing `triton._C.libtriton` and then run fully serialized: every test that
+needs a free-threaded interpreter skips, and the build stays green. The default
+matrix in `.github/workflows/unit_tests.yml` keeps the GIL because some
+test-only libraries still need it; the dedicated `free-threaded` job passes
+`free_threaded: true` to `.github/workflows/unit_tests_reusable.yml`, which
+exports `PYTHON_GIL=0` for every later step and runs
+`.github/scripts/ci_assert_free_threaded.py` after the package is installed.
+That gate fails the job unless `sys._is_gil_enabled()` is still `False` after
+importing `torch`, `gptqmodel`, `triton`, and `gptqmodel.utils.p2p`, so a
+silently serialized lane is a red build instead of a skipped one.
+
+The lane runs bounded concurrency tests: `tests/test_threadx_cpu_locks.py`,
+`tests/test_threadx_shutdown.py`, `tests/test_looper_concurrency.py`, and
+`tests/test_checkpoint_store.py` on CPU; `tests/test_stream.py` and
+`tests/test_thread_pool_exit.py` on one GPU; `tests/test_p2p.py` and
+`tests/test_p2p_copy_utils.py` on two GPUs for the P2P and native-kernel
+ownership paths. `tests/test_ci_free_threaded_lane.py` pins the workflow wiring
+and checks that the gate really fails when the GIL is enabled.
+
 ## Where P2P is used
 
 `gptqmodel.utils.p2p.enable_peer_access` / `enable_for_devices` probe and
