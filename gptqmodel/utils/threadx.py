@@ -515,11 +515,16 @@ class _DeviceWorker:
         """
         self._apply_cpu_affinity()
         _activate_thread_device(self.device)
-        while not self._stop.is_set():
+        # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
+        # after every task the pool already accepted, so reaching the sentinel
+        # means the queue is drained and every accepted future is resolved.
+        # Breaking out as soon as `_stop` was set abandoned the queued work:
+        # its future stayed pending and its in-flight count never dropped.
+        while True:
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
                 if not is_task:
-                    if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
+                    if DEBUG_ON: log.debug(f"{self.name}: sentinel received; queue drained, exiting")
                     break
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
@@ -722,7 +727,10 @@ class DeviceThreadPool:
         # Worker groups and RR dispatch bookkeeping.
         self._worker_groups: Dict[str, List[_DeviceWorker]] = {}
         self._dispatch_rr: Dict[str, int] = {}
-        self._dispatch_lock = threading.Lock()
+        # Reentrant: shutdown() issues worker stops while holding it, and a
+        # worker whose stop() re-enters _on_worker_exit (the _SyncWorker
+        # fallback does) would otherwise self-deadlock.
+        self._dispatch_lock = threading.RLock()
         self._serial_workers: Dict[str, _DeviceWorker] = {}
 
         # Stats / GC / inflight control
@@ -1158,19 +1166,25 @@ class DeviceThreadPool:
         """
         key = self._resolve_device_key(device)
         dev = self._devices_by_key[key]
-        worker = self._pick_worker(key)
         if cuda_event is not None and dev.type != "cuda":
             raise ValueError("cuda_event is only valid for CUDA devices")
 
         if DEBUG_ON: log.debug(f"submit: device={key} fn={getattr(fn, '__name__', repr(fn))}")
-        # Mark in-flight before enqueue to avoid races with wait().
-        self._mark_scheduled(key)
-        try:
-            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
-        except BaseException:
-            # Roll back inflight if enqueue fails (rare)
-            self._mark_finished(key)
-            raise
+        # Acceptance check, worker selection and enqueue all happen under the
+        # lock shutdown() takes to set `_stop_event` and queue its sentinels.
+        # A task is therefore either enqueued ahead of every sentinel (and
+        # drained) or rejected -- never queued behind a sentinel and stranded.
+        # In-flight is marked before enqueue so a racing wait() cannot miss it.
+        with self._dispatch_lock:
+            self._require_accepting_locked()
+            worker = self._pick_worker_locked(key)
+            self._mark_scheduled(key)
+            try:
+                return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
+            except BaseException:
+                # Roll back inflight if enqueue fails (rare)
+                self._mark_finished(key)
+                raise
 
     def submit_serial(
         self,
@@ -1191,6 +1205,7 @@ class DeviceThreadPool:
             raise ValueError("cuda_event is only valid for CUDA devices")
 
         with self._dispatch_lock:
+            self._require_accepting_locked()
             group = self._worker_groups.get(key)
             if group is None:
                 group = []
@@ -1204,16 +1219,16 @@ class DeviceThreadPool:
             self._refresh_serial_worker_locked(key)
             worker = self._serial_workers.get(key)
 
-        if worker is None:
-            raise ValueError(f"No serial worker available for device '{key}'")
+            if worker is None:
+                raise ValueError(f"No serial worker available for device '{key}'")
 
-        if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
-        self._mark_scheduled(key)
-        try:
-            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
-        except BaseException:
-            self._mark_finished(key)
-            raise
+            if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
+            self._mark_scheduled(key)
+            try:
+                return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
+            except BaseException:
+                self._mark_finished(key)
+                raise
 
     def do(
         self,
@@ -1237,24 +1252,28 @@ class DeviceThreadPool:
         IMPORTANT: We snapshot groups before stopping/joining to avoid mutating
         the lists while iterating (workers remove themselves on exit).
         """
-        self._stop_event.set()
-        self._gc_event.set()  # wake janitor if waiting
-
-        # Take stable snapshots under the dispatch lock.
+        # Set the stop event and queue every worker sentinel under the same lock
+        # submit() accepts work under, so submission and shutdown are atomic with
+        # respect to each other. A concurrent submit either completes first --
+        # leaving its task ahead of every sentinel, where the worker drains it --
+        # or observes `_stop_event` and is rejected. It can never be enqueued
+        # behind a sentinel, where nothing would run it.
         with self._dispatch_lock:
+            self._stop_event.set()
             group_snapshots: Dict[str, List[_DeviceWorker]] = {
                 key: list(group) for key, group in self._worker_groups.items()
             }
+            # Issue stop to every worker from the snapshots (no mutation hazards).
+            for snapshot in group_snapshots.values():
+                for w in snapshot:
+                    w.stop()
+
+        self._gc_event.set()  # wake janitor if waiting
 
         # Stop janitor first so it won't grab locks while workers wind down.
         if self._janitor is not None and wait:
             if DEBUG_ON: log.debug("Joining DP-Janitor thread…")
             self._janitor.join()
-
-        # Issue stop to every worker from the snapshots (no mutation hazards).
-        for key, snapshot in group_snapshots.items():
-            for w in snapshot:
-                w.stop()
 
         # Join everyone if requested.
         if wait:
@@ -1462,29 +1481,45 @@ class DeviceThreadPool:
         idx = "" if dev.index is None else f":{dev.index}"
         return f"{dev.type}{idx}"
 
-    def _pick_worker(self, key: str) -> _DeviceWorker:
+    def _require_accepting_locked(self) -> None:
+        """
+        Refuse new work once shutdown has started. Caller holds `_dispatch_lock`.
+
+        Without this a task accepted after `shutdown()` could be enqueued behind
+        a worker's sentinel, where nothing would ever run it: the caller's future
+        would stay pending forever.
+        """
+        if self._stop_event.is_set():
+            raise RuntimeError(
+                "DeviceThreadPool is shutting down; no new work is accepted. "
+                "Create a new pool to submit more tasks."
+            )
+
+    def _pick_worker_locked(self, key: str) -> "_DeviceWorker | _SyncWorker":
         """
         Round-robin selection across available workers for a device key.
         If no workers exist (should not happen under normal init), we
         spawn one lazily for robustness.
-        """
-        with self._dispatch_lock:
-            group = self._worker_groups.get(key)
-            if not group:
-                dev = self._devices_by_key[key]
-                w = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
-                group = [w]
-                self._worker_groups[key] = group
-                self._dispatch_rr[key] = 0
-                self._refresh_serial_worker_locked(key)
-                return w
 
-            n = len(group)
-            idx = self._dispatch_rr[key] % n
-            w = group[idx]
-            self._dispatch_rr[key] = (idx + 1) % n
+        Caller must hold `_dispatch_lock`, so lazy spawning cannot start a
+        thread after `shutdown()` has snapshotted the worker groups.
+        """
+        group = self._worker_groups.get(key)
+        if not group:
+            dev = self._devices_by_key[key]
+            w = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
+            group = [w]
+            self._worker_groups[key] = group
+            self._dispatch_rr[key] = 0
             self._refresh_serial_worker_locked(key)
             return w
+
+        n = len(group)
+        idx = self._dispatch_rr[key] % n
+        w = group[idx]
+        self._dispatch_rr[key] = (idx + 1) % n
+        self._refresh_serial_worker_locked(key)
+        return w
 
     def _refresh_serial_worker_locked(self, key: str) -> None:
         """

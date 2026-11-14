@@ -1679,6 +1679,11 @@ For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide
 
 Device worker locks are acquired per lock scope, not per device name, so a virtual pool key such as `model_loader:cpu` cannot make a family read scope take its parent's lock twice while a writer waits; see [CPU pool lock scopes](docs/cpu-pool-lock-scopes.md) for the acquisition order and the deadlock it prevents.
 
+Shutting down a device thread pool drains every task it already accepted and
+rejects any later submission; see
+[device thread pool shutdown](docs/device-thread-pool-shutdown.md) for the
+accept/drain/reject flow and the race it closes.
+
 Saved quantization configs preserve the complete P2P policy; see
 [P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)
 for override precedence and validation.
