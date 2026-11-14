@@ -10,7 +10,13 @@
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear import paroquant as paroquant_module
+from gptqmodel.nn_modules.qlinear._numerics import linear_wide_bias
+from gptqmodel.nn_modules.qlinear.paroquant import (
+    ParoLinear,
+    awq_gemm_bf16_supported,
+    awq_gemm_shape_supported,
+)
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -26,6 +32,7 @@ from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_vectorized,
     build_identity_rotation_buffers,
 )
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
@@ -314,6 +321,212 @@ def test_paroquant_cuda_kernel_adds_bias_after_the_fp32_reduction(monkeypatch):
 
     assert actual.dtype is torch.float16
     assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("bits", "in_features", "out_features", "groups", "expected"),
+    [
+        # The issue's advertised configuration: group_size 16 is not a native group size.
+        (4, 16, 8, 1, False),
+        (4, 128, 64, 8, False),  # group_size 16
+        (4, 32, 64, 1, True),  # group_size 32, 64-column output tile
+        (4, 64, 64, 2, True),
+        (4, 128, 128, 4, True),
+        (4, 128, 128, 1, True),  # group_size -1 packs one scale row per channel
+        (4, 128, 64, 1, False),  # output width not divisible by group_size 128
+        (4, 256, 128, 2, True),
+        (4, 64, 32, 2, False),  # output width below the 64-column tile
+        (4, 64, 96, 2, False),  # 96 is not a multiple of 64
+        (8, 64, 64, 2, False),  # the native kernel decodes uint4b only
+        (4, 64, 64, 0, False),  # no scale rows
+        (4, 96, 64, 3, True),  # group_size 32
+        (4, 100, 64, 3, False),  # in_features not divisible by groups
+    ],
+)
+def test_awq_gemm_shape_supported_matches_native_validator(
+    bits, in_features, out_features, groups, expected
+):
+    """Pin the native kernel's shape contract without needing a GPU.
+
+    ``validate_awq_gemm_args`` rejects a group size that is not a multiple of
+    32, an output width that is not a multiple of the 64-column CTA tile, and an
+    output width that is not divisible by the group size. ParoQuant advertises
+    configurations outside that set, so the predicate has to be exact.
+    """
+
+    assert (
+        awq_gemm_shape_supported(
+            bits=bits,
+            in_features=in_features,
+            out_features=out_features,
+            groups=groups,
+        )
+        is expected
+    )
+
+
+def test_cuda_awq_kernel_gate_is_false_off_cuda():
+    """A CPU module must never be routed into the CUDA extension."""
+    module = _cancelling_bias_module(32, 64, 32)
+
+    assert module.qweight.device.type == "cpu"
+    assert module._cuda_awq_kernel_supported(torch.float16) is False
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
+def test_paroquant_cuda_falls_back_for_native_unsupported_shape(monkeypatch):
+    """Regression for #3919: an advertised group_size 16 / narrow output must not raise."""
+
+    in_features, out_features, group_size = 16, 8, 16
+    module = _cancelling_bias_module(in_features, out_features, group_size).cuda()
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("native AWQ GEMM must not be attempted for an unsupported shape")
+
+    monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward", _unexpected)
+    monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward_fp32_reduce", _unexpected)
+
+    x = torch.full((1, in_features), 516, dtype=torch.float16, device="cuda")
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x.reshape(-1, in_features),
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        module.bias,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.float16)
+
+    assert module._cuda_awq_kernel_supported(torch.float16) is False
+    assert actual.dtype is torch.float16
+    assert torch.isfinite(actual).all()
+    assert actual[0, 0].item() == 65024.0
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
+def test_paroquant_cuda_fallback_promotes_bf16_activations(monkeypatch):
+    """The dense fallback pairs BF16 activations with its reconstructed FP32 grid."""
+
+    in_features, out_features, group_size = 16, 8, 16
+    module = _cancelling_bias_module(in_features, out_features, group_size).cuda()
+    monkeypatch.setattr(module, "_forward_cuda_awq_kernel", lambda _x: None)
+
+    x = torch.full((1, in_features), 516, dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x.reshape(-1, in_features),
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        module.bias,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.bfloat16)
+
+    assert actual.dtype is torch.bfloat16
+    assert torch.isfinite(actual).all()
+    assert actual[0, 0].item() == 65024.0
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
+def test_paroquant_cuda_gate_admits_the_native_supported_shape():
+    """The qualifying shape stays on the native path, including the BF16 rule."""
+
+    module = _cancelling_bias_module(32, 64, 32).cuda()
+
+    assert module._cuda_awq_kernel_supported(torch.float16) is True
+    assert module._cuda_awq_kernel_supported(torch.bfloat16) is awq_gemm_bf16_supported(
+        module.qweight.device
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
+def test_paroquant_cuda_fallback_retains_only_packed_storage():
+    """Repeated fallback forwards must not install a dense weight cache."""
+
+    in_features, out_features, group_size = 16, 8, 16
+    module = _cancelling_bias_module(in_features, out_features, group_size).cuda()
+    x = torch.full((1, in_features), 516, dtype=torch.float16, device="cuda")
+
+    with torch.no_grad():
+        for _ in range(2):
+            module(x)
+
+    retained = list(vars(module).values()) + list(module.buffers()) + list(module.parameters())
+    assert not any(
+        isinstance(value, torch.Tensor) and value.shape == (in_features, out_features)
+        for value in retained
+    )
+    assert module.qweight.dtype is torch.int32
+    assert module.qweight.numel() == in_features * (out_features // 8)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not IS_ROCM,
+    reason="ROCm device required",
+)
+def test_paroquant_rocm_skips_the_native_cuda_kernel():
+    """A HIP build must use the portable path, not attempt the CUDA-only extension."""
+
+    in_features, out_features, group_size = 32, 64, 32
+    module = _cancelling_bias_module(in_features, out_features, group_size).cuda()
+
+    assert module._cuda_awq_kernel_supported(torch.float16) is False
+
+    x = torch.full((1, in_features), 258, dtype=torch.float16, device="cuda")
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x.reshape(-1, in_features),
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        module.bias,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.float16)
+
+    assert actual.dtype is torch.float16
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA operand promotion")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_linear_wide_bias_promotes_mismatched_cuda_dtypes(dtype):
+    """Regression for #3919: FP32 reconstructed weights beside FP16/BF16 activations."""
+
+    x = torch.full((1, 16), 516, dtype=dtype, device="cuda")
+    weight = torch.full((8, 16), 8.0, dtype=torch.float32, device="cuda")
+    bias = torch.full((8,), -1024.0, dtype=torch.float32, device="cuda")
+
+    actual = linear_wide_bias(x, weight, bias)
+    expected = (x.double() @ weight.double().t() + bias.double()).to(dtype)
+
+    assert actual.dtype is dtype
+    assert torch.isfinite(actual).all()
+    assert actual[0, 0].item() == 65024.0
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 

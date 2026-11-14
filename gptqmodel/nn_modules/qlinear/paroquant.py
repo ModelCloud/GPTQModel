@@ -26,6 +26,7 @@ from ...utils.paroquant import (
     build_identity_rotation_buffers,
     is_identity_rotation,
 )
+from ...utils.rocm import IS_ROCM
 from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
 from .gemm_awq import (
@@ -54,6 +55,36 @@ _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
 # int4 GEMM then consumes the rotated BF16 activations; FP16 uses ATen's native
 # int4pack kernel because dense FP16 matmul is substantially slower on CPU.
 _PAROQUANT_CPU_AVX512 = env_flag("GPTQMODEL_PAROQUANT_CPU_AVX512", default=True)
+
+
+def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
+    """Whether the native AWQ GEMM accepts a packed layer of this shape.
+
+    Mirrors ``validate_awq_gemm_args`` in
+    ``gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu``: uint4b codes only, a
+    group size divisible by 32, an output width divisible by the 64-column CTA
+    tile, and an output width divisible by the group size. ``groups`` is the
+    packed scale-row count, so ``group_size`` is derived exactly as the kernel
+    derives it from ``scaling_factors.size(0)``.
+    """
+
+    if bits != 4 or groups <= 0 or in_features <= 0 or out_features <= 0:
+        return False
+    if in_features % groups:
+        return False
+    group_size = in_features // groups
+    if group_size % 32 or out_features % 64:
+        return False
+    return out_features % group_size == 0
+
+
+def awq_gemm_bf16_supported(device: torch.device) -> bool:
+    """Whether the native AWQ BF16 kernel can run on ``device`` (SM 8.0+)."""
+
+    try:
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    except Exception:  # noqa: BLE001 - device probe
+        return False
 
 
 class ParoLinear(AwqTorchLinear):
@@ -327,12 +358,49 @@ class ParoLinear(AwqTorchLinear):
             self._bias_for_compute(device=x_flat.device),
         )
 
+    def _cuda_awq_kernel_supported(self, compute_dtype: torch.dtype) -> bool:
+        """Whether the native AWQ GEMM can accept this layer's packed shape.
+
+        The kernel's own validator (``validate_awq_gemm_args``) requires an
+        output width that is a multiple of its 64-column CTA tile, a group size
+        that is a multiple of 32, and an output width divisible by that group
+        size. ParoQuant advertises ``group_size=16`` and unconstrained output
+        widths because the CPU, ATen and dense paths support them, so the native
+        path has to be skipped for those configurations instead of raising from
+        inside the kernel.
+
+        The group size is derived from the packed tensors the kernel actually
+        reads, not from the config value: ``group_size=-1`` packs one scale row
+        per input channel, which the kernel turns into
+        ``in_features / scales.size(0)``. The extension is also CUDA-only, so a
+        HIP build always takes the portable path.
+        """
+
+        if IS_ROCM or self.qweight.device.type != "cuda":
+            return False
+        qweight, scales = self.qweight, self.scales
+        if qweight.numel() == 0 or scales.numel() == 0:
+            return False
+        if self.bits != 4:
+            # The native kernel decodes uint4b codes only.
+            return False
+        if not awq_gemm_shape_supported(
+            bits=self.bits,
+            in_features=self.in_features,
+            out_features=qweight.size(1) * (32 // self.bits),
+            groups=scales.size(0),
+        ):
+            return False
+        if compute_dtype == torch.bfloat16 and not awq_gemm_bf16_supported(qweight.device):
+            # ``validate_bf16_device`` rejects the BF16 kernel below SM 8.0.
+            return False
+        return True
+
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
-        if x_flat.device.type != "cuda":
-            return None
-
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        if not self._cuda_awq_kernel_supported(compute_dtype):
+            return None
         kernel_input = (
             x_flat
             if x_flat.dtype == compute_dtype and x_flat.is_contiguous()

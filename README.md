@@ -661,6 +661,10 @@ Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to 
 Biased ParoQuant Triton calls always accumulate and add bias in FP32 before
 output rounding, including when this toggle is `0`. See the
 [ParoQuant Triton bias epilogue](docs/paroquant.md#triton-bias-epilogue).
+ParoQuant's native CUDA GEMM is selected only for the shapes and devices its own
+validator accepts, so advertised configurations such as `group_size=16` and
+narrow output widths run the portable fallback instead of raising. See the
+[ParoQuant native dispatch gate](docs/paroquant.md#native-dispatch-gate).
 
 ```shell
 # default behavior: higher accuracy, slightly lower speed on some kernels
