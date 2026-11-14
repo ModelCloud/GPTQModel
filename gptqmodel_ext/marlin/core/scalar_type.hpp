@@ -1,9 +1,10 @@
 #pragma once
 
 // For TORCH_CHECK
-#include <torch/library.h>
+#include "../../torch_stable_compat.h"
 
 #include <cstring>
+#include <variant>
 
 namespace vllm {
 

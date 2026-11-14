@@ -844,7 +844,7 @@ bool marlin_prefers_narrow_small_grid(int prob_m_split, int prob_n, int prob_k,
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
-               void* s, void* s2, void* zp, void* g_idx, void* perm,
+               void* s, const void* s2, void* zp, void* g_idx, void* perm,
                void* a_tmp, int prob_m, int prob_n, int prob_k, int lda,
                void* workspace, vllm::ScalarType const& q_type, bool has_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
@@ -1511,38 +1511,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
               "scalar type of global_scale must be float");
   const auto stream = at::cuda::getCurrentCUDAStream(dev);
-  // Explicit caller-owned workspaces can otherwise be returned to the caching
-  // allocator before this asynchronous launch completes on a non-current
-  // stream.  Recording the stream preserves their lifetime without a sync.
-  //
-  // Record from the destructor so the marker is queued *after* the launches
-  // below: a marker recorded before them completes before the kernels run and
-  // would not protect the buffers. The destructor also covers every return
-  // path, including the ones that rethrow on an unsupported dtype.
-  struct RecordStreamsOnExit {
-    const torch::Tensor* c;
-    const torch::Tensor* c_tmp;
-    const torch::Tensor* a_tmp;
-    const torch::Tensor* bias_f32;
-    bool has_c;
-    bool has_c_tmp;
-    bool has_a_tmp;
-    at::cuda::CompatibleCUDAStream current;
-    ~RecordStreamsOnExit() {
-      if (has_c) at::cuda::record_stream(*c, current);
-      if (has_c_tmp) at::cuda::record_stream(*c_tmp, current);
-      if (has_a_tmp) at::cuda::record_stream(*a_tmp, current);
-      at::cuda::record_stream(*bias_f32, current);
-    }
-  } record_streams_on_exit{
-      &c,
-      &c_tmp,
-      &a_tmp,
-      &bias_f32,
-      c_or_none.has_value(),
-      c_tmp_or_none.has_value(),
-      a_tmp_or_none.has_value(),
-      stream};
+  // Caller-owned output and scratch lifetime is owned by the public adapter
+  // (see adapter.cpp): the stable ABI has no `Tensor::record_stream`, so the
+  // torch-version-specific adapter records those buffers on this stream before
+  // forwarding here. This core is invoked only through that adapter.
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
