@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import List, Tuple
+import inspect
+import logging
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,8 +26,12 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
 from gptqmodel.quantization.awq.utils.module import get_op_by_name, set_op_by_name
+from gptqmodel.quantization.norm_tuning import resolve_gain_offset
 from gptqmodel.utils.device import get_device
 from gptqmodel.utils.model import move_to
+
+
+log = logging.getLogger(__name__)
 
 
 try:
@@ -51,6 +57,55 @@ allowed_act_fns = [
     GELUTanh,
     GELUActivation,
 ]
+
+
+def _source_gain_offset(ln: nn.Module) -> Optional[float]:
+    """Infer a ``1 + weight`` gain from the module's forward source.
+
+    Only used when the live gain probe cannot run (for example a norm whose
+    forward needs extra inputs). Returns ``None`` when the source is
+    unavailable or does not show an additive offset.
+    """
+    try:
+        source = inspect.getsource(type(ln).forward)
+    except (OSError, TypeError):
+        return None
+    compact = "".join(source.split())
+    if any(
+        pattern in compact
+        for pattern in (
+            "1.0+self.weight",
+            "1+self.weight",
+            "self.weight+1.0",
+            "self.weight+1",
+        )
+    ):
+        return 1.0
+    return None
+
+
+def _norm_gain_offset(ln: nn.Module) -> float:
+    """Resolve whether ``ln`` applies ``weight`` or ``1 + weight``.
+
+    The semantics are measured from the live module, not selected from a class
+    list, so Gemma 3, Qwen3.5, Qwen3-Next and future offset-gain norms are
+    folded correctly. A forward-source check keeps unusual modules working when
+    the probe cannot execute.
+    """
+    try:
+        return resolve_gain_offset(ln)
+    except Exception as exc:  # noqa: BLE001 - fall back to source semantics
+        offset = _source_gain_offset(ln)
+        if offset is not None:
+            return offset
+        log.warning(
+            "AWQ: could not resolve the gain parameterization of %s (%s): %s; "
+            "assuming a plain `weight` gain",
+            type(ln).__name__,
+            id(ln),
+            exc,
+        )
+        return 0.0
 
 
 @torch.inference_mode()
@@ -140,12 +195,15 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
 
     scales = scales.to(ln.weight.device)
 
-    # GemmaRMSNorm is different from Llama's in that it multiplies
-    # (1 + weight) to the output, instead of just weight.
-    if isinstance(ln, GemmaRMSNorm) or isinstance(ln, Gemma2RMSNorm):
-        ln.weight += 1
-        ln.weight.div_(scales)
-        ln.weight -= 1
+    # Offset-gain norms (Gemma, Gemma 2/3, Qwen3.5, Qwen3-Next, ...) multiply
+    # the output by (1 + weight) instead of weight. Resolve that semantics from
+    # the live module and fold in float32 so the stored fp16/bf16 gain does not
+    # absorb the rounding of the intermediate `1 + weight` value.
+    gain_offset = _norm_gain_offset(ln)
+    if gain_offset != 0.0:
+        folded = ln.weight.detach().to(torch.float32, copy=True)
+        folded.add_(gain_offset).div_(scales.to(torch.float32)).sub_(gain_offset)
+        ln.weight.copy_(folded.to(ln.weight.dtype))
     else:
         ln.weight.div_(scales)
 

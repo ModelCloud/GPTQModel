@@ -97,6 +97,7 @@ The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes 
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
+AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
 GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
@@ -1247,6 +1248,10 @@ GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded thro
 PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
 
 Per-module `rank_pattern` overrides match canonical, case-sensitive module names and are applied in full-name, suffix, then regex order; see [adapter rank-pattern matching](docs/adapter-rank-pattern-matching.md) for the matching flow and the legacy lowercase fallback.
+Saved adapters resolve `lora_alpha`, `use_rslora`, `rank_pattern`, and
+`alpha_pattern` per module; EoRA exports mirror dynamic ranks into alphas and
+normalize calibration covariance once. See [LoRA and EoRA scaling
+semantics](docs/lora-eora-scaling.md) for the load, export, and covariance flows.
 Adapter weights are cached per source path for the life of the process; see [adapter weight cache](docs/adapter-weight-cache.md) for how a load that uses only a subset of an adapter's target modules leaves the cached tensors intact for the next load.
 
 ### How to Add Support for a New Model 🛠️
