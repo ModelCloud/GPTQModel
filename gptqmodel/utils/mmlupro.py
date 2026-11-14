@@ -193,7 +193,13 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
             # Count prompt tokens on the CPU tokenizer output. Moving the
             # tensor to CUDA only to read its length made CPU-only evaluation
             # fail before generation even started.
-            length = len(tokenizer(prompt)["input_ids"][0])
+            input_ids = tokenizer(prompt)["input_ids"]
+            if hasattr(input_ids, "shape"):
+                length = input_ids.shape[-1]
+            elif isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], (list, tuple)):
+                length = len(input_ids[0])
+            else:
+                length = len(input_ids)
             if length < max_model_length - max_new_tokens:
                 prompt_length_ok = True
             elif k == 0:

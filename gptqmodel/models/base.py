@@ -38,6 +38,7 @@ from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
+from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -412,6 +413,12 @@ def _apply_module_tree_override_in_place(module_tree, override):
 
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
+# Declares that a leaf's output is not the direct input of the following scaling
+# consumer, so it must never be used as an AWQ `prev_op`. Used by definitions
+# whose forward graph has a residual add, a non-homogeneous activation, or a
+# second consumer between the leaf and the quantized block (see
+# docs/awq-scaling-groups.md).
+AWQ_NO_SCALE_SOURCE_FLAG = "nosrc"
 MOE_FLAG = ":moe"
 NORM_FLAG = ":norm"
 # Marks a normalization that consumes the block output (a "sandwich" post-norm).
@@ -5013,6 +5020,7 @@ class BaseQModel(nn.Module):
             has_gate_up_roles = any("gate" in roles or "up" in roles for roles in block_roles.values())
             is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
             is_moe_gate_up_block = is_moe_block and has_gate_up_roles
+            skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
                 # mlp.experts.0.down_proj
@@ -5071,51 +5079,55 @@ class BaseQModel(nn.Module):
 
                 if skip or not subset:
                     pending_nonquant.clear()
-                    continue
+                    skip_block = True
 
-                # Match the activation bucket to the first quantized child in this block
-                feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
-                root_split = feature_name.split(".")
-                module2inspect = None
-                root = None
-                if len(root_split) >= 2:
-                    root = root_split[0]
-                    if root != last_module_root:
-                        last_module_root = root
-                        module2inspect, _ = get_module_by_name_prefix(module, root)
+                if not skip_block:
+                    # Match the activation bucket to the first quantized child in this block
+                    feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
+                    root_split = feature_name.split(".")
+                    root = None
+                    module2inspect = None
+                    if len(root_split) >= 2:
+                        root = root_split[0]
+                        if root != last_module_root:
+                            last_module_root = root
+                            module2inspect, _ = get_module_by_name_prefix(module, root)
 
-                # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                if is_moe_gate_up_block and module2inspect is not None:
-                    if last_module_root not in input_feat:
-                        log.debug(
-                            "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
-                            last_module_root,
-                            len(block),
-                        )
-                    feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
-                    inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
-                else:
-                    feature_name = _select_feature_name(block)
-                    inp = input_feat.get(feature_name)
+                    # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
+                    if is_moe_gate_up_block and module2inspect is not None:
+                        if last_module_root not in input_feat:
+                            log.debug(
+                                "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
+                                last_module_root,
+                                len(block),
+                            )
+                        feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
+                        inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
+                    else:
+                        feature_name = _select_feature_name(block)
+                        inp = input_feat.get(feature_name)
 
-                if inp is None:
+                    if inp is None:
+                        pending_nonquant.clear()
+                        log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
+                        skip_block = True
+
+                input_width = None
+                scale_consumers = []
+                if not skip_block:
+                    input_width = inp.shape[-1] if inp.dim() > 0 else None
+                    allow_block_norm = is_moe_family and has_gate_up_roles
+                    prev_op = _select_prev_op(input_width, allow_block_norm=allow_block_norm)
+                    moe_consumers = (
+                        _moe_block_consumers(block, input_width, subset)
+                        if is_moe_family and input_width is not None
+                        else []
+                    )
+                    scale_consumers = _norm_scale_consumers(prev_op, input_width, extra_names=moe_consumers)
                     pending_nonquant.clear()
-                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
-                    continue
-
-                input_width = inp.shape[-1] if inp.dim() > 0 else None
-                allow_block_norm = is_moe_family and has_gate_up_roles
-                prev_op = _select_prev_op(input_width, allow_block_norm=allow_block_norm)
-                moe_consumers = (
-                    _moe_block_consumers(block, input_width, subset)
-                    if is_moe_family and input_width is not None
-                    else []
-                )
-                scale_consumers = _norm_scale_consumers(prev_op, input_width, extra_names=moe_consumers)
-                pending_nonquant.clear()
-                if prev_op is None:
-                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
-                    continue
+                    if prev_op is None:
+                        log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
+                        skip_block = True
 
                 # One group shares one scale vector, so it can only contain
                 # consumers of the same tensor. A layer whose input width differs
@@ -5124,7 +5136,7 @@ class BaseQModel(nn.Module):
                 # multiplying it by this norm's scale would either raise in
                 # `scale_ln_fcs` or silently corrupt the layer. Keep those layers
                 # in their own quantized-but-unscaled group.
-                if input_width is not None:
+                if not skip_block and input_width is not None:
                     fold_subset, fold_names, foreign_layers = [], [], []
                     for layer_module, layer_name in zip(subset, subset_names):
                         weight = getattr(layer_module, "weight", None)
@@ -5145,26 +5157,27 @@ class BaseQModel(nn.Module):
                             "awq_get_modules_for_scaling: skipping block %s; no consumer matches the fold source width",
                             block,
                         )
-                        continue
+                        skip_block = True
                     subset, subset_names = fold_subset, fold_names
 
                 # `_search_best_scale` scores a candidate scale by re-running
                 # `module2inspect`. A multi-module group needs a block forward;
                 # scoring a single member would miss the rest of the group.
-                if module2inspect is None and len(subset) > 1:
+                if not skip_block and module2inspect is None and len(subset) > 1:
                     common_parents = {strip_non_quantize_flags(name).rsplit(".", 1)[0] for name in subset_names}
                     inspect_name = common_parents.pop() if len(common_parents) == 1 else root
                     if inspect_name:
                         module2inspect, _ = get_module_by_name_prefix(module, inspect_name)
 
-                n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
-                                                        module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
-                                                        subset=subset, module2inspect=module2inspect)
-                n["_input_feature_name"] = feature_name
-                if scale_consumers:
-                    n["_scale_consumers"] = scale_consumers
+                if not skip_block:
+                    n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
+                                                            module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
+                                                            subset=subset, module2inspect=module2inspect)
+                    n["_input_feature_name"] = feature_name
+                    if scale_consumers:
+                        n["_scale_consumers"] = scale_consumers
 
-                nodes.append(n)
+                    nodes.append(n)
 
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
@@ -5208,7 +5221,70 @@ class BaseQModel(nn.Module):
             return out
 
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
-        return nodes
+        return self._filter_awq_scaling_sources(module, nodes)
+
+    def _filter_awq_scaling_sources(self, layer_module, nodes):
+        """Drop scaling groups whose ``prev_op`` cannot be folded without changing the layer output.
+
+        ``awq_get_modules_for_scaling`` selects ``prev_op`` from tree order, which
+        cannot see a residual add, a parallel branch, or a non-homogeneous
+        activation between the candidate and the consumer. A definition marks
+        those leaves with the ``nosrc`` tree flag; folding a scale into them
+        changes the decoder layer output, so the group is skipped here and the
+        consumer falls back to plain quantization (the processor falls back to
+        ``_quantize_layer_fallback`` when no group survives).
+
+        The flag is a declaration of the definition's forward data flow, so it
+        is validated by the ``apply_scale`` output-preservation invariant in
+        ``tests/test_awq_scaling_groups.py`` for every family that uses it.
+        """
+
+        if not nodes:
+            return nodes
+        try:
+            plan = self.module_plan()
+        except RuntimeError:
+            effective_tree = getattr(self, "effective_module_tree", None)
+            plan = ModulePlan.from_tree(
+                effective_tree if effective_tree is not None else _module_tree_for_class(type(self))
+            )
+
+        kept = []
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            prev_name = None
+            if prev_op is not None:
+                try:
+                    prev_name = get_op_name(layer_module, prev_op)
+                except Exception:
+                    prev_name = None
+            spec = plan.find(prev_name) if prev_name else None
+            if spec is not None and AWQ_NO_SCALE_SOURCE_FLAG in spec.flags:
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with declared non-source prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            # A gain norm can only absorb the consumer's input scale when its
+            # width matches that input. A stale tracker entry (for example a
+            # norm followed by a projection the definition does not list) would
+            # otherwise reach apply_scale and fail on the shape mismatch.
+            gain = getattr(prev_op, "weight", None)
+            consumers = node.get("layers") or []
+            if (
+                isinstance(gain, torch.Tensor)
+                and gain.ndim == 1
+                and consumers
+                and isinstance(consumers[0], nn.Linear)
+                and gain.numel() != consumers[0].weight.shape[1]
+            ):
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with width-mismatched prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            kept.append(node)
+        return kept
 
     # Materialize the target shell module from the lazy turtle source on the requested device.
     def shell_module_materialize(

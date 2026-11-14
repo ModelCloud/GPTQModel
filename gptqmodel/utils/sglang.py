@@ -269,6 +269,22 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
         if kwargs.get(source) is not None:
             sampling_params[target] = kwargs[source]
 
+    stop_entries = []
+    if "stop" in sampling_params and sampling_params["stop"] is not None:
+        val = sampling_params["stop"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if kwargs.get("stop_strings") is not None:
+        val = kwargs["stop_strings"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if stop_entries:
+        sampling_params["stop"] = list(dict.fromkeys(stop_entries))
+
     stop_ids = []
     if "stop_token_ids" in sampling_params and sampling_params["stop_token_ids"] is not None:
         stop_ids.extend(_normalize_stop_token_ids(sampling_params["stop_token_ids"]))
