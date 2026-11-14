@@ -72,7 +72,7 @@ flowchart TD
     D2 --> E{"config.layer_types has 2+ distinct types?"}
     E -- no --> F["cache layer-0 kwargs only<br/>unchanged behaviour"]
     E -- yes --> G["_build_layer_type_replay_kwargs"]
-    G --> H["per declared type:<br/>create_causal_mask or<br/>create_sliding_window_causal_mask"]
+    G --> H["per declared type:<br/>transformers mask-builder table<br/>causal, sliding, chunked, recurrent"]
     G --> I["per declared type:<br/>model rotary called with the layer type<br/>when its forward accepts one"]
     H --> J["layer_input_kwargs<br/>_gptqmodel_layer_type_replay_kwargs"]
     I --> J
@@ -119,7 +119,8 @@ Before-lines are from `origin/main`; after-lines are this change.
 | rotary forward has no `layer_type`/`attention_type` parameter | masks are rebuilt, the captured `position_embeddings` is kept |
 | `use_bidirectional_attention` set and the overlay helper is unavailable | no per-type capture |
 | layer's declared type has no captured entry | layer-0 kwargs, unchanged |
-| caller is not replaying an `attention_mask` at all | no mask is injected |
+| layer's declared type maps to no single builder (`hybrid`, unknown) | that type keeps the layer-0 kwargs |
+| layer-0 mask is `None` (causal skip) but a later type needs a materialized mask | the later type's mask is injected |
 
 `prepare_layer_replay_keep_mask` needs no change: the processor keep-mask is
 padding-equivalent for a causal and for a sliding-window causal mask, because
@@ -160,19 +161,23 @@ MISMATCHED_LAYERS = 0
 `tests/test_layer_type_replay.py` pins the same invariant for every layer: replay
 kwargs equal the native forward's kwargs (`torch.equal` on the mask and on the
 rotary tuple) and replaying the stack reproduces the native last hidden state.
+It covers `gemma3_text`, `gpt_oss`, and a `llama4_text` configuration whose
+layer 0 is `full_attention` and layer 1 is `chunked_attention`; the chunked case
+also pins that a materialized mask is injected after a causal-skip layer 0.
 
 ## Extension points
 
 `prepare_layer_replay_kwargs` remains the per-definition hook. Definitions whose
-model builds masks outside the two standard `transformers` builders
+model builds masks outside the standard `transformers` mask-builder table
 (`cohere_compass`, `inkling`, `lfm3`, `mimo_v2`, `muse_glimmer`) rebuild them
 there and win over the generic selection.
 
 ## Not in scope
 
 - Models that pass no `attention_mask` to their decoder layers
-  (`support_batch_quantize = False`): their sliding layers already replay without a
-  mask, and that is unchanged here.
+  (`support_batch_quantize = False`) still receive a per-type mask when a later
+  declared type needs a materialized one; a `None` layer-0 mask no longer hides
+  it.
 - Rebuilding masks for models whose per-type mask depends on model-specific
   overlays other than `use_bidirectional_attention`.
 - End-to-end GPTQ-vs-RTN quality sweeps for the affected families.

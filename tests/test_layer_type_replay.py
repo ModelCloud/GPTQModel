@@ -23,6 +23,7 @@ from torch import nn
 
 from gptqmodel.models.definitions.gemma3 import Gemma3QModel
 from gptqmodel.models.definitions.gpt_oss import GPTOSSGPTQ
+from gptqmodel.models.definitions.llama4 import Llama4QModel
 
 
 SEQ = 6
@@ -82,8 +83,45 @@ def _gpt_oss():
     return GptOssForCausalLM(config).eval(), GPTOSSGPTQ
 
 
-def _layer_type(layer: nn.Module) -> str | None:
-    return getattr(getattr(layer, "self_attn", None), "layer_type", None)
+def _llama4_text_chunked():
+    from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
+    from transformers.models.llama4.modeling_llama4 import Llama4ForCausalLM
+
+    torch.manual_seed(0)
+    config = Llama4TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=64,
+        attention_chunk_size=2,
+        layer_types=["full_attention", "chunked_attention"],
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    return Llama4ForCausalLM(config).eval(), Llama4QModel
+
+
+def _layer_type(layer: nn.Module, config) -> str | None:
+    attention = getattr(layer, "self_attn", None)
+    declared = getattr(attention, "layer_type", None)
+    if not isinstance(declared, str):
+        declared = getattr(layer, "layer_type", None)
+    if isinstance(declared, str):
+        return declared
+
+    index = getattr(attention, "layer_idx", None)
+    layer_types = getattr(config, "layer_types", ())
+    if isinstance(index, int) and 0 <= index < len(layer_types):
+        return layer_types[index]
+    return None
 
 
 def _native_forward(model, input_ids, attention_mask):
@@ -216,8 +254,12 @@ def _assert_masks_equal(layer_index, layer_type, expected, actual):
 @pytest.mark.parametrize("padded", [False, True], ids=["dense", "padded"])
 @pytest.mark.parametrize(
     "builder,qmodel_cls",
-    [(_gemma3_text, Gemma3QModel), (_gpt_oss, GPTOSSGPTQ)],
-    ids=["gemma3_text", "gpt_oss"],
+    [
+        (_gemma3_text, Gemma3QModel),
+        (_gpt_oss, GPTOSSGPTQ),
+        (_llama4_text_chunked, Llama4QModel),
+    ],
+    ids=["gemma3_text", "gpt_oss", "llama4_text_chunked"],
 )
 def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
     model, _ = builder()
@@ -236,7 +278,7 @@ def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
     assert len(set(layer_types[0])) == 2, "test model must mix two attention types"
 
     for index, layer in enumerate(model.model.layers):
-        layer_type = _layer_type(layer)
+        layer_type = _layer_type(layer, model.config)
         _assert_masks_equal(
             index,
             layer_type,
