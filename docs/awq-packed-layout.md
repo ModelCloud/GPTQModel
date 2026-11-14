@@ -98,3 +98,6 @@ Measured on RTX 4090 (SM 8.9): an 8-bit Marlin layer with `K=512`, `N=256`,
 Torch oracle. On CPU, a 64x16 AWQ GEMM shard moved from max error `0.2748` to
 exact equality for 4-bit, and 8-bit dequantization no longer crashes on the
 hardcoded width.
+
+Introduced in [PR #3993](https://github.com/ModelCloud/GPTQModel/pull/3993) for
+[issue #3974](https://github.com/ModelCloud/GPTQModel/issues/3974).
