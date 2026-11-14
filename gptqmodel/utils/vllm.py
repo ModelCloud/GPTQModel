@@ -231,10 +231,19 @@ def _apply_attention_mask(token_batch: list[list[int]], attention_mask: Any) -> 
             mask = list(mask)
         if not isinstance(mask, list) or len(mask) != len(token_ids):
             raise ValueError("Each `attention_mask` row must have the same length as its token prompt.")
-        filtered = [token_id for token_id, keep in zip(token_ids, mask) if bool(keep)]
-        if not filtered:
+        if any(not isinstance(keep, (bool, int)) or keep not in (0, 1, False, True) for keep in mask):
+            raise TypeError("`attention_mask` values must be boolean or 0/1 integers.")
+        kept_positions = [index for index, keep in enumerate(mask) if bool(keep)]
+        if not kept_positions:
             raise ValueError("`attention_mask` removed every token from a prompt.")
-        filtered_batch.append(filtered)
+        first, last = kept_positions[0], kept_positions[-1]
+        # A token prompt is a bare ID sequence: dropping an interior token would
+        # renumber every later position instead of preserving the prompt, and
+        # vLLM's token prompt cannot express a hole. Only padding removal is a
+        # faithful translation of a Hugging Face mask.
+        if any(not bool(mask[index]) for index in range(first, last + 1)):
+            raise ValueError("`attention_mask` may only remove left or right padding, not tokens inside a prompt.")
+        filtered_batch.append(token_ids[first : last + 1])
     return filtered_batch
 
 
@@ -248,10 +257,14 @@ def _normalize_vllm_inputs(prompts: Any, input_ids: Any, attention_mask: Any):
     if isinstance(value, str):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot be a string.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return value, None
     if isinstance(value, (list, tuple)) and value and all(isinstance(item, str) for item in value):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot contain strings.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return list(value), None
 
     token_batch = _coerce_token_batch(value)
