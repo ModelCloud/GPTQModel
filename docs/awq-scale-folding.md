@@ -62,10 +62,12 @@ plain gain (the pre-fix behavior).
 
 | Case | Before | After |
 | --- | --- | --- |
-| `Gemma3RMSNorm` fold, relative L2 | 0.287 (random gain; issue reports 0.48) | 1.2e-7 |
-| `Qwen3NextRMSNorm` fold, relative L2 | 0.44 (issue) | ~1e-7 |
+| `Gemma3RMSNorm` fold, relative L2 | 0.266 CPU / 0.290 CUDA | 1.2e-7 / 1.0e-7 |
+| `Qwen3NextRMSNorm` fold, relative L2 | 0.263 | 1.0e-7 |
+| synthetic `Qwen3_5MoeRMSNorm` fold, relative L2 | 0.269 | 1.2e-7 |
+| `LlamaRMSNorm` / `Gemma2RMSNorm` fold, relative L2 | ~1e-7 | ~1e-7 |
 | Gemma2 MLP `prev_op` | `post_attention_layernorm` | `pre_feedforward_layernorm` |
-| Gemma2 MLP fold, layer-output relative L2 | 0.38 (issue) | < 1e-5 |
+| Gemma2 MLP fold, layer-output relative L2 | 0.561 | < 1e-5 |
 
 The tests are in `tests/test_awq_scale_folding.py`; the pre-fold
 `norm -> linear` output and the closed-form folded weights are the two
