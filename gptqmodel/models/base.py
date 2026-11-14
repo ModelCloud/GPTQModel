@@ -4395,6 +4395,30 @@ class BaseQModel(nn.Module):
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
 
+        def _is_gain_norm(candidate_module, input_width: int | None) -> bool:
+            """Whether ``candidate_module`` can absorb the consumer's input scale."""
+            if norm_type_of(candidate_module) is None:
+                return False
+            weight = getattr(candidate_module, "weight", None)
+            if not isinstance(weight, nn.Parameter) or weight.ndim != 1:
+                return False
+            return input_width is None or weight.numel() == input_width
+
+        def _select_prev_op(input_width: int | None):
+            """Return the normalization that immediately feeds the consumer block.
+
+            Consecutive non-quantized blocks can contain several modules: the
+            post-attention/post-MLP norms, MoE routers, and capture-only roots.
+            Only the last gain norm whose width matches the consumer's input
+            actually feeds it; earlier entries in the run belong to sibling
+            branches (for example the router) or to a preceding residual.
+            ``last_module`` remains the fallback when no norm matches.
+            """
+            for _, candidate_module in reversed(pending_nonquant):
+                if _is_gain_norm(candidate_module, input_width):
+                    return candidate_module
+            return last_module
+
         def _module_kwargs_for_feature(feature_name: str | None):
             kwargs_for_feature = dict(base_module_kwargs)
             if feature_name and isinstance(per_feature_kwargs, dict):
@@ -4408,20 +4432,30 @@ class BaseQModel(nn.Module):
             is_awq_quantize=True,
             include_capture_only=True,
         )
-        for i, block in enumerate(full_layer_modules):
+        # Non-quantized blocks seen since the last quantized block. The run is
+        # resolved at the consumer, where the input width is known.
+        pending_nonquant = []
+        prev_not_quantized = False
+        for block in full_layer_modules:
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
-                # If both the current block and the previous one are marked as not quantized,
-                # skip remembering the current block. This ensures that when two consecutive
-                # blocks are not quantized, only the first one is remembered as last_module.
-                if i > 0 and all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in full_layer_modules[i - 1]):
+                # An empty block carries no module to remember; it also must not
+                # break the surrounding run of non-quantized blocks.
+                if not block:
                     continue
-
-                # Remember the latest norm (use the last entry if multiple are present)
+                # Remember the first block of the run as the fallback `last_module`.
+                # Every block in the run is kept as a candidate prev_op; the
+                # consumer selects the gain norm that actually feeds it.
                 candidate_name = strip_non_quantize_flags(block[-1])
-                _try_update_last_module(candidate_name)
+                resolved_module, _ = get_module_by_name_prefix(module, candidate_name)
+                if resolved_module is not None:
+                    pending_nonquant.append((candidate_name, resolved_module))
+                if not prev_not_quantized:
+                    _try_update_last_module(candidate_name)
+                prev_not_quantized = True
                 continue
 
+            prev_not_quantized = False
             try:
                 plan = self.module_plan()
             except RuntimeError:
@@ -4439,6 +4473,7 @@ class BaseQModel(nn.Module):
                 "gate" in roles or "up" in roles for roles in block_roles.values()
             )
             if is_moe_down_block and last_module is not None and last_module_name is not None:
+                pending_nonquant.clear()
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
                 for name in block:
@@ -4485,11 +4520,7 @@ class BaseQModel(nn.Module):
                         subset.append(m)
 
                 if skip or not subset:
-                    continue
-
-                prev_op = last_module
-                if prev_op is None:
-                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
+                    pending_nonquant.clear()
                     continue
 
                 # Match the activation bucket to the first quantized child in this block
@@ -4517,7 +4548,14 @@ class BaseQModel(nn.Module):
                     inp = input_feat.get(feature_name)
 
                 if inp is None:
+                    pending_nonquant.clear()
                     log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
+                    continue
+
+                prev_op = _select_prev_op(inp.shape[-1] if inp.dim() > 0 else None)
+                pending_nonquant.clear()
+                if prev_op is None:
+                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
                     continue
 
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
