@@ -40,11 +40,15 @@ def make_data_block(
     :param add_eos_token: bool, defaults to False, whether add eos_token or not to the label
     :param truncate_prompt: bool, defaults to True, whether to truncate prompt if the sample's total tokens
         number exceeds `sample_max_len`, if not, will truncate label and drop this sample when all tokens
-        in label are truncated
+        in label are truncated. When the label alone is longer than `sample_max_len`, the label is capped
+        to `sample_max_len` and the prompt is dropped, so the sample length is always enforced
     :param merge_prompt_label: bool, defaults to False, will merge label into prompt if set to True, usually
         this only required when doing language modeling task
     :return: Dict[str, List[torch.LongTensor]], a dict whose keys are `input_ids`, `attention_mask` and
         `label` and values are a list of torch.LongTensor
+
+    Raises `ValueError` when a sample is longer than `block_max_len`, since such
+    a sample cannot be placed in any block.
     """
     if preprocess_fn:
         samples = preprocess_fn(samples)
@@ -63,12 +67,21 @@ def make_data_block(
             tokenized_label += [tokenizer.eos_token_id]
         len_prompt = len(tokenized_prompt)
         len_label = len(tokenized_label)
-        exceed_len = len_prompt + len_label - sample_max_len
-        if exceed_len > 0:
+        if len_prompt + len_label > sample_max_len:
             if truncate_prompt:
-                tokenized_prompt = tokenized_prompt[exceed_len:]
+                # The label cannot borrow more room than the whole sample
+                # budget. Cap it first, then keep the tail of the prompt that
+                # still fits, so the sample never exceeds sample_max_len even
+                # when the label alone is longer than the budget.
+                if len_label > sample_max_len:
+                    tokenized_label = tokenized_label[:sample_max_len]
+                    len_label = sample_max_len
+                keep_prompt = max(0, sample_max_len - len_label)
+                if len_prompt > keep_prompt:
+                    tokenized_prompt = tokenized_prompt[len_prompt - keep_prompt :]
             else:
-                tokenized_label = tokenized_label[:-exceed_len]
+                keep_label = max(0, sample_max_len - len_prompt)
+                tokenized_label = tokenized_label[:keep_label]
         tokenized_prompts[idx] = tokenized_prompt
         tokenized_labels[idx] = tokenized_label
         if not tokenized_label:
@@ -88,6 +101,11 @@ def make_data_block(
         ori_sample_len = len(prompt_ids)
         if merge_prompt_label:
             ori_sample_len += len(label_ids)
+        if ori_sample_len > block_max_len:
+            raise ValueError(
+                f"sample length {ori_sample_len} exceeds block_max_len={block_max_len}; "
+                "raise block_max_len or lower sample_max_len"
+            )
         if ori_sample_len <= blk_max_len:
             additional_len = blk_max_len
             sample_len = blk_max_len
@@ -96,7 +114,9 @@ def make_data_block(
             sample_len = ori_sample_len
 
         if blk_total_len + additional_len > block_max_len:
-            sample_blocks.append((copy.copy(sample_block), blk_max_len))
+            # Never append an empty block: ``max()`` on it later would raise.
+            if sample_block:
+                sample_blocks.append((copy.copy(sample_block), blk_max_len))
             sample_block = []
             blk_max_len = 0
             blk_total_len = 0
