@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import gptqmodel.models._const as model_const
+from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -27,6 +28,8 @@ from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
@@ -134,6 +137,11 @@ def test_pick_device_on_rocm_does_not_probe_nvidia_capability(monkeypatch, suppo
 
 def _pick_group_size(cls):
     group_sizes = list(getattr(cls, "SUPPORTS_GROUP_SIZE", []))
+    # 128 is the common denominator across CPU and accelerator kernels; the
+    # first declared value can be a kernel-family-only size (TorchFused
+    # declares 16 for XPU, which its CPU int4pack op rejects).
+    if 128 in group_sizes:
+        return 128
     for candidate in group_sizes:
         if candidate != -1:
             return candidate
@@ -1694,4 +1702,230 @@ def test_allow_marlin_false_filters_auto_and_rejects_explicit(monkeypatch):
             quant_method=METHOD.GPTQ,
             pack_dtype=torch.int32,
             allow_marlin=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# CPU int4pack group-size contract (#4054 item 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("group_size", [16, -1])
+def test_torch_fused_cpu_rejects_group_size_the_int4pack_op_cannot_consume(group_size):
+    """``aten::_weight_int4pack_mm_for_cpu`` only accepts 32/64/128/256.
+
+    A per-channel checkpoint (group_size -1) resolves to ``in_features``, which
+    is 896 for Qwen2.5-0.5B; the old declaration let AUTO select this kernel and
+    the first forward raised ``expect qGroupSize to be ... got 896``.
+    """
+    clear_validation_cache()
+
+    ok, err = validate_quant_linear(
+        TorchFusedLinear,
+        bits=4,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        in_features=896,
+        device=DEVICE.CPU,
+    )
+
+    assert not ok
+    assert "CPU int4pack" in str(err)
+    assert "896" in str(err) or "16" in str(err)
+
+
+def test_torch_fused_cpu_keeps_xpu_and_resolved_per_channel_group_sizes():
+    clear_validation_cache()
+
+    ok, _ = validate_quant_linear(
+        TorchFusedLinear,
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        in_features=128,
+        device=DEVICE.XPU,
+    )
+    assert ok
+
+    # A per-channel group that resolves to a size the op accepts stays valid.
+    ok, _ = validate_quant_linear(
+        TorchFusedLinear,
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        in_features=128,
+        device=DEVICE.CPU,
+    )
+    assert ok
+
+
+def test_torch_fused_awq_inherits_the_cpu_group_size_gate():
+    clear_validation_cache()
+
+    ok, err = validate_quant_linear(
+        TorchFusedAwqLinear,
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        in_features=896,
+        device=DEVICE.CPU,
+    )
+
+    assert not ok
+    assert "CPU int4pack" in str(err)
+
+
+def test_cpu_auto_does_not_select_torch_fused_for_group_size_16():
+    clear_validation_cache()
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is not TorchFusedLinear
+    ok, err = validate_quant_linear(
+        selected,
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        in_features=896,
+        device=DEVICE.CPU,
+    )
+    assert ok, err
+
+
+# ---------------------------------------------------------------------------
+# CPU-offload device maps (#4054 item 6)
+# ---------------------------------------------------------------------------
+
+
+class _CudaOnlyPostInitKernel:
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
+    SUPPORTS_TRAINING = False
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+class _CudaOffloadSafeKernel(_CudaOnlyPostInitKernel):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
+    SUPPORTS_CPU_OFFLOAD = True
+
+
+class _PortableAutoKernel:
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
+    SUPPORTS_TRAINING = True
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+def _select_auto_cuda(**kwargs):
+    return select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.float16,
+        **kwargs,
+    )
+
+
+@pytest.mark.usefixtures("nvidia_runtime")
+def test_auto_cpu_offload_skips_a_cuda_only_post_init(monkeypatch):
+    _install_auto_candidates(
+        monkeypatch,
+        METHOD.GPTQ,
+        FORMAT.GPTQ,
+        [
+            (BACKEND.MARLIN, _CudaOnlyPostInitKernel),
+            (BACKEND.GPTQ_TORCH, _PortableAutoKernel),
+        ],
+    )
+
+    assert _select_auto_cuda() is _CudaOnlyPostInitKernel
+    assert _select_auto_cuda(cpu_offload=True) is _PortableAutoKernel
+
+
+@pytest.mark.usefixtures("nvidia_runtime")
+def test_auto_cpu_offload_accepts_a_declared_post_init_safe_cuda_kernel(monkeypatch):
+    _install_auto_candidates(
+        monkeypatch,
+        METHOD.GPTQ,
+        FORMAT.GPTQ,
+        [
+            (BACKEND.GPTQ_TRITON, _CudaOffloadSafeKernel),
+            (BACKEND.GPTQ_TORCH, _PortableAutoKernel),
+        ],
+    )
+
+    assert _select_auto_cuda(cpu_offload=True) is _CudaOffloadSafeKernel
+
+
+@pytest.mark.usefixtures("nvidia_runtime")
+def test_explicit_cuda_only_backend_rejects_a_cpu_offload_map(monkeypatch):
+    monkeypatch.setattr(
+        importer,
+        "get_kernel_for_backend",
+        lambda *args, **kwargs: _CudaOnlyPostInitKernel,
+    )
+
+    with pytest.raises(ValueError, match="cannot run `post_init`"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CUDA,
+            backend=BACKEND.MARLIN,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.float16,
+            cpu_offload=True,
+        )
+
+
+def test_explicit_backend_passes_the_adapter_to_validation(monkeypatch):
+    monkeypatch.setattr(
+        importer, "get_kernel_for_backend", lambda *args, **kwargs: TorchLinear
+    )
+
+    with pytest.raises(ValueError, match="does not support adapter"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CPU,
+            backend=BACKEND.GPTQ_TORCH,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+            adapter=Adapter(),
         )

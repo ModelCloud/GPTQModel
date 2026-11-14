@@ -39,6 +39,10 @@ class TritonV2Linear(TorchLinear):
 
     # TODO: ROCM also has Triton support. Need to validate ROCM for triton
     SUPPORTS_DEVICES = [DEVICE.CUDA]  # Intel XPU can use Triton but this has not been validated yet
+    # `post_init` only validates g_idx bounds with CPU Torch ops; the Triton
+    # kernel runs after Accelerate materializes the layer on the execution
+    # device, so a CPU-mapped layer loads correctly.
+    SUPPORTS_CPU_OFFLOAD = True
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
