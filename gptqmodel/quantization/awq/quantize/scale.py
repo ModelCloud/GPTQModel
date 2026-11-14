@@ -108,7 +108,43 @@ def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
         move_to(layer, device=original_device)
 
 
-def apply_scale(module, scales_list, input_feat_dict=None):
+@torch.inference_mode()
+def scale_input_columns(consumer: nn.Module, scales: torch.Tensor) -> None:
+    """Multiply the input columns of one non-quantized consumer of a scaled norm.
+
+    ``scale_ln_fcs`` divides a norm by ``s`` and multiplies the quantized
+    consumers' input columns by ``s``. Every other module that reads the same
+    normed hidden state - a MoE router, ``shared_expert_gate``, or any other
+    declared non-quantized linear consumer - has to receive the same ``s`` or
+    its output changes. Routers are usually a small ``nn.Module`` that owns a
+    plain ``weight`` of shape ``[experts, hidden]`` and applies it as a linear
+    map (``Qwen3MoeTopKRouter``, ``DeepseekV2TopkRouter``, ...), so the scale is
+    applied to the parameter rather than to a module class.
+    """
+
+    weight = getattr(consumer, "weight", None)
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+        raise TypeError(
+            f"AWQ: cannot absorb a norm scale into {type(consumer).__name__}: "
+            "it has no 2-D `weight`"
+        )
+    if weight.shape[1] != scales.numel():
+        raise ValueError(
+            f"AWQ: cannot absorb a {scales.numel()}-wide norm scale into "
+            f"{type(consumer).__name__} with weight {tuple(weight.shape)}"
+        )
+    weight.mul_(scales.to(device=weight.device, dtype=weight.dtype).view(1, -1))
+
+
+def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
+    """Apply every searched scale group of one layer.
+
+    ``consumer_map`` maps a ``prev_op`` name to the layer-relative names of
+    non-quantized modules that read that norm's output (MoE router,
+    ``shared_expert_gate``). Those consumers must receive the product of every
+    scale folded into the same norm, because each group divides the norm again.
+    """
+
     # Sibling captures (q/k/v, gate/up) can be backed by one host tensor, so a
     # name-keyed in-place division would scale that tensor once per module.
     # Track the group that already scaled each object and divide it once per
@@ -124,6 +160,8 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 if feature is not None:
                     groups_per_feature.setdefault(id(feature), set()).add(group_index)
 
+    # {prev_op_name: product of the scales folded into it during this call}
+    applied_norm_scales = {}
     for group_index, (prev_op_name, layer_names, scales, _) in enumerate(scales_list):
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
@@ -174,6 +212,11 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 move_to(layer, device=original_device)
             continue
 
+        if consumer_map and prev_op_name in consumer_map:
+            folded = scales.detach().to(device=target_device, dtype=torch.float32)
+            previous = applied_norm_scales.get(prev_op_name)
+            applied_norm_scales[prev_op_name] = folded if previous is None else previous * folded
+
         # apply the scaling to input feat if given; prepare it for clipping
         if input_feat_dict is not None:
             for layer_name in layer_names:
@@ -197,6 +240,19 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         move_to(prev_op, device=original_prev_device)
         for layer, original_device in zip(layers, original_layer_devices):
             move_to(layer, device=original_device)
+
+    # A norm that was divided by `s` no longer emits the tensor its non-quantized
+    # consumers were trained on. Fold the accumulated scale into those consumers
+    # so routing and the shared-expert gate keep their original inputs.
+    for prev_op_name, total_scales in applied_norm_scales.items():
+        for consumer_name in consumer_map[prev_op_name]:
+            consumer = get_op_by_name(module, consumer_name)
+            original_device = get_device(consumer)
+            move_to(consumer, device=_resolve_module_exec_device(consumer))
+            try:
+                scale_input_columns(consumer, total_scales)
+            finally:
+                move_to(consumer, device=original_device)
 
 
 @torch.inference_mode()

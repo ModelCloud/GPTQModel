@@ -22,6 +22,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
+from ..quantization.config import dynamic_get
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -1537,6 +1538,145 @@ def convert_bitsandbytes_shard(
     return tensors
 
 
+_AWQ_GEMV_FORMATS = frozenset({"gemv"})
+_AWQ_GEMV_FAST_FORMATS = frozenset({"gemv_fast", "gemv-fast", "llm-awq", "llm_awq"})
+
+
+def _awq_layout(config: Optional[dict]) -> str:
+    """Return the packed AWQ layout declared by a saved quantization config.
+
+    ``AWQConfig`` writes ``format`` and mirrors it into ``version`` for older
+    readers; checkpoints without either field use the classic GEMM layout.
+    """
+
+    config = config or {}
+    declared = str(config.get("format") or config.get("version") or "").strip().lower()
+    if declared in _AWQ_GEMV_FORMATS:
+        return "gemv"
+    if declared in _AWQ_GEMV_FAST_FORMATS:
+        return "gemv_fast"
+    return "gemm"
+
+
+def _awq_module_int(config: Optional[dict], prefix: str, key: str, default: int) -> int:
+    """Resolve a per-module AWQ setting, honoring ``dynamic`` overrides."""
+
+    dynamic = (config or {}).get("dynamic")
+    value = dynamic_get(dynamic, prefix, key, default) if dynamic else default
+    # An excluded module (`bits: false`) or a rule that only sets another key is
+    # not a width; fall back to the checkpoint default instead of coercing to 0.
+    if value is False or value is None:
+        return int(default)
+    return int(value)
+
+
+def _awq_group_index(in_features: int, group_size: int, *, device=None) -> torch.Tensor:
+    if group_size is None or int(group_size) <= 0:
+        group_size = in_features
+    return torch.arange(in_features, device=device, dtype=torch.long) // int(group_size)
+
+
+def _awq_gemv_fast_k_order(*, device=None) -> torch.Tensor:
+    """Return ``pack_intweight``'s 32-value input-axis order.
+
+    ``pack_intweight`` first transposes a ``(4, 4, 2)`` view of every 32-value
+    block, then applies the four-bit ``[0, 2, 4, 6, 1, 3, 5, 7]`` reorder.
+    ``order[p]`` is the natural column that ends up at packed position ``p``
+    inside one 32-value block.
+    """
+
+    index = torch.arange(32, device=device, dtype=torch.long)
+    forward = index.reshape(4, 4, 2).permute(1, 0, 2).reshape(32)
+    forward = forward.reshape(4, 4, 2).permute(0, 2, 1).reshape(32)
+    return forward
+
+
+def _dequantize_awq_gemm(qweight, qzeros, scales, bits: int) -> torch.Tensor:
+    """Reconstruct a GEMM-layout AWQ weight as ``[out_features, in_features]``."""
+
+    # AWQ packs along the output axis with the 4-bit `[0, 2, 4, 6, 1, 3, 5, 7]`
+    # interleave; wider widths are a contiguous little-endian stream.
+    unpacked_weight, unpacked_zeros = unpack_awq(qweight, qzeros, bits)
+    unpacked_weight, unpacked_zeros = reverse_awq_order(
+        unpacked_weight, unpacked_zeros, bits
+    )
+    unpacked_weight = unpacked_weight.to(torch.float32)
+    unpacked_zeros = unpacked_zeros.to(torch.float32)
+
+    num_groups = scales.shape[0]
+    group_size = unpacked_weight.shape[0] // num_groups
+    scales_full = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
+    zeros_full = unpacked_zeros.repeat_interleave(group_size, dim=0)
+    return ((unpacked_weight - zeros_full) * scales_full).t().contiguous()
+
+
+def _dequantize_awq_gemv(qweight, qzeros, scales, bits: int, group_size: int) -> torch.Tensor:
+    """Reconstruct a GEMV-layout AWQ weight (``[out, in/8]``, natural order)."""
+
+    if bits != 4:
+        raise NotImplementedError(
+            f"AWQ GEMV checkpoints store 4-bit codes; got bits={bits}. "
+            "Use a GEMM or LLM-AWQ export for other widths."
+        )
+    codes, zeros = unpack_awq(qweight, qzeros, bits)
+    codes = codes.to(torch.float32)
+    zeros = zeros.to(torch.float32)
+    in_features = codes.shape[1]
+    groups = _awq_group_index(in_features, group_size, device=codes.device)
+    # GEMV stores scales and integer zero points as [out_features, padded_groups].
+    scale = scales.to(torch.float32)[:, groups]
+    zero = zeros[:, groups]
+    return (codes - zero) * scale
+
+
+def _dequantize_awq_gemv_fast(qweight, zeros, scales, bits: int, group_size: int) -> torch.Tensor:
+    """Reconstruct a GEMV_FAST / LLM_AWQ weight (``[out/4, in]`` INT16 codes).
+
+    ``pack_intweight`` interleaves four output rows per INT16 word and stores
+    FP16 scale plus the scaled zero-point offset as ``[padded_groups, out]``.
+    """
+
+    if bits != 4:
+        raise NotImplementedError(
+            f"AWQ GEMV_FAST checkpoints store 4-bit codes; got bits={bits}. "
+            "Use a GEMM export for other widths."
+        )
+    in_features = qweight.shape[1]
+    if in_features % 64:
+        raise ValueError(
+            f"AWQ GEMV_FAST requires in_features divisible by 64, got {in_features}"
+        )
+    row_blocks = qweight.shape[0]
+    out_features = row_blocks * 4
+    packed = qweight.to(torch.int32)
+    nibbles = torch.stack(
+        [(packed >> shift) & 0xF for shift in (0, 4, 8, 12)],
+        dim=-1,
+    )
+    # Each packed word holds four output rows; ``pack_intweight`` then reshapes
+    # the (64 columns x 4 lanes) tile as if transposed, which mixes the lane
+    # index with the low column bits. Undo that mapping with a scatter.
+    blocks = in_features // 64
+    tiled = nibbles.reshape(row_blocks, blocks, 64, 4)
+    lane = torch.arange(row_blocks, device=packed.device).view(-1, 1, 1, 1)
+    block = torch.arange(blocks, device=packed.device).view(1, blocks, 1, 1)
+    flat = torch.arange(64, device=packed.device).view(1, 1, 64, 1) * 4 + torch.arange(
+        4, device=packed.device
+    ).view(1, 1, 1, 4)
+    row_lane = flat // 64
+    col_in_block = flat % 64
+    order = _awq_gemv_fast_k_order(device=packed.device)
+    natural_col = block * 64 + order[col_in_block % 32] + 32 * (col_in_block // 32)
+    codes = torch.zeros(
+        out_features, in_features, dtype=torch.int32, device=packed.device
+    )
+    codes[(lane * 4 + row_lane).expand_as(tiled), natural_col.expand_as(tiled)] = tiled
+    groups = _awq_group_index(in_features, group_size, device=codes.device)
+    scale = scales.to(torch.float32)[groups, :]
+    offset = zeros.to(torch.float32)[groups, :]
+    return (codes.to(torch.float32).t() * scale + offset).t().contiguous()
+
+
 def convert_awq_file(
     path: Path,
     target_dtype: torch.dtype,
@@ -1547,6 +1687,7 @@ def convert_awq_file(
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
+    layout = _awq_layout(config)
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
@@ -1565,6 +1706,11 @@ def convert_awq_file(
                 prefix = key[:-len(".qzeros")]
                 module_buffers[prefix]["qzeros"] = tensor
                 LOG.debug("Collected AWQ qzeros tensor '%s'", key)
+            elif key.endswith(".scaled_zeros"):
+                # LLM-AWQ stores the FP16 scaled offset under this name.
+                prefix = key[:-len(".scaled_zeros")]
+                module_buffers[prefix]["scaled_zeros"] = tensor
+                LOG.debug("Collected AWQ scaled-zero tensor '%s'", key)
             elif key.endswith(".scales"):
                 prefix = key[:-len(".scales")]
                 module_buffers[prefix]["scales"] = tensor
@@ -1572,38 +1718,41 @@ def convert_awq_file(
             else:
                 tensors[key] = finalize_for_save(tensor, target_dtype)
 
+    default_bits = int((config or {}).get("bits", 4))
+    default_group_size = int((config or {}).get("group_size", -1))
     for prefix, buf in module_buffers.items():
-        missing = {k for k in ("qweight", "qzeros", "scales") if k not in buf}
+        zeros_key = "qzeros"
+        if layout == "gemv_fast" and "scaled_zeros" in buf:
+            zeros_key = "scaled_zeros"
+        missing = {k for k in ("qweight", "scales", zeros_key) if k not in buf}
         if missing:
             raise KeyError(f"Incomplete AWQ buffers for module {prefix}: missing {missing}")
 
         qweight = buf["qweight"]
-        qzeros = buf["qzeros"]
         scales = buf["scales"]
-        bits = int((config or {}).get("bits", 4))
+        bits = _awq_module_int(config, prefix, "bits", default_bits)
+        group_size = _awq_module_int(config, prefix, "group_size", default_group_size)
 
-        # AWQ packs along the output axis with the 4-bit `[0, 2, 4, 6, 1, 3,
-        # 5, 7]` interleave; wider widths are a contiguous little-endian
-        # stream. `unpack_awq` decodes the words and `reverse_awq_order`
-        # restores the natural column order (it is a no-op for bits != 4).
-        unpacked_weight, unpacked_zeros = unpack_awq(qweight, qzeros, bits)
-        unpacked_weight, unpacked_zeros = reverse_awq_order(
-            unpacked_weight, unpacked_zeros, bits
-        )
-        unpacked_weight = unpacked_weight.to(torch.float32)
-        unpacked_zeros = unpacked_zeros.to(torch.float32)
+        if layout == "gemv":
+            weight = _dequantize_awq_gemv(qweight, buf["qzeros"], scales, bits, group_size)
+        elif layout == "gemv_fast":
+            weight = _dequantize_awq_gemv_fast(
+                qweight, buf[zeros_key], scales, bits, group_size
+            )
+        else:
+            weight = _dequantize_awq_gemm(qweight, buf["qzeros"], scales, bits)
 
-        num_groups = scales.shape[0]
-        group_size = unpacked_weight.shape[0] // num_groups
-        scales_full = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
-        zeros_full = unpacked_zeros.repeat_interleave(group_size, dim=0)
-
-        weight = (unpacked_weight - zeros_full) * scales_full
         tensors[prefix + ".weight"] = finalize_for_save(
-            weight.to(target_dtype).t().contiguous(),
+            weight.to(target_dtype).contiguous(),
             target_dtype,
         )
-        LOG.debug("Dequantized AWQ module '%s' to dtype %s", prefix, target_dtype)
+        LOG.debug(
+            "Dequantized AWQ module '%s' (%s layout, bits=%s) to dtype %s",
+            prefix,
+            layout,
+            bits,
+            target_dtype,
+        )
         if prefix + ".bias" in tensors:
             tensors[prefix + ".bias"] = finalize_for_save(tensors[prefix + ".bias"], target_dtype)
 

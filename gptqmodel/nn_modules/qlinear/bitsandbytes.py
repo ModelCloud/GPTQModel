@@ -1007,6 +1007,12 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             )
 
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
+        if x.dtype == torch.float16 and bias is None:
+            # The native fused epilogue is safe without a bias: there is no
+            # later cancellation that could be destroyed by its FP16 rounding.
+            return bnb.functional.int8_mm_dequant(
+                mm_out, x_stats, self.weight_scb
+            ).to(input_dtype)
         # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
         # overflows) the partial sum before a cancelling bias is added. Keep
         # the row/column scales and the bias in FP32 and round once.

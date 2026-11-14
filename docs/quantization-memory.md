@@ -107,7 +107,7 @@ flowchart LR
     style NEWREF fill:#f6ffed,stroke:#389e0d
 ```
 
-`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:2323`)
+`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:2370`)
 still streams the replay batch by batch, so the reference is materialized once
 rather than once per grid step. Peak device memory is unchanged, because the full
 reference is resident during the grid either way.
@@ -161,7 +161,7 @@ Three invariants keep this bitwise identical:
    (`gptqmodel/looper/awq_processor.py:1227`) caches the concatenation by the
    tuple of input tensor ids.
 3. **One scale division per tensor per group.** `apply_scale`
-   (`gptqmodel/quantization/awq/quantize/scale.py:111`) tracks which group already
+   (`gptqmodel/quantization/awq/quantize/scale.py:139`) tracks which group already
    divided each object. A tensor reached by a *different* group is restored from a
    pristine clone taken before the first division, so the second group still sees
    the captured value.

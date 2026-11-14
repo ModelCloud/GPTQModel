@@ -109,6 +109,13 @@ META_FIELD_GPTAQ_ENABLED = "gptaq"
 
 META_FIELD_FOEM_ENABLED = "foem"
 
+# GPTQModel <= 5.4.x stored the GPTAQ switch as a bare boolean in `meta.gptaq`
+# and kept its coefficient/device in these sibling keys. 5.x replaced the
+# boolean with the `GPTAQConfig` object, so readers must still understand the
+# legacy shape or every 5.4.x checkpoint fails to load.
+META_FIELD_GPTAQ_ALPHA = "gptaq_alpha"
+META_FIELD_GPTAQ_MEMORY_DEVICE = "gptaq_memory_device"
+
 ADAPTER_FIELD = "adapter"
 
 # saved formats
@@ -3246,6 +3253,23 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
     return _select_dynamic_value(overrides, key, default, sub_key)
 
 
+def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
+    """Return the raw patterns of every `-:` dynamic rule, in declaration order.
+
+    The `-:` prefix is GPT-QModel's own exclusion marker; HF Transformers and
+    vLLM read a plain pattern list from `modules_to_not_convert`.
+    """
+
+    patterns: List[str] = []
+    for pattern in list(dynamic or ()) + list(extra or ()):
+        if not isinstance(pattern, str) or not pattern.startswith("-:"):
+            continue
+        raw = pattern[2:]
+        if raw and raw not in patterns:
+            patterns.append(raw)
+    return patterns
+
+
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
     """Return the `dynamic` pattern that decides `module_name`'s override.
 
@@ -3510,23 +3534,67 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
-def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Optional[GPTAQConfig]:
+def _legacy_optional_number(value: Any) -> Optional[float]:
+    """Return `value` as a float when it is a real number, else `None`."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _normalize_gptaq(
+    gptaq: Optional[Union[GPTAQConfig, Dict[str, Any], bool]],
+    *,
+    legacy_alpha: Any = None,
+    legacy_device: Any = None,
+) -> Optional[GPTAQConfig]:
+    """Normalize `gptaq` from an object, a dict, or the legacy boolean.
+
+    GPTQModel 5.4.x serialized `"gptaq": false|true` into the checkpoint
+    `meta` and stored the coefficient and memory device in the sibling
+    `gptaq_alpha` / `gptaq_memory_device` keys. `False` means "GPTAQ off", so
+    it maps to `None`; `True` means "GPTAQ on", so it maps to a
+    `GPTAQConfig` that keeps the legacy coefficient when one was written.
+    """
+
     if gptaq is None:
         return None
+    if isinstance(gptaq, bool):
+        if not gptaq:
+            return None
+        alpha = _legacy_optional_number(legacy_alpha)
+        device = legacy_device if isinstance(legacy_device, str) and legacy_device else "auto"
+        return GPTAQConfig(
+            alpha=GPTAQConfig().alpha if alpha is None else alpha,
+            device=device,
+        )
     if isinstance(gptaq, dict):
         return GPTAQConfig(**gptaq)
     if not isinstance(gptaq, GPTAQConfig):
-        raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
+        raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, boolean, or None.")
     return gptaq
 
 
-def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Optional[FOEMConfig]:
+def _normalize_foem(
+    foem: Optional[Union[FOEMConfig, Dict[str, Any], bool]],
+) -> Optional[FOEMConfig]:
+    """Normalize `foem`; a legacy boolean follows the same on/off contract.
+
+    No released GPTQModel wrote a boolean `meta.foem`, but the sibling
+    normalizer accepted the same shapes as `gptaq` before the object form, and
+    a boolean here has an unambiguous meaning. Rejecting it would reintroduce
+    the checkpoint-compatibility bug for any producer that mirrored the GPTAQ
+    encoding.
+    """
+
     if foem is None:
         return None
+    if isinstance(foem, bool):
+        return FOEMConfig() if foem else None
     if isinstance(foem, dict):
         return FOEMConfig(**foem)
     if not isinstance(foem, FOEMConfig):
-        raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, or None.")
+        raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, boolean, or None.")
     return foem
 
 
@@ -4702,6 +4770,21 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 if normalized_key not in normalized and meta_key in meta_payload:
                     normalized[normalized_key] = meta_payload.get(meta_key)
 
+        # GPTQModel 5.4.x wrote `meta.gptaq` as a boolean and kept the
+        # coefficient/device in sibling keys that have no config field of their
+        # own. Fold that legacy shape into the object form so the checkpoint
+        # keeps its measured settings instead of silently falling back to the
+        # defaults. A top-level boolean is accepted for the same reason.
+        legacy_meta = meta_payload if isinstance(meta_payload, dict) else {}
+        if isinstance(normalized.get("gptaq"), bool):
+            normalized["gptaq"] = _normalize_gptaq(
+                normalized["gptaq"],
+                legacy_alpha=legacy_meta.get(META_FIELD_GPTAQ_ALPHA),
+                legacy_device=legacy_meta.get(META_FIELD_GPTAQ_MEMORY_DEVICE),
+            )
+        if isinstance(normalized.get("foem"), bool):
+            normalized["foem"] = _normalize_foem(normalized["foem"])
+
         # `format` defaults to GPTQ above for legacy payloads. Weight-only
         # methods have their own defaults, and forcing FORMAT.GPTQ would make
         # e.g. a `method="gguf"` payload fail format validation instead of
@@ -5152,6 +5235,10 @@ class AWQConfig(PreProcessorConfig):
     format: FORMAT = field(default=FORMAT.GEMM)
     gsq: Optional[GSQConfig] = field(default=None)
     gsq_training: Optional[GSQTrainingConfig] = field(default=None)
+    # HF Transformers and vLLM AutoAWQ only skip modules listed here. GPT-QModel
+    # expresses the same exclusions as `-:` rules in `dynamic`, so the writer
+    # mirrors them into this key for a checkpoint those loaders can consume.
+    modules_to_not_convert: Optional[List[str]] = field(default=None)
     scale_search_chunked_activations: bool = field(
         default=True,
         metadata={
@@ -5201,10 +5288,30 @@ class AWQConfig(PreProcessorConfig):
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format
+        excluded = self.excluded_module_patterns()
+        if excluded:
+            out["modules_to_not_convert"] = excluded
         if self.gsq is not None:
             out["gsq"] = asdict(self.gsq)
         if self.gsq_training is not None:
             out["gsq_training"] = self.gsq_training.to_dict()
+
+    def excluded_module_patterns(self) -> List[str]:
+        """Return every module HF/vLLM must leave unquantized.
+
+        `-:` dynamic rules are the authoritative exclusion declaration; the
+        declared `modules_to_not_convert` list is a compatibility surface for
+        checkpoints produced by other tools, so it is preserved as well.
+        """
+
+        patterns = _dynamic_exclusion_patterns(
+            self.dynamic,
+            sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
+        )
+        for pattern in self.modules_to_not_convert or ():
+            if isinstance(pattern, str) and pattern and pattern not in patterns:
+                patterns.append(pattern)
+        return patterns
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)

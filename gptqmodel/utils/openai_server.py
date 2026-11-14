@@ -186,13 +186,65 @@ def _sequence_end(row, eos_token_id, pad_token_id):
     is padding, including a second EOS written as the pad value.
     """
     ids = [int(token) for token in row.tolist()]
-    if eos_token_id is not None and eos_token_id in ids:
-        return ids.index(eos_token_id) + 1, "stop"
+    if eos_token_id is not None:
+        if isinstance(eos_token_id, int):
+            eos_set = {eos_token_id}
+        else:
+            eos_set = {int(e) for e in eos_token_id if e is not None}
+        for index, token in enumerate(ids):
+            if token in eos_set:
+                return index + 1, "stop"
     if pad_token_id is not None:
         # No EOS: a row that only ends in padding was cut short by the budget.
         while ids and ids[-1] == pad_token_id:
             ids.pop()
     return len(ids), "length"
+
+
+def _resolve_eos_token_ids(model, tokenizer) -> list[int]:
+    """Collect all valid EOS token IDs from the model config and tokenizer."""
+    ids: list[int] = []
+    gen_config = getattr(model, "generation_config", None)
+    if gen_config is not None:
+        cfg_eos = getattr(gen_config, "eos_token_id", None)
+        if isinstance(cfg_eos, int):
+            ids.append(cfg_eos)
+        elif isinstance(cfg_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in cfg_eos if x is not None)
+
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        cfg_eos = getattr(model_config, "eos_token_id", None)
+        if isinstance(cfg_eos, int):
+            ids.append(cfg_eos)
+        elif isinstance(cfg_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in cfg_eos if x is not None)
+
+    if tokenizer is not None:
+        tok_eos = getattr(tokenizer, "eos_token_id", None)
+        if isinstance(tok_eos, int):
+            ids.append(tok_eos)
+        elif isinstance(tok_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in tok_eos if x is not None)
+
+    return list(dict.fromkeys(ids))
+
+
+def _capture_rng_state():
+    """Capture the CPU RNG state plus the accelerator state when it exists.
+
+    ``torch.cuda.is_initialized()`` is used instead of ``is_available()`` so a
+    CPU-only request never creates a CUDA context just to read its state.
+    """
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    return torch.get_rng_state(), cuda_states
+
+
+def _restore_rng_state(state) -> None:
+    cpu_state, cuda_states = state
+    torch.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _coerce_generation_results(outputs) -> list:
@@ -286,13 +338,18 @@ class OpenAiServer:
 
     def setup_routes(self):
         class OpenAiRequest(BaseModel):
+            model_config = {"extra": "forbid"}
+
             model: str = ""
             messages: list = Field(default_factory=list, max_length=MAX_MESSAGES)
-            max_tokens: int = Field(default=256, ge=1, le=MAX_COMPLETION_TOKENS)
-            temperature: float = 0.0
+            max_tokens: int | None = Field(default=None, ge=1, le=MAX_COMPLETION_TOKENS)
+            max_completion_tokens: int | None = Field(default=None, ge=1, le=MAX_COMPLETION_TOKENS)
+            temperature: float = Field(default=0.0, ge=0.0)
             top_p: float = 1.0
             n: int = Field(default=1, ge=1, le=MAX_CHOICES)
             stop: list | str | None = None
+            stream: bool = False
+            seed: int | None = None
 
         class OpenAiResponseMessage(BaseModel):
             role: str = "assistant"
@@ -346,8 +403,17 @@ class OpenAiServer:
             # cannot run two generations concurrently, and letting the threadpool
             # call into it in parallel would raise VRAM use until it OOMs.
             # Authentication is enforced by AuthenticationMiddleware for /v1 paths.
+            if request.stream:
+                raise HTTPException(status_code=400, detail="Streaming is not currently supported.")
+
             if not request.messages:
                 raise HTTPException(status_code=400, detail="`messages` must not be empty.")
+
+            max_tokens = (
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else (request.max_tokens if request.max_tokens is not None else 256)
+            )
 
             try:
                 model_inputs = self.tokenizer.apply_chat_template(
@@ -369,11 +435,17 @@ class OpenAiServer:
                 stop_strings = _stop_list(request.stop)
                 do_sample = request.temperature != 0.0
 
+                eos_ids = _resolve_eos_token_ids(self.model, self.tokenizer)
+                eos_arg = eos_ids if len(eos_ids) > 1 else (eos_ids[0] if eos_ids else None)
+
                 generate_kwargs = {
-                    "max_new_tokens": request.max_tokens,
-                    "eos_token_id": self.tokenizer.eos_token_id,
+                    "max_new_tokens": max_tokens,
                     "do_sample": do_sample,
                 }
+                if eos_arg is not None:
+                    generate_kwargs["eos_token_id"] = eos_arg
+                if request.seed is not None and getattr(self.model, "_runtime_generate", None) is not None:
+                    generate_kwargs["seed"] = request.seed
                 if do_sample:
                     generate_kwargs["temperature"] = request.temperature
                     generate_kwargs["top_p"] = request.top_p
@@ -397,11 +469,27 @@ class OpenAiServer:
                         # External runtime adapters accept the OpenAI-style `stop` argument.
                         generate_kwargs["stop"] = stop_strings
 
-                with self._generation_lock, torch.inference_mode():
-                    outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                # Transformers `generate` has no seed argument, so the global RNG
+                # is seeded for this one call. Seeding outside the lock would let
+                # a concurrent request overwrite the seed before the model reads
+                # it, and leaving it applied would move every later caller onto
+                # this request's random stream. Capture, seed, generate and
+                # restore therefore all happen while `_generation_lock` is held.
+                seeded = request.seed is not None and getattr(self.model, "_runtime_generate", None) is None
+                rng_state = None
+                try:
+                    with self._generation_lock:
+                        if seeded:
+                            rng_state = _capture_rng_state()
+                            torch.manual_seed(request.seed)
+                        with torch.inference_mode():
+                            outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                finally:
+                    if rng_state is not None:
+                        _restore_rng_state(rng_state)
 
                 pad_token_id = self.tokenizer.pad_token_id
-                eos_token_id = self.tokenizer.eos_token_id
+                eos_token_id = eos_ids or self.tokenizer.eos_token_id
 
                 if torch.is_tensor(outputs):
                     generated_ids = outputs[:, prompt_length:]
@@ -520,7 +608,7 @@ class OpenAiServer:
         if self._is_loopback_host(host):
             # DNS rebinding presents the attacker's Host name to a loopback
             # listener; only accept the loopback spellings.
-            return ["localhost", "127.0.0.1", "::1"]
+            return ["localhost", "127.0.0.1", "::1", "[::1]"]
         # An explicit non-loopback bind already opted into network exposure and
         # authenticated the API; accept any Host unless the caller narrows it.
         return ["*"]

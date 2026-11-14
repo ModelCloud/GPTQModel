@@ -938,6 +938,24 @@ def run_layer_stage(
                     fallback=fallback,
                     embedding_module_name=embedding_module_name,
                 )
+            if is_lm_head_module:
+                # Subset planning may have swapped the live head for the
+                # auto-dtype-cast forward wrapper, which replaces the module
+                # object itself rather than one of its children. Re-read the
+                # head from the model tree: direct-state materialization
+                # resolves modules by identity inside that tree and cannot
+                # find the replaced object (`utils/structure.py:542`).
+                live_lm_head = get_module(
+                    looper.gptq_model.model, key=looper.gptq_model.lm_head
+                )
+                if live_lm_head is not None and live_lm_head is not module:
+                    module = live_lm_head
+                    full = find_modules(module, name=looper.gptq_model.lm_head)
+                    cur_layer_device = get_device(module)
+                    if getattr(cur_layer_device, "type", None) == "meta":
+                        cur_layer_device = normalize_device_like(
+                            looper.gptq_model.quantize_config.device
+                        ) or CPU
             if durable_progress_logs:
                 log.info(
                     "StageLayer: layer=%s processor=%s begin subsets=%s",

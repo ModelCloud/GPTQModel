@@ -115,6 +115,50 @@ def test_cpu_torch_fused_awq_adds_bias_before_the_cast():
     _assert_cancelled(_awq_fixture(TorchFusedAwqLinear, checkpoint_format=FORMAT.GEMM)(_x()))
 
 
+@pytest.mark.parametrize("training", [False, True])
+def test_cpu_torch_fused_gptq_adds_bias_before_the_cast(training):
+    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+
+    module = _gptq_fixture(TorchFusedLinear)
+    module.train(training)
+    _assert_cancelled(module(_x()))
+
+
+@pytest.mark.parametrize(
+    "cls_name",
+    ["TorchAtenLinear", "TorchAtenAwqLinear", "TorchFusedAwqLinear"],
+)
+def test_cpu_bf16_biased_layers_keep_the_fused_path(cls_name):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear, _has_local_int4pack_cpu_ops
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
+    from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
+
+    if not _has_local_int4pack_cpu_ops():
+        pytest.skip("PyTorch CPU int4pack ops unavailable")
+    classes = {
+        "TorchAtenLinear": TorchAtenLinear,
+        "TorchAtenAwqLinear": TorchAtenAwqLinear,
+        "TorchFusedAwqLinear": TorchFusedAwqLinear,
+    }
+    cls = classes[cls_name]
+    module = (
+        _gptq_fixture(cls)
+        if cls is TorchAtenLinear
+        else _awq_fixture(cls, checkpoint_format=FORMAT.GEMM)
+    )
+    module = module.to(dtype=torch.bfloat16).eval()
+    module.bias.fill_(1.0)
+    x = torch.full((1, K), X_VALUE, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        out = module(x)
+    assert torch.isfinite(out).all()
+    expected = float(torch.tensor(X_VALUE * K * WEIGHT + 1.0, dtype=torch.bfloat16))
+    torch.testing.assert_close(
+        out.float(), torch.full_like(out.float(), expected), rtol=0, atol=0
+    )
+    assert module.linear_mode == "inference"
+
+
 def test_cpu_awq_torch_adds_bias_before_the_cast():
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 
@@ -222,7 +266,8 @@ def _marlin_available() -> bool:
 
 @pytest.mark.skipif(not NVIDIA, reason="ExLlamaV2 requires NVIDIA CUDA")
 @pytest.mark.parametrize("backend", ["gptq", "awq"])
-def test_exllamav2_bias_cancels_before_the_fp16_cast(backend):
+@pytest.mark.parametrize("rows", [1, 64])
+def test_exllamav2_bias_cancels_before_the_fp16_cast(backend, rows):
     from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
     from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
     from gptqmodel.utils.exllamav2 import ScratchSpace
@@ -245,7 +290,7 @@ def test_exllamav2_bias_cancels_before_the_fp16_cast(backend):
     module.bias.fill_(BIAS)
     module.post_init(ScratchSpace(module.scratch_space_fixed(), 0))
 
-    _assert_cancelled(module(_x(device="cuda")))
+    _assert_cancelled(module(_x(rows, device="cuda")))
 
 
 @pytest.mark.skipif(not _marlin_available(), reason="Marlin requires NVIDIA Ampere or newer")
@@ -297,3 +342,37 @@ def test_awq_gemm_bias_cancels_before_the_fp16_cast(rows):
     module.post_init()
 
     _assert_cancelled(module(_x(rows, device="cuda")))
+
+
+@pytest.mark.skipif(not NVIDIA, reason="AwqExLlamaV2 requires NVIDIA CUDA")
+def test_awq_exllamav2_lora_keeps_activation_and_weight_dtypes():
+    from gptqmodel.adapter.adapter import Lora
+    from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+    from gptqmodel.utils.exllamav2 import ScratchSpace
+
+    module = AwqExllamaV2Linear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=K,
+        out_features=128,
+        bias=True,
+        register_buffers=True,
+        checkpoint_format=FORMAT.GEMM,
+    ).cuda().eval()
+    module.qweight.fill_(-1)
+    module.qzeros.fill_(-2004318072)
+    module.scales.fill_(6.0)
+    module.bias.fill_(BIAS)
+    module.post_init(ScratchSpace(module.scratch_space_fixed(), 0))
+    lora_a = torch.full((K, 1), 0.01, device="cuda", dtype=torch.float16)
+    lora_b = torch.full((1, 128), 0.5, device="cuda", dtype=torch.float16)
+    module.adapter = Lora(rank=1, lora_A=lora_a, lora_B=lora_b)
+
+    with torch.inference_mode():
+        out = module(_x(device="cuda"))
+
+    assert out.dtype == torch.float16
+    assert module.adapter.lora_A.dtype == torch.float16
+    assert module.adapter.lora_B.dtype == torch.float16

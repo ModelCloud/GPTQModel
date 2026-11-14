@@ -69,6 +69,7 @@ typedef void (*fp_gemm_half_q_half_kernel)
     const uint32_t*,
     const half*,
     half*,
+    float*,
     const int,
     const int,
     const int,
@@ -92,6 +93,7 @@ __global__ void gemm_half_q_half_kernel
     const uint32_t*  __restrict__ b_q_scale,
     const half*      __restrict__ b_q_scale_max,
     half*            __restrict__ c,
+    float*           __restrict__ c_float,
     const int size_m,
     const int size_n,
     const int size_k,
@@ -146,7 +148,18 @@ __global__ void gemm_half_q_half_kernel
     if (clear && blockIdx.z == 0) // && (threadIdx.x & 1) == 0)
     {
         for (int m = 0; m < m_count; m++)
-            *((uint64_t*) c_.item_ptr(offset_m + m, n)) = 0;
+        {
+            if (c_float)
+            {
+                float* out = c_float + (int64_t) (offset_m + m) * size_n + n;
+                #pragma unroll
+                for (int lane = 0; lane < 4; ++lane) out[lane] = 0.0f;
+            }
+            else
+            {
+                *((uint64_t*) c_.item_ptr(offset_m + m, n)) = 0;
+            }
+        }
     }
 
     __syncthreads();
@@ -449,11 +462,20 @@ __global__ void gemm_half_q_half_kernel
 
     for (int m = 0; m < m_count; m++)
     {
-        half2* out = (half2*)c_.item_ptr(offset_m + m, n);
-        half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
-        half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
-        atomicAdd(out    , result01);
-        atomicAdd(out + 1, result23);
+        if (c_float)
+        {
+            float* out = c_float + (int64_t) (offset_m + m) * size_n + n;
+            #pragma unroll
+            for (int lane = 0; lane < 4; ++lane) atomicAdd(out + lane, block_c[m][lane]);
+        }
+        else
+        {
+            half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+            half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
+            half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
+            atomicAdd(out    , result01);
+            atomicAdd(out + 1, result23);
+        }
     }
 }
 

@@ -12,6 +12,7 @@ These cover the three defects verified against the previous implementation:
 
 import asyncio
 import inspect
+import threading
 import time
 
 import pytest
@@ -680,3 +681,142 @@ def test_shutdown_is_not_reachable_without_valid_token_when_client_host_is_unpar
 
     assert TestClient(server.app).get("/shutdown").status_code == 403
     assert called == []
+
+
+def test_stream_parameter_rejected_with_400(client):
+    response = _chat(client, stream=True)
+    assert response.status_code == 400
+    assert "Streaming is not currently supported" in response.json()["detail"]
+
+
+def test_max_completion_tokens_aliases_max_tokens(client, model):
+    response = _chat(client, max_completion_tokens=5)
+    assert response.status_code == 200
+    assert model.calls[-1]["max_new_tokens"] == 5
+
+    assert _chat(client, max_completion_tokens=0).status_code == 422
+    assert _chat(client, max_completion_tokens=MAX_COMPLETION_TOKENS + 1).status_code == 422
+
+
+def test_negative_temperature_rejected(client):
+    assert _chat(client, temperature=-0.5).status_code == 422
+
+
+def test_unknown_request_fields_rejected_extra_forbid(client):
+    assert _chat(client, unrecognized_field="bad").status_code == 422
+
+
+def test_seed_honored(client, model):
+    response = _chat(client, seed=1234)
+    assert response.status_code == 200
+
+
+def test_seed_is_applied_to_native_generation(model):
+    class _RecordingSeed(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.seen_seeds = []
+
+        def generate(self, **kwargs):
+            # Read the live seed the way a sampling kernel would.
+            self.seen_seeds.append(torch.initial_seed())
+            return super().generate(**kwargs)
+
+    stub = _RecordingSeed(model.tokenizer)
+    client = TestClient(OpenAiServer(model=stub).app)
+
+    assert _chat(client, temperature=0.7, seed=4321).status_code == 200
+    assert stub.seen_seeds == [4321]
+
+
+def test_seed_does_not_leak_into_the_global_rng(model):
+    # `generate` has no seed argument, so the server seeds the process RNG.
+    # Leaving that seed applied would move every later unseeded caller onto
+    # this request's random stream.
+    client = TestClient(OpenAiServer(model=model).app)
+    before = torch.get_rng_state().clone()
+
+    assert _chat(client, temperature=0.7, seed=1234).status_code == 200
+
+    assert torch.equal(torch.get_rng_state(), before)
+
+
+def test_concurrent_seeded_requests_each_keep_their_own_seed(model):
+    # Seeding outside `_generation_lock` lets the second request reseed the
+    # process while the first is already inside `generate`.
+    class _SlowSeed(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.seen_seeds = []
+            self._guard = threading.Lock()
+
+        def generate(self, **kwargs):
+            time.sleep(0.3)
+            with self._guard:
+                self.seen_seeds.append(torch.initial_seed())
+            return "alpha"
+
+    stub = _SlowSeed(model.tokenizer)
+    server = OpenAiServer(model=stub)
+
+    def payload(seed):
+        return {
+            "model": "stub-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.7,
+            "seed": seed,
+        }
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return await asyncio.gather(
+                client.post("/v1/chat/completions", json=payload(11)),
+                client.post("/v1/chat/completions", json=payload(22)),
+            )
+
+    responses = asyncio.run(scenario())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert sorted(stub.seen_seeds) == [11, 22]
+
+
+def test_multi_eos_token_ids_from_generation_config(tokenizer):
+    gen_eos_list = [128001, 128008]
+
+    class _GenConfig:
+        eos_token_id = gen_eos_list
+
+    class _MultiEOSModel(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.generation_config = _GenConfig()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            prompt = kwargs["input_ids"]
+            # Row ends on <|eom_id|> (128008) followed by pad 0
+            row = torch.tensor([[65, 66, 128008, 0, 0]])
+            return torch.cat([prompt, row], dim=1)
+
+    model = _MultiEOSModel(tokenizer)
+    client = TestClient(OpenAiServer(model=model).app)
+    response = _chat(client, max_tokens=10)
+    assert response.status_code == 200
+
+    call = model.calls[-1]
+    assert 128008 in call["eos_token_id"]
+    assert 128001 in call["eos_token_id"]
+
+    body = response.json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["usage"]["completion_tokens"] == 3
+
+
+def test_ipv6_bracketed_host_allowed(model):
+    server = OpenAiServer(model=model)
+    server._install_host_validation("::1")
+
+    # Starlette compares the bracketed Host header "[::1]" when connecting over IPv6
+    client = TestClient(server.app, base_url="http://[::1]")
+    assert client.get("/health").status_code == 200

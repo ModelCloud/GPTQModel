@@ -76,6 +76,7 @@ now compares against the FP32-before-cast epilogue.
 
 ## Trade-off
 
-Biased ExllamaV2 layers take the extension's FP32 path, which reconstructs the
-FP16 weight transiently per call; the reconstruction is not retained (see
-`temp_dq_size() == 0`). Unbiased layers keep the native FP16 kernel.
+Biased FP16 ExLlamaV2 layers now keep FP16 activations and request a transient
+FP32 output from the quantized kernel; the output is not retained. See the
+[fused kernel dispatch and bias epilogues](fused-kernel-epilogues.md) for the
+follow-up flow and the remaining GPTQ reduction-order limitation.

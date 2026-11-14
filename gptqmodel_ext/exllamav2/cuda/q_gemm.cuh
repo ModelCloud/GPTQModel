@@ -15,6 +15,7 @@ void gemm_half_q_half_cuda
     const half* a,
     QMatrix* b,
     half* c,
+    float* c_float,
     int size_m,
     int size_n,
     int size_k,

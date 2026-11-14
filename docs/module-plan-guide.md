@@ -192,6 +192,7 @@ and tests must implement any new semantics.
 | `:!` | Explicit non-quantized declaration. | Norms, routers, direct parameter owners, or projections deliberately kept in their source representation. Does not delete or unload weights. |
 | `:?` | Capture-only declaration. | Keeps a module available for capture/inspection without quantizing it; capture views must opt in with `include_capture_only=True`. |
 | `:norm` | Norm consumer flag. | `"input_layernorm:!:norm"`; used by norm-related consumers and rotation. It is not a projection role, so inspect `spec.flags`, not `plan.roles()`. |
+| `:nosrc` | Not an AWQ scale source. | `"post_attention_layernorm:!:nosrc"` or `"fc1:0:nosrc"`; the leaf's output is not the direct input of the following scaling consumer (residual add, parallel branch, non-homogeneous activation, or a fused projection). See [AWQ scaling groups](awq-scaling-groups.md). |
 | `:in=<tag>` | Identical input activation declaration. | Siblings with the same tag may share Hessian capture after real-forward verification. A group number or matching shape does not prove shared input. |
 | `runtime\|checkpoint` | Ordered path aliases. | `"gate_proj\|w1:0:gate"` names runtime `gate_proj` and a checkpoint alias. `plan.find()` queries the first name; it is not an alias search API. |
 | Empty dictionary key `""` | Keep the current parent path. | Used for direct dense MLP alternatives alongside MoE branches. |
