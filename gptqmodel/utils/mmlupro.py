@@ -206,7 +206,8 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
     accu, corr, wrong = save_res(res, output_path)
     log.info("this batch accu is: {}, corr: {}, wrong: {}\n".format(str(accu), str(corr), str(wrong)))
 
-    accu, corr, wrong = save_res(res, output_path)
+    # Score once: save_res guesses a missing prediction at random, so a second
+    # call can report a different accuracy than the one just logged.
     return accu, corr, wrong
 
 
