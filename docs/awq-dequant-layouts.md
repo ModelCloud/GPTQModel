@@ -27,7 +27,7 @@ short tail.
 the `(64 columns x 4 lanes)` tile as if transposed, so the lane index mixes with
 the low six column bits. Decoding scatters each nibble back with the inverse of
 that mapping (`_awq_gemv_fast_k_order` + a scatter in
-`gptqmodel/utils/model_dequant.py:1632`).
+`gptqmodel/utils/model_dequant.py:1673`).
 
 ## Flow
 
