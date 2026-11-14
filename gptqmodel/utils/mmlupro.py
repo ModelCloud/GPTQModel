@@ -135,6 +135,7 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
         with torch.inference_mode():
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
+                attention_mask=input_tensor["attention_mask"],
                 tokenizer=tokenizer,
                 do_sample=False,
                 temperature=0.0,
@@ -189,9 +190,10 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
         prompt = None
         while not prompt_length_ok:
             prompt = generate_cot_prompt(val_df, curr, k)
-            inputs = tokenizer(prompt, return_tensors="pt")
-            inputs = {key: value.cuda() for key, value in inputs.items()}
-            length = len(inputs["input_ids"][0])
+            # Count prompt tokens on the CPU tokenizer output. Moving the
+            # tensor to CUDA only to read its length made CPU-only evaluation
+            # fail before generation even started.
+            length = len(tokenizer(prompt)["input_ids"][0])
             if length < max_model_length - max_new_tokens:
                 prompt_length_ok = True
             k -= 1
