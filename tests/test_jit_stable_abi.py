@@ -31,6 +31,7 @@ from gptqmodel.utils import (
     rco_cpp,
     swordfish,
     tt_blockfloat_cuda,
+    tt_blockfloat_hip,
     vptq_cuda,
 )
 
@@ -135,6 +136,15 @@ def test_tt_blockfloat_cuda_uses_stable_abi():
     _assert_stable(tt_blockfloat_cuda._EXTENSION)
 
 
+def test_tt_blockfloat_hip_uses_stable_abi():
+    root = Path(__file__).resolve().parents[1] / "gptqmodel_ext" / "tt_blockfloat_hip"
+    _assert_stable(
+        tt_blockfloat_hip._EXTENSION,
+        sources=[str(root / "tt_blockfloat_hip_torch.cpp")],
+        include_paths=[cpp.torch_stable_compat_include_path()],
+    )
+
+
 def test_vptq_cuda_uses_stable_abi():
     _assert_stable(vptq_cuda._VPTQ_TORCH_OPS_EXTENSION)
 
@@ -152,24 +162,15 @@ def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
 
 
 def test_every_jit_loader_declares_the_stable_abi():
-    """Any product JIT loader must opt into the stable ABI.
-
-    The HIP loaders are the only exceptions: their compat/device layer has not
-    been ported because this repository has no ROCm build in CI here.
-    """
+    """Any product JIT loader must opt into the stable ABI."""
 
     root = Path(__file__).resolve().parents[1] / "gptqmodel"
-    rocm_only = {
-        "gptqmodel/utils/tt_blockfloat_hip.py",
-    }
     missing = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "TorchOpsJitExtension(" not in text:
             continue
         relative = path.relative_to(root.parent).as_posix()
-        if relative in rocm_only:
-            continue
         for match in re.finditer(r"TorchOpsJitExtension\(", text):
             depth = 0
             index = match.end() - 1
