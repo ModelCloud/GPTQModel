@@ -22,6 +22,11 @@ run of non-quantized blocks (`pending_nonquant`) between two quantized blocks.
 group; `_norm_scale_consumers` collects the non-quantized modules that read the
 same normed tensor. `AWQProcessor` then hands both to `apply_scale`.
 
+After selection, `_filter_awq_scaling_sources` drops groups whose `prev_op` is
+declared `nosrc` by the definition (see
+[AWQ scaling groups](awq-scaling-groups.md)). A dropped group scales no
+consumers, because its norm is never divided.
+
 ```mermaid
 flowchart TD
     A["full_layer_modules block"] --> B{"all names carry ! or ?"}
@@ -161,6 +166,7 @@ not mutated in place.
 | `layer_modules_strict=False` and a declared module is missing | only that name is skipped (DeepSeek alternative layouts) |
 | No keep mask bound to the calibration thread | every hook is a no-op; rows pass through |
 | `defuser` older than 0.0.30 | the loader logs an error naming the installed version before conversion, because fused 3-D experts stay unsplit and are left unquantized |
+| `prev_op` declared `nosrc` | `_filter_awq_scaling_sources` drops the group before `apply_scale`; consumers are not scaled because the norm is not divided |
 
 ## Measured results
 
