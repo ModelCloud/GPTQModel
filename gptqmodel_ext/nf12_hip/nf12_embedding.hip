@@ -155,6 +155,18 @@ hipError_t launch_embedding(const uint8_t* packed, const uint4* escapes,
       packed, escapes, num_escapes, exp_base, n, k, ids, num_ids, out, stream);
 }
 
+template <typename Id>
+hipError_t launch_embedding_any(const uint8_t* packed, const uint4* escapes,
+                                uint32_t num_escapes, uint32_t exp_base,
+                                int64_t n, int64_t k, const Id* ids,
+                                int64_t num_ids, void* out, hipStream_t stream) {
+  return num_ids == 1
+      ? launch_embedding<256, 1>(packed, escapes, num_escapes, exp_base, n, k,
+                                 ids, num_ids, out, stream)
+      : launch_embedding<32, 16>(packed, escapes, num_escapes, exp_base, n, k,
+                                 ids, num_ids, out, stream);
+}
+
 }  // namespace
 }  // namespace nf12_hip
 
@@ -165,17 +177,9 @@ extern "C" hipError_t nf12_embedding(
     void* out, hipStream_t stream) {
   if ((ids32 == nullptr) == (ids64 == nullptr)) return hipErrorInvalidValue;
   if (ids32 != nullptr) {
-    if (num_ids == 1) {
-      return nf12_hip::launch_embedding<256, 1>(
-          packed, escapes, num_escapes, exp_base, n, k, ids32, num_ids, out, stream);
-    }
-    return nf12_hip::launch_embedding<32, 16>(
+    return nf12_hip::launch_embedding_any(
         packed, escapes, num_escapes, exp_base, n, k, ids32, num_ids, out, stream);
   }
-  if (num_ids == 1) {
-    return nf12_hip::launch_embedding<256, 1>(
-        packed, escapes, num_escapes, exp_base, n, k, ids64, num_ids, out, stream);
-  }
-  return nf12_hip::launch_embedding<32, 16>(
+  return nf12_hip::launch_embedding_any(
       packed, escapes, num_escapes, exp_base, n, k, ids64, num_ids, out, stream);
 }

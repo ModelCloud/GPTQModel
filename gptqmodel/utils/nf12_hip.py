@@ -56,6 +56,13 @@ _SOURCE_FILES = (
     "nf12_validation.cuh",
 )
 
+# Portable format helpers shared with the CUDA kernels. The HIP build stages
+# them beside the kernels so the include stays backend-local.
+_SHARED_SOURCES = (
+    ("../nf12/csrc/common/rowmajor_format.cuh", "rowmajor_format.cuh"),
+    ("../nf12/csrc/common/rowmajor_pack.cuh", "rowmajor_pack.cuh"),
+)
+
 
 def _staging_root() -> Path:
     """Writable directory that receives a copy of the kernel sources."""
@@ -90,6 +97,11 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"NF12 HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
+    for relative, staged_name in _SHARED_SOURCES:
+        source = originals / relative
+        if not source.exists():
+            raise FileNotFoundError(f"NF12 HIP shared source is missing: {source}")
+        (stage / staged_name).write_bytes(source.read_bytes())
     # Derived from _SOURCE_FILES so a new kernel cannot be staged but silently
     # left out of the build. Headers are staged above but are not sources.
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
@@ -188,6 +200,23 @@ class _OperatorCache:
 
 
 _OPERATORS = _OperatorCache()
+
+
+def _op(name: str):
+    """Return a cached dispatcher handle, building the extension on first use."""
+
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = getattr(_OPERATORS, name)
+    if op is None:
+        # The dispatcher handle is immutable, so publishing it from concurrent
+        # free-threaded callers is safe.
+        op = getattr(torch.ops.nf12_hip, name)
+        setattr(_OPERATORS, name, op)
+    return op
 
 
 def nf12_hip_supported(device: torch.device | None = None) -> bool:
@@ -309,14 +338,10 @@ def linear(
     global _EXTENSION_READY
     if not _EXTENSION_READY:
         if not _EXTENSION.load():
-            raise RuntimeError(
-                _EXTENSION.last_error_message() or "nf12_hip extension is unavailable"
-            )
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
         _EXTENSION_READY = True
     op = _OPERATORS.linear
     if op is None:
-        # The dispatcher handle is immutable and safe to publish from concurrent
-        # free-threaded callers, as for the embedding operators below.
         op = torch.ops.nf12_hip.linear
         _OPERATORS.linear = op
     return op(x, packed, escapes, int(exp_base), bias)
@@ -342,9 +367,6 @@ def embedding(
         _EXTENSION_READY = True
     op = _OPERATORS.embedding
     if op is None:
-        # Assigning the same registered OpOverload from concurrent threads is
-        # safe on the free-threaded interpreter; it is an immutable dispatcher
-        # handle, not mutable state.
         op = torch.ops.nf12_hip.embedding
         _OPERATORS.embedding = op
     return op(ids, packed, escapes, int(exp_base))
@@ -357,16 +379,7 @@ def rowmajor_pack(
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     """Convert canonical NF12 to the embedding-only row-major layout."""
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-        _EXTENSION_READY = True
-    op = _OPERATORS.rowmajor_pack
-    if op is None:
-        op = torch.ops.nf12_hip.rowmajor_pack
-        _OPERATORS.rowmajor_pack = op
-    row_packed, row_escapes, original, collisions = op(
+    row_packed, row_escapes, original, collisions = _op("rowmajor_pack")(
         packed, escapes, int(exp_base)
     )
     return row_packed, row_escapes, int(original), int(collisions)
@@ -380,16 +393,7 @@ def rowmajor_embedding(
 ) -> torch.Tensor:
     """Gather exact BF16 rows from the row-major embedding layout."""
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-        _EXTENSION_READY = True
-    op = _OPERATORS.rowmajor_embedding
-    if op is None:
-        op = torch.ops.nf12_hip.rowmajor_embedding
-        _OPERATORS.rowmajor_embedding = op
-    return op(ids, row_packed, row_escapes, int(exp_base))
+    return _op("rowmajor_embedding")(ids, row_packed, row_escapes, int(exp_base))
 
 
 __all__ = [
