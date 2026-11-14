@@ -176,6 +176,23 @@ def test_zamba_mixer_uses_fast_path_when_kernels_are_available(monkeypatch):
     }
 
 
+def test_zamba_mixer_without_legacy_paths_keeps_upstream_forward():
+    """Transformers 5.22 removed slow_forward/cuda_kernels_forward from the mixer."""
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
+        return "upstream"
+
+    mixer_class = type("ZambaMambaMixer", (), {"forward": forward})
+    mixer = mixer_class()
+    layer = SimpleNamespace(mamba=mixer)
+    qmodel = ZambaQModel.__new__(ZambaQModel)
+    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    qmodel.monkey_patch()
+
+    assert mixer.forward(object()) == "upstream"
+
+
 def test_zamba_capture_and_replay_kwargs_preserve_original_hidden_states_and_layer_index():
     model_def = ZambaQModel.__new__(ZambaQModel)
     hidden_states = torch.randn(1, 3, 8)
