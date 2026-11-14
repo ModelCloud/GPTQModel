@@ -157,13 +157,19 @@ class AutoNF12Embedding(nn.Module):
         target = torch.device(device)
         base = self._exp_base
         if self.row_major:
-            ids = torch.arange(self.num_embeddings, dtype=torch.int64, device=target)
+            # The row-major lookup is a native kernel that requires the packed
+            # buffers and its index tensor on the same CUDA/HIP device. Decode
+            # there and move the result, so an explicit host target still works.
+            source = self.nf12_row_packed.device
+            ids = torch.arange(self.num_embeddings, dtype=torch.int64, device=source)
             weight = self._rowmajor_embedding_op(
                 ids,
-                self.nf12_row_packed.to(target),
-                self.nf12_row_escapes.to(target),
+                self.nf12_row_packed,
+                self.nf12_row_escapes,
                 base,
             )
+            if weight.device != target:
+                weight = weight.to(target)
             return weight.to(dtype)
         return nf12_codec.decode(
             self.nf12_packed.to(target),
