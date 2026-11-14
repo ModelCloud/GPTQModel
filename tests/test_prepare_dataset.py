@@ -208,6 +208,65 @@ def test_prepare_dataset_splits_long_row_across_blocks():
     assert second_mask == [[1, 0, 0, 0, 0]]
 
 
+def test_prepare_dataset_concat_preserves_every_row_of_a_2d_item():
+    """Concatenation must not drop rows after the first of a 2-D item."""
+
+    qmodel = _make_qmodel()
+    dataset = [
+        {
+            "input_ids": [[11, 12, 13], [21, 22, 23]],
+            "attention_mask": [[1, 1, 1], [1, 0, 1]],
+        }
+    ]
+    common = dict(
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+        calibration_concat_separator=None,
+    )
+
+    non_concat = qmodel.prepare_dataset(
+        calibration_dataset=copy.deepcopy(dataset),
+        calibration_dataset_concat_size=None,
+        **common,
+    )
+    concat = qmodel.prepare_dataset(
+        calibration_dataset=copy.deepcopy(dataset),
+        calibration_dataset_concat_size=4,
+        **common,
+    )
+
+    non_concat_tokens = sum(int(batch["attention_mask"].sum()) for batch in non_concat)
+    concat_tokens = sum(int(batch["attention_mask"].sum()) for batch in concat)
+    assert non_concat_tokens == 5
+    assert concat_tokens == non_concat_tokens
+
+    ids = [int(value) for batch in concat for value in batch["input_ids"][0].tolist()]
+    masks = [int(value) for batch in concat for value in batch["attention_mask"][0].tolist()]
+    # Both rows are present in order; only trailing padding follows.
+    assert ids == [11, 12, 13, 21, 22, 23, 0, 0]
+    assert masks == [1, 1, 1] + [1, 0, 1] + [0, 0]
+
+
+def test_prepare_dataset_concat_separates_rows_of_a_2d_item():
+    qmodel = _make_qmodel()
+    dataset = [{"input_ids": [[1, 2], [3, 4]], "attention_mask": [[1, 1], [1, 1]]}]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=10,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+        calibration_concat_separator="##",
+    )
+
+    sep_tokens = [_StubTokenizer._encode_char("#"), _StubTokenizer._encode_char("#")]
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[1, 2, *sep_tokens, 3, 4, 0, 0, 0, 0]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 1, 1, 1, 0, 0, 0, 0]]
+
+
 def test_prepare_dataset_collapses_causal_attention_mask():
     qmodel = _make_qmodel_with_tokenizer(_CausalMaskTokenizer())
 
