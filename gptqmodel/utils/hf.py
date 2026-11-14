@@ -250,11 +250,31 @@ def normalize_torch_dtype_kwarg(
     api_name: str,
     explicit_dtype: Any = _MISSING,
 ) -> Any:
+    def _resolve_dtype(value: Any) -> Any:
+        if value is _MISSING or value is None:
+            return value
+        if isinstance(value, str):
+            if value.strip().lower() == "auto":
+                return "auto"
+        if isinstance(value, torch.dtype):
+            return value
+        if isinstance(value, str):
+            name = value.strip().removeprefix("torch.")
+            resolved = getattr(torch, name, None)
+            if isinstance(resolved, torch.dtype):
+                return resolved
+            raise ValueError(f"Invalid dtype string: {value}")
+        raise ValueError(
+            f"dtype must be torch.dtype, str, None, or 'auto', got {value!r}"
+        )
+
     current_dtype = explicit_dtype
     if explicit_dtype is _MISSING:
         current_dtype = kwargs.pop("dtype", _MISSING)
 
     torch_dtype = kwargs.pop("torch_dtype", _MISSING)
+    current_dtype = _resolve_dtype(current_dtype)
+    torch_dtype = _resolve_dtype(torch_dtype)
     if torch_dtype is _MISSING:
         if explicit_dtype is _MISSING and current_dtype is not _MISSING:
             kwargs["dtype"] = current_dtype

@@ -100,6 +100,10 @@ Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row p
 AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
+Checkpoint resaves, GGUF BF16 bytes, packed biases, explicit dtype strings, and
+FP8 block scales preserve their declared precision and bit patterns; see
+[checkpoint dtype boundary preservation](docs/dtype-boundary-preservation.md)
+for the selection and failure flows.
 GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
 3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.

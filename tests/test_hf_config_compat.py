@@ -77,6 +77,24 @@ def test_normalize_torch_dtype_kwarg_resolves_explicit_dtype_parameter():
     assert kwargs == {}
 
 
+@pytest.mark.parametrize("value", ["bfloat16", "torch.bfloat16"])
+def test_normalize_torch_dtype_kwarg_resolves_dtype_strings(value):
+    kwargs = {"dtype": value}
+
+    resolved = normalize_torch_dtype_kwarg(kwargs, api_name="test")
+
+    assert resolved is torch.bfloat16
+    assert kwargs == {"dtype": torch.bfloat16}
+
+
+def test_normalize_torch_dtype_kwarg_rejects_invalid_dtype_string():
+    with pytest.raises(ValueError, match="Invalid dtype"):
+        normalize_torch_dtype_kwarg(
+            {"dtype": "not-a-torch-dtype"},
+            api_name="test",
+        )
+
+
 def test_normalize_torch_dtype_kwarg_rejects_conflicting_values():
     kwargs = {"dtype": torch.float16, "torch_dtype": torch.bfloat16}
 
