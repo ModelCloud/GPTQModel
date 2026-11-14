@@ -1402,9 +1402,32 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   // Explicit caller-owned workspaces can otherwise be returned to the caching
   // allocator before this asynchronous launch completes on a non-current
   // stream.  Recording the stream preserves their lifetime without a sync.
-  if (c_or_none.has_value()) at::cuda::record_stream(c, stream);
-  if (c_tmp_or_none.has_value()) at::cuda::record_stream(c_tmp, stream);
-  if (a_tmp_or_none.has_value()) at::cuda::record_stream(a_tmp, stream);
+  //
+  // Record from the destructor so the marker is queued *after* the launches
+  // below: a marker recorded before them completes before the kernels run and
+  // would not protect the buffers. The destructor also covers every return
+  // path, including the ones that rethrow on an unsupported dtype.
+  struct RecordStreamsOnExit {
+    const torch::Tensor* c;
+    const torch::Tensor* c_tmp;
+    const torch::Tensor* a_tmp;
+    bool has_c;
+    bool has_c_tmp;
+    bool has_a_tmp;
+    at::cuda::CompatibleCUDAStream current;
+    ~RecordStreamsOnExit() {
+      if (has_c) at::cuda::record_stream(*c, current);
+      if (has_c_tmp) at::cuda::record_stream(*c_tmp, current);
+      if (has_a_tmp) at::cuda::record_stream(*a_tmp, current);
+    }
+  } record_streams_on_exit{
+      &c,
+      &c_tmp,
+      &a_tmp,
+      c_or_none.has_value(),
+      c_tmp_or_none.has_value(),
+      a_tmp_or_none.has_value(),
+      stream};
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;

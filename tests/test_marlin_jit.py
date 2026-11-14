@@ -1516,3 +1516,58 @@ def test_marlin_rejects_scratch_overlapping_padded_rows():
             use_fp32_reduce=True,
             c_tmp=c_tmp,
         )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_record_stream_keeps_caller_output_alive():
+    """A caller-owned output used on another stream must survive the free.
+
+    Without stream tracking the caching allocator hands the block to the next
+    same-sized allocation while the side stream still writes to it.
+    """
+
+    if not marlin_utils.marlin_runtime_available(torch.float16):
+        pytest.skip(marlin_utils.marlin_runtime_error(torch.float16))
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    in_features, out_features, m = 256, 64, 17
+
+    module = _marlin_module_for_stream_tests(device, dtype)
+    x = torch.randn((m, in_features), device=device, dtype=dtype) * 0.01
+
+    c = torch.empty((m, out_features), device=device, dtype=dtype)
+    ptr = c.data_ptr()
+
+    side = torch.cuda.Stream(device=device)
+    with torch.cuda.stream(side):
+        # Keep the side stream busy so the launch below is still pending when
+        # the host drops the output.
+        torch.cuda._sleep(50_000_000)
+        out = marlin_utils.gptq_marlin_gemm(
+            x,
+            c,
+            module.qweight,
+            None,
+            module.scales,
+            None,
+            module.qzeros,
+            module.g_idx,
+            module.g_idx_sort_indices,
+            module.workspace,
+            scalar_types.uint4b8,
+            size_m=m,
+            size_n=out_features,
+            size_k=in_features,
+            is_k_full=True,
+        )
+    del out, c
+
+    probe = torch.empty((m, out_features), device=device, dtype=dtype)
+    reused = probe.data_ptr() == ptr
+    torch.cuda.synchronize(device)
+
+    assert not reused, (
+        "the caching allocator reused a buffer that the side stream was still writing"
+    )
