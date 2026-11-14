@@ -1,0 +1,258 @@
+# SPDX-License-Identifier: Apache-2.0
+# GPU=-1
+"""Replay each decoder layer with the mask and rotary embeddings of its own layer type.
+
+Issue #4004: input capture recorded only the *first* decoder layer's
+`attention_mask` / `position_embeddings` and layer replay handed that pair to every
+layer. `transformers` 5 builds one mask per layer type
+(`causal_mask_mapping[config.layer_types[i]]`), and Gemma3 additionally builds one
+rotary tuple per type, so full-attention layers of a mixed-`layer_types` model were
+calibrated with the sliding-window mask and the local RoPE.
+
+These tests pin the invariant directly: for every decoder layer, the kwargs that
+`BaseQModel.prepare_layer_replay_kwargs` produces must equal the kwargs the model's
+own forward passes to that layer, and replaying the stack must reproduce the native
+last hidden state.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+from gptqmodel.models.definitions.gemma3 import Gemma3QModel
+from gptqmodel.models.definitions.gpt_oss import GPTOSSGPTQ
+
+
+SEQ = 6
+SLIDING_WINDOW = 2
+
+
+class _StopCapture(Exception):
+    """Abort the calibration forward from the first-layer hook, as `StopForward` does."""
+
+
+def _gemma3_text():
+    from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
+    from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
+
+    torch.manual_seed(0)
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=64,
+        sliding_window=SLIDING_WINDOW,
+        layer_types=["sliding_attention", "full_attention"],
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    return Gemma3ForCausalLM(config).eval(), Gemma3QModel
+
+
+def _gpt_oss():
+    from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
+
+    torch.manual_seed(0)
+    config = GptOssConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        sliding_window=SLIDING_WINDOW,
+        max_position_embeddings=64,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    return GptOssForCausalLM(config).eval(), GPTOSSGPTQ
+
+
+def _layer_type(layer: nn.Module) -> str | None:
+    return getattr(getattr(layer, "self_attn", None), "layer_type", None)
+
+
+def _native_forward(model, input_ids, attention_mask):
+    """Record what the model's own forward hands to every decoder layer."""
+
+    recorded = {}
+    outputs = []
+    handles = []
+
+    def make_hook(index):
+        def hook(module, args, kwargs):
+            recorded[index] = {
+                "attention_mask": kwargs.get("attention_mask"),
+                "position_embeddings": kwargs.get("position_embeddings"),
+                "hidden_states": args[0].detach().clone(),
+            }
+
+        return hook
+
+    for index, layer in enumerate(model.model.layers):
+        handles.append(layer.register_forward_pre_hook(make_hook(index), with_kwargs=True))
+        handles.append(layer.register_forward_hook(lambda mod, args, out: outputs.append(out)))
+    try:
+        with torch.inference_mode():
+            model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+    return recorded, outputs
+
+
+def _capture_and_replay(model, qmodel_cls, input_ids, attention_mask):
+    """Run the capture hook once, then replay every layer through the default hooks."""
+
+    qmodel = object.__new__(qmodel_cls)
+    nn.Module.__init__(qmodel)
+    qmodel.model = model
+    layers = model.model.layers
+    captured = {}
+
+    def capture_first(module, args, kwargs):
+        replay_kwargs = {
+            key: value
+            for (key, value) in kwargs.items()
+            if key not in ("hidden_states", "attention_mask", "position_ids")
+        }
+        replay_kwargs = qmodel.capture_first_layer_input_kwargs(
+            args=args,
+            kwargs=kwargs,
+            batch_device=torch.device("cpu"),
+            layer_input_kwargs=replay_kwargs,
+        )
+        # Mirrors `StageInputsCapture.cache_inputs`: the per-layer-type capture is
+        # an optional hook, absent on a definition that does not provide it.
+        capture_layer_type_kwargs = getattr(
+            qmodel, "capture_layer_type_replay_kwargs", None
+        )
+        if callable(capture_layer_type_kwargs):
+            replay_kwargs = capture_layer_type_kwargs(
+                args=args,
+                kwargs=kwargs,
+                batch_device=torch.device("cpu"),
+                layer_input_kwargs=replay_kwargs,
+            )
+        captured["hidden_states"] = args[0].detach().clone()
+        captured["attention_mask"] = kwargs.get("attention_mask")
+        captured["kwargs"] = replay_kwargs
+        raise _StopCapture
+
+    handle = layers[0].register_forward_pre_hook(capture_first, with_kwargs=True)
+    qmodel.begin_input_capture_example(
+        {"input_ids": input_ids, "attention_mask": attention_mask},
+        torch.device("cpu"),
+    )
+    try:
+        with torch.inference_mode():
+            model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+    except _StopCapture:
+        pass
+    finally:
+        handle.remove()
+        qmodel.end_input_capture_example()
+
+    replayed = []
+    hidden_states = captured["hidden_states"]
+    for layer in layers:
+        additional_inputs = {
+            key: value
+            for (key, value) in captured["kwargs"].items()
+            if key not in ("past_key_values", "past_key_value")
+        }
+        additional_inputs["attention_mask"] = captured["attention_mask"]
+        additional_inputs["position_ids"] = torch.arange(
+            hidden_states.shape[1], dtype=torch.long
+        ).unsqueeze(0)
+        additional_inputs["use_cache"] = False
+        additional_inputs = qmodel.prepare_layer_replay_kwargs(
+            layer=layer,
+            layer_input=[hidden_states],
+            additional_inputs=additional_inputs,
+            target_device=torch.device("cpu"),
+        )
+        # The capture bookkeeping must be consumed by the replay hook, never
+        # forwarded to the decoder layer.
+        assert not [key for key in additional_inputs if key.startswith("_gptqmodel")], (
+            f"private replay key leaked into {type(layer).__name__} kwargs"
+        )
+        replayed.append(dict(additional_inputs))
+        with torch.inference_mode():
+            output = layer(hidden_states, **additional_inputs)
+        hidden_states = output[0] if isinstance(output, tuple) else output
+    return replayed, hidden_states
+
+
+def _assert_masks_equal(layer_index, layer_type, expected, actual):
+    if expected is None or actual is None:
+        assert expected is None and actual is None, (
+            f"layer {layer_index} ({layer_type}): native mask is "
+            f"{'None' if expected is None else 'materialized'} but replay mask is "
+            f"{'None' if actual is None else 'materialized'}"
+        )
+        return
+    assert torch.equal(expected, actual), (
+        f"layer {layer_index} ({layer_type}): replay attention_mask differs from the "
+        "mask the model builds for that layer type"
+    )
+
+
+@pytest.mark.parametrize("padded", [False, True], ids=["dense", "padded"])
+@pytest.mark.parametrize(
+    "builder,qmodel_cls",
+    [(_gemma3_text, Gemma3QModel), (_gpt_oss, GPTOSSGPTQ)],
+    ids=["gemma3_text", "gpt_oss"],
+)
+def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
+    model, _ = builder()
+    input_ids = torch.arange(3, 3 + SEQ).unsqueeze(0)
+    attention_mask = torch.ones(1, SEQ, dtype=torch.long)
+    if padded:
+        attention_mask[0, :2] = 0
+
+    native, native_outputs = _native_forward(model, input_ids, attention_mask)
+    replayed, replayed_hidden = _capture_and_replay(
+        model, qmodel_cls, input_ids, attention_mask
+    )
+
+    layer_types = [getattr(model.config, "layer_types", None)]
+    assert layer_types[0] is not None, "test model must declare per-layer attention types"
+    assert len(set(layer_types[0])) == 2, "test model must mix two attention types"
+
+    for index, layer in enumerate(model.model.layers):
+        layer_type = _layer_type(layer)
+        _assert_masks_equal(
+            index,
+            layer_type,
+            native[index]["attention_mask"],
+            replayed[index].get("attention_mask"),
+        )
+        native_pe = native[index]["position_embeddings"]
+        replay_pe = replayed[index].get("position_embeddings")
+        assert native_pe is not None and replay_pe is not None, (
+            f"layer {index} ({layer_type}): replay dropped position_embeddings"
+        )
+        for native_component, replay_component in zip(native_pe, replay_pe):
+            assert torch.equal(native_component, replay_component), (
+                f"layer {index} ({layer_type}): replay position_embeddings differs from "
+                "the rotary embeddings the model builds for that layer type"
+            )
+
+    last_native = native_outputs[-1]
+    last_native = last_native[0] if isinstance(last_native, tuple) else last_native
+    torch.testing.assert_close(replayed_hidden, last_native, rtol=0, atol=0)

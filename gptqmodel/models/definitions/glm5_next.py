@@ -470,9 +470,11 @@ class Glm5NextQModel(BaseQModel):
         self._glm5_next_capture_input_ids = input_ids.detach().to(
             device=batch_device
         )
+        super().begin_input_capture_example(example=example, batch_device=batch_device)
 
     def end_input_capture_example(self) -> None:
         self._glm5_next_capture_input_ids = None
+        super().end_input_capture_example()
 
     def capture_first_layer_input_kwargs(
         self,
