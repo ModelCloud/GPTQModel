@@ -140,6 +140,8 @@ class BodySizeLimitMiddleware:
                 if int(declared) > self.max_bytes:
                     return await self._reject(scope, receive, send)
             except ValueError:
+                # Invalid Content-Length; fall back to bounded streaming check below.
+                # This preserves behavior and still enforces max body size safely.
                 pass
 
         body = bytearray()
