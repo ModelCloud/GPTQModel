@@ -17,13 +17,30 @@ last hidden state.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 import torch
 from torch import nn
 
+from gptqmodel.models.base import _LAYER_TYPE_REPLAY_KWARGS_KEY
 from gptqmodel.models.definitions.gemma3 import Gemma3QModel
+from gptqmodel.models.definitions.gemma3n import (
+    Gemma3nForConditionalGenerationGPTQ,
+    Gemma3nTextQModel,
+)
+from gptqmodel.models.definitions.gemma4 import (
+    Gemma4ForConditionalGenerationGPTQ,
+    Gemma4TextQModel,
+)
+from gptqmodel.models.definitions.gemma4_unified import (
+    Gemma4UnifiedForConditionalGenerationGPTQ,
+    Gemma4UnifiedTextQModel,
+)
 from gptqmodel.models.definitions.gpt_oss import GPTOSSGPTQ
 from gptqmodel.models.definitions.llama4 import Llama4QModel
+from gptqmodel.models.definitions.olmo3 import Olmo3QModel
+from gptqmodel.models.definitions.raon1_mini import Raon1MiniQModel
 
 
 SEQ = 6
@@ -98,7 +115,9 @@ def _llama4_text_chunked():
         head_dim=8,
         max_position_embeddings=64,
         attention_chunk_size=2,
-        layer_types=["full_attention", "chunked_attention"],
+        # Llama4 declares the chunked type first, so it is the base type whose
+        # mask `support_batch_quantize=False` replay used to discard.
+        layer_types=["chunked_attention", "full_attention"],
         num_local_experts=2,
         num_experts_per_tok=1,
         pad_token_id=0,
@@ -107,6 +126,29 @@ def _llama4_text_chunked():
         tie_word_embeddings=False,
     )
     return Llama4ForCausalLM(config).eval(), Llama4QModel
+
+
+def _olmo3_text():
+    from transformers.models.olmo3.configuration_olmo3 import Olmo3Config
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3ForCausalLM
+
+    torch.manual_seed(0)
+    config = Olmo3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        sliding_window=SLIDING_WINDOW,
+        layer_types=["sliding_attention", "full_attention"],
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    return Olmo3ForCausalLM(config).eval(), Olmo3QModel
 
 
 def _layer_type(layer: nn.Module, config) -> str | None:
@@ -153,8 +195,15 @@ def _native_forward(model, input_ids, attention_mask):
     return recorded, outputs
 
 
-def _capture_and_replay(model, qmodel_cls, input_ids, attention_mask):
-    """Run the capture hook once, then replay every layer through the default hooks."""
+def _capture_and_replay(
+    model, qmodel_cls, input_ids, attention_mask, *, drop_captured_mask: bool = False
+):
+    """Run the capture hook once, then replay every layer through the default hooks.
+
+    ``drop_captured_mask`` reproduces `support_batch_quantize=False` replay,
+    where the forward executor hands every layer ``attention_mask=None``. The
+    per-layer-type capture must still restore the base type's window/chunk mask.
+    """
 
     qmodel = object.__new__(qmodel_cls)
     nn.Module.__init__(qmodel)
@@ -214,7 +263,9 @@ def _capture_and_replay(model, qmodel_cls, input_ids, attention_mask):
             for (key, value) in captured["kwargs"].items()
             if key not in ("past_key_values", "past_key_value")
         }
-        additional_inputs["attention_mask"] = captured["attention_mask"]
+        additional_inputs["attention_mask"] = (
+            None if drop_captured_mask else captured["attention_mask"]
+        )
         additional_inputs["position_ids"] = torch.arange(
             hidden_states.shape[1], dtype=torch.long
         ).unsqueeze(0)
@@ -258,8 +309,9 @@ def _assert_masks_equal(layer_index, layer_type, expected, actual):
         (_gemma3_text, Gemma3QModel),
         (_gpt_oss, GPTOSSGPTQ),
         (_llama4_text_chunked, Llama4QModel),
+        (_olmo3_text, Olmo3QModel),
     ],
-    ids=["gemma3_text", "gpt_oss", "llama4_text_chunked"],
+    ids=["gemma3_text", "gpt_oss", "llama4_text_chunked", "olmo3_text"],
 )
 def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
     model, _ = builder()
@@ -299,3 +351,117 @@ def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
     last_native = native_outputs[-1]
     last_native = last_native[0] if isinstance(last_native, tuple) else last_native
     torch.testing.assert_close(replayed_hidden, last_native, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("padded", [False, True], ids=["dense", "padded"])
+@pytest.mark.parametrize(
+    "builder,qmodel_cls",
+    [
+        (_gemma3_text, Gemma3QModel),
+        (_gpt_oss, GPTOSSGPTQ),
+        (_llama4_text_chunked, Llama4QModel),
+        (_olmo3_text, Olmo3QModel),
+    ],
+    ids=["gemma3_text", "gpt_oss", "llama4_text_chunked", "olmo3_text"],
+)
+def test_base_layer_type_mask_survives_support_batch_quantize_false(
+    builder, qmodel_cls, padded
+):
+    """`support_batch_quantize=False` replay must rebuild the base-type mask.
+
+    Issue #4038: the forward executor drops the captured mask for those models,
+    so every layer of the first declared type ran with full causal attention
+    instead of the sliding/chunked mask HF passes.
+    """
+
+    model, _ = builder()
+    input_ids = torch.arange(3, 3 + SEQ).unsqueeze(0)
+    attention_mask = torch.ones(1, SEQ, dtype=torch.long)
+    if padded:
+        attention_mask[0, :2] = 0
+
+    native, _ = _native_forward(model, input_ids, attention_mask)
+    replayed, _ = _capture_and_replay(
+        model,
+        qmodel_cls,
+        input_ids,
+        attention_mask,
+        drop_captured_mask=True,
+    )
+
+    base_type = model.config.layer_types[0]
+    materialized = 0
+    for index, layer in enumerate(model.model.layers):
+        layer_type = _layer_type(layer, model.config)
+        if layer_type != base_type:
+            continue
+        if native[index]["attention_mask"] is not None:
+            materialized += 1
+        _assert_masks_equal(
+            index,
+            layer_type,
+            native[index]["attention_mask"],
+            replayed[index].get("attention_mask"),
+        )
+    if padded:
+        # Left padding forces every base-type layer to receive a materialized
+        # mask, so the equality check above cannot pass vacuously.
+        assert materialized > 0
+
+
+@pytest.mark.parametrize(
+    "qmodel_cls",
+    [
+        Olmo3QModel,
+        Gemma4TextQModel,
+        Gemma4ForConditionalGenerationGPTQ,
+        Gemma4UnifiedTextQModel,
+        Gemma4UnifiedForConditionalGenerationGPTQ,
+        Gemma3nTextQModel,
+        Gemma3nForConditionalGenerationGPTQ,
+        Raon1MiniQModel,
+    ],
+    ids=[
+        "olmo3",
+        "gemma4_text",
+        "gemma4",
+        "gemma4_unified_text",
+        "gemma4_unified",
+        "gemma3n_text",
+        "gemma3n",
+        "raon1_mini",
+    ],
+)
+def test_model_override_consumes_private_layer_type_capture_key(qmodel_cls):
+    """Model-specific replay overrides must call the base hook, not shadow it.
+
+    Issue #4038: OLMo3/Gemma3n/Gemma4/Raon overrode
+    `prepare_layer_replay_kwargs` without `super()`, so
+    `_gptqmodel_layer_type_replay_kwargs` leaked into the decoder layer call and
+    full-attention layers kept layer 0's sliding mask.
+    """
+
+    qmodel = object.__new__(qmodel_cls)
+    nn.Module.__init__(qmodel)
+    qmodel.model = nn.Module()
+    layer_type_mask = torch.zeros(1, 1, 2, 2, dtype=torch.bool)
+    layer = types.SimpleNamespace(layer_type="full_attention")
+
+    prepared = qmodel.prepare_layer_replay_kwargs(
+        layer=layer,
+        layer_input=[],
+        additional_inputs={
+            _LAYER_TYPE_REPLAY_KWARGS_KEY: {
+                "base_type": "sliding_attention",
+                "layer_types": ("sliding_attention", "full_attention"),
+                "by_type": {"full_attention": {"attention_mask": layer_type_mask}},
+            },
+            "use_cache": False,
+        },
+        target_device=torch.device("cpu"),
+    )
+
+    assert not [key for key in prepared if key.startswith("_gptqmodel")], (
+        f"{qmodel_cls.__name__} leaked private replay state into layer kwargs"
+    )
+    assert prepared["attention_mask"] is not None
