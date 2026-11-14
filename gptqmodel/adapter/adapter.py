@@ -295,7 +295,11 @@ class Lora(Adapter):
                 k = k.lower()
                 assert v > 0 # check for invalid rank range
                 # first do string full match, then suffix match, then regex match
-                if weight_key == k or k.endswith(weight_key) or pcre.compile(k).match(weight_key):
+                if (
+                    weight_key == k
+                    or weight_key.endswith(k)
+                    or pcre.compile(k).search(weight_key)
+                ):
                     self.rank = v
                     log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
                     return True
