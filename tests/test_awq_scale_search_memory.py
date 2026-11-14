@@ -21,6 +21,7 @@ These tests pin the sharing contract:
 import threading
 import types
 
+import pytest
 import torch
 from torch import nn
 
@@ -66,6 +67,40 @@ def test_siblings_share_one_host_copy():
 
     assert q is k is v
     # Values still match an independent host copy of the capture.
+    assert torch.equal(q, source.detach())
+
+
+def test_inference_tensor_captures_share_one_host_copy():
+    """Calibration captures are inference tensors, which have no ``_version``.
+
+    The sibling dedup used to key on ``feature._version`` and silently return
+    ``None`` for every real capture. Count the host materializations so a
+    regression that disables sharing again fails here rather than only showing
+    up as extra D2H traffic.
+    """
+
+    processor = _processor()
+    materialized = []
+    original = processor._apply_active_keep_mask_to_feature
+    processor._apply_active_keep_mask_to_feature = lambda feature: (
+        materialized.append(feature) or original(feature)
+    )
+
+    with torch.inference_mode():
+        source = torch.randn(2, 6, 8)
+        with pytest.raises(RuntimeError):
+            # The version counter is what made the old key unusable.
+            int(source._version)
+        _record(processor, "self_attn.q_proj", source)
+        _record(processor, "self_attn.k_proj", source)
+        _record(processor, "self_attn.v_proj", source)
+
+    q = processor.tasks["self_attn.q_proj"]["inputs"][0]
+    k = processor.tasks["self_attn.k_proj"]["inputs"][0]
+    v = processor.tasks["self_attn.v_proj"]["inputs"][0]
+
+    assert q is k is v
+    assert len(materialized) == 1, "the second and third captures must hit the cache"
     assert torch.equal(q, source.detach())
 
 

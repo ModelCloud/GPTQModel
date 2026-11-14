@@ -477,16 +477,19 @@ class OpenAiServer:
                 # restore therefore all happen while `_generation_lock` is held.
                 seeded = request.seed is not None and getattr(self.model, "_runtime_generate", None) is None
                 rng_state = None
-                try:
-                    with self._generation_lock:
-                        if seeded:
-                            rng_state = _capture_rng_state()
-                            torch.manual_seed(request.seed)
+                with self._generation_lock:
+                    if seeded:
+                        rng_state = _capture_rng_state()
+                        torch.manual_seed(request.seed)
+                    try:
                         with torch.inference_mode():
                             outputs = self.model.generate(**generate_kwargs, **generate_inputs)
-                finally:
-                    if rng_state is not None:
-                        _restore_rng_state(rng_state)
+                    finally:
+                        # Restore before releasing the lock: otherwise the next
+                        # request can seed and start generating, and this
+                        # request's restore then overwrites its RNG state.
+                        if rng_state is not None:
+                            _restore_rng_state(rng_state)
 
                 pad_token_id = self.tokenizer.pad_token_id
                 eos_token_id = eos_ids or self.tokenizer.eos_token_id
