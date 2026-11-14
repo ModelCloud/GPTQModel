@@ -25,7 +25,7 @@ from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block
+from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
 from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
 
@@ -425,9 +425,18 @@ class QQQ:
             shifting every value by roughly the group minimum.
             """
 
-            lo, hi = affine_range_with_zero(lo, hi)
+            if self.qcfg.sym:
+                # Every symmetric kernel assumes zero = 2 ** (bits - 1);
+                # Marlin does not even read the stored qzeros. Fit the common
+                # symmetric range so all strategies store that fixed zero.
+                lo, hi = symmetric_range(block_mod)
+            else:
+                lo, hi = affine_range_with_zero(lo, hi)
             scale = torch.clamp((hi - lo) / maxq, min=1e-8)
-            zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
+            if self.qcfg.sym:
+                zero = torch.full_like(scale, (maxq + 1) // 2)
+            else:
+                zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
             q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
             return (q - zero) * scale, scale, zero
 
@@ -527,7 +536,11 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # The exported INT8 channel scale must describe the quantized
+            # weight, not the original one: GPTQ error propagation can push
+            # max|Q| above max|W|, and a scale fitted to W then saturates the
+            # packed codes (and no longer reproduces the in-memory `wq`).
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -1081,7 +1094,12 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # Derive the INT8 channel scale from the quantized weight `Q` that
+            # is about to become `layer.weight` (as upstream QQQ does), not
+            # from the pre-quantization `W`. Error propagation can raise
+            # max|Q| above max|W|; a W-fitted scale then clamps packed codes
+            # and the export no longer equals the in-memory `wq`.
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start

@@ -599,6 +599,7 @@ def make_quant(
     device: DEVICE = None,
     from_quantized: bool = False,
     dtype: Optional[torch.dtype] = None,
+    bias_dtype: Optional[torch.dtype] = None,
     is_sharded: bool = False,
 ) -> Type[BaseQuantLinear]:
 
@@ -662,6 +663,7 @@ def make_quant(
         format=format,
         init_kwargs=init_kwargs,
         dtype=dtype,
+        bias_dtype=bias_dtype,
     )
     log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
     return linear_cls
@@ -685,6 +687,7 @@ def create_quant_module(
     adapter: Optional[Adapter] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
+    bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
 
 ):
@@ -816,6 +819,7 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
+        bias_dtype=bias_dtype,
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
@@ -838,6 +842,7 @@ def create_quant_layer(
         format: FORMAT = FORMAT.GPTQ,
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
+        bias_dtype: Optional[torch.dtype] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -872,6 +877,7 @@ def create_quant_layer(
                     adapter=adapter,
                     init_kwargs=init_kwargs,
                     dtype=dtype,
+                    bias_dtype=bias_dtype,
                 )
             except NotImplementedError as error:
                 last_error = error

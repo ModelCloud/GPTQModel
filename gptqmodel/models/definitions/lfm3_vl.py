@@ -39,7 +39,7 @@ class LFM3VLQModel(LFM3QModel):
         "#",
         {
             "operator_norm": ("operator_norm:!",),
-            "post_operator_norm": ("post_operator_norm:!",),
+            "post_operator_norm": ("post_operator_norm:!:postnorm",),
             "conv": ("in_proj:0", "out_proj:1"),
             "self_attn": (
                 "q_proj:0",
@@ -51,7 +51,7 @@ class LFM3VLQModel(LFM3QModel):
                 "o_proj:1",
             ),
             "ffn_norm": ("ffn_norm:!",),
-            "post_ffn_norm": ("post_ffn_norm:!",),
+            "post_ffn_norm": ("post_ffn_norm:!:postnorm",),
             "feed_forward": ("w1:0", "w3:0", "w2:1"),
         },
     ]

@@ -111,7 +111,13 @@ def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     x = tl.load(X + row * K + k, k < K, other=0).to(tl.float32)
     amax = tl.max(tl.abs(x), 0)
     scale = tl.where(amax > 0, amax / 448.0, 1.0)
-    q = _to_e4m3_rn(tl.minimum(tl.maximum(x / scale, -448.0), 448.0))
+    # Divide with the IEEE round-to-nearest instruction. Triton's plain `/`
+    # may lower to the approximate reciprocal sequence, which is one ULP off
+    # near an E4M3 midpoint and flips the code; `fp8_token_qdq`, the oracle
+    # GPTQ replay calibrates against, divides in exact FP32. Keep the scale
+    # itself as `amax / 448.0`: `div_rn` there would change the reference
+    # scale and break equality instead.
+    q = _to_e4m3_rn(tl.minimum(tl.maximum(tl.div_rn(x, scale), -448.0), 448.0))
     tl.store(Q + row * K + k, q, k < K)
     tl.store(RowScale + row, scale)
 

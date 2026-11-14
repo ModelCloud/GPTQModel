@@ -23,6 +23,22 @@ OUT_FEATURES = 48
 GROUP_SIZE = 32
 
 
+@pytest.fixture
+def unvalidated_module(monkeypatch):
+    """Build a 3-bit module with a misaligned tail on purpose.
+
+    ``_validate`` now rejects this shape before calibration, so the packer's
+    own fail-closed guard is exercised by bypassing only that earlier check.
+    """
+
+    monkeypatch.setattr(
+        TorchLinear,
+        "validate",
+        classmethod(lambda cls, **kwargs: (True, None)),
+    )
+    return _module()
+
+
 def _module(register_buffers: bool = True) -> TorchLinear:
     return TorchLinear(
         bits=3,
@@ -45,38 +61,38 @@ def _fixture(device="cpu"):
     return linear, scales, zeros, g_idx
 
 
-def test_registered_3bit_zero_words_keep_the_tail_width():
-    module = _module()
+def test_registered_3bit_zero_words_keep_the_tail_width(unvalidated_module):
+    module = unvalidated_module
     # ceil(48 * 3 / 32) == 5 words; the GPU packer used to emit only 3.
     assert module.qzeros.shape == (IN_FEATURES // GROUP_SIZE, 5)
 
 
-def test_pack_original_rejects_3bit_tail():
+def test_pack_original_rejects_3bit_tail(unvalidated_module):
     linear, scales, zeros, g_idx = _fixture()
-    module = _module()
+    module = unvalidated_module
     with pytest.raises(ValueError, match="divisible by 32"):
         module.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
 
 
-def test_pack_block_rejects_3bit_tail():
+def test_pack_block_rejects_3bit_tail(unvalidated_module):
     linear, scales, zeros, g_idx = _fixture()
-    module = _module()
+    module = unvalidated_module
     with pytest.raises(ValueError, match="divisible by 32"):
         module.pack_block(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx, workers=1)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pack_gpu requires CUDA")
-def test_pack_gpu_rejects_3bit_tail():
+def test_pack_gpu_rejects_3bit_tail(unvalidated_module):
     linear, scales, zeros, g_idx = _fixture("cuda")
-    module = _module().to("cuda")
+    module = unvalidated_module.to("cuda")
     with pytest.raises(ValueError, match="divisible by 32"):
         module.pack_gpu(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx, device="cuda")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="auto selects pack_gpu on CUDA")
-def test_hf_pack_layer_auto_fails_closed_for_3bit_tail():
+def test_hf_pack_layer_auto_fails_closed_for_3bit_tail(unvalidated_module):
     linear, scales, zeros, g_idx = _fixture("cuda")
-    module = _module().to("cuda")
+    module = unvalidated_module.to("cuda")
     with pytest.raises(ValueError, match="divisible by 32"):
         hf_pack_layer(
             module=module,
@@ -86,3 +102,29 @@ def test_hf_pack_layer_auto_fails_closed_for_3bit_tail():
             g_idx=g_idx,
             pack_impl="auto",
         )
+
+
+@pytest.mark.parametrize(
+    ("in_features", "out_features"),
+    [(64, 48), (48, 64), (64, 64)],
+    ids=["out_tail", "in_tail", "aligned"],
+)
+def test_validate_enforces_the_3bit_32_alignment_before_packing(in_features, out_features):
+    ok, err = TorchLinear.validate(
+        bits=3,
+        group_size=GROUP_SIZE,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    if in_features % 32 == 0 and out_features % 32 == 0:
+        assert ok is True
+        assert err is None
+    else:
+        assert ok is False
+        assert isinstance(err, NotImplementedError)
+        assert "divisible by 32" in str(err)

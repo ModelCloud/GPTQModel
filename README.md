@@ -98,9 +98,15 @@ AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
 AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
+AWQ selects fold sources from declared data flow and skips sandwich post-norms and unresolvable gains; see the [AWQ normalization selection](docs/awq-norm-selection.md) flow.
 AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
+LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
+The native FP8 forward wrapper and the W4A16 quant source resolve one
+`weight_scale_semantics` per checkpoint, so a DeepSeek multiplier and a native
+inverse scale decode identically; see the
+[FP8 checkpoint scale semantics](docs/fp8-scale-semantics.md) flow.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
 Checkpoint resaves, GGUF BF16 bytes, packed biases, explicit dtype strings, and
 FP8 block scales preserve their declared precision and bit patterns; see
@@ -127,6 +133,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+QuaRot/SpinQuant Hadamard rotation resolves its backend per call from the
+tensor's device, so a rotated checkpoint runs on CPU and a CPU-only host can
+apply the exact Hadamard; see the
+[rotation Hadamard device dispatch](docs/rotation-device-dispatch.md) flow.
 The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
 page explains how a token lookup reads only its packed rows, why small tables
 and large token counts still use whole-table decode, and what that means for
@@ -188,6 +198,7 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
+For how each decoder layer is replayed with the attention mask and rotary embeddings of its own `config.layer_types` entry, see [calibration layer replay](docs/calibration-replay.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
@@ -227,7 +238,9 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 lossless NF12 storage for eligible BF16 source matrices during calibration
 forwards and restores the exact source dtype before quantization. See
 [automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
-flow, FP16 eligibility rule, and native floatx precedence.
+flow, FP16 eligibility rule, and native floatx precedence, and
+[excluded-layer replay and AUTO_NF12](docs/auto-nf12-excluded-layers.md) for the
+`dynamic` exclusion contract and the writer's fail-closed check.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
@@ -297,6 +310,11 @@ GEMMs large enough to amortize dispatch. Forward decodes at most 512 output
 columns at a time and never retains a dense dequantized weight;
 `get_weight_tensor()` materializes one on demand for export and tests. Set
 `GPTQMODEL_EXL3_CPU_BF16X3=0` to disable the BF16x3 path.
+
+The [EXL3 runtime weight lifecycle](docs/exl3-runtime-weights.md) describes how
+deferred dense replay weights are refreshed before every layer forward, why the
+generic path zero-pads output columns to 128 and rejects unaligned input
+features before calibration.
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 

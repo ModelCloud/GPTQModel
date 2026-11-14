@@ -26,7 +26,11 @@ import pcre
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..looper.loop_processor import CalibrationTypes, LoopProcessor
+from ..looper.loop_processor import (
+    CalibrationTypes,
+    LoopProcessor,
+    prepare_layer_runtime_weights_for_forward,
+)
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..models.module_plan import _model_module_plan
@@ -936,6 +940,14 @@ def _run_single_subset_pass(
                     and not getattr(looper.gptq_model, "_has_eora", False)
                 ):
                     full[named_module.name] = named_module.module
+        # The layer forward executes every module, not only this subset.
+        # Projections packed by an earlier subset still hold the processor's
+        # META placeholder, so refresh the whole inventory before running.
+        prepare_layer_runtime_weights_for_forward(
+            processors=getattr(looper, "processors", ()),
+            full=full,
+            fallback_device=cur_layer_device,
+        )
 
     # Determine MoE block name for hook selection
     moe_block_name = None

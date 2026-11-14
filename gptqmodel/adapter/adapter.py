@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import numbers
 import os
 from dataclasses import dataclass
 from typing import Dict, Hashable, Iterable, List, Optional, Tuple, Union
@@ -26,27 +27,21 @@ HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = False) -> bool:
     """Return whether one `rank_pattern` key selects `weight_key`.
 
-    The checks mirror PEFT's documented order: an exact module name, then a
-    module-name suffix, then a regex search. The pattern is matched exactly as
-    written. Canonical module names are case-sensitive (MPT's `Wqkv`,
-    Baichuan's `W_pack`) and regex escapes such as `\\S`, `\\D`, and `\\W` are
-    meaningful, so the pattern text is never rewritten.
+    This is PEFT's exact rule (``peft.utils.other.get_pattern_key``):
+    ``re.match(rf"(.*\\.)?({pattern})$", weight_key)``. A bare suffix therefore
+    has to start after a dot, so ``q_proj`` matches ``...self_attn.q_proj`` but
+    ``1.self_attn.q_proj`` does not match layer 11. The pattern is matched
+    exactly as written. Canonical module names are case-sensitive (MPT's
+    `Wqkv`, Baichuan's `W_pack`) and regex escapes such as `\\S`, `\\D`, and
+    `\\W` are meaningful, so the pattern text is never rewritten.
 
     `ignore_case` is the explicit legacy-export fallback. It folds only the
-    literal comparisons and the regex engine's case flag; the pattern itself is
-    passed through unchanged, so escapes keep their meaning.
+    regex engine's case flag; the pattern itself is passed through unchanged,
+    so escapes keep their meaning.
     """
 
-    if ignore_case:
-        folded_key = weight_key.lower()
-        folded_pattern = pattern.lower()
-        if folded_key == folded_pattern or folded_key.endswith(folded_pattern):
-            return True
-        return pcre.compile(pattern, pcre.IGNORECASE).search(weight_key) is not None
-
-    if weight_key == pattern or weight_key.endswith(pattern):
-        return True
-    return pcre.compile(pattern).search(weight_key) is not None
+    flags = pcre.IGNORECASE if ignore_case else 0
+    return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
 
 
 class AdapterCache():
@@ -389,13 +384,23 @@ class Lora(Adapter):
         alpha = base_alpha
         if lora_cfg.alpha_pattern:
             for pattern, override in lora_cfg.alpha_pattern.items():
-                assert isinstance(pattern, str) and isinstance(override, int)
-                assert override > 0
+                # PEFT accepts float alphas in `alpha_pattern`; JSON has no
+                # integer type, so `4.0` is a valid export. Reject only values
+                # that cannot be a positive scale.
+                if not isinstance(pattern, str):
+                    raise ValueError(
+                        f"Adapter: `alpha_pattern` key must be a string, actual = `{pattern}`."
+                    )
+                if not isinstance(override, numbers.Real) or float(override) <= 0:
+                    raise ValueError(
+                        f"Adapter: `alpha_pattern[{pattern!r}]` must be a positive real, "
+                        f"actual = `{override}`."
+                    )
                 matched = _rank_pattern_matches(pattern, weight_key)
                 if not matched and (pattern != pattern.lower() or weight_key != weight_key.lower()):
                     matched = _rank_pattern_matches(pattern, weight_key, ignore_case=True)
                 if matched:
-                    alpha = override
+                    alpha = float(override)
                     log.info(
                         f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
                         f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import inspect
 import json
 import os
 import threading
@@ -420,6 +421,11 @@ CAPTURE_ONLY_FLAG = ":?"
 AWQ_NO_SCALE_SOURCE_FLAG = "nosrc"
 MOE_FLAG = ":moe"
 NORM_FLAG = ":norm"
+# Marks a normalization that consumes the block output (a "sandwich" post-norm).
+# It still owns checkpoint weights and may be trained, but it never feeds the
+# next quantized projection, so AWQ must not fold the consumer's input scale
+# into it.
+POST_NORM_FLAG = ":postnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -479,6 +485,23 @@ def _module_tree_for_class(cls):
     active = _ACTIVE_MODULE_TREE.get()
     return active[1] if active is not None and active[0] is cls else cls.module_tree
 
+
+# Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
+# captured from the first decoder layer's forward. `capture_first_layer_input_kwargs`
+# stores it in the cached batch kwargs and `prepare_layer_replay_kwargs` consumes it,
+# selecting the entry for the layer being replayed and dropping the key again.
+_LAYER_TYPE_REPLAY_KWARGS_KEY = "_gptqmodel_layer_type_replay_kwargs"
+
+# `transformers` names the windowed attention layer type this string; every other
+# declared type (`full_attention`, `hybrid`, ...) uses the plain causal mask.
+_LAYER_TYPE_SLIDING = "sliding_attention"
+
+# Returned when a declared layer type has no single mask builder (for example
+# the composite `hybrid` pattern). Replay then keeps the captured layer-0 mask
+# instead of guessing one.
+_LAYER_TYPE_MASK_UNSUPPORTED = object()
+
+
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
     # an instance are wrapped in ``__getattribute__`` below so they resolve
@@ -492,6 +515,7 @@ class BaseQModel(nn.Module):
         "is_moe_module",
         "get_moe_module_name",
         "get_norm_modules",
+        "get_post_norm_modules",
         "build_layer_modules",
         "simple_layer_modules",
         "shared_input_plan",
@@ -1137,8 +1161,14 @@ class BaseQModel(nn.Module):
         return found_names
 
     @classmethod
-    def _collect_norm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
-        """Collect layer-relative paths of modules tagged with the `:norm` flag."""
+    def _collect_norm_modules_from_tree(
+        cls,
+        tree_node,
+        parent_path: str = "",
+        flag: str = NORM_FLAG,
+    ) -> List[str]:
+        """Collect layer-relative paths of modules tagged with ``flag``."""
+        flag_name = flag.lstrip(":")
         found = []
         if isinstance(tree_node, dict):
             for key, value in tree_node.items():
@@ -1146,18 +1176,18 @@ class BaseQModel(nn.Module):
                     continue
                 module_name, flags = cls._parse_module_flags(key)
                 path = f"{parent_path}.{module_name}" if parent_path else module_name
-                if NORM_FLAG.lstrip(":") in flags:
+                if flag_name in flags:
                     found.append(path)
-                found.extend(cls._collect_norm_modules_from_tree(value, path))
+                found.extend(cls._collect_norm_modules_from_tree(value, path, flag))
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
                 if isinstance(item, dict):
-                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path))
+                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path, flag))
                     continue
                 if not isinstance(item, str):
                     continue
                 module_name, flags = cls._parse_module_flags(item)
-                if NORM_FLAG.lstrip(":") not in flags:
+                if flag_name not in flags:
                     continue
                 # Same leaf rule as the layer walker: a child named like its parent is the parent.
                 if parent_path == module_name or parent_path.endswith(f".{module_name}"):
@@ -1165,6 +1195,22 @@ class BaseQModel(nn.Module):
                 else:
                     found.append(f"{parent_path}.{module_name}" if parent_path else module_name)
         return found
+
+    @classmethod
+    def _collect_flagged_layer_modules(cls, flag: str) -> List[str]:
+        """Collect the deduplicated layer-relative paths tagged with ``flag``."""
+        names = []
+        for tree in cls._iter_module_tree_variants():
+            found_hash = False
+            for item in tree:
+                if item == "#":
+                    found_hash = True
+                elif found_hash and isinstance(item, dict):
+                    for name in cls._collect_norm_modules_from_tree(item, flag=flag):
+                        if name not in names:
+                            names.append(name)
+                    break
+        return names
 
     @classmethod
     def get_norm_modules(cls) -> List[str]:
@@ -1175,18 +1221,17 @@ class BaseQModel(nn.Module):
 
         Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
         """
-        names = []
-        for tree in cls._iter_module_tree_variants():
-            found_hash = False
-            for item in tree:
-                if item == "#":
-                    found_hash = True
-                elif found_hash and isinstance(item, dict):
-                    for name in cls._collect_norm_modules_from_tree(item):
-                        if name not in names:
-                            names.append(name)
-                    break
-        return names
+        return cls._collect_flagged_layer_modules(NORM_FLAG)
+
+    @classmethod
+    def get_post_norm_modules(cls) -> List[str]:
+        """Layer-relative paths of sandwich post-norms declared via `:postnorm`.
+
+        These norms consume a block's output (after the residual add), so their
+        output never feeds the next quantized projection. AWQ must not fold a
+        consumer's input scale into them.
+        """
+        return cls._collect_flagged_layer_modules(POST_NORM_FLAG)
 
     @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
@@ -3281,12 +3326,23 @@ class BaseQModel(nn.Module):
         example: Dict[str, Any],
         batch_device: torch.device,
     ) -> None:
-        """Expose original model inputs while the first-layer hook executes."""
+        """Expose original model inputs while the first-layer hook executes.
 
-        del example, batch_device
+        The first-layer hook only sees the mask and rotary embeddings that the
+        outer decoder block selected for *that* layer. Rebuilding the kwargs of
+        the other declared layer types needs the unexpanded inputs (the 2-D
+        padding mask and the position ids), so keep a reference for the duration
+        of one example and release it in `end_input_capture_example`.
+        """
+
+        del batch_device
+        self._layer_type_replay_source = example
 
     def end_input_capture_example(self) -> None:
         """Release any model-specific original-input capture state."""
+
+        self._layer_type_replay_source = None
+        self._layer_type_replay_rotary = None
 
     def capture_first_layer_input_kwargs(
         self,
@@ -3298,6 +3354,274 @@ class BaseQModel(nn.Module):
         """Allow model definitions to persist extra first-layer replay metadata during calibration capture."""
 
         return layer_input_kwargs
+
+    @staticmethod
+    def _layer_type_param_name(module: nn.Module) -> Optional[str]:
+        """Name of the rotary-embedding argument that selects a layer type."""
+
+        try:
+            parameters = inspect.signature(module.forward).parameters
+        except (TypeError, ValueError):
+            return None
+        for name in ("layer_type", "attention_type"):
+            if name in parameters:
+                return name
+        return None
+
+    def _resolve_layer_type_replay_rotary(self) -> Optional[nn.Module]:
+        """Rotary module that builds a different `position_embeddings` per layer type."""
+
+        state = object.__getattribute__(self, "__dict__")
+        cached = state.get("_layer_type_replay_rotary")
+        if cached is not None:
+            return cached
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+
+        declared = getattr(self, "rotary_embedding", None)
+        if declared:
+            module, _ = get_module_by_name_prefix(model, [declared])
+            if module is not None and self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+
+        for name, module in model.named_modules():
+            if "rotary" not in name.lower() and "rotary" not in type(module).__name__.lower():
+                continue
+            if self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+        return None
+
+    def _replay_root_model(self) -> Optional[nn.Module]:
+        """The loaded model, or None for a definition instance built without `nn.Module.__init__`.
+
+        `BaseQModel.__getattr__` resolves missing attributes through `self.model`,
+        so probing attributes on a bare instance recurses. Read the module table
+        directly instead.
+        """
+
+        modules = object.__getattribute__(self, "__dict__").get("_modules") or {}
+        model = modules.get("model")
+        return model if isinstance(model, nn.Module) else None
+
+    def _layer_type_replay_config(self):
+        """Config that declares `layer_types` (the text tower for multimodal wrappers)."""
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+        config = getattr(model, "config", None)
+        if config is None:
+            return None
+        text_config = getattr(config, "text_config", config)
+        return text_config if text_config is not None else config
+
+    def _declared_layer_types(self) -> Optional[tuple]:
+        """Distinct-typed `config.layer_types`, or None when one type covers the stack."""
+
+        text_config = self._layer_type_replay_config()
+        layer_types = getattr(text_config, "layer_types", None)
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return None
+        if len(set(layer_types)) < 2:
+            return None
+        return tuple(layer_types)
+
+    @staticmethod
+    def _layer_type_or_mask(layer_type: str, text_config):
+        """Mask overlay `Gemma3TextModel.forward` applies for bidirectional attention."""
+
+        if layer_type != _LAYER_TYPE_SLIDING:
+            return lambda *args, **kwargs: torch.tensor(True, dtype=torch.bool)
+        try:
+            from transformers.masking_utils import sliding_window_bidirectional_overlay
+        except ImportError:  # pragma: no cover - older transformers
+            return None
+        window = getattr(text_config, "sliding_window", None)
+        if window is None:
+            return None
+        return sliding_window_bidirectional_overlay(window)
+
+    def _build_layer_type_attention_mask(
+        self,
+        text_config,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        raw_attention_mask: Optional[torch.Tensor],
+        position_ids: torch.Tensor,
+    ):
+        """Rebuild the mask `transformers` would hand to a layer of `layer_type`."""
+
+        from transformers.masking_utils import LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING
+
+        mask_kwargs = {
+            "config": text_config,
+            "inputs_embeds": hidden_states,
+            "attention_mask": raw_attention_mask,
+            "past_key_values": None,
+            "position_ids": position_ids,
+        }
+        if getattr(text_config, "use_bidirectional_attention", False):
+            or_mask_function = self._layer_type_or_mask(layer_type, text_config)
+            if or_mask_function is None:
+                return _LAYER_TYPE_MASK_UNSUPPORTED
+            mask_kwargs["or_mask_function"] = or_mask_function
+        # Use the same pattern-to-builder table `create_masks_for_generate` uses.
+        # A bare `create_causal_mask` fallback silently gives chunked, recurrent,
+        # and other non-sliding types the wrong attention pattern.
+        builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+        if builder is None or isinstance(builder, dict):
+            return _LAYER_TYPE_MASK_UNSUPPORTED
+        return builder(**mask_kwargs)
+
+    def _build_layer_type_position_embeddings(
+        self,
+        rotary: nn.Module,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        target_device: torch.device,
+    ):
+        """Rebuild the per-layer-type rotary tuple with the model's own rotary module."""
+
+        rotary_device = get_device(rotary)
+        probe = torch.empty(1, device=rotary_device, dtype=hidden_states.dtype)
+        result = rotary(probe, move_to(position_ids, device=rotary_device), layer_type)
+        if isinstance(result, (tuple, list)):
+            return type(result)(move_to(value, device=target_device) for value in result)
+        return move_to(result, device=target_device)
+
+    def capture_layer_type_replay_kwargs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+        layer_input_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist the replay kwargs of every declared layer type, not only layer 0's.
+
+        Called by the capture stage right after `capture_first_layer_input_kwargs`;
+        a no-op (the key is simply absent) when the model declares one layer type.
+        """
+
+        layer_type_kwargs = self._build_layer_type_replay_kwargs(
+            args=args,
+            kwargs=kwargs,
+            batch_device=batch_device,
+        )
+        if layer_type_kwargs is not None:
+            layer_input_kwargs[_LAYER_TYPE_REPLAY_KWARGS_KEY] = layer_type_kwargs
+        return layer_input_kwargs
+
+    def _build_layer_type_replay_kwargs(
+        self,
+        *,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+    ) -> Optional[Dict[str, Any]]:
+        """Rebuild the mask and rotary tuple of every declared layer type.
+
+        `transformers` 5 builds one mask per layer *type*
+        (`causal_mask_mapping[config.layer_types[i]]`) and Gemma3/OLMo3 also pass a
+        different `position_embeddings` per type. The capture hook fires on the
+        first decoder layer only, so a single captured mask would be replayed to
+        layers whose type expects a different one. Rebuild the missing types from
+        the same inputs the model used, and let replay select by layer index.
+        """
+
+        layer_types = self._declared_layer_types()
+        if layer_types is None:
+            return None
+        source = object.__getattribute__(self, "__dict__").get("_layer_type_replay_source")
+        if not isinstance(source, dict):
+            return None
+
+        hidden_states = kwargs.get("hidden_states")
+        if hidden_states is None and args:
+            hidden_states = args[0]
+        if not torch.is_tensor(hidden_states) or hidden_states.dim() != 3:
+            return None
+
+        text_config = self._layer_type_replay_config()
+        num_layers = getattr(text_config, "num_hidden_layers", None)
+        if isinstance(num_layers, int) and num_layers != len(layer_types):
+            # A per-layer list is the only shape this reconstruction can index.
+            return None
+
+        raw_attention_mask = source.get("attention_mask")
+        if raw_attention_mask is not None:
+            if not torch.is_tensor(raw_attention_mask) or raw_attention_mask.dim() != 2:
+                return None
+            if raw_attention_mask.shape[-1] != hidden_states.shape[1]:
+                return None
+            raw_attention_mask = move_to(raw_attention_mask, device=hidden_states.device)
+
+        position_ids = kwargs.get("position_ids")
+        if not torch.is_tensor(position_ids):
+            position_ids = torch.arange(
+                hidden_states.shape[1], device=hidden_states.device, dtype=torch.long
+            ).unsqueeze(0)
+        position_ids = move_to(position_ids, device=hidden_states.device)
+        if position_ids.shape[-1] != hidden_states.shape[1]:
+            return None
+
+        base_type = layer_types[0]
+        captured_position_embeddings = kwargs.get("position_embeddings")
+        rotary = (
+            self._resolve_layer_type_replay_rotary()
+            if captured_position_embeddings is not None
+            else None
+        )
+
+        by_type: Dict[str, Dict[str, Any]] = {}
+        for layer_type in sorted(set(layer_types) - {base_type}):
+            entry: Dict[str, Any] = {}
+            layer_type_mask = self._build_layer_type_attention_mask(
+                text_config=text_config,
+                layer_type=layer_type,
+                hidden_states=hidden_states,
+                raw_attention_mask=raw_attention_mask,
+                position_ids=position_ids,
+            )
+            if layer_type_mask is not _LAYER_TYPE_MASK_UNSUPPORTED:
+                entry["attention_mask"] = layer_type_mask
+            if rotary is not None:
+                entry["position_embeddings"] = self._build_layer_type_position_embeddings(
+                    rotary=rotary,
+                    layer_type=layer_type,
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    target_device=batch_device,
+                )
+            by_type[layer_type] = entry
+
+        return {
+            "base_type": base_type,
+            "layer_types": layer_types,
+            "by_type": by_type,
+        }
+
+    @staticmethod
+    def _resolve_layer_replay_type(layer: nn.Module, layer_types: Sequence[str]) -> Optional[str]:
+        """Layer type declared by the decoder layer being replayed."""
+
+        attention = getattr(layer, "self_attn", None)
+        declared = getattr(attention, "layer_type", None)
+        if not isinstance(declared, str):
+            declared = getattr(layer, "layer_type", None)
+        if isinstance(declared, str):
+            return declared
+
+        index = getattr(attention, "layer_idx", None)
+        if not isinstance(index, int):
+            index = getattr(layer, "layer_idx", None)
+        if isinstance(index, int) and 0 <= index < len(layer_types):
+            return layer_types[index]
+        return None
 
     def quantization_layer_output_required(
         self,
@@ -3347,7 +3671,62 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, Any]:
         """Allow model definitions to refresh layer-specific kwargs before cached layer replay."""
 
+        layer_type_kwargs = additional_inputs.pop(_LAYER_TYPE_REPLAY_KWARGS_KEY, None)
+        if layer_type_kwargs:
+            self._apply_layer_type_replay_kwargs(
+                layer=layer,
+                layer_type_kwargs=layer_type_kwargs,
+                additional_inputs=additional_inputs,
+                target_device=target_device,
+            )
         return additional_inputs
+
+    def _apply_layer_type_replay_kwargs(
+        self,
+        *,
+        layer: nn.Module,
+        layer_type_kwargs: Dict[str, Any],
+        additional_inputs: Dict[str, Any],
+        target_device: torch.device,
+    ) -> None:
+        """Swap in the mask/rotary captured for the layer type being replayed."""
+
+        layer_types = layer_type_kwargs.get("layer_types") or ()
+        by_type = layer_type_kwargs.get("by_type") or {}
+        if not by_type:
+            return
+        layer_type = self._resolve_layer_replay_type(layer, layer_types)
+        if layer_type is None or layer_type == layer_type_kwargs.get("base_type"):
+            return
+        entry = by_type.get(layer_type)
+        if not entry:
+            return
+
+        # A `None` layer-0 mask can mean "causal skip" rather than "masks are
+        # disabled", so a later layer type that needs a materialized mask (for
+        # example chunked attention after a full-attention layer 0) must still
+        # receive it. Only skip the write when both sides are `None`.
+        if "attention_mask" in entry:
+            layer_type_mask = entry["attention_mask"]
+            if layer_type_mask is not None or additional_inputs.get("attention_mask") is not None:
+                additional_inputs["attention_mask"] = (
+                    None
+                    if layer_type_mask is None
+                    else move_to(layer_type_mask, device=target_device)
+                )
+        position_embeddings = entry.get("position_embeddings")
+        if position_embeddings is not None and additional_inputs.get("position_embeddings") is not None:
+            additional_inputs["position_embeddings"] = self._move_position_embeddings(
+                position_embeddings, target_device
+            )
+
+    @staticmethod
+    def _move_position_embeddings(position_embeddings, target_device: torch.device):
+        if isinstance(position_embeddings, (tuple, list)):
+            return type(position_embeddings)(
+                move_to(value, device=target_device) for value in position_embeddings
+            )
+        return move_to(position_embeddings, device=target_device)
 
     def prepare_layer_replay_keep_mask(
         self,
@@ -3684,6 +4063,14 @@ class BaseQModel(nn.Module):
                         scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
                         axis=None,
                         target_dtype=torch.float32,
+                        # Resolve the checkpoint convention once so this decoder
+                        # and ``_build_fp8_forward_module`` agree. A direct
+                        # ``weight_scale`` is already normalized to a multiplier.
+                        scale_semantics=(
+                            self._decoder_fp8_scale_semantics()
+                            if isinstance(scale_inv, torch.Tensor)
+                            else "multiplier"
+                        ),
                     )
                 elif decoder_kind == "fp4":
                     decoded_weight = dequantize_f4_e2m1(
@@ -3726,6 +4113,39 @@ class BaseQModel(nn.Module):
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             return int(block_size[0]), int(block_size[1])
         return None
+
+    def _decoder_fp8_scale_semantics(self) -> str:
+        """Resolve how a checkpoint's ``weight_scale_inv`` is applied, once.
+
+        HF/DeepSeek/Qwen FP8 checkpoints store ``amax / 448`` under the
+        historical ``weight_scale_inv`` name and *multiply* it. A checkpoint
+        that stores a true inverse scale declares
+        ``quantization_config.weight_scale_semantics = "inverse"``.
+
+        Both the native forward wrapper and the dense quant-source decoder read
+        this single resolved value so they can never disagree about the same
+        checkpoint tensor.
+        """
+
+        cached = self.__dict__.get("_resolved_fp8_scale_semantics")
+        if cached is not None:
+            return cached
+
+        config = self._decoder_source_config()
+        quant_config = getattr(config, "quantization_config", None)
+        if isinstance(quant_config, dict):
+            declared = quant_config.get("weight_scale_semantics")
+        else:
+            declared = getattr(quant_config, "weight_scale_semantics", None)
+
+        semantics = "multiplier" if declared is None else str(declared).strip().lower()
+        if semantics not in {"multiplier", "inverse"}:
+            raise ValueError(
+                "FP8 `weight_scale_semantics` must be 'multiplier' or 'inverse', "
+                f"got {declared!r}."
+            )
+        self.__dict__["_resolved_fp8_scale_semantics"] = semantics
+        return semantics
 
     def _decoder_declared_floatx_format(self) -> str:
         """Read flat and compressed-tensors group format labels."""
@@ -4032,7 +4452,9 @@ class BaseQModel(nn.Module):
             scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
             result_shape=tuple(weight.shape),
         )
-        if not isinstance(scale_inv, torch.Tensor):
+        if isinstance(scale_inv, torch.Tensor):
+            scale_semantics = self._decoder_fp8_scale_semantics()
+        else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
@@ -4051,6 +4473,9 @@ class BaseQModel(nn.Module):
                 torch.reciprocal(scale),
                 torch.full_like(scale, 1.0 / tiny),
             )
+            # The synthesized tensor is an inverse scale regardless of any
+            # checkpoint-declared semantics, so the wrapper must divide.
+            scale_semantics = "inverse"
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
@@ -4072,6 +4497,7 @@ class BaseQModel(nn.Module):
                 format=format_name,
                 weight_scale_method=weight_scale_method,
                 weight_block_size=weight_block_size,
+                weight_scale_semantics=scale_semantics,
                 register_buffers=False,
             ).to(device=device)
         except Exception:
@@ -4376,6 +4802,13 @@ class BaseQModel(nn.Module):
                     module_name = module_name.replace(flag, "")
             return module_name
 
+        # A sandwich post-norm (for example LFM3's `post_operator_norm`) is
+        # applied to the block output, after the residual add. It can appear in
+        # the tree immediately before the next consumer and share that
+        # consumer's width, so position and width cannot identify a fold
+        # source. The definition marks it explicitly instead.
+        post_norm_modules = set(self.get_post_norm_modules())
+
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""
             for raw in names:
@@ -4402,8 +4835,10 @@ class BaseQModel(nn.Module):
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
 
-        def _is_gain_norm(candidate_module, input_width: int | None) -> bool:
+        def _is_gain_norm(candidate_module, candidate_name: str, input_width: int | None) -> bool:
             """Whether ``candidate_module`` can absorb the consumer's input scale."""
+            if candidate_name in post_norm_modules:
+                return False
             if norm_type_of(candidate_module) is None:
                 return False
             weight = getattr(candidate_module, "weight", None)
@@ -4421,9 +4856,13 @@ class BaseQModel(nn.Module):
             branches (for example the router) or to a preceding residual.
             ``last_module`` remains the fallback when no norm matches.
             """
-            for _, candidate_module in reversed(pending_nonquant):
-                if _is_gain_norm(candidate_module, input_width):
+            for candidate_name, candidate_module in reversed(pending_nonquant):
+                if _is_gain_norm(candidate_module, candidate_name, input_width):
                     return candidate_module
+            if last_module_name in post_norm_modules:
+                # Folding into a post-norm corrupts the block output. With no
+                # data-flow source in this run, skip the scale instead.
+                return None
             return last_module
 
         def _module_kwargs_for_feature(feature_name: str | None):

@@ -18,7 +18,6 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.config import (
     _normalize_fp8_fmt,
-    _normalize_fp8_scale_semantics,
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
 )
@@ -38,6 +37,24 @@ from ._numerics import autocast_active, matmul_fp32_reduce
 log = setup_logger()
 
 _MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
+
+
+def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
+    """Normalize a loaded checkpoint's ``weight_scale_inv`` convention.
+
+    ``FP8Config`` only emits GPT-QModel's own inverse scales, so its
+    normalizer accepts ``inverse`` alone. A loaded HF/DeepSeek checkpoint can
+    additionally store a multiplier under the historical
+    ``weight_scale_inv`` name, which this wrapper must decode.
+    """
+
+    normalized = "inverse" if value is None else str(value).strip().lower()
+    if normalized not in {"inverse", "multiplier"}:
+        raise ValueError(
+            "FP8 weight scale semantics must be 'inverse' or 'multiplier', "
+            f"got `{value}`."
+        )
+    return normalized
 _MLX_FP8_FORMATS = {
     "float8_e4m3fn",
     "float8_e5m2",
@@ -220,7 +237,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             weight_block_size=block_size,
         )
         self.weight_block_size = block_size
-        self.weight_scale_semantics = _normalize_fp8_scale_semantics(weight_scale_semantics)
+        self.weight_scale_semantics = _normalize_linear_scale_semantics(weight_scale_semantics)
         self._scaled_mm_hard_disabled = False
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
@@ -480,11 +497,6 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_target(device=device, dtype=dtype)
 
-        if self.weight_scale_semantics != "inverse":
-            raise NotImplementedError(
-                f"Unsupported FP8 scale semantics `{self.weight_scale_semantics}`."
-            )
-
         # Older GPUs can store the module on CUDA but still miss native FP8 math.
         # In that case, dequantize on CPU directly to fp16/bf16 and only then move.
         prefer_cpu_dequant = target_device.type == "cpu"
@@ -519,42 +531,57 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
     def _dequantize_native(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
-        # FP8 -> FP32 is exact, so divide the fp32 dequant buffer in place
-        # instead of materialising a full N x K fp32 scale with
-        # `repeat_interleave`. The per-element division order is unchanged and
-        # the result is bitwise identical to `weight / expanded_scale`.
+        # FP8 -> FP32 is exact, so apply the fp32 scale in place instead of
+        # materialising a full N x K fp32 scale with `repeat_interleave`.
+        # ``weight_scale_semantics`` decides whether the stored tensor is an
+        # inverse scale (divide) or a DeepSeek/HF multiplier (multiply).
         deq = weight.to(torch.float32)
         scale_inv = self.weight_scale_inv
         if scale_inv.device != target_device or scale_inv.dtype != torch.float32:
             scale_inv = scale_inv.to(device=target_device, dtype=torch.float32)
 
+        multiply = self.weight_scale_semantics == "multiplier"
         if self.weight_scale_method == "tensor":
-            deq.div_(scale_inv)
+            if multiply:
+                deq.mul_(scale_inv)
+            else:
+                deq.div_(scale_inv)
         elif self.weight_scale_method == "row":
-            deq.div_(scale_inv.view(-1, 1))
+            if multiply:
+                deq.mul_(scale_inv.view(-1, 1))
+            else:
+                deq.div_(scale_inv.view(-1, 1))
         else:
             if self.weight_block_size is None:
                 raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
             block_rows, block_cols = self.weight_block_size
             rows, cols = deq.shape
             if rows % block_rows == 0 and cols % block_cols == 0:
-                deq.view(rows // block_rows, block_rows, cols // block_cols, block_cols).div_(
-                    scale_inv[:, None, :, None]
-                )
+                view = deq.view(rows // block_rows, block_rows, cols // block_cols, block_cols)
+                if multiply:
+                    view.mul_(scale_inv[:, None, :, None])
+                else:
+                    view.div_(scale_inv[:, None, :, None])
             else:
                 # Non-divisible block shapes keep the padded/cropped expansion
                 # as a fallback; the common path above never allocates it.
-                deq.div_(self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32))
+                expanded = self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32)
+                if multiply:
+                    deq.mul_(expanded)
+                else:
+                    deq.div_(expanded)
         return deq.to(target_dtype).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
-        # ``dequantize_fp8`` treats ``scale_inv`` heuristically (it multiplies
-        # when every value is <= 1), whereas this module's inverse-scale
-        # semantics always divide. Pass the reciprocal as an ordinary scale so
-        # the CPU fallback is exactly the arithmetic of ``_dequantize_native``.
+        # ``dequantize_fp8``'s ``scale`` argument always multiplies. Convert the
+        # stored inverse-scale tensor into the arithmetic this module declares
+        # so the CPU fallback is exactly ``_dequantize_native``.
+        stored_scale = self.weight_scale_inv.to(device="cpu", dtype=torch.float32)
+        if self.weight_scale_semantics == "inverse":
+            stored_scale = torch.reciprocal(stored_scale)
         weight = dequantize_fp8(
             self.weight.to(device="cpu"),
-            scale=torch.reciprocal(self.weight_scale_inv.to(device="cpu", dtype=torch.float32)),
+            scale=stored_scale,
             axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
             target_dtype=target_dtype,
         )
@@ -566,7 +593,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         scale_inv = self.weight_scale_inv
         if scale_inv.device != device:
             scale_inv = scale_inv.to(device=device)
-        scale = torch.reciprocal(scale_inv.to(torch.float32))
+        scale = scale_inv.to(torch.float32)
+        if self.weight_scale_semantics == "inverse":
+            scale = torch.reciprocal(scale)
         if self.weight_scale_method == "tensor":
             return scale
         if self.weight_scale_method == "row":
