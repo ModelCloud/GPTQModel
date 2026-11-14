@@ -126,6 +126,10 @@ class _TorchHadamardTransform:
         n = x.shape[-1]
         if not is_pow2(n):
             raise ValueError(f"Torch Hadamard fallback requires a power-of-two width, got {n}.")
+        if x.numel() == 0:
+            # `reshape(..., -1, 2, stride)` cannot infer the missing extent for
+            # a zero-element tensor, and there is nothing to transform anyway.
+            return torch.empty_like(x)
         original_shape = x.shape
         original_dtype = x.dtype
         # A half-precision butterfly can overflow before the final 1/sqrt(n)
@@ -308,6 +312,12 @@ def apply_online_hadamard(
     This mirrors ``BaseQuantLinear._apply_rotation_to_input`` so the same transform
     can be reused by ``HookedLinear`` during calibration/replay.
     """
+    if x.numel() == 0:
+        # Empty decode/prefill batches reach this from every quant-linear
+        # backend. Both the native extension (zero-sized grid) and the Torch
+        # butterfly (ambiguous reshape) reject them, and the transform of an
+        # empty tensor is itself empty.
+        return x
     if not online_full_had and not online_partial_had:
         return x
     if had_K is None and K != 1:

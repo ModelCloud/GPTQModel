@@ -311,7 +311,10 @@ class MacheteLinear(GPTQQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        # Machete's matmul addresses the activation rows densely, so a strided
+        # view (for example `hidden_states[:, -1:, :]` with batch > 1) must be
+        # packed first.
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
 
         if self.input_perm.numel() > 0:
             perm = self.input_perm

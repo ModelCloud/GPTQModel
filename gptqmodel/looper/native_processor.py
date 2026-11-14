@@ -34,6 +34,11 @@ class NativeProcessor(LoopProcessor):
             required=True,
             replay_after_process=False,
             all_modules_in_single_pass=True,
+            # This pass only records raw inputs. No quantization task follows
+            # it, so a packed AUTO_NF12 wrapper would stay in the model tree and
+            # the quantizer would find a parameterless module instead of the
+            # dense source.
+            allow_auto_dtype_cast=False,
         ),
     )
 

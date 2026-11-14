@@ -74,7 +74,13 @@ def _build_fixture(model_dir: Path) -> Qwen3MoeConfig:
     return config
 
 
-def _quantize(model_dir: Path, calibration, batch_size: int, output: Path) -> dict:
+def _quantize(
+    model_dir: Path,
+    calibration,
+    batch_size: int,
+    output: Path,
+    patch_model=None,
+) -> dict:
     quantize_config = QuantizeConfig(bits=4, group_size=32, device="cpu")
     # FP32 calibration keeps the forward independent of the batch shape: in
     # BF16 the GEMM blocking changes with `batch_size`, which alone moves expert
@@ -85,6 +91,8 @@ def _quantize(model_dir: Path, calibration, batch_size: int, output: Path) -> di
         backend=BACKEND.TORCH,
         dtype=torch.float32,
     )
+    if patch_model is not None:
+        patch_model(model.model)
     model.quantize(
         calibration,
         batch_size=batch_size,
@@ -136,4 +144,74 @@ def test_moe_expert_weights_match_across_calibration_batch_sizes(tmp_path: Path)
     dense_names = [name for name in single if ".self_attn." in name or ".mlp.shared_experts." in name]
     assert dense_names, "the fixture must quantize dense attention"
     for name in dense_names:
+        assert _relative_error(batched[name], single[name]) < 1e-6, name
+
+
+def _force_padding_only_experts(model) -> None:
+    """Route every real token to experts 2/3 and every padding row to 0/1.
+
+    The MoE-root hook zeroes padded hidden states before routing. A router sees
+    all-zero logits for those rows, so a tie can still send them to experts
+    0/1. This router makes that deterministic on every device: experts 0/1 win
+    only padding rows, while experts 2/3 win every real token.
+    """
+
+    gate = model.model.layers[0].mlp.gate
+    num_experts = gate.num_experts
+    top_k = gate.top_k
+    hidden_dim = gate.hidden_dim
+
+    def forced_forward(hidden_states):
+        flat = hidden_states.reshape(-1, hidden_dim)
+        real = flat.abs().sum(dim=-1) > 0
+        logits = torch.zeros(
+            flat.shape[0], num_experts, device=flat.device, dtype=flat.dtype
+        )
+        logits[~real, 0] = 2.0
+        logits[~real, 1] = 1.0
+        logits[real, 2] = 2.0
+        logits[real, 3] = 1.0
+        probs = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float)
+        values, indices = torch.topk(probs, top_k, dim=-1)
+        return logits, values.to(logits.dtype), indices
+
+    gate.forward = forced_forward
+
+
+def test_padding_only_expert_is_not_zeroed_at_batch_size_above_one(tmp_path: Path):
+    """An expert that wins no real token must fall back to RTN, not GPTQ.
+
+    Before the fix the padded rows routed to experts 0/1 cleared the 0.5%
+    fallback threshold, GPTQ ran on an all-zero Hessian, and
+    `_neutralize_dead_columns` zeroed the whole weight.
+    """
+
+    model_dir = tmp_path / "native"
+    _build_fixture(model_dir)
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_dir)
+    calibration = [
+        dict(tokenizer(_LONG_TEXT, return_tensors="pt")),
+        dict(tokenizer(_SHORT_TEXT, return_tensors="pt")),
+        dict(tokenizer(_LONG_TEXT, return_tensors="pt")),
+        dict(tokenizer(_SHORT_TEXT, return_tensors="pt")),
+    ]
+
+    single = _quantize(
+        model_dir, calibration, 1, tmp_path / "bs1", patch_model=_force_padding_only_experts
+    )
+    batched = _quantize(
+        model_dir, calibration, 4, tmp_path / "bs4", patch_model=_force_padding_only_experts
+    )
+
+    padding_only = [
+        name
+        for name in single
+        if ".mlp.experts.0." in name or ".mlp.experts.1." in name
+    ]
+    assert len(padding_only) == 6, padding_only
+    for name in padding_only:
+        # RTN fallback keeps the source weights; the pre-fix batched run wrote
+        # an all-zero tensor here (zero_frac = 1.000).
+        assert float(batched[name].abs().max()) > 0.0, name
+        assert float((batched[name] == 0).float().mean()) < 1.0, name
         assert _relative_error(batched[name], single[name]) < 1e-6, name

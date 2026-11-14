@@ -1,0 +1,281 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""Checkpoint-interop regressions for issue #4053 (items 1-3).
+
+Every case failed on the parent commit:
+
+* an AutoAWQ checkpoint that declares ``modules_to_not_convert: ["down_proj"]``
+  was loaded with a zero-filled AWQ placeholder (NaN output) because the loader
+  ignored the key;
+* re-saving a loaded v1 checkpoint after setting ``format = gptq_v2`` copied the
+  old v1 qzeros under the v2 label;
+* ``save_pretrained()`` on a loaded model wrote the kernel's converted v2
+  qzeros while ``checkpoint_format`` still said v1.
+
+The synthetic fixtures are CPU-only and use an independent dense oracle for the
+AWQ case; the GPTQ cases compare logits before and after the round trip.
+"""
+
+import os
+import shutil
+
+import pytest
+import torch
+from safetensors.torch import load_file, save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization import FORMAT, QuantizeConfig
+from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+from gptqmodel.utils.model import convert_gptq_v2_to_v1_format
+
+
+HIDDEN = 32
+INTERMEDIATE = 64
+VOCAB = 32
+GROUP = 32
+BITS = 4
+
+
+def _save_tokenizer(directory):
+    PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(
+            WordLevel({"[UNK]": 0, "[BOS]": 1, "[EOS]": 2}, unk_token="[UNK]")
+        ),
+        unk_token="[UNK]",
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+    ).save_pretrained(directory)
+
+
+def _tiny_llama(seed=0):
+    config = LlamaConfig(
+        vocab_size=VOCAB,
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    torch.manual_seed(seed)
+    return config, LlamaForCausalLM(config).half()
+
+
+def _logits(model):
+    with torch.inference_mode():
+        return model(input_ids=torch.tensor([[1, 3, 4, 5]]), use_cache=False).logits.float()
+
+
+def _relative_error(reference, actual):
+    return (reference - actual).abs().max().item() / reference.abs().max().item()
+
+
+def _build_awq_checkpoint(path):
+    """Write an AWQ checkpoint whose ``down_proj`` is deliberately dense."""
+
+    os.makedirs(path, exist_ok=True)
+    config, dense = _tiny_llama()
+    state = {name: value.clone() for name, value in dense.state_dict().items()}
+    oracle = LlamaForCausalLM(config).half()
+    oracle.load_state_dict(dense.state_dict())
+
+    for name, linear in list(dense.named_modules()):
+        if not isinstance(linear, torch.nn.Linear) or name == "lm_head":
+            continue
+        if name.endswith("mlp.down_proj"):
+            # The producer left this module unquantized; its dense weight must
+            # survive the load instead of becoming a zero-filled AWQ placeholder.
+            continue
+        out_features, in_features = linear.out_features, linear.in_features
+        groups = in_features // GROUP
+        codes = torch.randint(0, 1 << BITS, (in_features, out_features), dtype=torch.int32)
+        zeros = torch.randint(0, 1 << BITS, (groups, out_features), dtype=torch.int32)
+        scales = (torch.rand(groups, out_features) * 0.02 + 0.001).half()
+        qweight, qzeros = pack_awq(codes, zeros, BITS)
+        state[f"{name}.qweight"] = qweight
+        state[f"{name}.qzeros"] = qzeros
+        state[f"{name}.scales"] = scales
+        state.pop(f"{name}.weight", None)
+
+        # Independent dense oracle: (code - zero) * scale, expanded per group.
+        expanded_zeros = zeros.repeat_interleave(GROUP, dim=0).to(torch.float32)
+        expanded_scales = scales.repeat_interleave(GROUP, dim=0).to(torch.float32)
+        weight = (codes.to(torch.float32) - expanded_zeros) * expanded_scales
+        oracle.get_submodule(name).weight.data.copy_(weight.t().to(torch.float16))
+
+    save_file(
+        {name: value.contiguous() for name, value in state.items()},
+        os.path.join(path, "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    config.quantization_config = {
+        "quant_method": "awq",
+        "bits": BITS,
+        "group_size": GROUP,
+        "zero_point": True,
+        "version": "gemm",
+        "modules_to_not_convert": ["down_proj"],
+    }
+    config.save_pretrained(path)
+    _save_tokenizer(path)
+    return oracle
+
+
+def _build_gptq_v1_checkpoint(path):
+    """Write a v1 GPTQ checkpoint and return its qzeros for byte assertions."""
+
+    os.makedirs(path, exist_ok=True)
+    config, model = _tiny_llama()
+    qcfg = QuantizeConfig(bits=BITS, group_size=GROUP, desc_act=False, sym=True, format=FORMAT.GPTQ)
+    for name, linear in list(model.named_modules()):
+        if not isinstance(linear, torch.nn.Linear) or name == "lm_head":
+            continue
+        quant = TorchLinear(
+            bits=BITS,
+            group_size=GROUP,
+            desc_act=False,
+            sym=True,
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=False,
+            format=FORMAT.GPTQ_V2,
+        )
+        scales = torch.full((linear.out_features, linear.in_features // GROUP), 0.01)
+        zeros = torch.full_like(scales, 8)
+        quant.pack_original(linear, scales, zeros)
+        model.set_submodule(name, quant)
+    convert_gptq_v2_to_v1_format(model, qcfg, TorchLinear)
+
+    state = {name: value.clone() for name, value in model.state_dict().items()}
+    save_file(state, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
+    config.architectures = ["LlamaForCausalLM"]
+    config.save_pretrained(path)
+    qcfg.save_pretrained(path)
+    _save_tokenizer(path)
+    return state
+
+
+def _load(path, backend=BACKEND.GPTQ_TORCH):
+    return GPTQModel.load(
+        path,
+        backend=backend,
+        device="cpu",
+        dtype=torch.float16,
+        local_files_only=True,
+    )
+
+
+def test_awq_modules_to_not_convert_keeps_dense_module(tmp_path):
+    source = tmp_path / "awq"
+    oracle = _build_awq_checkpoint(str(source))
+
+    model = _load(str(source), backend=BACKEND.AWQ_TORCH)
+    down_proj = model.model.model.layers[0].mlp.down_proj
+
+    assert type(down_proj) is torch.nn.Linear
+    logits = _logits(model.model)
+    assert torch.isfinite(logits).all()
+    assert _relative_error(_logits(oracle), logits) < 2e-3
+
+
+def test_optimum_inclusion_list_restricts_quantization():
+    config = QuantizeConfig.from_quant_config(
+        {
+            "quant_method": "gptq",
+            "bits": 4,
+            "group_size": 128,
+            "sym": True,
+            "desc_act": False,
+            "modules_in_block_to_quantize": [["self_attn.q_proj"], ["mlp.down_proj"]],
+        }
+    )
+
+    assert config.external_module_inclusions() == ("self_attn.q_proj", "mlp.down_proj")
+
+
+def test_awq_missing_qweight_is_rejected(tmp_path):
+    source = tmp_path / "awq_missing"
+    _build_awq_checkpoint(str(source))
+    state = load_file(str(source / "model.safetensors"))
+    state.pop("model.layers.0.self_attn.q_proj.qweight")
+    save_file(state, str(source / "model.safetensors"), metadata={"format": "pt"})
+
+    with pytest.raises(ValueError, match="Missing required quantized weights"):
+        _load(str(source), backend=BACKEND.AWQ_TORCH)
+
+
+def test_resave_v1_to_v2_converts_qzeros(tmp_path):
+    source = tmp_path / "v1"
+    _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source))
+    reference = _logits(model.model)
+
+    model.quantize_config.format = FORMAT.GPTQ_V2
+    target = tmp_path / "v2"
+    model.save(str(target))
+
+    source_qzeros = load_file(str(source / "model.safetensors"))[
+        "model.layers.0.self_attn.q_proj.qzeros"
+    ]
+    saved_qzeros = load_file(str(target / "model.safetensors"))[
+        "model.layers.0.self_attn.q_proj.qzeros"
+    ]
+    # v1 stores (zero_point - 1); v2 stores the logical zero point.
+    assert not torch.equal(source_qzeros, saved_qzeros)
+
+    reloaded = _load(str(target))
+    assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+
+def test_resave_refuses_unconvertible_format_change(tmp_path):
+    source = tmp_path / "v1"
+    _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source))
+    model.quantize_config.format = FORMAT.MARLIN
+
+    with pytest.raises(ValueError, match="requires re-quantization"):
+        model.save(str(tmp_path / "marlin"))
+
+
+def test_save_pretrained_emits_checkpoint_qzeros(tmp_path):
+    source = tmp_path / "v1"
+    state = _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source))
+    reference = _logits(model.model)
+
+    target = tmp_path / "hf"
+    model.model.save_pretrained(str(target))
+    shutil.copy(source / "quantize_config.json", target / "quantize_config.json")
+    _save_tokenizer(str(target))
+
+    saved_qzeros = load_file(str(target / "model.safetensors"))[
+        "model.layers.0.self_attn.q_proj.qzeros"
+    ]
+    # The in-memory kernel converted v1 -> v2; the serialized checkpoint must
+    # still carry the v1 words named by `checkpoint_format: gptq`.
+    assert torch.equal(saved_qzeros, state["model.layers.0.self_attn.q_proj.qzeros"])
+
+    reloaded = _load(str(target))
+    assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+
+def test_runtime_layout_kernels_refuse_state_dict():
+    marlin = object.__new__(MarlinLinear)
+    marlin._marlin_repacked = True
+    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+        marlin._save_to_state_dict({}, "", False)
+
+    exllama = object.__new__(ExllamaV2Linear)
+    exllama._native_shuffled = True
+    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+        exllama._save_to_state_dict({}, "", False)

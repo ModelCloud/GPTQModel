@@ -92,10 +92,11 @@ class MiniMaxQModel(BaseQModel):
                 # linear-attention ("lightning") layers
                 "qkv_proj:0",
                 # `output_gate` reads the same normed input as qkv_proj, so it
-                # receives the folded scale as a consumer. Its own output feeds
-                # `out_proj` through a sigmoid, so it is a non-source.
-                "output_gate:0:!:nosrc",
-                "out_proj:1",
+                # belongs in that group and receives the folded scale. Its own
+                # output feeds `out_proj` through a sigmoid, so it is a
+                # non-source and `out_proj` keeps its own group.
+                "output_gate:0:nosrc",
+                "out_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
             "mlp:moe": {  # MoE module

@@ -5339,7 +5339,14 @@ class BaseQModel(nn.Module):
         for node in nodes:
             prev_op = node.get("prev_op")
             gain = getattr(prev_op, "weight", None)
-            if not isinstance(prev_op, nn.Module) or not isinstance(gain, torch.Tensor) or gain.ndim != 1:
+            if not isinstance(prev_op, nn.Module):
+                merged.append(node)
+                continue
+            # A gated or weightless norm is still a single source, even though it
+            # has no 1-D gain to divide; merging keeps one group per norm so a
+            # later foldability check drops the whole group instead of half.
+            has_gain = isinstance(gain, torch.Tensor) and gain.ndim == 1
+            if not has_gain and norm_type_of(prev_op) is None:
                 merged.append(node)
                 continue
             key = id(prev_op)

@@ -92,6 +92,7 @@ class SmolVLMQModel(BaseQModel):
         return processor.apply_chat_template(
             conversations,
             add_generation_prompt=True,
+            padding=True,
             return_tensors="pt",
             return_dict=True,
             tokenize=True,

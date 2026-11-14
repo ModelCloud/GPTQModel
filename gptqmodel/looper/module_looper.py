@@ -832,6 +832,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if torch.is_tensor(mask) and mask.ndim == 2
             else None
         )
+        # Routed-expert hooks need to know whether this batch contains padding
+        # before they scan a `[routed_rows, H]` activation for all-zero rows.
+        # Resolve it here, once per batch, instead of synchronizing per expert.
+        tls.mask_has_padding = (
+            not bool(mask.all())
+            if torch.is_tensor(mask) and mask.ndim == 2
+            else None
+        )
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -2169,6 +2177,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
             else:
+                forward_policy = getattr(processor, "forward", None)
+                if forward_policy is not None and not getattr(
+                    forward_policy, "allow_auto_dtype_cast", True
+                ):
+                    # Forward-only capture: nothing restores a packed
+                    # AUTO_NF12 source afterwards, so the model tree keeps the
+                    # dense module the next processor will quantize.
+                    subset[name].state["auto_dtype_cast_forward_disabled"] = True
                 source_module = subset[name].module
                 # EoRA runs after quantization: its forward must consume the
                 # quantized module in the model tree, not a freshly packed

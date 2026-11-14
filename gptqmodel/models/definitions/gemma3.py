@@ -12,13 +12,16 @@ import torch
 from transformers import AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched_conversations
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
+
+
+_GEMMA3_REPLAY_MASK_MAPPING = "__gptqmodel_gemma3_replay_mask_mapping"
 
 
 class Gemma3QModel(LlamaQModel):
@@ -152,6 +155,79 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
 
     lm_head_module = "model.lm_head"
 
+    def _language_model(self):
+        return self.model.model.language_model
+
+    def _start_replay_mask_capture(self) -> None:
+        """Capture the per-layer-type masks Gemma-3's outer model builds.
+
+        ``Gemma3Model.forward`` hands the text decoder a ``full_attention`` /
+        ``sliding_attention`` mask dict built from ``token_type_ids`` so image
+        tokens attend bidirectionally inside each image block. The first-layer
+        hook only sees the tensor selected for layer 0, so keep the whole dict
+        for replay instead of rebuilding it without the image-block overlay.
+        """
+
+        self._stop_replay_mask_capture()
+        language_model = self._language_model()
+
+        def capture_outer_inputs(module, args, kwargs):
+            del args
+            attention_mask = kwargs.get("attention_mask")
+            if isinstance(attention_mask, dict):
+                setattr(module, _GEMMA3_REPLAY_MASK_MAPPING, attention_mask)
+
+        self._gemma3_mask_capture_handle = language_model.register_forward_pre_hook(
+            capture_outer_inputs,
+            with_kwargs=True,
+        )
+
+    def _stop_replay_mask_capture(self) -> None:
+        handle = getattr(self, "_gemma3_mask_capture_handle", None)
+        if handle is not None:
+            handle.remove()
+            delattr(self, "_gemma3_mask_capture_handle")
+
+        language_model = self._language_model()
+        if hasattr(language_model, _GEMMA3_REPLAY_MASK_MAPPING):
+            delattr(language_model, _GEMMA3_REPLAY_MASK_MAPPING)
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(
+            args,
+            kwargs,
+            batch_device,
+            layer_input_kwargs,
+        )
+        mask_mapping = getattr(self._language_model(), _GEMMA3_REPLAY_MASK_MAPPING, None)
+        if isinstance(mask_mapping, dict):
+            layer_input_kwargs[_GEMMA3_REPLAY_MASK_MAPPING] = nested_move_to(
+                mask_mapping,
+                device=batch_device,
+            )
+        return layer_input_kwargs
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        mask_mapping = additional_inputs.pop(_GEMMA3_REPLAY_MASK_MAPPING, None)
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer,
+            layer_input,
+            additional_inputs,
+            target_device,
+        )
+        if not isinstance(mask_mapping, dict):
+            return additional_inputs
+
+        layer_types = self._declared_layer_types() or ()
+        layer_type = self._resolve_layer_replay_type(layer, layer_types)
+        mask = mask_mapping.get(layer_type) if layer_type is not None else None
+        if mask is None:
+            # Single-type stacks keep the layer-0 mask for every layer.
+            mask = next(iter(mask_mapping.values()), None)
+        if mask is not None:
+            additional_inputs["attention_mask"] = move_to(mask, device=target_device)
+        return additional_inputs
+
     def pre_quantize_generate_hook_start(self):
         language_model = self.model.model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
@@ -159,8 +235,10 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         self.shell_module_materialize(language_model.norm, self.quantize_config.device)
         self.shell_module_materialize(self.model.model.vision_tower, self.quantize_config.device)
         self.shell_module_materialize(self.model.model.multi_modal_projector, self.quantize_config.device)
+        self._start_replay_mask_capture()
 
     def pre_quantize_generate_hook_end(self):
+        self._stop_replay_mask_capture()
         language_model = self.model.model.language_model
         if self.quantize_config.offload_to_disk:
             offload_to_disk(

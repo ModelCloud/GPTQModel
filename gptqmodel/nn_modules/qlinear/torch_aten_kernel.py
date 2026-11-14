@@ -350,13 +350,13 @@ class TorchAtenLinear(PackableQuantLinear):
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
             # The fused kernel writes the activation dtype before a separate
-            # bias add, so a pre-bias sum outside its range would become inf.
-            # Keep biased layers on the FP32-reduce dense path unless the
-            # fused op applies the bias itself.
+            # bias add unless ``_fused_op_forward`` asks for an FP32 product.
+            # Biased FP16 layers take that path so the pre-bias sum cannot
+            # overflow before the bias cancels it.
             and (
                 self.bias is None
                 or self._fused_op_handles_bias
-                or x.dtype == torch.bfloat16
+                or x.dtype in (torch.bfloat16, torch.float16)
             )
         ):
             capture_fused_train_state(self)
@@ -408,7 +408,17 @@ class TorchAtenLinear(PackableQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
-        return _cpu_int4pack_mm(x, self.qweight, self.group_size, self.scales_and_zeros)
+        return _cpu_int4pack_mm(
+            x,
+            self.qweight,
+            self.group_size,
+            self.scales_and_zeros,
+            out_dtype=(
+                torch.float32
+                if self.bias is not None and x.dtype == torch.float16
+                else None
+            ),
+        )
 
     def _empty_gptq_only_weights(self):
         self.qzeros = None

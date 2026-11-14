@@ -166,6 +166,16 @@ _LEGACY_BACKEND_BY_METHOD = {
     "nf12": {
         BACKEND.TORCH: BACKEND.NF12,
     },
+    "qqq": {
+        BACKEND.TORCH: BACKEND.QQQ_TORCH,
+    },
+    "gguf": {
+        BACKEND.TORCH: BACKEND.GGUF_TORCH,
+        BACKEND.TRITON: BACKEND.GGUF_TRITON,
+    },
+    "bitsandbytes": {
+        BACKEND.TORCH: BACKEND.BITSANDBYTES,
+    },
 }
 
 # Method-qualified Marlin/Machete/Swordfish/AllSpark names from older releases.

@@ -100,3 +100,47 @@ def test_native_capture_skips_empty_samples_like_gptq_processor(kind):
     # skip them too or every later sample would read the wrong entry.
     assert torch.isfinite(quantizer.H).all()
     assert quantizer.H.shape == (8, 8)
+
+
+def _foem_quantize(blocksize, *, group_size=-1, beta=0.2, columns=512, rows=16):
+    """Quantize one synthetic linear with FOEM and return Q plus the avg loss."""
+
+    torch.manual_seed(0)
+    linear = nn.Linear(columns, rows, bias=False)
+    named = NamedModule(linear, name="proj", full_name="model.layers.0.proj", layer_index=0)
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        act_group_aware=False,
+        foem=FOEMConfig(alpha=0, beta=beta),
+    )
+    task = FOEM(named, qcfg)
+    task.quantizer.configure(perchannel=True)
+    x = torch.randn(64, columns)
+    task.add_batch(x, linear(x))
+    Q, _scale, _zero, _g_idx, _duration, avg_loss, _damp, _nsamples = task.quantize(
+        blocksize=blocksize
+    )
+    return Q.clone(), avg_loss
+
+
+def test_foem_block_boundary_beta_correction_is_blocksize_invariant():
+    """The beta correction must reach the first column of every block.
+
+    ``FOEM.quantize`` pulls the next column back toward its raw value before
+    that column is quantized. The block-boundary form targeted
+    ``W[:, i2 + 1]`` after the inner loop had already ended, so it never ran
+    and every block after the first skipped beta for its first column. With
+    ``group_size=-1`` the quantization grid is fixed before the loop, so the
+    only difference between block sizes is the correction itself.
+    """
+
+    q128, loss128 = _foem_quantize(128)
+    q512, loss512 = _foem_quantize(512)
+
+    torch.testing.assert_close(q128, q512, rtol=0, atol=1e-5)
+    torch.testing.assert_close(
+        torch.tensor(loss128), torch.tensor(loss512), rtol=0, atol=1e-4
+    )

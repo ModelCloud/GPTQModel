@@ -419,6 +419,23 @@ def test_linear_handles_a_full_grid_y():
     assert ((got.to(torch.float32) - expected).abs().max() / expected.abs().max()).item() < 5e-3
 
 
+def test_linear_f32_handles_a_full_grid_y():
+    """The fp32 SIMT path maps one row tile onto grid.y, which caps at 65535."""
+
+    torch.manual_seed(13)
+    m, n, k = 2_097_152, 1, 16
+    weight = torch.randn(n, k, device="cuda", dtype=torch.float32)
+    grid, _, _ = _reference(weight, 8)
+    codes, exponents = _cuda_quantize(weight, 8)
+
+    x = torch.ones((m, k), dtype=torch.float32, device="cuda")
+    got = bf_cuda.linear(x, codes, exponents, 8)
+
+    expected = x @ grid.reshape(n, k).T
+    assert tuple(got.shape) == (m, n)
+    assert ((got - expected).abs().max() / expected.abs().max()).item() < 5e-3
+
+
 def test_fused_fallback_masks_an_odd_output_width():
     """The fused path must not write past the last column when ``n`` is odd.
 

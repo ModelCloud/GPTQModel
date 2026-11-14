@@ -18,6 +18,10 @@ class Llama4QModel(BaseQModel):
     support_batch_quantize = False
     loader = AutoModelForImageTextToText
 
+    # The conditional-generation wrapper keeps the causal head on its inner
+    # `Llama4ForCausalLM`, not at the top level.
+    lm_head = "language_model.lm_head"
+
     pre_lm_head_norm_module = "language_model.model.norm"
 
     dynamic_expert_index = "num_local_experts"

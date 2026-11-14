@@ -34,6 +34,11 @@ void hgemm
     TORCH_CHECK_DIM(b, 2);
     TORCH_CHECK_SHAPES(a, -1, b, 0, 1);
     TORCH_CHECK_SHAPES(b, 1, c, -1, 1);
+    // cuBLAS reads `a`/`b`/`c` with dense leading dimensions; a strided view
+    // would be interpreted as packed rows.
+    TORCH_CHECK(a.is_contiguous(), "hgemm requires a contiguous `a`");
+    TORCH_CHECK(b.is_contiguous(), "hgemm requires a contiguous `b`");
+    TORCH_CHECK(c.is_contiguous(), "hgemm requires a contiguous `c`");
 
     const half* a_ptr = (const half*) a.data_ptr();
     const half* b_ptr = (const half*) b.data_ptr();

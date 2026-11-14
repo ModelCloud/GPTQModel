@@ -17,6 +17,13 @@ def tensor_buffer(tensor: torch.Tensor):
     without importing NumPy.
     """
     view = tensor.detach()
+    if not _tracks_version_counter(view):
+        # RTN packs weights under ``torch.inference_mode()``. Those buffers,
+        # and views whose storage came from them, have no version counter, so
+        # ``reshape``/``contiguous`` fail even though ``is_inference()`` can
+        # report ``False``. Materialize a normal copy outside inference mode.
+        with torch.inference_mode(False):
+            view = view.clone()
     if view.is_conj() or view.is_neg():
         view = view.resolve_conj().resolve_neg()
     view = view.to(device="cpu").contiguous().reshape(-1)
@@ -24,6 +31,14 @@ def tensor_buffer(tensor: torch.Tensor):
     if nbytes == 0:
         return view, memoryview(b"")
     return view, memoryview((ctypes.c_char * nbytes).from_address(view.data_ptr()))
+
+
+def _tracks_version_counter(tensor: torch.Tensor) -> bool:
+    try:
+        tensor._version
+    except RuntimeError:
+        return False
+    return True
 
 
 def tensor_bytes(tensor: torch.Tensor) -> bytes:

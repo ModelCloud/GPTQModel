@@ -1446,11 +1446,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
                 "q_b_norm:!",
                 # q_b_proj reads q_a, and o_b_proj reads the attention output;
                 # neither is the direct input of the next scaling consumer.
-                "q_b_proj:0:q:in=q_a:nosrc",
+                "q_b_proj:1:q:in=q_a:nosrc",
                 "o_a_proj:!",
-                "o_b_proj:1:o:nosrc",
+                "o_b_proj:2:o:nosrc",
                 "kv_norm:!",
-                "kv_proj:2:k:v",
+                "kv_proj:0:k:v",
                 "compressor:!",
                 "compressor.kv_norm:!",
                 "compressor.kv_proj:!",
@@ -1581,12 +1581,42 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
         forward or quant-source role. Eagerly materializing the containing
         layer first bypasses that decoder-aware boundary and tries to reshape
         packed FP4 expert weights into dense shell parameters.
+
+        That boundary only exists for the packed-floatx/EXL3 decoder. The
+        ordinary GPTQ/AWQ/RTN subset loop prepares just the current subset, so
+        an eagerly skipped layer still holds META projections when the whole
+        layer is rehomed for its first forward ("Tensor on device meta").
+        Materialize target layers eagerly for every other method.
         """
 
         layers = getattr(getattr(self.model, "model", None), "layers", ())
-        if any(module is layer for layer in layers):
+        if any(module is layer for layer in layers) and self._keeps_packed_target_layer_lazy():
             return module
         return super().pre_quantize(module)
+
+    def _keeps_packed_target_layer_lazy(self) -> bool:
+        """Whether this run uses the decoder-aware packed-floatx layer boundary."""
+
+        quantize_config = getattr(self, "quantize_config", None)
+        if quantize_config is None:
+            # Direct ModuleLooper callers and unit harnesses keep the packed
+            # boundary; they opt in to the decoder by setting a config.
+            return True
+
+        for attr in ("method", "format"):
+            value = getattr(quantize_config, attr, None)
+            name = str(getattr(value, "value", value)).lower()
+            if name == "exl3":
+                return True
+
+        active_decoder = getattr(self, "_active_auto_module_decoder_config", None)
+        if callable(active_decoder):
+            try:
+                if active_decoder() is not None:
+                    return True
+            except Exception:
+                return True
+        return False
 
     def zero_route_recovery_context(
         self,

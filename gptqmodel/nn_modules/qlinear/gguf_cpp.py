@@ -699,6 +699,13 @@ class _GGMLBridge:
         x: torch.Tensor,
         kernel_name: str,
     ) -> torch.Tensor:
+        # ggml runs the graph on its own CUDA stream. Any work the caller
+        # enqueued on its current stream (for example under
+        # `torch.cuda.stream(s)`) must be visible before ggml copies the input
+        # from `x.data_ptr()`, otherwise the copy reads stale memory and the
+        # result is wrong. A synchronize is the portable ordering primitive
+        # here: ggml's stream is not exposed.
+        torch.cuda.current_stream(x.device).synchronize()
         self._ggml_base.ggml_backend_tensor_set(
             plan.input_tensor,
             ctypes.c_void_p(x.data_ptr()),
@@ -789,27 +796,36 @@ class _GGMLBridge:
             )
 
         device = x.device
-        backend = self._get_cuda_backend(0 if device.index is None else device.index)
-        x_cuda, input_ggml_type = self._normalize_input_cuda(x, padded_in_features)
-        if plan is None:
-            qweight_cuda = self._normalize_qweight_cuda(qweight, device=device)
-            plan = self.build_quantized_matmul_cuda_plan(
+        previous_device = torch.cuda.current_device()
+        try:
+            backend = self._get_cuda_backend(0 if device.index is None else device.index)
+            x_cuda, input_ggml_type = self._normalize_input_cuda(x, padded_in_features)
+            if plan is None:
+                qweight_cuda = self._normalize_qweight_cuda(qweight, device=device)
+                plan = self.build_quantized_matmul_cuda_plan(
+                    backend=backend,
+                    qweight=qweight_cuda,
+                    gguf_tensor_qtype=gguf_tensor_qtype,
+                    padded_in_features=padded_in_features,
+                    out_features=out_features,
+                    rows=x_cuda.shape[0],
+                    input_ggml_type=input_ggml_type,
+                    kernel_name="GGUFCudaKernel",
+                )
+            output = self.run_quantized_matmul_cuda_plan(
                 backend=backend,
-                qweight=qweight_cuda,
-                gguf_tensor_qtype=gguf_tensor_qtype,
-                padded_in_features=padded_in_features,
-                out_features=out_features,
-                rows=x_cuda.shape[0],
-                input_ggml_type=input_ggml_type,
+                plan=plan,
+                x=x_cuda,
                 kernel_name="GGUFCudaKernel",
             )
-        output = self.run_quantized_matmul_cuda_plan(
-            backend=backend,
-            plan=plan,
-            x=x_cuda,
-            kernel_name="GGUFCudaKernel",
-        )
-        return output, plan
+            return output, plan
+        finally:
+            # ggml's CUDA backend calls `cudaSetDevice`; without restoring it
+            # a forward on cuda:1 leaves the process's current device on 1, so
+            # later `torch.empty(device="cuda")` allocations land on the wrong
+            # GPU.
+            if torch.cuda.current_device() != previous_device:
+                torch.cuda.set_device(previous_device)
 
 
 _GGML_BRIDGE: Optional[_GGMLBridge] = None

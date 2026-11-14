@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+from types import SimpleNamespace
 from typing import Dict, Optional
 
 import torch
@@ -82,10 +83,39 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     ATTENTION_MASKS_DTYPE = torch.long
     require_monkeypatch = True
 
+    # Transformers 5.22 registers the checkpoint -> runtime renames for the
+    # Qwen2.5-Omni thinker (``thinker.visual`` -> ``thinker.model.visual``, and
+    # likewise for the audio tower and ``language_model``) under the nested
+    # ``qwen2_5_omni_thinker`` model type, not the top-level ``qwen2_5_omni``.
+    # Resolving the top-level type therefore finds no conversion map, and the
+    # lazy disk loader leaves the towers and ``embed_tokens`` on META. Declare
+    # the runtime -> checkpoint aliases explicitly so both layouts resolve.
+    HF_CONVERSION_MAP_REVERSED = (
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.visual\.(.+)$"],
+            target_patterns=[r"^thinker.visual.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.audio_tower\.(.+)$"],
+            target_patterns=[r"^thinker.audio_tower.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.language_model\.(.+)$"],
+            target_patterns=[r"^thinker.model.\1"],
+            operations=[],
+        ),
+    )
+
     loader = AutoModelForTextToWaveform
 
     lm_head = "thinker.lm_head"
-    pre_lm_head_norm_module = "thinker.model.norm"
+    # transformers 5.22 nests the thinker decoder under `language_model`.
+    pre_lm_head_norm_module = [
+        "thinker.model.language_model.norm",
+        "thinker.model.norm",
+    ]
 
     require_pkgs = ["audioread>=3.1.0", "librosa>=0.11.0", "av>=16.0.1"]
 
