@@ -23,6 +23,32 @@ HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
 
+def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = False) -> bool:
+    """Return whether one `rank_pattern` key selects `weight_key`.
+
+    The checks mirror PEFT's documented order: an exact module name, then a
+    module-name suffix, then a regex search. The pattern is matched exactly as
+    written. Canonical module names are case-sensitive (MPT's `Wqkv`,
+    Baichuan's `W_pack`) and regex escapes such as `\\S`, `\\D`, and `\\W` are
+    meaningful, so the pattern text is never rewritten.
+
+    `ignore_case` is the explicit legacy-export fallback. It folds only the
+    literal comparisons and the regex engine's case flag; the pattern itself is
+    passed through unchanged, so escapes keep their meaning.
+    """
+
+    if ignore_case:
+        folded_key = weight_key.lower()
+        folded_pattern = pattern.lower()
+        if folded_key == folded_pattern or folded_key.endswith(folded_pattern):
+            return True
+        return pcre.compile(pattern, pcre.IGNORECASE).search(weight_key) is not None
+
+    if weight_key == pattern or weight_key.endswith(pattern):
+        return True
+    return pcre.compile(pattern).search(weight_key) is not None
+
+
 class AdapterCache():
     """Caches loaded adapter configs and tensors by source path."""
 
@@ -303,14 +329,16 @@ class Lora(Adapter):
         if lora_cfg.rank_pattern:
             for k, v in lora_cfg.rank_pattern.items():
                 assert isinstance(k, str) and isinstance(v, int)
-                k = k.lower()
                 assert v > 0 # check for invalid rank range
-                # first do string full match, then suffix match, then regex match
-                if (
-                    weight_key == k
-                    or weight_key.endswith(k)
-                    or pcre.compile(k).search(weight_key)
-                ):
+                # Match the pattern exactly as written: full name, then suffix,
+                # then regex. Lowercasing here silently missed canonical
+                # mixed-case module names and inverted regex escapes.
+                matched = _rank_pattern_matches(k, weight_key)
+                if not matched and (k != k.lower() or weight_key != weight_key.lower()):
+                    # Legacy GPT-QModel exports lowercased module names. Retry
+                    # case-insensitively without rewriting the pattern.
+                    matched = _rank_pattern_matches(k, weight_key, ignore_case=True)
+                if matched:
                     self.rank = v
                     log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
                     return True

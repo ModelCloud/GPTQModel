@@ -1210,6 +1210,8 @@ GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded thro
 
 PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
 
+Per-module `rank_pattern` overrides match canonical, case-sensitive module names and are applied in full-name, suffix, then regex order; see [adapter rank-pattern matching](docs/adapter-rank-pattern-matching.md) for the matching flow and the legacy lowercase fallback.
+
 ### How to Add Support for a New Model 🛠️
 
 Follow **[Add and validate a new model](docs/module-plan-guide.md#add-and-validate-a-new-model)** and the current [Llama definition](gptqmodel/models/definitions/llama.py). Every new model type or alias needs an explicit registry plan case and a real-model module-plan unit test, including non-quantized checkpoint-owned decoder weights. See the [module-plan wiki](https://github.com/ModelCloud/GPTQModel/wiki/Module-Plan-Guide) for the same guide online.

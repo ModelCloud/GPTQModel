@@ -155,3 +155,82 @@ class TestExtensionConfig(unittest.TestCase):
         )
         assert adapter.rank == 8
 
+    def test_rank_pattern_matches_canonical_mixed_case_module_name(self):
+        """PEFT rank patterns name module segments in their canonical case."""
+
+        name = "transformer.blocks.0.attn.Wqkv"
+        for pattern in ("Wqkv", "Wqkv$", name):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            ), pattern
+            assert adapter.rank == 16, pattern
+
+        # Baichuan's `W_pack` is the other canonical mixed-case projection.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"W_pack": 32}),
+            "model.layers.3.mlp.W_pack",
+        )
+        assert adapter.rank == 32
+
+    def test_rank_pattern_preserves_regex_escapes(self):
+        """Lowercasing rewrote `\\S`/`\\D`/`\\W` into their opposite classes."""
+
+        name = "model.layers.0.self_attn.q_proj"
+        for pattern in (r"\S+\.q_proj$", r"\D+\.q_proj$", r"\W+q_proj$"):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            ), pattern
+            assert adapter.rank == 16, pattern
+
+        # The folded classes must not match a name that only the original
+        # spelling selects: `\d` needs a digit immediately before `.q_proj`.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\d+\.q_proj$": 16}), name
+        )
+        assert adapter.rank == 8
+
+    def test_rank_pattern_legacy_lowercase_module_name(self):
+        """Legacy exports lowercased module names; the fallback still matches."""
+
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"Wqkv": 16}),
+            "transformer.blocks.0.attn.wqkv",
+        )
+        assert adapter.rank == 16
+
+        # A lowercase pattern against a canonical mixed-case name is the same
+        # legacy pairing in the other direction.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"wqkv": 16}),
+            "transformer.blocks.0.attn.Wqkv",
+        )
+        assert adapter.rank == 16
+
+    def test_rank_pattern_mixed_case_regex_fallback_keeps_escapes(self):
+        """The case-insensitive fallback must not rewrite the pattern either."""
+
+        # `\S+\.Q_PROJ$` only differs from the legacy lowercase name by case,
+        # so the explicit fallback selects it. `\S` must still mean
+        # non-whitespace; a folded `\s` would never match this name.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\S+\.Q_PROJ$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 16
+
+        # The fallback must not turn a genuinely non-matching escape into a
+        # match: `\s+\.q_proj$` requires whitespace and this name has none.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\s+\.q_proj$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
