@@ -162,7 +162,8 @@ def _capture_and_replay(model, qmodel_cls, input_ids, attention_mask):
         with torch.inference_mode():
             model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
     except _StopCapture:
-        pass
+        # Expected control-flow exception from `capture_first` to stop early after capture.
+        ...
     finally:
         handle.remove()
         qmodel.end_input_capture_example()
