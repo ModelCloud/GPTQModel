@@ -9,6 +9,9 @@ forward would have handed it at that depth.**
 
 Introduced by the fix for issue #4004.
 
+The base-type mask, the definition-override `super()` contract, and the AWQ
+typed-rotary call are covered in [layer-type replay masks](layer-type-replay-masks.md).
+
 ## Why the layer-0 capture was not enough
 
 `transformers` 5 builds the attention mask *per layer type*, not once for the
@@ -80,9 +83,9 @@ flowchart TD
     K --> L["ForwardExecutor.run_single<br/>or forward_batch_worker"]
     L --> M["prepare_layer_replay_kwargs"]
     M --> N{"layer type == captured base type?"}
-    N -- yes --> O["replay layer-0 mask and RoPE"]
+    N -- yes --> O["apply rebuilt base-type mask<br/>keep captured layer-0 RoPE"]
     N -- no --> P["replay that type's mask and position_embeddings"]
-    O --> Q["definition override still runs last<br/>cohere_compass, inkling, olmo3, gemma3n"]
+    O --> Q["definition override runs after<br/>it must call super() first"]
     P --> Q
     Q --> R["decoder layer forward<br/>Hessian from native activations"]
     style E fill:#ffe7ba
@@ -107,7 +110,8 @@ Before-lines are from `origin/main`; after-lines are this change.
 | Raw 2-D padding mask | discarded (`gptqmodel/models/base.py:3272`) | retained for one example (`gptqmodel/models/base.py:3285`) |
 | Capture stage | `gptqmodel/looper/stage_inputs_capture.py:296` | same call, plus the optional `capture_layer_type_replay_kwargs` hook at `gptqmodel/looper/stage_inputs_capture.py:306` |
 | Replay stage | `gptqmodel/looper/forward_executor.py:394` | same call; selection happens inside the default `prepare_layer_replay_kwargs` |
-| Definition overrides | authoritative | still authoritative: they run after the default selection |
+| Base-type mask | not rebuilt; `support_batch_quantize=False` replayed `None` | rebuilt for `layer_types[0]` and applied when non-`None` (`gptqmodel/models/base.py:3689`) |
+| Definition overrides | authoritative; five skipped `super()` | still authoritative, but they call `super()` first so the private key is consumed |
 
 ## Contracts
 
@@ -121,6 +125,8 @@ Before-lines are from `origin/main`; after-lines are this change.
 | layer's declared type has no captured entry | layer-0 kwargs, unchanged |
 | layer's declared type maps to no single builder (`hybrid`, unknown) | that type keeps the layer-0 kwargs |
 | layer-0 mask is `None` (causal skip) but a later type needs a materialized mask | the later type's mask is injected |
+| base-type rebuilt mask is a tensor | applied even when `support_batch_quantize=False` supplied `None` |
+| base-type rebuilt mask is `None` (causal skip) | the incoming mask is kept, never cleared |
 
 `prepare_layer_replay_keep_mask` needs no change: the processor keep-mask is
 padding-equivalent for a causal and for a sliding-window causal mask, because
