@@ -258,6 +258,22 @@ def load_tt_llama_weights(checkpoint_dir: str):
 # --------------------------------------------------------------------------- KV pool
 
 
+def kv_pool_geometry(max_context: int, kv_tokens: int, block_size: int):
+    """``(blocks per user, pool blocks incl. scratch)`` satisfying both device ops.
+
+    * Chunked SDPA needs page-table rows of a multiple of 32 bytes, so the
+      per-user block count is rounded up to 8 int32 entries.
+    * ``paged_update_cache`` requires the page-table width to be no larger than
+      the pool, so a small pool (a short ``generate``) is grown to at least one
+      full row plus the scratch block.  Without this a one-prompt, 100-token
+      run sized a 7-block pool against an 8-wide table and failed in the op.
+    """
+
+    per_user = math.ceil(math.ceil(max_context / block_size) / 8) * 8
+    blocks = max(math.ceil(kv_tokens / block_size), per_user) + 1  # + scratch block 0
+    return per_user, blocks
+
+
 class KVBlockPool:
     """Host-side allocator for the paged KV cache.
 
@@ -332,12 +348,9 @@ class TTLlama:
             raise ValueError("block_size must be a tile multiple and prefill_chunk a multiple of max(block_size, 128)")
         self.block_size = block_size
         self.prefill_chunk = prefill_chunk
-        # Page-table rows must be a multiple of 32 bytes (8 int32 entries) for
-        # chunked SDPA, so the per-user block count is rounded up to 8.
-        self.max_blocks_per_user = math.ceil(math.ceil(max_context / block_size) / 8) * 8
+        self.max_blocks_per_user, self.num_blocks = kv_pool_geometry(
+            max_context, kv_tokens or self.users * min(max_context, 4096), block_size)
         self.max_context = self.max_blocks_per_user * block_size
-        kv_tokens = kv_tokens or self.users * min(self.max_context, 4096)
-        self.num_blocks = math.ceil(kv_tokens / block_size) + 1  # + scratch block 0
         self.kv_dtype = getattr(ttnn, kv_dtype)
         self.check_drift = check_drift
         self.drift: dict = {}
@@ -770,6 +783,7 @@ class TTLlama:
 __all__ = [
     "DECODE_BATCH",
     "KVBlockPool",
+    "kv_pool_geometry",
     "LlamaDims",
     "P300C_DECODE_GRIDS",
     "PackedBlockfloat",
