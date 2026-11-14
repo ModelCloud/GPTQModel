@@ -681,3 +681,63 @@ def test_reshard_rejects_index_shard_outside_source(tmp_path):
 
 def test_shard_config_accepts_layout_aliases():
     assert ShardConfig(layout="per-layer-with-single-global").layout is ShardLayout.PER_LAYER_WITH_SINGLE_GLOBAL
+
+
+@pytest.mark.parametrize(
+    "tensor_name",
+    [
+        "../../../victim/model.layers.0.w",
+        "/tmp/gptqmodel-victim/a.layers.3.w",
+    ],
+)
+def test_reshard_rejects_layer_group_escaping_staging_dir(tmp_path, tensor_name):
+    source = tmp_path / "source"
+    state = _make_state()
+    state[tensor_name] = torch.ones(2, dtype=torch.float16)
+    _build_source(source, state=state)
+
+    target = tmp_path / "target"
+    victim = tmp_path / "victim"
+
+    with pytest.raises(ValueError, match="Unsafe layer group"):
+        reshard(source, target)
+
+    assert not victim.exists()
+    assert not target.exists()
+
+
+def test_reshard_rejects_auxiliary_symlink_escaping_source(tmp_path):
+    source = tmp_path / "source"
+    _build_source(source)
+    secret = tmp_path / "id_rsa"
+    secret.write_text("private key", encoding="utf-8")
+    os.symlink(secret, source / "README.md")
+
+    with pytest.raises(ValueError, match="resolves outside the checkpoint tree"):
+        reshard(source, tmp_path / "target")
+
+
+def test_reshard_copies_auxiliary_hf_blob_symlink(tmp_path):
+    hub = tmp_path / "hub"
+    blobs = hub / "blobs"
+    snapshot = hub / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+
+    state = _make_state()
+    shard = blobs / "blob.safetensors"
+    save_file({name: tensor.contiguous() for name, tensor in state.items()}, str(shard), metadata={"format": "pt"})
+    shard_name = "model-00001-of-00001.safetensors"
+    os.symlink(os.path.join("..", "..", "blobs", "blob.safetensors"), snapshot / shard_name)
+    index = {
+        "metadata": {"total_size": shard.stat().st_size},
+        "weight_map": dict.fromkeys(state, shard_name),
+    }
+    (snapshot / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+    (blobs / "README.md").write_text("blob readme", encoding="utf-8")
+    os.symlink(os.path.join("..", "..", "blobs", "README.md"), snapshot / "README.md")
+
+    target = tmp_path / "target"
+    reshard(snapshot, target)
+
+    assert (target / "README.md").read_text(encoding="utf-8") == "blob readme"
