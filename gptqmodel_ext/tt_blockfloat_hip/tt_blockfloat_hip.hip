@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <type_traits>
 
 namespace {
@@ -1155,21 +1156,29 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
 // ---------------------------------------------------------------------------
 
 // True when the current device exposes the gfx12 WMMA instruction.
+//
+// The architecture probe is cached per device because hipGetDeviceProperties is
+// a driver call, but the cache is process-wide while the BF16 linear path can be
+// entered from several Python threads at once on a GIL-disabled build.  A plain
+// `bool initialised[]` guard is a data race there: two threads can both observe
+// the flag as unset and write `cache[device]` concurrently, which is undefined
+// behaviour and leaves the dispatch decision without a publication order.
+// `std::call_once` gives each device one synchronized initialization, and its
+// happens-before edge publishes `cache[device]` to every later caller.
 bool ttbf_wmma_device() {
-    static int cache[64];
-    static bool initialised[64] = {false};
+    static int cache[64] = {0};
+    static std::once_flag initialised[64];
     int device = 0;
     if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= 64) {
         return false;
     }
-    if (!initialised[device]) {
+    std::call_once(initialised[device], [device]() {
         hipDeviceProp_t props{};
         const bool ok = hipGetDeviceProperties(&props, device) == hipSuccess &&
                         (std::strncmp(props.gcnArchName, "gfx1200", 7) == 0 ||
                          std::strncmp(props.gcnArchName, "gfx1201", 7) == 0);
         cache[device] = ok ? 1 : 0;
-        initialised[device] = true;
-    }
+    });
     return cache[device] != 0;
 }
 

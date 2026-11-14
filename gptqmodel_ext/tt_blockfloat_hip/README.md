@@ -285,6 +285,34 @@ Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
 | 128x128 block, 32x32 warp tile | 39 us | 185 us |
 | partial-tile fix, staging test hoisted out of the loop | 35 us | 186 us |
 
+## Thread safety
+
+`ttbf_wmma_device()` caches a per-device architecture decision
+(`gfx1200`/`gfx1201` selects the WMMA path) because `hipGetDeviceProperties` is
+a driver call, and the bf16 `m > 1` linear path consults it on every launch.
+The cache is process-wide, so it must be initialized exactly once per device.
+
+```mermaid
+flowchart TD
+    A["ttbf_linear, bf16, m greater than 1"] --> B["ttbf_wmma_device()"]
+    B --> C["hipGetDevice"]
+    C --> D{"call_once for this device already ran?"}
+    D -- No --> E["one thread: hipGetDeviceProperties, store cache for device"]
+    D -- Yes --> F["cache for device is published by call_once"]
+    E --> G["return cache for device"]
+    F --> G
+    style E fill:#dfd,stroke:#060
+```
+
+`std::call_once` per device replaces the previous `static bool initialised[64]`
+flag. That flag was read and written without synchronization, so two threads
+entering their first bf16 linear on the same device could both observe it unset
+and write `cache[device]` concurrently — a C++ data race with no defined
+publication order for the dispatch decision. `call_once` gives each device one
+synchronized initialization and a happens-before edge, so every later caller
+observes the published result. The launch path is otherwise unchanged; the only
+added cost is one atomic check per call.
+
 ## Limitations
 
 * The checkpoint layout is row-major, as GPT-QModel writes it. The Tenstorrent
