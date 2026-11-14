@@ -118,6 +118,7 @@ class LlavaQModel(BaseQModel):
                 processor.apply_chat_template(
                     batch,
                     add_generation_prompt=True,
+                    padding=True,
                     tokenize=True,
                     return_dict=True,
                     return_tensors="pt",
