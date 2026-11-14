@@ -107,14 +107,38 @@ decoder and fails if any called `nn.Linear` resolves to no plan leaf.
 | Called `nn.Linear` absent from the tree | Silent source-dtype tensor (`layer_modules_strict=False`) | Declared and quantized (Jamba `x_proj`) or declared `:!` (AXK2) |
 | Unknown model layout | `plan.find()` returns `None` | Coverage test fails instead of assuming exclusion |
 
+## Additive shared-input tags
+
+Issue #4041 also listed sibling projections that read one activation but had
+no `:in=` tag, which kept Hessian dedup off. This change covers a verified
+subset of those families: `opt`, `starcoder2`, `gptj`, `phi`, `jamba` and
+`lfm2`. Each family gained
+
+- `:in=x` on the q/k/v siblings (and gate/up or w1/w3 where the MLP has that
+  shape),
+- a real-forward case in `tests/module_tree/test_shared_input_cpu_forward.py`,
+- its `model_type` in the definition's own `shared_input_verified_model_types`.
+
+The safety argument has two halves, both tested:
+
+1. `build_layer_modules` emits byte-identical blocks with and without the
+   `:in=` metadata (`test_in_tags_do_not_change_quantization_blocks`), so the
+   quantization order and membership cannot change.
+2. `probe_shared_inputs` records every planned module's input during a real
+   forward and fails unless group members are bitwise identical
+   (`test_plan_matches_real_forward_inputs`).
+
+Together those mean the follower's skipped Hessian is the leader's Hessian, so
+the packed tensors are unchanged. Families that need remote code or a
+non-native layout were left out rather than tagged without a forward case.
+
 ## Not in scope
 
 This change does not re-audit `:in=` tag correctness (issue #4041 found none
-wrong) and does not add tags to every definition listed in the issue. Tag
-additions require a real-forward case in
-`tests/module_tree/test_shared_input_cpu_forward.py` and an explicit
-`shared_input_verified_model_types` entry, so they ship separately from the
-ordering fixes.
+wrong) and does not tag every family the issue lists. Families whose layout
+requires remote code (for example `deepseek_v2`, `deepseek_v4`, `kimi_k25`) or
+whose sibling leaves sit under different parents (attention and MLP parallel
+blocks such as `falcon`) need their own real-forward case first.
 
 ## Reference
 
