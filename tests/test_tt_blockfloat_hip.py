@@ -11,6 +11,11 @@ would feed its matrix engine after unpack.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -205,3 +210,97 @@ def test_pack_uses_the_device_quantizer():
 
     expected = quantize_blockfloat(linear_module.weight.detach().float(), bits)[0]
     assert torch.equal(module.dequantize(), expected)
+
+
+_MISMATCH_SCRIPT = """
+import sys
+
+import torch
+
+from gptqmodel.utils.tt_blockfloat_hip import (
+    embedding,
+    linear,
+    prewarm_tt_blockfloat_hip_extension,
+    quantize,
+)
+
+assert prewarm_tt_blockfloat_hip_extension(), "block-float HIP extension failed to build"
+
+rows, cols = 32, 64
+weight = torch.randn(rows, cols, dtype=torch.float32, device="cuda")
+codes, exponents = quantize(weight, 4)
+# Deliberately mismatched: the codes stay on the device that owns the stream.
+mismatched = exponents.to({target!r})
+
+try:
+    if {kind!r} == "linear":
+        linear(torch.randn(4, cols, device="cuda"), codes, mismatched, 4)
+    else:
+        ids = torch.tensor([0, 3], dtype=torch.int64, device="cuda")
+        embedding(ids, codes, mismatched, 4, rows, cols)
+except RuntimeError as exc:
+    print("REJECTED:", str(exc).splitlines()[0])
+    sys.exit(0)
+
+print("ACCEPTED")
+sys.exit(3)
+"""
+
+
+def _run_mismatched_exponents(kind: str, target: str) -> subprocess.CompletedProcess:
+    """Run one mismatch in its own process.
+
+    A kernel that reads another device's pointer can raise an illegal memory
+    access, and on ROCm that poisons the HIP context for every later call in the
+    same process. Each case therefore gets a fresh interpreter so the remaining
+    tests still report their own result.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    return subprocess.run(
+        [sys.executable, "-c", _MISMATCH_SCRIPT.format(kind=kind, target=target)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3000,
+    )
+
+
+@pytest.mark.parametrize("kind", ["linear", "embedding"])
+def test_host_exponents_are_rejected_before_launch(kind):
+    """A CPU exponent buffer has no device pointer the kernel may dereference."""
+
+    result = _run_mismatched_exponents(kind, "cpu")
+
+    assert result.returncode == 0, result.stderr
+    assert "REJECTED:" in result.stdout, result.stdout
+    assert "must be on a CUDA/ROCm device" in result.stdout
+    assert "ACCEPTED" not in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["linear", "embedding"])
+def test_second_device_exponents_are_rejected_before_launch(kind):
+    """Exponents on another accelerator would be read as a foreign pointer."""
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("two ROCm devices required")
+
+    result = _run_mismatched_exponents(kind, "cuda:1")
+
+    assert result.returncode == 0, result.stderr
+    assert "REJECTED:" in result.stdout, result.stdout
+    assert "must share a device" in result.stdout
+    assert "ACCEPTED" not in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["linear", "embedding"])
+def test_matching_device_exponents_still_run(kind):
+    """The same-device path must keep working after the added validation."""
+
+    result = _run_mismatched_exponents(kind, "cuda:0")
+
+    assert result.returncode == 3, result.stderr
+    assert "ACCEPTED" in result.stdout
+    assert "REJECTED:" not in result.stdout
