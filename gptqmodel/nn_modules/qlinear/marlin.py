@@ -62,6 +62,25 @@ _MARLIN_SM75_CAPABILITY = (7, 5)
 _MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
 
 
+def _g_idx_is_contiguous(g_idx: Optional[torch.Tensor], in_features: int, group_size: int) -> bool:
+    """Return whether ``g_idx`` describes plain contiguous groups.
+
+    ``desc_act=False`` checkpoints normally store ``arange(K) // group_size``.
+    A third-party writer can leave the field describing a block permutation
+    while still declaring ``desc_act=False``; that index is authoritative and
+    must not be discarded. An empty index is the runtime layout of a kernel
+    that already dropped it, so keep the historical contiguous assumption.
+    """
+
+    if g_idx is None or g_idx.numel() == 0:
+        return True
+    if g_idx.numel() != in_features:
+        return False
+    group = group_size if group_size and group_size > 0 else in_features
+    expected = torch.arange(in_features, device=g_idx.device, dtype=torch.long) // group
+    return torch.equal(g_idx.to(torch.long), expected)
+
+
 class MarlinLinear(GPTQQuantLinear):
     # GPTQ sub-kernel of the shared Marlin backend. ``BACKEND.MARLIN`` plus the
     # checkpoint method/format selects this class; no separate GPTQ-specific
@@ -349,7 +368,30 @@ class MarlinLinear(GPTQQuantLinear):
                 + marlin_runtime_error(self.compute_dtype)
             )
 
-        self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
+        # A non-contiguous ``g_idx`` is an activation-order checkpoint even
+        # when it declares ``desc_act=False``. Trust the stored index instead
+        # of silently replacing it with an empty one.
+        effective_desc_act = self.desc_act
+        if not effective_desc_act and not _g_idx_is_contiguous(
+            getattr(self, "g_idx", None),
+            self.in_features,
+            self.requested_group_size,
+        ):
+            if not marlin_is_tile_aligned(self.out_features, self.in_features):
+                raise NotImplementedError(
+                    "GPTQ Marlin: checkpoint g_idx is non-contiguous but "
+                    "`desc_act` is False. Activation-order decoding requires "
+                    f"tile-aligned shapes; got K={self.in_features}, "
+                    f"N={self.out_features}. Load with a non-Marlin backend."
+                )
+            log.warn.once(
+                "Kernel: checkpoint g_idx is non-contiguous while "
+                "`desc_act=False`; decoding with the Marlin activation-order path."
+            )
+            effective_desc_act = True
+            self.desc_act = True
+
+        self.is_k_full = marlin_is_k_full(effective_desc_act, is_row_parallel=False)
 
         # Allocate marlin workspace.
         self.workspace = marlin_make_workspace_new(device)
@@ -361,7 +403,7 @@ class MarlinLinear(GPTQQuantLinear):
             else self.requested_group_size
         )
         # Validation keeps act-order shapes aligned; other shapes may use zero padding.
-        if self.desc_act:
+        if effective_desc_act:
             padded_n, padded_k = self.out_features, self.in_features
         else:
             padded_n, padded_k = marlin_padded_nk(
@@ -410,7 +452,7 @@ class MarlinLinear(GPTQQuantLinear):
             return x
 
         # Handle sorting for activation reordering if needed.
-        if self.desc_act:
+        if effective_desc_act:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(getattr(self, "g_idx"))
             _transform_param(self, "g_idx", lambda _: g_idx)
             self.g_idx_sort_indices = g_idx_sort_indices

@@ -109,6 +109,39 @@ def test_quantize_config_rejects_is_marlin_format_in_serialized_payload():
         )
 
 
+def test_quantize_config_accepts_is_marlin_format_false():
+    payload = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": True,
+        "sym": True,
+        "quant_method": "gptq",
+        "is_marlin_format": False,
+    }
+
+    cfg = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(cfg, GPTQConfig)
+    assert cfg.format == FORMAT.GPTQ
+
+    constructed = QuantizeConfig(bits=4, is_marlin_format=False)
+    assert isinstance(constructed, GPTQConfig)
+
+
+def test_quantize_config_normalizes_string_bits_and_null_sym():
+    cfg = QuantizeConfig.from_quant_config(
+        {
+            "bits": "4",
+            "group_size": 128,
+            "desc_act": False,
+            "sym": None,
+            "quant_method": "gptq",
+        }
+    )
+
+    assert cfg.bits == 4
+    assert cfg.sym is True
+
+
 def test_quantize_config_dispatches_rtn_constructor():
     cfg = QuantizeConfig(weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)))
 

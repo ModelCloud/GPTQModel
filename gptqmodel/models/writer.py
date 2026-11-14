@@ -2023,8 +2023,12 @@ def ModelWriter(cls):
                 tensor_storage,
             )
 
+        # Build the save-time shell in a local. Replacing ``self.model`` would
+        # leave the caller's live model pointing at a CPU kernel that returns
+        # wrong logits after ``save()``.
+        model_for_save = self.model
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
-            self.model = self.get_model_with_quantize(
+            model_for_save = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
@@ -2040,7 +2044,7 @@ def ModelWriter(cls):
             quantize_config,
             runtime_format,
         )
-        self.model.config = config
+        model_for_save.config = config
 
         def strip_attention_impl_fields(target: Any) -> Dict[str, Any]:
             removed: Dict[str, Any] = {}
@@ -2054,28 +2058,28 @@ def ModelWriter(cls):
                         pass
             return removed
 
-        generation_config = getattr(self.model, "generation_config", None)
+        generation_config = getattr(model_for_save, "generation_config", None)
         removed_config_attention_attrs: Dict[str, Any] = {}
         removed_generation_attention_attrs: Dict[str, Any] = {}
 
         try:
-            removed_config_attention_attrs = strip_attention_impl_fields(self.model.config)
+            removed_config_attention_attrs = strip_attention_impl_fields(model_for_save.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
-            _normalize_legacy_tied_weights_keys(self.model)
+            _normalize_legacy_tied_weights_keys(model_for_save)
 
             # Save model metadata directly. Calling model.save_pretrained with
             # an empty state_dict deletes resumable shards in recent
             # Transformers releases because they are absent from the supplied
             # (empty) checkpoint.
             _save_model_configs_without_weights(
-                self.model,
+                model_for_save,
                 save_dir,
                 self.model_local_path,
             )
         finally:
             for attr, value in removed_config_attention_attrs.items():
-                setattr(self.model.config, attr, value)
+                setattr(model_for_save.config, attr, value)
             if generation_config is not None:
                 for attr, value in removed_generation_attention_attrs.items():
                     setattr(generation_config, attr, value)
@@ -2120,7 +2124,7 @@ def ModelWriter(cls):
             # those tensors by name would overwrite the packed codes, so leave
             # every module with a `QUANT_TYPE` to `get_state_dict_for_save`,
             # which restores it from the offload bundle the quantizer wrote.
-            quantized_module_types = _quantized_module_types(self.model)
+            quantized_module_types = _quantized_module_types(model_for_save)
             suspend_staging = getattr(
                 self.turtle_model, "suspend_active_source_staging", None
             )
@@ -2129,12 +2133,12 @@ def ModelWriter(cls):
             )
             with direct_source_scope:
                 alias_all_from_turtle_if_meta(
-                    shell_model=self.model,
+                    shell_model=model_for_save,
                     turtle_model=self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
                 materialized_layers = _materialize_meta_layers_from_turtle(
-                    self.model,
+                    model_for_save,
                     self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
@@ -2144,7 +2148,7 @@ def ModelWriter(cls):
                         materialized_layers,
                     )
                 restored_meta = _materialize_remaining_meta_params_from_turtle(
-                    self.model,
+                    model_for_save,
                     self.turtle_model,
                     skip_module_types=quantized_module_types,
                 )
@@ -2167,7 +2171,7 @@ def ModelWriter(cls):
                 validated_overlay=save_state_overlay,
             )
         else:
-            state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+            state_dict = get_state_dict_for_save(model_for_save, offload_root=offload_root)
         if checkpoint_passthrough_plan is None:
             state_dict.update(out_of_model_state_dict)
             out_of_model_state_dict.clear()
@@ -2206,7 +2210,7 @@ def ModelWriter(cls):
                 metadata=metadata_dict,
                 max_shard_size=max_shard_size_bytes,
                 layer_prefixes=self.extract_layers_node(),
-                model=self.model,
+                model=model_for_save,
             )
         else:
             expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
