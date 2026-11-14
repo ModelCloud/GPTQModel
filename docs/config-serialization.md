@@ -95,12 +95,12 @@ always saw `False`.
 | Area | Before | After |
 | --- | --- | --- |
 | Factory kwargs | `_filter_quantize_config_payload_for_target_cls` dropped unknown and foreign keys silently | `_validate_quantize_config_factory_kwargs` raises for unknown keys and warns for foreign known fields (`config.py:4012`) |
-| EXL3 fields | `EXL3Config.__post_init__` bypassed base normalisation (`config.py:6303` before this change) | calls `_normalize_serialization_fields` (`config.py:6387`) |
-| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:4415`) |
-| Bool fields | `bool()` accepted the string `"False"` as `True` (`config.py:4450` before this change) | `_validate_bool_fields` raises `TypeError` (`config.py:4438`); `desc_act` likewise |
+| EXL3 fields | `EXL3Config.__post_init__` bypassed base normalisation (`config.py:6303` before this change) | calls `_normalize_serialization_fields` (`config.py:6401`) |
+| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:4429`) |
+| Bool fields | `bool()` accepted the string `"False"` as `True` (`config.py:4450` before this change) | `_validate_bool_fields` raises `TypeError` (`config.py:4452`); `desc_act` likewise |
 | Calibration examples | `isinstance(example, dict)` rejected `BatchEncoding` (`calibration.py:352` before this change) | `isinstance(example, Mapping)` (`calibration.py:356`) |
 | Device placement | explicit `device` replaced by `device_map` without a check (`loader.py:1735` before this change) | `_normalize_requested_device_map` (`loader.py:569`) validates agreement and maps HF device strings |
-| `static_groups` | written to `meta`, absent from the reload map | mapped in `from_quant_config` (`config.py:4817`) |
+| `static_groups` | written to `meta`, absent from the reload map | mapped in `from_quant_config` (`config.py:4831`) |
 
 ## Failure contract
 
@@ -126,9 +126,9 @@ always saw `False`.
 
 Measured with the commands in the pull request:
 
-- Before the fix, the new and copied tests reported `17 failed, 42 passed`.
-- After the fix, the same set reported `59 passed` on CUDA and ROCm.
-- The related `tests/qcfg`, calibration, and loader set reported `136 passed`
+- Before the fix, the new and copied tests reported `20 failed, 42 passed`.
+- After the fix, the same set reported `62 passed` on CUDA and ROCm.
+- The related `tests/qcfg`, calibration, and loader set reported `139 passed`
   on both runtimes.
 - An EXL3 `bits=2, auto_dtype_cast="off"` quantize and `save()` completed on
   both an RTX 4090 and an R9700; before the fix the same run quantized and then

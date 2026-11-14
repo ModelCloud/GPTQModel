@@ -577,7 +577,23 @@ def _normalize_requested_device_map(device, device_map):
     if device_map is None:
         return None
     if isinstance(device_map, str):
-        normalized = device_map if _is_accelerate_device_map_string(device_map) else {"": device_map}
+        if _is_accelerate_device_map_string(device_map):
+            normalized = device_map
+        else:
+            try:
+                torch.device(device_map)
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    "If passing a string for `device_map`, choose 'auto', 'balanced', "
+                    "'balanced_low_0', 'sequential', or a concrete device such as 'cpu' "
+                    "or 'cuda:0'."
+                ) from exc
+            if device_map.strip().lower() in {"disk", "meta"}:
+                raise ValueError(
+                    "A full-model `device_map` cannot be an offload target; use a "
+                    "per-module map for 'disk' or 'meta' entries."
+                )
+            normalized = {"": device_map}
     else:
         normalized = dict(device_map)
     if device is not None:

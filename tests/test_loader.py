@@ -51,6 +51,12 @@ def test_device_map_string_device_is_hf_shorthand():
     assert loader._normalize_requested_device_map(None, "balanced_low_0") == "balanced_low_0"
 
 
+@pytest.mark.parametrize("device_map", ("not-a-device", "disk", "meta"))
+def test_device_map_string_rejects_invalid_or_offload_targets(device_map):
+    with pytest.raises(ValueError, match="device_map"):
+        loader._normalize_requested_device_map(None, device_map)
+
+
 @pytest.mark.parametrize(
     ("device", "device_map"),
     (
