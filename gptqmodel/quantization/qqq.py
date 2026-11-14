@@ -536,7 +536,11 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # The exported INT8 channel scale must describe the quantized
+            # weight, not the original one: GPTQ error propagation can push
+            # max|Q| above max|W|, and a scale fitted to W then saturates the
+            # packed codes (and no longer reproduces the in-memory `wq`).
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -1090,7 +1094,12 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # Derive the INT8 channel scale from the quantized weight `Q` that
+            # is about to become `layer.weight` (as upstream QQQ does), not
+            # from the pre-quantization `W`. Error propagation can raise
+            # max|Q| above max|W|; a W-fitted scale then clamps packed codes
+            # and the export no longer equals the in-memory `wq`.
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start

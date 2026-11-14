@@ -6,7 +6,11 @@ import torch
 
 from gptqmodel.looper.gptq_processor import enable_w4afp8_replay
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
-from gptqmodel.nn_modules.qlinear.w4a_triton import _token_fp8_quant, fp8_linear_prepacked
+from gptqmodel.nn_modules.qlinear.w4a_triton import (
+    _token_fp8_quant,
+    fp8_linear_prepacked,
+    fp8_pack,
+)
 from gptqmodel.quantization.activation_floatx import fp8_token_qdq
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND, backend_for_activation
@@ -275,3 +279,45 @@ def test_token_fp8_rounding_holds_at_e4m3_midpoint_neighbours():
     oracle = pre_round.to(torch.float8_e4m3fn)
     torch.testing.assert_close(scales, reference_scales.squeeze(1), rtol=0, atol=0)
     assert torch.equal(codes.view(torch.uint8), oracle.view(torch.uint8))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+@pytest.mark.parametrize(
+    ("rows", "width", "dtype"),
+    [
+        # The issue's scale: plain `/` mismatched 102 of these codes.
+        (5120, 1024, torch.float16),
+        (7, 128, torch.bfloat16),
+        (1, 4096, torch.float16),
+        (3, 100, torch.bfloat16),
+    ],
+)
+def test_fp8_pack_is_bit_exact_with_fp8_token_qdq(rows, width, dtype):
+    """The Triton packer must reproduce the Torch reference bit for bit.
+
+    ``fp8_pack`` promises exact agreement with ``fp8_token_qdq``, the path
+    GPTQ replay calibrates against. Triton's approximate ``/`` is one ULP off
+    near E4M3 midpoints, which flips codes on random input; ``tl.div_rn`` is
+    the IEEE division the reference performs. Seed 8 over the first shape is
+    the measured worst case here (104 flipped codes before the fix).
+    """
+    generator = torch.Generator(device="cuda").manual_seed(8)
+    x = torch.randn((rows, width), device="cuda", dtype=dtype, generator=generator)
+    if rows > 1:
+        x[0].zero_()
+
+    codes, scales = fp8_pack(x)
+    torch.cuda.synchronize()
+
+    x32 = x.float()
+    amax = x32.abs().amax(dim=-1, keepdim=True)
+    reference_scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax))
+    reference_codes = (x32 / reference_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+
+    assert torch.equal(scales, reference_scale.reshape(-1))
+    mismatches = int((codes.view(torch.uint8) != reference_codes.view(torch.uint8)).sum())
+    assert mismatches == 0, f"{mismatches} of {codes.numel()} codes differ from the reference"
+
+    dequantized = (codes.float() * scales[:, None]).to(x.dtype)
+    assert torch.equal(dequantized, fp8_token_qdq(x))
