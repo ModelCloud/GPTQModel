@@ -157,6 +157,15 @@ def mse_optimal_quant(
     else:
         min_val = block_f.min(dim=1, keepdim=True).values
         max_val = block_f.max(dim=1, keepdim=True).values
+        # An affine code range only represents zero points in `[0, maxq]`.
+        # Fitting the raw group minimum and maximum makes the derived zero
+        # point fall outside that range for a group whose values do not cross
+        # zero (positive-only gives a negative zero point, negative-only one
+        # above `maxq`), and the packer then stores a different grid than the
+        # one this optimizer scored. Including zero in the fitted range keeps
+        # every zero point representable and preserves full group coverage.
+        min_val = torch.minimum(min_val, torch.zeros_like(min_val))
+        max_val = torch.maximum(max_val, torch.zeros_like(max_val))
         base_zero = None
 
     steps = max(int(math.log(max(steps, 2)) / math.log(1.5)) + 1, 3)
