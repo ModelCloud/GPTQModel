@@ -1540,6 +1540,7 @@ class TTBlockfloatForCausalLM({BASE_CLASS}):
             default_bits=int(quant.get("bits", 4)),
             embed_bits=int(quant.get("embed_bits", 8)),
             block=int(quant.get("block", 16)),
+            block_axis=str(quant.get("block_axis", "in")),
         )
 
     def tie_weights(self, *args, **kwargs):
@@ -1596,6 +1597,7 @@ def save_blockfloat_model(
     metadata: "Optional[dict]" = None,
     safetensors_metadata: "Optional[dict]" = None,
     max_shard_bytes: int = DEFAULT_MAX_SHARD_BYTES,
+    block_axis: "Optional[str]" = None,
 ) -> dict:
     """Write a self-contained checkpoint in the standard HF layout.
 
@@ -1607,6 +1609,12 @@ def save_blockfloat_model(
     (``<prefix>.codes`` / ``.exponents`` / ``.code_shape``), so ``load_state_dict``
     needs no translation table. The embedding is stored the same way, at
     ``embed_bits``.
+
+    ``block_axis`` is the exponent-block axis of the dense weights being
+    written (``"in"`` or ``"out"``, see :func:`gptq_solve_blockfloat`). Already
+    packed modules carry their own axis; ``None`` takes it from them, falling
+    back to ``"in"``. A checkpoint holds one axis, recorded in
+    ``quantization_config.block_axis`` when it is ``"out"``.
     """
 
     import json
@@ -1618,7 +1626,27 @@ def save_blockfloat_model(
     default_bits = _default_bits(bits)
     tied = bool(getattr(model.config, "tie_word_embeddings", False))
 
-    for prefix in _quantized_prefixes(model):
+    prefixes = _quantized_prefixes(model)
+    packed_axes = {
+        getattr(model.get_submodule(prefix), "block_axis", "in")
+        for prefix in prefixes
+        if _packed_state(model.get_submodule(prefix)) is not None
+    }
+    if len(packed_axes) > 1:
+        raise ValueError(
+            f"model mixes block axes {sorted(packed_axes)}; a checkpoint stores one"
+        )
+    if block_axis is None:
+        block_axis = next(iter(packed_axes), "in")
+    if block_axis not in ("in", "out"):
+        raise ValueError(f"block_axis must be 'in' or 'out', got {block_axis!r}")
+    if packed_axes and block_axis not in packed_axes:
+        raise ValueError(
+            f"block_axis={block_axis!r} contradicts the packed modules' axis "
+            f"{next(iter(packed_axes))!r}"
+        )
+
+    for prefix in prefixes:
         module = model.get_submodule(prefix)
         # A table exposes ``num_embeddings``; a projection does not. Using the
         # presence of ``in_features`` instead would misclassify a block-float
@@ -1637,8 +1665,10 @@ def save_blockfloat_model(
             continue
         layer_width = embed_bits if is_embedding else _layer_bits(bits, prefix)
         weight = module.weight.detach().to(torch.float32)
+        # ``"out"`` stores W^T so the 16-value blocks run along the last dim.
+        stored = weight.T.contiguous() if block_axis == "out" else weight
         try:
-            codes, exponents = decompose_blockfloat(weight, bits=layer_width)
+            codes, exponents = decompose_blockfloat(stored, bits=layer_width)
         except ValueError:
             # Not on the grid (or not quantized): keep it dense like any other
             # float tensor rather than claiming a format it does not have.
@@ -1735,6 +1765,9 @@ def save_blockfloat_model(
     }
     if len(widths) > 1:
         quantization_config["mixed_bits"] = True
+    if block_axis != "in":
+        # Only written when it differs, so existing checkpoints are unchanged.
+        quantization_config["block_axis"] = block_axis
     config["quantization_config"] = quantization_config
 
     # Ship the modeling file so plain ``transformers`` can load this directory.
@@ -1843,7 +1876,9 @@ def _resolve_layer_widths(state: dict, quantization_config: dict) -> dict:
     return widths
 
 
-def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None:
+def _validate_restored_geometry(
+    restored: dict, state: dict, block: int, block_axis: str = "in"
+) -> None:
     """Check every packed buffer against the module it was installed in.
 
     ``_resolve_layer_widths`` can only see the checkpoint, so a ``code_shape``
@@ -1855,29 +1890,35 @@ def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None
 
     for prefix, geometry in sorted(restored.items()):
         out_features, in_features = (int(geometry[0]), int(geometry[1]))
-        if in_features % block:
+        # The stored matrix is [out, in] for block_axis="in" and [in, out] for
+        # "out"; blocks always run along its last dim.
+        rows, cols = (
+            (out_features, in_features) if block_axis == "in" else (in_features, out_features)
+        )
+        axis_name = "in_features" if block_axis == "in" else "out_features"
+        if cols % block:
             raise ValueError(
-                f"{prefix}: in_features={in_features} is not a multiple of the "
+                f"{prefix}: {axis_name}={cols} is not a multiple of the "
                 f"block size {block}, so one exponent per block cannot cover it."
             )
         shape = state.get(f"{prefix}.code_shape")
         if shape is not None:
             actual = [int(v) for v in shape.tolist()]
-            if actual != [out_features, in_features]:
+            if actual != [rows, cols]:
                 raise ValueError(
                     f"{prefix}: the checkpoint declares code_shape {actual}, but "
-                    f"the module is [{out_features}, {in_features}]. A swapped "
-                    "or resized shape decodes the codes in the wrong order, so "
-                    "the checkpoint is corrupt."
+                    f"the module stores [{rows}, {cols}] (block_axis="
+                    f"{block_axis!r}). A swapped or resized shape decodes the "
+                    "codes in the wrong order, so the checkpoint is corrupt."
                 )
         exponents = state.get(f"{prefix}.exponents")
         if exponents is not None:
-            expected = (out_features, in_features // block)
+            expected = (rows, cols // block)
             if tuple(int(v) for v in exponents.shape) != expected:
                 raise ValueError(
                     f"{prefix}: `.exponents` has shape "
                     f"{list(exponents.shape)}, but one exponent per {block} "
-                    f"inputs over [{out_features}, {in_features}] is "
+                    f"{axis_name} over [{rows}, {cols}] is "
                     f"{list(expected)}."
                 )
 
@@ -1932,6 +1973,12 @@ def build_blockfloat_model(
     _cast_model_dtype(model, dtype)
     _sync_config_dtype(model.config, dtype)
 
+    block_axis = str(quantization_config.get("block_axis", "in"))
+    if block_axis not in ("in", "out"):
+        raise ValueError(
+            f"{checkpoint_dir}: quantization_config.block_axis must be 'in' or "
+            f"'out', got {block_axis!r}"
+        )
     restored = swap_blockfloat_modules(
         model,
         bits_per_layer=widths,
@@ -1939,6 +1986,7 @@ def build_blockfloat_model(
         embed_bits=int(quantization_config.get("embed_bits", 8)),
         block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK)),
         quantized_prefixes=sorted(widths),
+        block_axis=block_axis,
     )
 
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -1961,7 +2009,10 @@ def build_blockfloat_model(
         )
 
     _validate_restored_geometry(
-        restored, state, block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK))
+        restored,
+        state,
+        block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK)),
+        block_axis=block_axis,
     )
 
     model.eval()
