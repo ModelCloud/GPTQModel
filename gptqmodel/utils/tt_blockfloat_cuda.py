@@ -169,6 +169,8 @@ def linear(
 
     ``x`` is ``[m, k]`` in float16, bfloat16 or float32 and the result has the
     same dtype and shape ``[m, n]``, with ``n`` taken from ``exponents``.
+    ``bias`` is float32 and is added to the float32 accumulator before the
+    single output cast, so it keeps the checkpoint's precision.
     """
 
     if x.dim() != 2:

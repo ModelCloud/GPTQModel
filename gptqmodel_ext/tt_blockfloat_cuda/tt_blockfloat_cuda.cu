@@ -437,7 +437,8 @@ template <int BITS, typename T, bool B_DENSE>
 __global__ __launch_bounds__(PTHREADS) void linear_mma_kernel(
     const T* __restrict__ x, const uint8_t* __restrict__ codes,
     const int8_t* __restrict__ exponents, int64_t m, int64_t n, int64_t k,
-    const T* __restrict__ bias, T* __restrict__ out, const T* __restrict__ b_dense) {
+    const float* __restrict__ bias, T* __restrict__ out,
+    const T* __restrict__ b_dense) {
   __shared__ __align__(16) T As[2][PM][PA_LD];
   __shared__ __align__(16) T Bs[2][PN][PB_LD];
 
@@ -597,8 +598,8 @@ __global__ __launch_bounds__(PTHREADS) void linear_mma_kernel(
         // The fragment covers a pair of adjacent columns, but n may be odd, so
         // the second column of the last pair is out of range.
         const bool has_hi = gn + 1 < n;
-        const float b0 = bias ? bf_load<T>(&bias[gn]) : 0.0f;
-        const float b1 = (bias != nullptr && has_hi) ? bf_load<T>(&bias[gn + 1]) : 0.0f;
+        const float b0 = bias ? bias[gn] : 0.0f;
+        const float b1 = (bias != nullptr && has_hi) ? bias[gn + 1] : 0.0f;
         if (gm < m) {
           out[gm * n + gn] = bf_cast<T>(acc[i][j][0] + b0);
           if (has_hi) out[gm * n + gn + 1] = bf_cast<T>(acc[i][j][1] + b1);
@@ -856,11 +857,12 @@ class TemporaryBuffer {
 
 // Epilogue for the cuBLAS path: fp32 accumulator -> bias -> T.
 template <typename T>
-__global__ void epilogue_kernel(const float* __restrict__ c, const T* __restrict__ bias,
-                                T* __restrict__ out, int64_t m, int64_t n) {
+__global__ void epilogue_kernel(const float* __restrict__ c,
+                                const float* __restrict__ bias, T* __restrict__ out,
+                                int64_t m, int64_t n) {
   const int64_t col = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (col >= n) return;
-  const float b = bias != nullptr ? bf_load<T>(&bias[col]) : 0.0f;
+  const float b = bias != nullptr ? bias[col] : 0.0f;
   // gridDim.y is capped at 65535, so rows are strided instead of mapped 1:1.
   // A flattened batch/sequence dimension reaches that cap in long-context runs.
   for (int64_t row = blockIdx.y; row < m; row += gridDim.y) {
@@ -966,7 +968,7 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
   const unsigned rows = (unsigned)std::min<int64_t>(m, 65535);
   const dim3 grid((unsigned)((n + 255) / 256), rows);
   epilogue_kernel<T><<<grid, 256, 0, stream>>>(
-      c32, reinterpret_cast<const T*>(bias), reinterpret_cast<T*>(out), m, n);
+      c32, reinterpret_cast<const float*>(bias), reinterpret_cast<T*>(out), m, n);
   return cudaGetLastError();
 }
 
@@ -979,7 +981,7 @@ cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
                                 const void* bias, void* out, cudaStream_t stream) {
   const dim3 grid((unsigned)((n + PN - 1) / PN), (unsigned)((m + PM - 1) / PM));
   const T* xp = reinterpret_cast<const T*>(x);
-  const T* bp = reinterpret_cast<const T*>(bias);
+  const float* bp = reinterpret_cast<const float*>(bias);
   T* op = reinterpret_cast<T*>(out);
   // Up to one row tile the weights are dequantised exactly once either way, so
   // keeping them in shared memory avoids the round trip through a workspace.

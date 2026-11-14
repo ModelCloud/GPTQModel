@@ -101,12 +101,17 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   if (m == 0) return;
 
   const void* bias_ptr = nullptr;
+  torch::Tensor bias_f32;
   if (bias.has_value()) {
+    // The stored bias is dense float32 state and the epilogue accumulates in
+    // float32.  Keep it there instead of rounding it to the activation dtype:
+    // float16 cannot represent a large finite float32 bias, and narrowing it
+    // first turns a cancelling result into inf.
     const torch::Tensor& b = *bias;
-    check_like(b, xc, "bias");
     TORCH_CHECK(b.dim() == 1 && b.size(0) == n, "bias must be [n]");
-    TORCH_CHECK(b.scalar_type() == xc.scalar_type(), "bias dtype must match x");
-    bias_ptr = b.data_ptr();
+    bias_f32 = b.to(at::kFloat).contiguous();
+    check_like(bias_f32, xc, "bias");
+    bias_ptr = bias_f32.data_ptr();
   }
 
   const c10::cuda::CUDAGuard guard(xc.device());

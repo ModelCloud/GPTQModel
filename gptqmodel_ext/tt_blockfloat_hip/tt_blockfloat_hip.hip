@@ -517,7 +517,7 @@ __global__ __launch_bounds__(kGemvThreads)
 void gemv_kernel(const T* __restrict__ x,
                  const uint8_t* __restrict__ codes,
                  const int8_t* __restrict__ exponents,
-                 const T* __restrict__ bias,
+                 const float* __restrict__ bias,
                  T* __restrict__ out,
                  int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -612,7 +612,7 @@ void gemv_kernel(const T* __restrict__ x,
             if (row[r] < n) {
                 float v = acc[r];
                 if (bias != nullptr) {
-                    v += ttbf_load<T>(bias + row[r]);
+                    v += bias[row[r]];
                 }
                 out[row[r]] = ttbf_cast<T>(v);
             }
@@ -641,7 +641,7 @@ __global__ __launch_bounds__(kGemmThreads)
 void gemm_kernel(const T* __restrict__ x,
                  const uint8_t* __restrict__ codes,
                  const int8_t* __restrict__ exponents,
-                 const T* __restrict__ bias,
+                 const float* __restrict__ bias,
                  T* __restrict__ out,
                  int64_t m, int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -764,7 +764,7 @@ void gemm_kernel(const T* __restrict__ x,
             }
             float v = acc[i][j];
             if (bias != nullptr) {
-                v += ttbf_load<T>(bias + gn);
+                v += bias[gn];
             }
             out[gm * n + gn] = ttbf_cast<T>(v);
         }
@@ -838,7 +838,7 @@ __global__ __launch_bounds__(32 * (MTILE / WTM) * (NTILE / WTN))
 void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
                       const uint8_t* __restrict__ codes,
                       const int8_t* __restrict__ exponents,
-                      const __hip_bfloat16* __restrict__ bias,
+                      const float* __restrict__ bias,
                       __hip_bfloat16* __restrict__ out,
                       int64_t m, int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -1139,7 +1139,7 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
                     v += acc[q][1][i];
                 }
                 if (bias != nullptr) {
-                    v += __bfloat162float(bias[gn]);
+                    v += bias[gn];
                 }
                 out[gm * n + gn] = __float2bfloat16(v);
             }
@@ -1267,7 +1267,7 @@ hipError_t linear_impl(const void* x, const uint8_t* codes,
                        int64_t k, const void* bias, void* out,
                        hipStream_t stream) {
     const T* xp = static_cast<const T*>(x);
-    const T* bp = static_cast<const T*>(bias);
+    const float* bp = static_cast<const float*>(bias);
     T* op = static_cast<T*>(out);
     if (m == 1) {
         const int blocks =
@@ -1288,7 +1288,7 @@ hipError_t linear_impl(const void* x, const uint8_t* codes,
             // changes only the fp32 accumulation order.
             if (ttbf_wmma_device()) {
                 const auto* xb = static_cast<const __hip_bfloat16*>(x);
-                const auto* bb = static_cast<const __hip_bfloat16*>(bias);
+                const auto* bb = static_cast<const float*>(bias);
                 auto* ob = static_cast<__hip_bfloat16*>(out);
                 // Tile choice, all measured rather than assumed.  Two things
                 // move the large-M shapes: the M block sets how many times the
