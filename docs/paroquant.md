@@ -121,8 +121,8 @@ The Triton bias epilogue was introduced by [PR #3657](https://github.com/ModelCl
 
 ## Native dispatch gate
 
-`ParoLinear` advertises `group_size=16` and unconstrained output widths because
-its CPU, ATen and dense paths support them. The native AWQ CUDA GEMM does not:
+`ParoLinear` advertises `group_size=16` because its CPU, ATen and dense paths
+support it. The native AWQ CUDA GEMM does not:
 `validate_awq_gemm_args` in
 `gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu` requires uint4b codes, a group
 size divisible by 32, an output width divisible by the 64-column CTA tile, and
@@ -193,3 +193,58 @@ independent FP32 packed-grid dequantization in
 
 Repeated fallback forwards keep only the packed `int32` buffers; the test
 asserts that no `(in_features, out_features)` tensor is retained by the module.
+
+## Output width alignment
+
+An output width is packable only in multiples of eight. `pack_awq` writes eight
+INT4 codes per `int32`, and ParoQuant reuses that packed layout for every
+inference path (CPU ATen, the dense fallback, the AWQ CUDA GEMM and Triton), so
+the alignment belongs to the format rather than to one kernel. Both the
+selection-time check and the constructor read the same module constant
+`PAROQUANT_OUT_FEATURES_ALIGN`:
+
+```mermaid
+flowchart TD
+    A["ParoLinear.validate()<br/>inherited BaseQuantLinear._validate"] --> B["BaseQuantLinear._validate_shape_constraints()"]
+    B --> C{"out_features divisible by SUPPORTS_OUT_FEATURES_DIVISIBLE_BY, which is [8]?"}
+    C -- "No, for example 9" --> R1["False + NotImplementedError<br/>must be divisible by [8]"]
+    C -- "Yes" --> D["ParoLinear.__init__"]
+    D --> E{"out_features % PAROQUANT_OUT_FEATURES_ALIGN == 0?"}
+    E -- "No, direct construction" --> R2["ValueError before super().__init__ allocates buffers"]
+    E -- "Yes" --> F["AwqTorchLinear.pack(source, scales, zeros)"]
+    F --> G["pack_awq(intweight, zeros, bits=4)"]
+    G --> H{"iweights.shape[-1] % 8 == 0 and izeros.shape[-1] % 8 == 0?"}
+    H -- "No" --> R3["ValueError from pack_awq<br/>defense in depth, unreachable through the public path"]
+    H -- "Yes" --> I["qweight / qzeros int32 buffers"]
+    classDef blocked fill:#fce8e6,stroke:#a33,color:#111
+    class R1,R2,R3 blocked
+```
+
+`SUPPORTS_OUT_FEATURES_DIVISIBLE_BY` and the constructor guard both read the
+single module constant `PAROQUANT_OUT_FEATURES_ALIGN`, so the declaration the
+backend selector consumes, the constructor, and `pack_awq` cannot drift apart.
+`ParoMlxQuantLinear` already declared `[8]` for the same layout; this change
+makes the CUDA/CPU class agree with it.
+
+### Previous behavior
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Declaration consumed by selection | `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]` at `gptqmodel/nn_modules/qlinear/paroquant.py:104` (pre-fix) | `[PAROQUANT_OUT_FEATURES_ALIGN]` = `[8]` at `paroquant.py:117` |
+| Selection-time validation | `BaseQuantLinear._validate_shape_constraints` at `gptqmodel/nn_modules/qlinear/__init__.py:731-733` computed `out_features % 1`, so 9 passed | The same code computes `out_features % 8`, so 9 fails with `NotImplementedError` |
+| Direct construction | `ParoLinear.__init__` (`paroquant.py:115-138` pre-fix) had no width check; 9 failed at `AwqTorchLinear.pack` (`torch_awq.py:141`) | `ParoLinear.__init__` raises `ValueError` at `paroquant.py:155-161`, before `super().__init__` |
+| Auto-padding | `SUPPORTS_AUTO_PADDING = False` at `paroquant.py:102` (pre-fix), so selection never padded | Unchanged `False` at `paroquant.py:110`; no unpad exists, so the width is constrained |
+| `pack_awq` on an unaligned width | `ValueError: INT4 AWQ packing requires ... divisible by 8` at `packing_utils.py:42-43` | Unchanged; now defense in depth, unreachable through the public path |
+
+This is fail-closed rather than padded: `SUPPORTS_AUTO_PADDING` is `False` and
+no unpad step exists in any ParoQuant forward, so padding the output width would
+require changing packing and all four inference paths together. Declaring the
+real alignment keeps every accepted width round-trippable.
+
+### Validation
+
+| Test | Invariant |
+| --- | --- |
+| `test_paroquant_output_width_declaration_matches_the_packer` | Declaration is `[8]`; `validate` rejects 9 and accepts 8, 16, 64 |
+| `test_paroquant_constructor_rejects_an_unpackable_output_width` | Direct construction of width 9 raises before packing; width 8 still constructs |
+| `test_paroquant_pack_and_forward_round_trips_at_the_packer_alignment` | Width 8 packs, forwards, and matches `_fp32_awq_oracle` exactly |

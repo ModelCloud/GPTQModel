@@ -1041,3 +1041,115 @@ def test_paroquant_triton_matches_existing_cuda_kernel():
 
     assert candidate_max_abs <= baseline_max_abs + 0.1
     assert candidate_mean_abs <= baseline_mean_abs + 0.02
+
+
+def test_paroquant_output_width_declaration_matches_the_packer():
+    """#3939: the declared output divisibility must equal the packer's contract.
+
+    ``pack_awq`` stores eight INT4 codes per int32, so a narrower output width
+    cannot be packed at all. Declaring 1 let backend selection accept such a
+    layer and fail later inside the packer with an unrelated message.
+    """
+
+    assert paroquant_module.PAROQUANT_OUT_FEATURES_ALIGN == 8
+    assert ParoLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY == [8]
+
+    shared = {
+        "bits": 4,
+        "group_size": 16,
+        "desc_act": False,
+        "sym": True,
+        "pack_dtype": torch.int32,
+        "dtype": torch.float16,
+        "device": torch.device("cpu"),
+        "in_features": 16,
+    }
+    # `validate` is the entry point backend selection uses.
+    ok, err = ParoLinear.validate(out_features=9, **shared)
+    assert ok is False
+    assert isinstance(err, NotImplementedError)
+    assert "divisible by [8]" in str(err)
+
+    for width in (8, 16, 64):
+        ok, err = ParoLinear.validate(out_features=width, **shared)
+        assert ok is True, (width, err)
+
+
+def test_paroquant_constructor_rejects_an_unpackable_output_width():
+    """A directly constructed layer must fail before packing, not inside it."""
+
+    with pytest.raises(ValueError, match="multiple of 8"):
+        ParoLinear(
+            bits=4,
+            group_size=16,
+            sym=True,
+            desc_act=False,
+            in_features=16,
+            out_features=9,
+            bias=False,
+            register_buffers=True,
+            krot=1,
+        )
+
+    # The smallest packable width is still accepted.
+    module = ParoLinear(
+        bits=4,
+        group_size=16,
+        sym=True,
+        desc_act=False,
+        in_features=16,
+        out_features=8,
+        bias=False,
+        register_buffers=True,
+        krot=1,
+    )
+    assert module.out_features == 8
+
+
+def test_paroquant_pack_and_forward_round_trips_at_the_packer_alignment(monkeypatch):
+    """Positive control: the narrowest packable width packs and forwards exactly."""
+
+    in_features, out_features, group_size = 16, 8, 16
+    torch.manual_seed(3939)
+    source = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn(out_features, in_features))
+
+    module = ParoLinear(
+        bits=4,
+        group_size=16,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=True,
+        krot=1,
+    )
+    scales = torch.rand(out_features, 1, dtype=torch.float16) * 0.5 + 0.25
+    zeros = torch.zeros(out_features, 1, dtype=torch.float16)
+
+    # `pack` used to be the first place the width constraint surfaced.
+    module.pack(source, scales, zeros)
+    module.post_init()
+    module.eval()
+    monkeypatch.setattr(module, "_forward_cpu_aten", lambda _x: None)
+
+    assert module.qweight.numel() == in_features * (out_features // 8)
+
+    x = torch.randn(2, in_features, dtype=torch.float16)
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x,
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        None,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.float16)
+
+    assert actual.shape == (2, out_features)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -676,8 +676,12 @@ output rounding, including when this toggle is `0`. See the
 [ParoQuant Triton bias epilogue](docs/paroquant.md#triton-bias-epilogue).
 ParoQuant's native CUDA GEMM is selected only for the shapes and devices its own
 validator accepts, so advertised configurations such as `group_size=16` and
-narrow output widths run the portable fallback instead of raising. See the
-[ParoQuant native dispatch gate](docs/paroquant.md#native-dispatch-gate).
+narrow output widths that the packer supports run the portable fallback instead
+of raising. Output widths must be a multiple of eight, because the shared INT4
+AWQ packer stores eight codes per `int32`; an unaligned width is rejected at
+validation time rather than failing during packing. See the
+[ParoQuant native dispatch gate](docs/paroquant.md#native-dispatch-gate) and
+[output width alignment](docs/paroquant.md#output-width-alignment).
 
 ```shell
 # default behavior: higher accuracy, slightly lower speed on some kernels
