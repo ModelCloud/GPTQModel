@@ -116,12 +116,12 @@ GPT-QModel inverse scales.
 
 | Old mechanism at `origin/main` (`d18e2ba1`) | Old location | New mechanism | Failure removed |
 | --- | --- | --- | --- |
-| Loaded shell forced to FP16 | `gptqmodel/models/writer.py:2156-2168` and `:2218-2225` | `get_hf_config_dtype` at `gptqmodel/models/writer.py:2157-2169` and `:2221-2228` | BF16 norm infinity and config rewrite |
+| Loaded shell forced to FP16 | `gptqmodel/models/writer.py:2156-2168` and `:2218-2225` | `get_hf_config_dtype` at `gptqmodel/models/writer.py:2170`, with loads at `:2174` and `:2231` | BF16 norm infinity and config rewrite |
 | BF16 byte values converted to uint16 | `gptqmodel/nn_modules/qlinear/gguf.py:1037-1039`, `gptqmodel/utils/internal_gguf.py:386-388` | `_decode_gguf_bf16` at `gptqmodel/nn_modules/qlinear/gguf.py:1030-1051` | Garbage BF16 and doubled width |
-| Bias forced to FP16 | `gptqmodel/nn_modules/qlinear/__init__.py:1492`, `:1727`, `:1884` | Source dtype at `:1491-1492`, `:1726-1727`, `:1881-1884` | Large bias infinity |
+| Bias forced to FP16 | `gptqmodel/nn_modules/qlinear/__init__.py:1492`, `:1727`, `:1884` | Source dtype at `:1492`, `:1727`, and `:1889` | Large bias infinity |
 | String dtype returned unchanged | `gptqmodel/utils/hf.py:247-275` | String resolution at `:247-295` | Explicit BF16 silently became auto |
 | FP8 scale chosen from tensor-wide max | `gptqmodel/quantization/dtype.py:270-282`, `:350-369` | Explicit semantics at `:270-291`, `:354-383` | One large block flipped the whole tensor |
-| FP8 conversion defaulted to heuristic | `gptqmodel/utils/model_dequant.py:1037-1043`, `:1797-1799` | Multiplier default at `:1037-1043`, `:1798-1802` | Multiply/divide corruption |
+| FP8 conversion defaulted to heuristic | `gptqmodel/utils/model_dequant.py:1037-1043`, `:1797-1799` | Multiplier default at `:1044` and config resolution at `:1810-1813` | Multiply/divide corruption |
 
 ## Failure and ambiguity contract
 
