@@ -279,8 +279,17 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
     if stop_ids:
         sampling_params["stop_token_ids"] = list(dict.fromkeys(stop_ids))
 
-    # do_sample=False is deterministic even when an explicit temperature was supplied.
-    if kwargs.get("do_sample") is False:
+    # GPT-QModel's public generate method follows Hugging Face semantics, where
+    # sampling is disabled unless explicitly requested. SGLang treats a missing
+    # temperature as the model's generation-config default (1.0 when unset), so
+    # an omitted `do_sample` must still resolve to greedy. An explicit
+    # `sampling_params` mapping is the caller's own contract and is left alone,
+    # except for an explicit `do_sample=False`, which is deterministic even when
+    # the mapping supplied a temperature.
+    if value is None:
+        if kwargs.get("do_sample") is not True:
+            sampling_params["temperature"] = 0.0
+    elif kwargs.get("do_sample") is False:
         sampling_params["temperature"] = 0.0
     return sampling_params
 
