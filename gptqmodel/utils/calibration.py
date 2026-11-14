@@ -678,6 +678,10 @@ def prepare_calibration_dataset(
         new_calibration_dataset_batched = [
             {
                 "input_ids": torch.tensor(block["input_ids"], dtype=torch.long),
+                # Keep the mask even without batch collation: a padded tail block
+                # (or a user row that already carried padding) must not let pad
+                # tokens enter the Hessian as real activations.
+                "attention_mask": torch.tensor(block["attention_mask"], dtype=torch.long),
             }
             for block in sorted_dataset
         ]
