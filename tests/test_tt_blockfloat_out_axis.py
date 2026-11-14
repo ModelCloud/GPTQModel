@@ -260,3 +260,41 @@ def test_writer_rejects_axis_contradicting_packed_modules(tmp_path):
     reloaded, _, _ = bq.build_blockfloat_model(str(tmp_path / "a"), dtype=torch.float32)
     with pytest.raises(ValueError, match="contradicts"):
         bq.save_blockfloat_model(reloaded, str(tmp_path / "b"), block_axis="in")
+
+
+# --- sequential calibration -------------------------------------------------
+
+
+@pytest.mark.parametrize("block_axis", ["in", "out"])
+def test_sequential_first_block_matches_one_pass_and_later_blocks_differ(block_axis):
+    text = [("the quick brown fox jumps over the lazy dog %d " % i) * 12 for i in range(8)]
+    one_pass, seq = _tiny_llama(), _tiny_llama()
+    kw = {"bits": 4, "nsamples": 4, "text": text, "embed_bits": 8, "block_axis": block_axis,
+          "act_order": block_axis == "out", "seqlen": 64}
+    r1 = bq.quantize_model_blockfloat(one_pass, _Tok(), **kw)
+    r2 = bq.quantize_model_blockfloat(seq, _Tok(), sequential=True, **kw)
+    assert set(r1) == set(r2) and all(v["on_grid"] for v in r2.values())
+    b0a, b0b = one_pass.model.layers[0], seq.model.layers[0]
+    for (name, a), (_, b) in zip(b0a.named_parameters(), b0b.named_parameters()):
+        # Same inputs reach block 0 in both modes; only Hessian scaling differs,
+        # which GPTQ's relative damping makes irrelevant.
+        torch.testing.assert_close(a, b, atol=0, rtol=0, msg=name)
+    w1 = one_pass.model.layers[1].mlp.down_proj.weight
+    w2 = seq.model.layers[1].mlp.down_proj.weight
+    assert not torch.equal(w1, w2)
+
+
+def test_sequential_beats_one_pass_on_calibration_loss():
+    text = [("alpha beta gamma delta %d epsilon zeta eta theta " % i) * 8 for i in range(16)]
+    dense = _tiny_llama()
+    ids = torch.tensor([[ord(c) % 256 for c in text[3][:128]]])
+    with torch.no_grad():
+        ref = dense(ids).logits
+    errs = {}
+    for sequential in (False, True):
+        m = _tiny_llama()
+        bq.quantize_model_blockfloat(m, _Tok(), bits=4, nsamples=8, text=text, embed_bits=None,
+                                     block_axis="out", act_order=True, sequential=sequential, seqlen=64)
+        with torch.no_grad():
+            errs[sequential] = float((m(ids).logits - ref).pow(2).mean())
+    assert errs[True] <= errs[False] * 1.05, errs
