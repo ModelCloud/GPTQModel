@@ -2293,6 +2293,10 @@ def ModelWriter(cls):
                 lm_head_name=self.lm_head,
                 pack=True,
                 device=DEVICE.CPU,
+                # Register quantized-module biases at the checkpoint/model width
+                # so a bf16/fp32 bias cannot overflow an fp16 placeholder
+                # before ``load_checkpoint_in_model`` copies it in.
+                bias_dtype=model_dtype,
             )
 
         if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:

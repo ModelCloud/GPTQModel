@@ -29,7 +29,7 @@ from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block
+from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -1607,12 +1607,21 @@ class GPTQ:
             shifting every value by roughly the group minimum.
             """
 
-            lo, hi = affine_range_with_zero(lo, hi)
+            if self.qcfg.sym:
+                # Every symmetric kernel assumes zero = 2 ** (bits - 1);
+                # Marlin does not even read the stored qzeros. Fit the common
+                # symmetric range so all strategies store that fixed zero.
+                lo, hi = symmetric_range(block_mod)
+            else:
+                lo, hi = affine_range_with_zero(lo, hi)
             scale = _floor_scale_for_storage(
                 _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
                 scale_min,
             )
-            zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
+            if self.qcfg.sym:
+                zero = torch.full_like(scale, (maxq + 1) // 2)
+            else:
+                zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
             q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
             return (q - zero) * scale, scale, zero
 

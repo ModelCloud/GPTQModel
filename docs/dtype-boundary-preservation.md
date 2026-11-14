@@ -119,6 +119,7 @@ GPT-QModel inverse scales.
 | Loaded shell forced to FP16 | `gptqmodel/models/writer.py:2156-2168` and `:2218-2225` | `get_hf_config_dtype` at `gptqmodel/models/writer.py:2170`, with loads at `:2174` and `:2231` | BF16 norm infinity and config rewrite |
 | BF16 byte values converted to uint16 | `gptqmodel/nn_modules/qlinear/gguf.py:1037-1039`, `gptqmodel/utils/internal_gguf.py:386-388` | `_decode_gguf_bf16` at `gptqmodel/nn_modules/qlinear/gguf.py:1030-1051` | Garbage BF16 and doubled width |
 | Bias forced to FP16 | `gptqmodel/nn_modules/qlinear/__init__.py:1492`, `:1727`, `:1884` | Source dtype at `:1492`, `:1727`, and `:1889` | Large bias infinity |
+| Re-save bias placeholder forced to FP16 | `gptqmodel/nn_modules/qlinear/__init__.py:316` and `:1201`; `gptqmodel/models/writer.py:2216` called `make_quant` without a dtype | `bias_dtype` threaded from `writer.py:2227` to the registered buffer (`qlinear/__init__.py:283`, `:1188`) | BF16 bias `99840` became `inf` on re-save |
 | String dtype returned unchanged | `gptqmodel/utils/hf.py:247-275` | String resolution at `:247-295` | Explicit BF16 silently became auto |
 | FP8 scale chosen from tensor-wide max | `gptqmodel/quantization/dtype.py:270-282`, `:350-369` | Explicit semantics at `:270-291`, `:354-383` | One large block flipped the whole tensor |
 | FP8 conversion defaulted to heuristic | `gptqmodel/utils/model_dequant.py:1037-1043`, `:1797-1799` | Multiplier default at `:1044` and config resolution at `:1810-1813` | Multiply/divide corruption |
@@ -141,6 +142,7 @@ GPT-QModel inverse scales.
 | Test | Invariant |
 | --- | --- |
 | `tests/test_save_loaded_quantized_model_dtype.py` | Tiny BF16 GPTQ quantize-save-load-resave preserves exact norm bits |
+| `tests/test_save_loaded_quantized_model_dtype.py::test_loaded_quantized_resave_preserves_bf16_non_quantized_bits` | All 7 quantized-module BF16 biases keep their exact bit pattern on re-save |
 | `tests/test_internal_gguf.py::test_internal_gguf_bf16_reader_reinterprets_byte_pairs` | Reader and both decoders match a NumPy BF16 byte oracle |
 | `tests/test_quant_scale_overflow.py::test_packers_preserve_source_bfloat16_bias_bits` | All three GPTQ packers preserve BF16 bias |
 | `tests/test_hf_config_compat.py::test_normalize_torch_dtype_kwarg_resolves_dtype_strings` | String dtypes resolve and invalid strings fail |

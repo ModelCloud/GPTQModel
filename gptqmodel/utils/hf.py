@@ -222,12 +222,17 @@ def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
     if isinstance(dtype, torch.dtype):
         return dtype
 
-    # If provided as a string (e.g., "float16"), resolve it via torch namespace
+    # If provided as a string (e.g., "float16" or "torch.bfloat16"), resolve it
+    # via the torch namespace. The loader accepts the same prefixed spelling.
     if isinstance(dtype, str):
+        name = dtype.strip().removeprefix("torch.")
         try:
-            return getattr(torch, dtype)
+            resolved = getattr(torch, name)
         except AttributeError:
             raise ValueError(f"Invalid dtype string: {dtype}")
+        if not isinstance(resolved, torch.dtype):
+            raise ValueError(f"Invalid dtype string: {dtype}")
+        return resolved
 
     raise ValueError(f"dtype must be torch.dtype or str, but got {dtype} (type={type(dtype)})")
 

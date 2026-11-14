@@ -40,6 +40,19 @@ def test_get_hf_config_dtype_preserves_stored_legacy_value():
     assert get_hf_config_dtype(config) is torch.float16
 
 
+def test_get_hf_config_dtype_accepts_the_torch_prefixed_string():
+    config = SimpleNamespace(dtype="torch.bfloat16")
+
+    assert get_hf_config_dtype(config) is torch.bfloat16
+
+
+def test_get_hf_config_dtype_rejects_a_non_dtype_torch_attribute():
+    config = SimpleNamespace(dtype="torch.pi")
+
+    with pytest.raises(ValueError, match="Invalid dtype string"):
+        get_hf_config_dtype(config)
+
+
 def test_normalize_hf_config_compat_backfills_llama_rope_parameters():
     config = LlamaConfig(rope_parameters=None, rope_theta=12345.0)
 
