@@ -674,6 +674,17 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
+    # Defuser gates `convert_model()` on its own model registry. Model types
+    # that GPT-QModel supports through the generic Transformers experts
+    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+    # so run Defuser's generic replacement pass explicitly instead of leaving
+    # the fused 3-D expert parameters unquantized.
+    if not converted and getattr(cls, "defuser_generic_experts", False):
+        from defuser.modeling.update_module import update_module
+
+        update_module(model, cleanup_original=cleanup_original)
+        converted = True
+
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
     if defuser_module_paths:
         for module_path in defuser_module_paths:
@@ -689,6 +700,10 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     # Defuser has no matching registration and reports no structural change.
     if callable(after_conversion):
         after_conversion(model)
+
+    from ..utils.defuser_compat import apply_glm4_moe_router_compat
+
+    apply_glm4_moe_router_compat()
 
     return converted
 
