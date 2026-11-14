@@ -247,7 +247,9 @@ def format_quantize_summary(
 
     A long run ends with a flush of the region timer, which says how time was
     spent but not what was produced or how much of the card it used. This is the
-    line a user pastes into a bug report.
+    line a user pastes into a bug report. `peak_vram_gib` is the largest
+    per-device peak allocation across the GPUs the run quantized on, so the
+    label says which of the two possible readings it is.
     """
 
     result = result or {}
@@ -258,7 +260,7 @@ def format_quantize_summary(
         f"{format_duration(elapsed_s)}"
     ]
     if peak_vram_gib is not None:
-        parts.append(f"peak VRAM {peak_vram_gib:.2f} GiB")
+        parts.append(f"peak VRAM {peak_vram_gib:.2f} GiB (per-device max)")
     return ", ".join(parts)
 
 
