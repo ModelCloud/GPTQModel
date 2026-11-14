@@ -385,6 +385,47 @@ def run_fusions(args) -> list[dict]:
     return rows
 
 
+def _resolve_device_profile(device_index: int) -> dict:
+    """Describe the card that produced these numbers, or say why it cannot.
+
+    Benchmarks are pasted into PRs and compared across machines, so a result
+    without the hardware in it is ambiguous. ``marlin_device_profile`` is probed
+    once per device by the extension, so this costs a dict conversion.
+    """
+
+    try:
+        from gptqmodel.utils.marlin import marlin_device_profile
+    except Exception as exc:  # pragma: no cover - import failure is environmental
+        return {"available": False, "reason": f"import failed: {type(exc).__name__}"}
+
+    try:
+        profile = marlin_device_profile(device_index)
+    except Exception as exc:
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return {"available": True, **profile}
+
+
+def format_device_header(profile: dict, device_name: str) -> str:
+    """One line naming the card and the limits the kernel selection reads."""
+
+    if not profile.get("available"):
+        return f"device: {device_name} | profile unavailable ({profile.get('reason', 'unknown')})"
+    shared_kib = profile["max_shared_mem"] // 1024
+    l2_mib = profile["l2_cache_size"] // (1024 * 1024)
+    tensor_memory = "yes" if profile["has_tensor_memory"] else "no"
+    return (
+        f"device: {device_name} | sms {profile['sms']} | shared {shared_kib} KiB"
+        f" | L2 {l2_mib} MiB | sm {profile['capability_major']}.{profile['capability_minor']}"
+        f" | tensor memory {tensor_memory}"
+    )
+
+
+def build_payload(rows: list[dict], profile: dict, device_name: str) -> dict:
+    """JSON body: the rows plus the hardware they were measured on."""
+
+    return {"device": {**profile, "name": device_name}, "rows": rows}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=sorted(PRESETS), default="qwen3_8b")
@@ -398,6 +439,12 @@ def main() -> int:
     parser.add_argument("--fusion", action="store_true",
                         help="compare fused qkv / gate_up against the separate calls")
     parser.add_argument("--json", default=None, help="write rows to this path")
+    parser.add_argument(
+        "--no-device-profile",
+        dest="device_profile",
+        action="store_false",
+        help="omit the probed device limits from the header and the JSON body",
+    )
     args = parser.parse_args()
     if not args.m or any(m < 1 for m in args.m):
         parser.error("--m requires one or more positive batch sizes")
@@ -408,9 +455,17 @@ def main() -> int:
         print("CUDA device required")
         return 1
 
+    device_index = torch.cuda.current_device()
+    device_name = torch.cuda.get_device_name(device_index)
+    if args.device_profile:
+        profile = _resolve_device_profile(device_index)
+        print(format_device_header(profile, device_name), flush=True)
+    else:
+        profile = {"available": False, "reason": "disabled by --no-device-profile"}
+
     rows = run_fusions(args) if args.fusion else run(args)
     if args.json:
-        Path(args.json).write_text(json.dumps(rows, indent=2))
+        Path(args.json).write_text(json.dumps(build_payload(rows, profile, device_name), indent=2))
         print(f"wrote {len(rows)} rows to {args.json}")
     return 0
 
