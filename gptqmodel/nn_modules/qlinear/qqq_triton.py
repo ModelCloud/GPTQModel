@@ -10,7 +10,9 @@ from triton.language.extra import libdevice
 
 @triton.jit
 def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
+    # rows * K can exceed 2^31 for a very large prefill batch; compute the row
+    # offset in 64-bit so the load/store addresses do not wrap.
+    row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, BLOCK)
     values = tl.load(X + row * K + columns, columns < K, other=0).to(tl.float32)
     # Match Torch's scalar division: multiply by the FP32 reciprocal of 127.

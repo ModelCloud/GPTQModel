@@ -367,8 +367,14 @@ class FOEM(GPTQ):
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
             else:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-            if i+1 < count:
-                W[:, i2+1] -= self.qcfg.foem.beta * (W[:, i2+1]-W_raw[:, i2+1])
+            # The in-block correction above pulls the next column back toward
+            # its raw value before that column is quantized. The first column
+            # of the next block needs the same correction at the block
+            # boundary; the previous form targeted `W[:, i2+1]` after the loop
+            # left `i == count - 1`, so it never ran and every block after the
+            # first skipped beta for its first column.
+            if i2 < self.columns:
+                W[:, i2] -= self.qcfg.foem.beta * (W[:, i2] - W_raw[:, i2])
 
         del Hinv
         if self.gptaq:

@@ -590,7 +590,9 @@ class ParoLinear(AwqTorchLinear):
             # Rotation and AWQ GEMM both require a positive row count; keep the
             # empty batch on the shared shape-preserving path instead.
             return self.empty_linear_output(x)
-        x_flat = x.reshape(-1, x.shape[-1])
+        # The fused rotation op requires a densely packed operand and rejects
+        # a strided `reshape` view (for example `hidden_states[:, -1:, :]`).
+        x_flat = x.reshape(-1, x.shape[-1]).contiguous()
         rotated = self._rotate_inputs(x_flat)
 
         out = self._forward_cuda_awq_kernel(rotated)

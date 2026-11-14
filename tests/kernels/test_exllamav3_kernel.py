@@ -400,3 +400,74 @@ def test_exllamav3_cuda_large_batch_matches_torch_reference(bits: int, codebook:
     assert cuda_out.dtype == x.dtype
     assert cuda_out.shape == torch_out.shape
     assert torch.allclose(cuda_out, torch_out, rtol=8e-2, atol=8e-2)
+
+
+@pytest.mark.parametrize(
+    ("bits", "codebook"),
+    [
+        (2, "3inst"),
+        (4, "mul1"),
+    ],
+)
+def test_exllamav3_cuda_noncontiguous_batch_slice_matches_torch(bits: int, codebook: str):
+    """A strided decode-step slice must not be reinterpreted as packed rows."""
+    _, torch_kernel, cuda_kernel = _build_kernels(bits, codebook)
+    base = torch.randn(4, 7, torch_kernel.in_features, device="cuda", dtype=torch.float16)
+    x = base[:, -1:, :]
+    assert not x.is_contiguous()
+
+    with torch.inference_mode():
+        torch_out = torch_kernel(x)
+        cuda_out = cuda_kernel(x)
+
+    assert cuda_out.shape == torch_out.shape
+    assert torch.allclose(cuda_out, torch_out, rtol=8e-2, atol=8e-2)
+
+
+def test_exllamav3_hadamard_kernel_rejects_strided_operands():
+    if not torch.cuda.is_available():
+        pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
+    from gptqmodel.exllamav3.ext import _runtime_op, exllamav3_runtime_available
+
+    if not exllamav3_runtime_available():
+        pytest.skip("EXL3 CUDA runtime unavailable")
+
+    had = _runtime_op("had_r_128")
+    base = torch.randn(4, 7, 128, device="cuda", dtype=torch.float16)
+    x = base[:, -1:, :].reshape(-1, 128)
+    y = torch.empty((x.shape[0], 128), device="cuda", dtype=torch.float16)
+    assert not x.is_contiguous()
+
+    with pytest.raises(RuntimeError, match="contiguous"):
+        had(x, y, None, None, 1.0)
+
+
+def test_exllamav3_hadamard_addresses_rows_past_two_to_the_32_elements():
+    """The row offset is rows * cols; it wrapped in 32-bit arithmetic."""
+    if not torch.cuda.is_available():
+        pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
+    from gptqmodel.exllamav3.ext import _runtime_op, exllamav3_runtime_available
+
+    if not exllamav3_runtime_available():
+        pytest.skip("EXL3 CUDA runtime unavailable")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 20 * 1024**3:
+        pytest.skip("the 2^32 offset regression needs at least 20 GiB of device memory")
+
+    rows, cols = 2**20 + 1, 4096
+    x = torch.zeros((rows, cols), device="cuda", dtype=torch.float16)
+    x[rows - 1].fill_(1.0)
+    # A sentinel proves the last row is written at all: a wrapped offset
+    # redirects it onto row 0 and leaves this row untouched.
+    y = torch.full((rows, cols), -1.0, device="cuda", dtype=torch.float16)
+    had = _runtime_op("had_r_128")
+
+    had(x, y, None, None, 1.0)
+    torch.cuda.synchronize()
+
+    # Every 128-wide block of the all-ones last row has DC 128/sqrt(128).
+    expected_dc = torch.tensor(128 / 128**0.5, device="cuda", dtype=torch.float16)
+    assert torch.count_nonzero(y[0]) == 0
+    assert torch.equal(y[rows - 1, 0], expected_dc)
+    assert torch.equal(y[rows - 1, 128], expected_dc)
+    assert torch.count_nonzero(y[rows - 1, 1:128]) == 0

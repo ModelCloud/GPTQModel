@@ -901,11 +901,23 @@ template <int BITS>
 cudaError_t launch_linear_f32(const void* x, const uint8_t* codes,
                               const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                               const void* bias, void* out, cudaStream_t stream) {
-  const dim3 grid((unsigned)((n + FN - 1) / FN), (unsigned)((m + FM - 1) / FM));
-  linear_f32_kernel<BITS><<<grid, 256, 0, stream>>>(
-      reinterpret_cast<const float*>(x), codes, exponents, m, n, k,
-      reinterpret_cast<const float*>(bias), reinterpret_cast<float*>(out));
-  return cudaGetLastError();
+  // gridDim.y is capped at 65535, so one launch covers at most
+  // 65535 * FM rows. Split larger batches into row chunks and shift the
+  // input/output pointers; the weight operands are indexed by column and are
+  // shared by every chunk.
+  const int64_t rows_per_launch = (int64_t)65535 * FM;
+  const float* xp = reinterpret_cast<const float*>(x);
+  float* op = reinterpret_cast<float*>(out);
+  for (int64_t off = 0; off < m; off += rows_per_launch) {
+    const int64_t rows = std::min<int64_t>(m - off, rows_per_launch);
+    const dim3 grid((unsigned)((n + FN - 1) / FN), (unsigned)((rows + FM - 1) / FM));
+    linear_f32_kernel<BITS><<<grid, 256, 0, stream>>>(
+        xp + off * k, codes, exponents, rows, n, k,
+        reinterpret_cast<const float*>(bias), op + off * n);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) return e;
+  }
+  return cudaSuccess;
 }
 
 template <typename T>
@@ -979,28 +991,38 @@ template <int BITS, typename T>
 cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
                                 const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                 const void* bias, void* out, cudaStream_t stream) {
-  const dim3 grid((unsigned)((n + PN - 1) / PN), (unsigned)((m + PM - 1) / PM));
   const T* xp = reinterpret_cast<const T*>(x);
   const float* bp = reinterpret_cast<const float*>(bias);
   T* op = reinterpret_cast<T*>(out);
-  // Up to one row tile the weights are dequantised exactly once either way, so
-  // keeping them in shared memory avoids the round trip through a workspace.
-  if (m <= PM) {
-    linear_mma_kernel<BITS, T, false><<<grid, PTHREADS, 0, stream>>>(
-        xp, codes, exponents, m, n, k, bp, op, nullptr);
-    return cudaGetLastError();
-  }
-  TemporaryBuffer buffer((size_t)n * k * sizeof(T), stream);
-  if (buffer.status() != cudaSuccess) return buffer.status();
-  T* w = reinterpret_cast<T*>(buffer.get());
-  cudaError_t e;
-  e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
-  if (e == cudaSuccess) {
+  // Same gridDim.y cap as the fp32 path; chunk very large row counts.
+  const int64_t rows_per_launch = (int64_t)65535 * PM;
+  for (int64_t off = 0; off < m; off += rows_per_launch) {
+    const int64_t rows = std::min<int64_t>(m - off, rows_per_launch);
+    const dim3 grid((unsigned)((n + PN - 1) / PN), (unsigned)((rows + PM - 1) / PM));
+    const T* chunk_x = xp + off * k;
+    T* chunk_out = op + off * n;
+    // Up to one row tile the weights are dequantised exactly once either way,
+    // so keeping them in shared memory avoids the round trip through a
+    // workspace.
+    if (rows <= PM) {
+      linear_mma_kernel<BITS, T, false><<<grid, PTHREADS, 0, stream>>>(
+          chunk_x, codes, exponents, rows, n, k, bp, chunk_out, nullptr);
+      const cudaError_t e = cudaGetLastError();
+      if (e != cudaSuccess) return e;
+      continue;
+    }
+    TemporaryBuffer buffer((size_t)n * k * sizeof(T), stream);
+    if (buffer.status() != cudaSuccess) return buffer.status();
+    T* w = reinterpret_cast<T*>(buffer.get());
+    cudaError_t e;
+    e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
+    if (e != cudaSuccess) return e;
     linear_mma_kernel<BITS, T, true><<<grid, PTHREADS, 0, stream>>>(
-        xp, codes, exponents, m, n, k, bp, op, w);
+        chunk_x, codes, exponents, rows, n, k, bp, chunk_out, w);
     e = cudaGetLastError();
+    if (e != cudaSuccess) return e;
   }
-  return e;
+  return cudaSuccess;
 }
 
 template <int BITS, typename T>

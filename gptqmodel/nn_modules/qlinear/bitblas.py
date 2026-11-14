@@ -867,6 +867,12 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             # The operator runs in fp16 when bf16 compute is unavailable (see module header);
             # keep `x` itself in the module dtype for adapters.
             x_2d = x_2d.to(self.compute_dtype)
+        # `_invoke_bitblas_matmul` hands BitBLAS a raw `data_ptr()`, so the
+        # operand must be densely packed. `reshape` returns a view for a
+        # non-contiguous input such as `hidden_states[:, -1:, :]` (every
+        # batched decode step), and BitBLAS would then read the wrong rows.
+        # A dtype cast above already copies; `contiguous()` is a no-op then.
+        x_2d = x_2d.contiguous()
 
         args = [x_2d, self.qweight, self.scales]
         if self.quant_config.with_zeros:
