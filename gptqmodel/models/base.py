@@ -71,6 +71,7 @@ from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
+from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config
@@ -308,7 +309,17 @@ class _QuantizedCheckpointSource:
             # Validate shard headers before any tuning; this maps files but does
             # not load checkpoint tensors into CPU/GPU memory.
             for shard_name in set(self._weight_map.values()):
-                with safe_open(os.path.join(self.model_local_path, shard_name), framework="pt", device="cpu"):
+                # A `weight_map` entry is untrusted: an absolute or `..` shard
+                # name would later be joined to the output directory. Validate
+                # it before the header probe so the source path is contained
+                # lexically; HF blob symlinks must keep resolving.
+                shard_path = resolve_checkpoint_path(
+                    self.model_local_path,
+                    shard_name,
+                    kind="checkpoint weight_map shard",
+                    follow_symlinks=False,
+                )
+                with safe_open(shard_path, framework="pt", device="cpu"):
                     pass
             self._index_filename = os.path.basename(checkpoint_file_name)
             return

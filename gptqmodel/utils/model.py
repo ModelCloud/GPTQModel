@@ -64,6 +64,7 @@ from ..quantization.config import (
 from ..quantization.module_config import resolve_module_constructor_config
 from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
+from .checkpoint_paths import assert_auxiliary_copy_allowed
 from .ctx import ctx
 from .device import get_device
 from .hf import get_hf_config_dtype, resolve_checkpoint_subfolder
@@ -2113,7 +2114,11 @@ def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
     if os.path.isdir(model_id_or_path):
         py_files = [f for f in os.listdir(model_id_or_path) if f.endswith('.py')]
         for file in py_files:
-            shutil.copy2(os.path.join(model_id_or_path, file), save_dir)
+            source_path = os.path.join(model_id_or_path, file)
+            # `copy2` follows symlinks; a cloned repository must not smuggle a
+            # file from outside its own tree into an output directory.
+            assert_auxiliary_copy_allowed(model_id_or_path, source_path, kind="custom Python file")
+            shutil.copy2(source_path, save_dir)
     else:
         remote_model_info = model_info(model_id_or_path)
         for file in remote_model_info.siblings:

@@ -46,6 +46,7 @@ from safetensors import safe_open
 from torch import nn
 
 from ..utils.logger import setup_logger
+from .checkpoint_paths import validate_relative_checkpoint_path
 from .p2p import safe_move_to
 from .torch import as_torch_device
 
@@ -1496,6 +1497,11 @@ class LazyTurtle:
             weight_map = index.get("weight_map", {})
             if not isinstance(weight_map, dict) or not weight_map:
                 raise ValueError(f"Invalid safetensors index: {resolved_archive_file}")
+            # Shard names are later joined to an output directory. Reject an
+            # absolute or `..` entry here so every consumer sees a contained
+            # relative name; HF blob symlinks are resolved by the reader.
+            for filename in weight_map.values():
+                validate_relative_checkpoint_path(filename, kind="checkpoint weight_map shard")
             return {str(name): str(filename) for name, filename in weight_map.items()}
 
         shard_name = os.path.basename(resolved_archive_file)

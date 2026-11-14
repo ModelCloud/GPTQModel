@@ -44,6 +44,12 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..utils.backend import BACKEND
+from ..utils.checkpoint_paths import (
+    CheckpointPathError,
+    assert_auxiliary_copy_allowed,
+    resolve_checkpoint_path,
+    validate_relative_checkpoint_path,
+)
 from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
@@ -504,8 +510,18 @@ def _save_module_replacement_safetensors(
     for shard_name, dropped_names in drop_by_shard.items():
         if not shard_name.endswith(".safetensors"):
             raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
-        source_path = os.path.join(turtle_model.model_local_path, shard_name)
-        target_path = os.path.join(save_dir, shard_name)
+        # `shard_name` comes from the checkpoint's `weight_map`. Reject an
+        # absolute or `..` entry before it is joined to the source or output
+        # directory: the write must never leave `save_dir`.
+        source_path = resolve_checkpoint_path(
+            turtle_model.model_local_path,
+            shard_name,
+            kind="checkpoint weight_map shard",
+            follow_symlinks=False,
+        )
+        target_path = resolve_checkpoint_path(
+            save_dir, shard_name, kind="checkpoint weight_map shard"
+        )
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         read_path = target_path if os.path.exists(target_path) else source_path
         tensors = {}
@@ -543,8 +559,10 @@ def _copy_missing_checkpoint_files(source_dir: str, save_dir: str) -> List[str]:
             target_path = os.path.join(target_root, filename)
             if os.path.exists(target_path):
                 continue
+            source_path = os.path.join(root, filename)
+            assert_auxiliary_copy_allowed(source_root, source_path, kind="module replacement auxiliary file")
             os.makedirs(target_root, exist_ok=True)
-            shutil.copy2(os.path.join(root, filename), target_path)
+            shutil.copy2(source_path, target_path)
             copied.append(os.path.relpath(target_path, save_root))
     return copied
 
@@ -1043,13 +1061,11 @@ def _is_safe_relative_checkpoint_shard(shard_name: str) -> bool:
     the checkpoint root.
     """
 
-    if not isinstance(shard_name, str) or not shard_name:
+    try:
+        validate_relative_checkpoint_path(shard_name, kind="checkpoint shard name")
+    except CheckpointPathError:
         return False
-    if "\x00" in shard_name or "\\" in shard_name:
-        return False
-    if os.path.isabs(shard_name) or os.path.splitdrive(shard_name)[0]:
-        return False
-    return all(part not in ("", ".", "..") for part in shard_name.split("/"))
+    return True
 
 
 def _build_exllamav3_checkpoint_passthrough_state_dict(
