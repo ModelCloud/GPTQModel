@@ -20,8 +20,11 @@ class FalconH1QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "mamba": ("in_proj:0", "out_proj:1"),
+            # Attention and the Mamba mixer are parallel branches of one norm.
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
+            # The SSM between in_proj and out_proj is not homogeneous.
+            "mamba": ("in_proj:0:in=x:nosrc", "out_proj:1"),
+            "pre_ff_layernorm": ("pre_ff_layernorm:!",),
             "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]

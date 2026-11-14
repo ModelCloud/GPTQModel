@@ -32,13 +32,17 @@ def _gemma4_module_tree():
                 "k_norm:!",
                 "k_proj:0:in=x",
                 "v_norm:!",
-                "v_proj:0:in=x",
+                # MHA configs pass v through a scale-free `v_norm`, so v_proj's
+                # output is not o_proj's input.
+                "v_proj:0:in=x:nosrc",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
-            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+            # Applied to the MLP output before the residual add; the per-layer
+            # input gate reads the post-residual hidden state, not this norm.
+            "post_feedforward_layernorm": ("post_feedforward_layernorm:!:postnorm",),
             "per_layer_input_gate": ("per_layer_input_gate:0",),
             "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
             "per_layer_projection": ("per_layer_projection:1",),

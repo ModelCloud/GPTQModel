@@ -44,7 +44,9 @@ class MuseGlimmerQModel(BaseQModel):
                 "q_proj:0:q",
                 "k_proj:0:k",
                 "v_proj:0:v",
-                "gate_proj:0",
+                # o_proj reads `attn * sigmoid(gate_proj(x))`; the gate makes
+                # gate_proj's output non-homogeneous.
+                "gate_proj:0:nosrc",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

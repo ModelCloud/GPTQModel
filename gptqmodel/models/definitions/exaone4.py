@@ -77,7 +77,9 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
                 "q_norm:!",
                 "k_norm:!",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # Exaone 4.5 adds the normalized attention output to the residual,
+            # so this norm does not feed the MLP (same contract as Exaone4).
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },

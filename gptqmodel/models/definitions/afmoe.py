@@ -30,8 +30,13 @@ class AfMoeQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "gate_proj:0"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # `o_proj` reads `attn * sigmoid(gate_proj(x))`; the gate makes
+            # gate_proj's output non-homogeneous, so it is not o_proj's source.
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "gate_proj:0:nosrc"),
+            # Both post-attention and post-MLP norms consume a branch output
+            # before the residual add, so neither feeds the next projection.
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
+            "pre_mlp_layernorm": ("pre_mlp_layernorm:!",),
             "mlp:moe:?": {
                 # The router gate (`mlp.router.gate`) stays in the checkpoint
                 # dtype; it is not a quantizable projection.
@@ -45,5 +50,6 @@ class AfMoeQModel(BaseQModel):
             # remaining layers route through mlp.experts. Missing on MoE layers,
             # which is fine because layer_modules_strict=False.
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "post_mlp_layernorm": ("post_mlp_layernorm:!:postnorm",),
         }
     ]

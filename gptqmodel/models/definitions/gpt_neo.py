@@ -23,6 +23,7 @@ class GptNeoQModel(BaseQModel):
                 "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1")
             },
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            # GELU between the two projections is not positively homogeneous.
+            "mlp": ("c_fc:0:nosrc", "c_proj:1"),
         }
     ]

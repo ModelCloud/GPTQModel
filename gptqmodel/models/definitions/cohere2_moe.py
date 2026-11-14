@@ -34,6 +34,9 @@ class Cohere2MoeQModel(BaseQModel):
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
+                # Shared experts read the same parallel-block norm as the routed
+                # experts, so they must be folded into the same scaling group.
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 # Dense fallback used by Cohere2-MoE prefix decoder blocks.
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             },

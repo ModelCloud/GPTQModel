@@ -1444,9 +1444,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
                 "q_a_norm:!",
                 "q_a_proj:0:q",
                 "q_b_norm:!",
-                "q_b_proj:1:q:in=q_a",
+                # q_b_proj reads q_a, and o_b_proj reads the attention output;
+                # neither is the direct input of the next scaling consumer.
+                "q_b_proj:1:q:in=q_a:nosrc",
                 "o_a_proj:!",
-                "o_b_proj:2:o",
+                "o_b_proj:2:o:nosrc",
                 "kv_norm:!",
                 "kv_proj:0:k:v",
                 "compressor:!",

@@ -959,7 +959,7 @@
       "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
     },
     "falcon": {
-      "definition": "RwgQModel",
+      "definition": "FalconQModel",
       "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
     },
     "falcon_h1": {
