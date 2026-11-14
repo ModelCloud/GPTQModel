@@ -11,7 +11,7 @@ import torch
 from torch.nn import Module
 
 from ..adapter.adapter import Lora
-from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
+from ..eora.eora import eora_compute_lora, eora_process_input
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -64,8 +64,8 @@ class EoraProcessor(LoopProcessor):
             forward=forward,
         )
 
-        # Track per-module segment accumulators keyed by device so we can merge
-        # contributions without repeatedly moving data through the CPU.
+        # Track raw per-module X^T X sums keyed by device. Contributions stay
+        # local until one final normalization by the total token count.
         self._segment_accumulators: Dict[str, Dict[torch.device, Dict[str, Any]]] = {}
         self._module_target_devices: Dict[str, torch.device] = {}
 
@@ -150,8 +150,7 @@ class EoraProcessor(LoopProcessor):
         def tmp(module, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
             """Processes one batch of inputs into an EoRA contribution segment."""
 
-            batch_index = self.current_batch_index()
-            batch, contribution, scale = self.eora_process_input(
+            _, contribution, token_count = self.eora_process_input(
                 input=input,
                 name=name,
                 sample_size=self.num_batches,
@@ -160,10 +159,8 @@ class EoraProcessor(LoopProcessor):
 
             self._accumulate_eora_contribution(
                 name=name,
-                batch_index=batch_index,
-                batch=batch,
                 contribution=contribution,
-                scale=scale,
+                token_count=token_count,
             )
         return tmp
 
@@ -171,33 +168,25 @@ class EoraProcessor(LoopProcessor):
         self,
         *,
         name: str,
-        batch_index: Optional[int],
-        batch: int,
         contribution: torch.Tensor,
-        scale: float,
+        token_count: int,
     ) -> None:
-        """Merges one EoRA contribution segment into the per-device accumulator."""
+        """Adds one raw EoRA covariance contribution to the per-device accumulator."""
 
-        if batch <= 0:
+        if token_count <= 0:
             return
 
         contribution = contribution.detach()
         device = torch.device(contribution.device)
-        scale_value = float(scale)
 
         with self.lock:
             accumulators = self._segment_accumulators.setdefault(name, {})
             record = accumulators.get(device)
 
-            index_value = int(batch_index) if batch_index is not None else 0
-
             if record is None:
                 record = {
                     "total": contribution,
-                    "scale_product": scale_value,
-                    "start_index": index_value,
-                    "end_index": index_value,
-                    "count": 1,
+                    "token_count": int(token_count),
                 }
                 accumulators[device] = record
                 return
@@ -206,23 +195,10 @@ class EoraProcessor(LoopProcessor):
             if total.device != contribution.device:
                 total = total.to(device=contribution.device)
 
-            total.mul_(scale_value)
             total.add_(contribution)
 
             record["total"] = total
-            record["scale_product"] *= scale_value
-            record["count"] += 1
-
-            if batch_index is not None:
-                batch_value = int(batch_index)
-                if record["start_index"] is None or batch_value < record["start_index"]:
-                    record["start_index"] = batch_value
-                if record["end_index"] is None or batch_value > record["end_index"]:
-                    record["end_index"] = batch_value
-            else:
-                if record.get("start_index") is None:
-                    record["start_index"] = record["count"] - 1
-                record["end_index"] = record["count"] - 1
+            record["token_count"] += int(token_count)
 
             del contribution
 
@@ -238,23 +214,27 @@ class EoraProcessor(LoopProcessor):
                 f"EoRA statistics for module '{name}' were not collected before processing."
             )
 
-        ordered_segments = sorted(
-            segments.values(),
-            key=lambda record: record.get("start_index", 0),
-        )
-
         if target_device is None:
-            first_total = ordered_segments[0]["total"]
+            first_total = next(iter(segments.values()))["total"]
             target_device = torch.device(first_total.device)
 
-        segment_pairs = []
-        for record in ordered_segments:
-            total = record["total"]
-            if total.device != target_device:
-                total = total.to(device=target_device, dtype=torch.float32)
-            segment_pairs.append((total, float(record["scale_product"])))
+        total = None
+        token_count = 0
+        for record in segments.values():
+            contribution = record["total"]
+            if contribution.device != target_device:
+                contribution = contribution.to(device=target_device, dtype=torch.float32)
+            if total is None:
+                total = contribution.clone()
+            else:
+                total.add_(contribution)
+            token_count += int(record["token_count"])
 
-        return merge_eora_segments(segment_pairs)
+        if total is None or token_count <= 0:
+            raise RuntimeError(f"EoRA statistics for module '{name}' contain no activation tokens.")
+
+        total.div_(float(token_count))
+        return total
 
     def process(
         self,

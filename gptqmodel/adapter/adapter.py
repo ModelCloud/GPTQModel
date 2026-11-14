@@ -180,6 +180,7 @@ class Lora(Adapter):
 
         self.lora_A = lora_A
         self.lora_B = lora_B
+        self.lora_scale = 1.0
 
     @classmethod
     def name(cls) -> str:
@@ -326,6 +327,7 @@ class Lora(Adapter):
 
         # check for rank override from base config
         self.dynamic_rank_override(lora_cfg=lora_cfg, weight_key=weight_key)
+        alpha = self.dynamic_alpha_override(lora_cfg=lora_cfg, weight_key=weight_key)
 
         # # since loder cache is singleton, we need to reset to None to ci loop tests can pass
         # if len(lora_weights) == 0:
@@ -340,6 +342,19 @@ class Lora(Adapter):
         # safe to downcast from float64
         self.lora_A = lora_A.to(device=device, dtype=torch.float32 if lora_A.dtype == torch.float64 else lora_A.dtype)
         self.lora_B = lora_B.to(device=device, dtype=torch.float32 if lora_B.dtype == torch.float64 else lora_B.dtype)
+        if self.rank <= 0:
+            raise ValueError(f"Adapter: LoRA rank must be positive, actual = `{self.rank}`.")
+        if alpha <= 0:
+            raise ValueError(f"Adapter: LoRA alpha must be positive, actual = `{alpha}`.")
+        self.lora_scale = (
+            float(alpha) / float(self.rank) ** 0.5
+            if lora_cfg.use_rslora
+            else float(alpha) / float(self.rank)
+        )
+        # `lora_B` is already a private contiguous clone from the immutable
+        # adapter cache. Fold the scale once here so every forward uses the
+        # PEFT effective scale without adding another multiply.
+        self.lora_B.mul_(self.lora_scale)
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
@@ -366,6 +381,28 @@ class Lora(Adapter):
                     return True
 
         return False
+
+    def dynamic_alpha_override(self, lora_cfg: LoraConfig, weight_key: str) -> float:
+        """Resolves the PEFT alpha for this module from `alpha_pattern` or the base config."""
+
+        base_alpha = lora_cfg.lora_alpha
+        alpha = base_alpha
+        if lora_cfg.alpha_pattern:
+            for pattern, override in lora_cfg.alpha_pattern.items():
+                assert isinstance(pattern, str) and isinstance(override, int)
+                assert override > 0
+                matched = _rank_pattern_matches(pattern, weight_key)
+                if not matched and (pattern != pattern.lower() or weight_key != weight_key.lower()):
+                    matched = _rank_pattern_matches(pattern, weight_key, ignore_case=True)
+                if matched:
+                    alpha = override
+                    log.info(
+                        f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
+                        f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
+                    )
+                    break
+
+        return alpha
 
 
 

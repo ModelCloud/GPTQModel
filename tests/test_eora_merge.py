@@ -1,54 +1,48 @@
-import math
+import threading
 
 import pytest
 import torch
 
-from gptqmodel.eora.eora import eora_process_input, merge_eora_segments
+from gptqmodel.eora.eora import eora_process_input
+from gptqmodel.looper.eora_processor import EoraProcessor
 
 
-def _segment_reduce(contributions, scales):
-    total = None
-    scale_product = 1.0
-    for contribution, scale in zip(contributions, scales):
-        if total is None:
-            total = contribution.clone()
-            scale_product = float(scale)
-        else:
-            total.mul_(float(scale))
-            total.add_(contribution)
-            scale_product *= float(scale)
-    return total, scale_product
+def _processor_for_uniformity():
+    processor = object.__new__(EoraProcessor)
+    processor.lock = threading.Lock()
+    processor._segment_accumulators = {"layer.proj": {}}
+    processor._module_target_devices = {"layer.proj": torch.device("cpu")}
+    processor.num_batches = 16
+    processor._batch_tls = threading.local()
+    processor.eora_process_input = eora_process_input
+    return processor
 
 
-@pytest.mark.parametrize("segments", [1, 2, 4])
-def test_eora_merge_matches_sequential(segments):
+class _FakeModule:
+    def __init__(self, device):
+        self.weight = type("_Weight", (), {"data": torch.empty(0, device=device)})()
+
+
+def test_eora_covariance_weights_every_batch_uniformly():
     torch.manual_seed(0)
-
-    sample_size = 96
     cols = 8
-    base_contributions = [
-        torch.randn(cols, cols, dtype=torch.float32)
-        for _ in range(sample_size)
+    batches = [
+        torch.randn(1, 3, cols, dtype=torch.float32)
+        for _ in range(16)
     ]
-    def scale_fn(batch):
-        return sample_size / (sample_size + batch)
-    scales = [scale_fn(1) for _ in range(sample_size)]
+    processor = _processor_for_uniformity()
+    hook = processor.pre_process_fwd_hook("layer.proj")
+    module = _FakeModule(torch.device("cpu"))
 
-    sequential = torch.zeros((cols, cols), dtype=torch.float32)
-    for contribution, scale in zip(base_contributions, scales):
-        sequential.mul_(float(scale))
-        sequential.add_(contribution)
+    for batch_index, sample in enumerate(batches):
+        processor._set_current_batch_index(batch_index)
+        hook(module, (sample,), None)
 
-    segment_length = math.ceil(sample_size / segments)
-    segment_pairs = []
-    for start in range(0, sample_size, segment_length):
-        end = min(start + segment_length, sample_size)
-        contributions = base_contributions[start:end]
-        seg_scales = scales[start:end]
-        segment_pairs.append(_segment_reduce(contributions, seg_scales))
+    actual = processor._finalize_eigen_scaling_matrix("layer.proj")
+    tokens = torch.cat(batches, dim=1).reshape(-1, cols).double()
+    oracle = tokens.T @ tokens / tokens.shape[0]
 
-    merged = merge_eora_segments(segment_pairs)
-    torch.testing.assert_close(merged, sequential, atol=5e-6, rtol=5e-6)
+    torch.testing.assert_close(actual.double(), oracle, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -56,7 +50,7 @@ def test_eora_process_input_preserves_device():
     device = torch.device("cuda", 0)
     sample = torch.randn(1, 4, 6, device=device, dtype=torch.float16)
 
-    batch, contribution, scale = eora_process_input(
+    batch, contribution, sample_count = eora_process_input(
         input=(sample,),
         name="test",
         sample_size=32,
@@ -64,6 +58,6 @@ def test_eora_process_input_preserves_device():
     )
 
     assert batch == 1
+    assert sample_count == 4
     assert contribution.device == device
     assert contribution.dtype == torch.float32
-    assert isinstance(scale, float)
