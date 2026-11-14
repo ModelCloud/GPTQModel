@@ -1380,10 +1380,69 @@ class GPTQ:
         deliberately leaves ``H`` and the per-device partials in place so the
         subsequent quantization pass can consume the original device-local
         capture without retaining every Hessian in host memory.
+
+        Both the already-finalized contribution (``self.H`` or ``self._H_diag``)
+        and any partials collected after it are merged by their own sample
+        counts, mirroring :meth:`materialize_global_hessian`.  Embedding
+        captures use the same count-derived diagonal normalization as
+        :meth:`finalize_hessian`.
         """
 
         with self.lock:
             device = self._select_hessian_target_device(target_device)
+
+            if isinstance(self.module, nn.Embedding):
+                if not self._hessian_dirty and self._H_diag is not None:
+                    self._wait_hessian_ready(device)
+                    source_diag = self._H_diag
+                    result = source_diag.detach().to(device=device, dtype=torch.float32)
+                    if result.device != source_diag.device or result.dtype != source_diag.dtype:
+                        event = self._cuda_event_for(device)
+                        if event is not None:
+                            event.record(torch.cuda.current_stream(device))
+                        self._defer_hessian_sources([source_diag], event)
+                    return result
+
+                finalized_samples, pending_samples = self._snapshot_sample_counts()
+                total_samples = finalized_samples + pending_samples
+                diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
+                if total_samples == 0:
+                    return diag
+
+                sources: list[torch.Tensor] = []
+                if finalized_samples and self._H_diag is not None:
+                    self._wait_hessian_ready(device)
+                    source_diag = self._H_diag
+                    previous = safe_move_to(source_diag, device, dtype=torch.float32)
+                    diag.add_(
+                        previous,
+                        alpha=float(finalized_samples) / float(total_samples),
+                    )
+                    if previous is not source_diag:
+                        sources.append(source_diag)
+
+                for partial_device in sorted(
+                    self._device_embedding_counts, key=_device_reduction_key
+                ):
+                    counts = self._device_embedding_counts[partial_device]
+                    partial_event = self._device_hessian_partial_ready.get(
+                        torch.device(partial_device)
+                    )
+                    if partial_event is not None:
+                        if device.type == "cuda":
+                            torch.cuda.current_stream(device).wait_event(partial_event)
+                        else:
+                            partial_event.synchronize()
+                    diag.add_(
+                        safe_move_to(counts, device, dtype=torch.float32),
+                        alpha=2.0 / float(total_samples),
+                    )
+                event = self._cuda_event_for(device)
+                if event is not None:
+                    event.record(torch.cuda.current_stream(device))
+                self._defer_hessian_sources(sources, event)
+                return diag
+
             if not self._hessian_dirty and self.H is not None:
                 self._wait_hessian_ready(device)
                 source = self.H
@@ -1395,12 +1454,8 @@ class GPTQ:
                     self._defer_hessian_sources([source], event)
                 return result
 
-            total_samples = sum(self._device_sample_counts.values())
-            if total_samples != self.nsamples:
-                raise RuntimeError(
-                    f"Hessian snapshot sample-count drift: partials={total_samples}, "
-                    f"capture={self.nsamples}"
-                )
+            finalized_samples, pending_samples = self._snapshot_sample_counts()
+            total_samples = finalized_samples + pending_samples
             result = torch.zeros(
                 (self.columns, self.columns),
                 dtype=torch.float32,
@@ -1410,6 +1465,16 @@ class GPTQ:
                 return result
 
             sources = list(self._device_hessian_partials.values())
+            if finalized_samples and self.H is not None:
+                self._wait_hessian_ready(device)
+                source_hessian = self.H
+                previous = safe_move_to(source_hessian, device, dtype=torch.float32)
+                result.add_(
+                    previous,
+                    alpha=float(finalized_samples) / float(total_samples),
+                )
+                if previous is not source_hessian:
+                    sources.insert(0, source_hessian)
             for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
                 partial = self._device_hessian_partials[partial_device]
                 event = self._device_hessian_partial_ready.get(torch.device(partial_device))
@@ -1418,13 +1483,27 @@ class GPTQ:
                         torch.cuda.current_stream(device).wait_event(event)
                     else:
                         event.synchronize()
-                result.add_(partial.to(device=device, dtype=torch.float32))
-            result.mul_(2.0 / float(total_samples))
+                result.add_(
+                    safe_move_to(partial, device, dtype=torch.float32),
+                    alpha=2.0 / float(total_samples),
+                )
             event = self._cuda_event_for(device)
             if event is not None:
                 event.record(torch.cuda.current_stream(device))
             self._defer_hessian_sources(sources, event)
             return result
+
+    def _snapshot_sample_counts(self) -> Tuple[int, int]:
+        """Return the finalized and pending sample counts of the live capture."""
+
+        finalized_samples = self._hessian_total_samples
+        pending_samples = sum(self._device_sample_counts.values())
+        if finalized_samples + pending_samples != self.nsamples:
+            raise RuntimeError(
+                f"Hessian snapshot sample-count drift: finalized={finalized_samples}, "
+                f"partials={pending_samples}, capture={self.nsamples}"
+            )
+        return finalized_samples, pending_samples
 
     def create_H(self, target_device):
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
