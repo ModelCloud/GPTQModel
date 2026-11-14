@@ -680,3 +680,72 @@ def test_shutdown_is_not_reachable_without_valid_token_when_client_host_is_unpar
 
     assert TestClient(server.app).get("/shutdown").status_code == 403
     assert called == []
+
+
+def test_stream_parameter_rejected_with_400(client):
+    response = _chat(client, stream=True)
+    assert response.status_code == 400
+    assert "Streaming is not currently supported" in response.json()["detail"]
+
+
+def test_max_completion_tokens_aliases_max_tokens(client, model):
+    response = _chat(client, max_completion_tokens=5)
+    assert response.status_code == 200
+    assert model.calls[-1]["max_new_tokens"] == 5
+
+    assert _chat(client, max_completion_tokens=0).status_code == 422
+    assert _chat(client, max_completion_tokens=MAX_COMPLETION_TOKENS + 1).status_code == 422
+
+
+def test_negative_temperature_rejected(client):
+    assert _chat(client, temperature=-0.5).status_code == 422
+
+
+def test_unknown_request_fields_rejected_extra_forbid(client):
+    assert _chat(client, unrecognized_field="bad").status_code == 422
+
+
+def test_seed_honored(client, model):
+    response = _chat(client, seed=1234)
+    assert response.status_code == 200
+
+
+def test_multi_eos_token_ids_from_generation_config(tokenizer):
+    gen_eos_list = [128001, 128008]
+
+    class _GenConfig:
+        eos_token_id = gen_eos_list
+
+    class _MultiEOSModel(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.generation_config = _GenConfig()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            prompt = kwargs["input_ids"]
+            # Row ends on <|eom_id|> (128008) followed by pad 0
+            row = torch.tensor([[65, 66, 128008, 0, 0]])
+            return torch.cat([prompt, row], dim=1)
+
+    model = _MultiEOSModel(tokenizer)
+    client = TestClient(OpenAiServer(model=model).app)
+    response = _chat(client, max_tokens=10)
+    assert response.status_code == 200
+
+    call = model.calls[-1]
+    assert 128008 in call["eos_token_id"]
+    assert 128001 in call["eos_token_id"]
+
+    body = response.json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["usage"]["completion_tokens"] == 3
+
+
+def test_ipv6_bracketed_host_allowed(model):
+    server = OpenAiServer(model=model)
+    server._install_host_validation("::1")
+
+    # Starlette compares the bracketed Host header "[::1]" when connecting over IPv6
+    client = TestClient(server.app, base_url="http://[::1]")
+    assert client.get("/health").status_code == 200
