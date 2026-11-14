@@ -61,7 +61,13 @@ jobs:
     if: ${{ inputs.github_vm == false }}
     env:
       UV_TORCH_BACKEND: cu130
+  # The pinned Torch build is below the patch for GHSA-rrmf-rvhw-rf47 /
+      # CVE-2025-3000, so the runtime gate in gptqmodel._torch_safety would
+      # refuse to import this matrix. It opts out explicitly. Raise
+      # TORCH_VERSION to >= 2.13.0 and delete this override once the image
+      # ships it.
       TORCH_VERSION: 2.11.0
+      GPTQ_BYPASS_SAFETY_CHECKS: '1'
       PYTHON_VERSION: 3.14
       UV_PYTHON: 3.14
     container:

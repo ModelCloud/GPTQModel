@@ -58,7 +58,13 @@ env:
   GPU_ALLOCATOR_URL: http://10.0.13.31/gpu
   LOGBAR_ANIMATION: '0'
   UV_TORCH_BACKEND: cu130
+  # The pinned Torch build is below the patch for GHSA-rrmf-rvhw-rf47 /
+  # CVE-2025-3000, so the runtime gate in gptqmodel._torch_safety would
+  # refuse to import this matrix. It opts out explicitly. Raise
+  # TORCH_VERSION to >= 2.13.0 and delete this override once the image
+  # ships it.
   TORCH_VERSION: 2.12.0
+  GPTQ_BYPASS_SAFETY_CHECKS: '1'
   PYTHON_VERSION: 3.14t
   UV_PYTHON: 3.14t
   MODEL_TEST_MODE: ${{ inputs.model_test_mode || 'fast' }}

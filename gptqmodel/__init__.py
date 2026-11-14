@@ -10,6 +10,16 @@ import threading
 
 
 # isort: off
+# Must be the first check in the package: it refuses an affected PyTorch before
+# the allocator is initialized, a device is opened, or a checkpoint is read.
+# ``gptqmodel._torch_safety`` is standalone on purpose; importing
+# ``gptqmodel.utils`` here would initialize CUDA first.
+# `UnsafeTorchVersionError` is re-exported so callers can catch the gate's error
+# as `gptqmodel.UnsafeTorchVersionError`.
+from ._torch_safety import UnsafeTorchVersionError, ensure_safe_torch  # noqa: E402, F401
+
+ensure_safe_torch()
+
 # Must run before any submodule import: importing `.utils` initialises the CUDA
 # caching allocator, and Torch only reads the allocator configuration once. A
 # late assignment is silently ignored, which leaves large quantization runs
