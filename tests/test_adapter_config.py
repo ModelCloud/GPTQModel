@@ -19,6 +19,7 @@ import os
 
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora, normalize_adapter
+from gptqmodel.adapter.peft import LoraConfig
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -125,4 +126,32 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.bits == bits
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
+
+    def test_rank_pattern_matches_short_suffix_and_regex(self):
+        name = "model.layers.0.self_attn.q_proj"
+
+        for pattern in ("q_proj", "q_proj$", name):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            )
+            assert adapter.rank == 16, pattern
+
+    def test_rank_pattern_override_is_serialized(self):
+        adapter = Lora(rank=8)
+
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"q_proj": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.to_dict()["rank"] == 16
+
+    def test_rank_pattern_does_not_match_other_suffixes(self):
+        adapter = Lora(rank=8)
+
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"v_proj$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
 
