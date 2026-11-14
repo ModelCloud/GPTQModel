@@ -9,8 +9,9 @@
 // alive while a kernel on another stream is still writing them. This small
 // adapter is rebuilt for the installed torch, keeps the public operator name
 // and schema, records those buffers with the real allocator hook, and forwards
-// to the stable core through the dispatcher. Python callers and direct
-// `torch.ops` / native callers therefore get identical lifetime protection.
+// the same stack to the stable core through the dispatcher. Python callers and
+// direct `torch.ops` / native callers therefore get identical lifetime
+// protection.
 //
 // `record_stream` only registers allocator usage; the completion event is
 // created when the block is freed, so recording before the launch is safe and
@@ -23,7 +24,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include <optional>
 #include <vector>
 
 #if MARLIN_ADAPTER_BF16
@@ -48,6 +48,11 @@ static constexpr const char* kSchema =
     "Tensor(d!)? a_tmp=None) -> Tensor(a!)";
 #endif
 
+// Argument positions in `kSchema` of the buffers the kernel writes.
+constexpr size_t kCArg = 1;
+constexpr size_t kCTmpArg = 18;
+constexpr size_t kATmpArg = 19;
+
 namespace {
 
 const c10::OperatorHandle& core_gemm_handle() {
@@ -58,55 +63,29 @@ const c10::OperatorHandle& core_gemm_handle() {
   return handle;
 }
 
-c10::IValue optional_tensor(const std::optional<at::Tensor>& value) {
-  return value.has_value() ? c10::IValue(*value) : c10::IValue();
+void record_stream_if_present(c10::Stack& stack, size_t index, at::Stream stream) {
+  if (index >= stack.size() || stack[index].isNone()) {
+    return;
+  }
+  stack[index].toTensor().record_stream(stream);
 }
 
-at::Tensor record_and_forward(
-    at::Tensor a, std::optional<at::Tensor> c_or_none, at::Tensor b_q_weight,
-    std::optional<at::Tensor> const& b_bias_or_none, at::Tensor b_scales,
-    std::optional<at::Tensor> const& global_scale_or_none,
-    std::optional<at::Tensor> const& b_zeros_or_none,
-    std::optional<at::Tensor> const& g_idx_or_none,
-    std::optional<at::Tensor> const& perm_or_none, at::Tensor workspace,
-    int64_t b_q_type_id, int64_t size_m, int64_t size_n, int64_t size_k,
-    bool is_k_full, bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float,
-    std::optional<at::Tensor> c_tmp_or_none,
-    std::optional<at::Tensor> a_tmp_or_none) {
+// Boxed on purpose: the stack already holds the caller's arguments, so the
+// adapter can record streams and hand the same stack to the core without an
+// extra unbox/box round trip.
+void record_and_forward(const c10::OperatorHandle&, c10::Stack* stack) {
+  const at::Tensor& a = stack->at(0).toTensor();
   const c10::cuda::OptionalCUDAGuard guard(a.device());
   const auto stream = at::cuda::getCurrentCUDAStream(
       static_cast<c10::DeviceIndex>(a.get_device()));
   // These are the buffers the kernel writes. Recording them on the executing
   // stream keeps the allocator from handing their storage to another stream
   // before the launch completes.
-  if (c_or_none.has_value()) c_or_none->record_stream(stream);
-  if (c_tmp_or_none.has_value()) c_tmp_or_none->record_stream(stream);
-  if (a_tmp_or_none.has_value()) a_tmp_or_none->record_stream(stream);
+  record_stream_if_present(*stack, kCArg, stream);
+  record_stream_if_present(*stack, kCTmpArg, stream);
+  record_stream_if_present(*stack, kATmpArg, stream);
 
-  std::vector<c10::IValue> stack = {
-      a,
-      optional_tensor(c_or_none),
-      b_q_weight,
-      optional_tensor(b_bias_or_none),
-      b_scales,
-      optional_tensor(global_scale_or_none),
-      optional_tensor(b_zeros_or_none),
-      optional_tensor(g_idx_or_none),
-      optional_tensor(perm_or_none),
-      workspace,
-      b_q_type_id,
-      size_m,
-      size_n,
-      size_k,
-      is_k_full,
-      use_atomic_add,
-      use_fp32_reduce,
-      is_zp_float,
-      optional_tensor(c_tmp_or_none),
-      optional_tensor(a_tmp_or_none),
-  };
-  core_gemm_handle().callBoxed(stack);
-  return stack[0].toTensor();
+  core_gemm_handle().callBoxed(*stack);
 }
 
 }  // namespace
@@ -119,7 +98,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_marlin_bf16, m) {
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_marlin_bf16, CUDA, m) {
-  m.impl(kPublicOp, &record_and_forward);
+  m.impl(kPublicOp, torch::CppFunction::makeFromBoxedFunction<&record_and_forward>());
 }
 #else
 TORCH_LIBRARY_FRAGMENT(gptqmodel_marlin_fp16, m) {
@@ -127,6 +106,6 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_marlin_fp16, m) {
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_marlin_fp16, CUDA, m) {
-  m.impl(kPublicOp, &record_and_forward);
+  m.impl(kPublicOp, torch::CppFunction::makeFromBoxedFunction<&record_and_forward>());
 }
 #endif
