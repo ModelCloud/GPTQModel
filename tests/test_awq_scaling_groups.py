@@ -12,6 +12,7 @@ still reproduces its own consumer.
 """
 
 import dataclasses
+import importlib
 
 import pytest
 import torch
@@ -60,6 +61,7 @@ FAMILY_MODEL_TYPES = [
     "falcon_h1",
     "falcon_mamba",
     "gemma4_text",
+    "hrm_text",
     # MoE families.
     "cohere2_moe",
     "gpt_oss",
@@ -276,8 +278,10 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 PLAIN_QUANTIZATION_FAMILIES = {"codegen", "gpt2", "minimax"}
 
 # Issue #4039 families that can be instantiated as a tiny ``AutoModelForCausalLM``.
-# ``exaone4_5`` is a vision-language wrapper (covered by ``exaone4``, which shares
-# the decoder tree, plus ``test_exaone4_5_marks_post_attention_norm_as_postnorm``),
+# ``exaone4_5`` and ``muse_glimmer`` are vision-language wrappers with no
+# ``AutoModelForCausalLM`` entry point; their flags are pinned statically by
+# ``test_declared_non_source_flags_are_present`` (plus ``exaone4``, which shares
+# the Exaone 4 decoder tree, for the numeric invariant),
 # and ``deepseek_v3``/``deepseek_v32`` fail to build a tiny config in this
 # transformers release (``RuntimeError: shape '[-1, 8, 0]'``).
 ISSUE_4039_FAMILIES = {
@@ -295,6 +299,7 @@ ISSUE_4039_FAMILIES = {
     "gpt_neo",
     "gpt_neox",
     "gpt_oss",
+    "hrm_text",
     "laguna",
     "minimax",
     "olmoe",
@@ -415,3 +420,39 @@ def test_exaone4_5_marks_post_attention_norm_as_postnorm():
     from gptqmodel.models.definitions.exaone4 import Exaone4_5QModel
 
     assert "post_attention_layernorm" in Exaone4_5QModel.get_post_norm_modules()
+
+
+@pytest.mark.parametrize(
+    "module_path,class_name,leaf",
+    [
+        # Vision-language wrappers with no AutoModelForCausalLM entry point.
+        ("gptqmodel.models.definitions.muse_glimmer", "MuseGlimmerQModel", "self_attn.gate_proj"),
+        ("gptqmodel.models.definitions.exaone4", "Exaone4_5QModel", "post_attention_layernorm"),
+        # Gated attention and non-homogeneous MLP activations.
+        ("gptqmodel.models.definitions.hrm_text", "HrmTextQModel", "self_attn.gate_proj"),
+        ("gptqmodel.models.definitions.afmoe", "AfMoeQModel", "self_attn.gate_proj"),
+        ("gptqmodel.models.definitions.gemma4", "Gemma4TextQModel", "self_attn.v_proj"),
+        ("gptqmodel.models.definitions.gpt_oss", "GPTOSSGPTQ", "mlp.experts.{expert_index}.up_proj"),
+        ("gptqmodel.models.definitions.gpt_neox", "GPTNeoXQModel", "mlp.dense_h_to_4h"),
+        ("gptqmodel.models.definitions.gpt_neo", "GptNeoQModel", "mlp.c_fc"),
+        ("gptqmodel.models.definitions.gpt_bigcode", "GptBigCodeQModel", "mlp.c_fc"),
+        ("gptqmodel.models.definitions.bloom", "BloomQModel", "mlp.dense_h_to_4h"),
+        ("gptqmodel.models.definitions.rw", "RwgQModel", "mlp.dense_h_to_4h"),
+        ("gptqmodel.models.definitions.rw", "FalconQModel", "mlp.dense_h_to_4h"),
+        ("gptqmodel.models.definitions.falcon_h1", "FalconH1QModel", "mamba.in_proj"),
+        ("gptqmodel.models.definitions.minimax_m2", "MiniMaxQModel", "self_attn.output_gate"),
+        ("gptqmodel.models.definitions.deepseek_v4", "DeepSeekV4QModel", "self_attn.o_b_proj"),
+    ],
+)
+def test_declared_non_source_flags_are_present(module_path, class_name, leaf):
+    """Definitions that cannot build a tiny CausalLM still declare their non-sources."""
+
+    from gptqmodel.models.base import AWQ_NO_SCALE_SOURCE_FLAG, POST_NORM_FLAG
+
+    definition = importlib.import_module(module_path)
+    cls = getattr(definition, class_name)
+    plan = ModulePlan.from_tree(cls.module_tree)
+    spec = plan.find(leaf)
+    assert spec is not None, f"{class_name}: `{leaf}` is not declared in the module tree"
+    declared = {AWQ_NO_SCALE_SOURCE_FLAG, POST_NORM_FLAG.lstrip(":")} & set(spec.flags)
+    assert declared, f"{class_name}: `{leaf}` must declare `:nosrc` or `:postnorm` (flags={spec.flags})"
