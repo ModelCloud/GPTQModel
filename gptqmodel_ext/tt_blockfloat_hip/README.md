@@ -87,6 +87,41 @@ dense = tt_blockfloat_hip.dequantize(codes, exponents, 4, weight.shape, torch.fl
 automatically use these kernels when the module is on a ROCm device; the torch
 path remains the fallback everywhere else.
 
+## Device contract
+
+Every entry point validates its tensors before it takes a raw pointer. The
+kernels receive `codes`, `exponents` and the activation as bare addresses and
+run on the stream of one guarded device, so all of them must live on that same
+accelerator. `check_weight` covers dtype, shape and contiguity;
+`check_weight_device` covers device ownership.
+
+```mermaid
+flowchart TD
+    A["linear / embedding / dequant"] --> B["check_weight: dtype, shape, contiguous"]
+    B --> C{"codes.is_cuda and exponents.is_cuda?"}
+    C -- No --> R1["RuntimeError: weight must be on a CUDA/ROCm device"]
+    C -- Yes --> D{"codes.device == exponents.device?"}
+    D -- No --> R2["RuntimeError: codes and exponents must share a device"]
+    D -- Yes --> E{"activation/ids on the codes device?"}
+    E -- No --> R3["RuntimeError: must share a device"]
+    E -- Yes --> F["CUDAGuard, then launch on the current stream"]
+    style R1 fill:#fee,stroke:#c00
+    style R2 fill:#fee,stroke:#c00
+    style R3 fill:#fee,stroke:#c00
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `exponents` on the host, `codes` on the device | Accepted; the kernel dereferenced a host pointer | `RuntimeError` naming the device requirement |
+| `exponents` on `cuda:1`, `codes` on `cuda:0` | Accepted; the kernel read another device's address, which raised an illegal memory access | `RuntimeError` naming both devices |
+| All tensors on one device | Launched | Launched (unchanged) |
+
+A mismatched pointer previously surfaced either as an illegal memory access or,
+worse, as plausible-looking output read from unrelated memory. On ROCm an
+illegal access also poisons the HIP context for the rest of the process, which
+is why the regression tests in `tests/test_tt_blockfloat_hip.py` run each
+mismatch in its own interpreter.
+
 ## Build and validate without ROCm PyTorch
 
 The JIT extension is the production entry point, but the kernels can be

@@ -87,15 +87,26 @@ void check_weight(const torch::Tensor& codes, const torch::Tensor& exponents,
                 " values, expected ", rows * (cols / 16));
 }
 
+// Every launch reads `codes` and `exponents` through raw pointers handed to the
+// kernel on the stream of one guarded device.  Both buffers must therefore live
+// on that same accelerator: a matching dtype/shape/contiguity is not enough,
+// because a pointer owned by another device (or by the host) has no access or
+// stream-order guarantee and the kernel reads whatever those addresses hold.
+void check_weight_device(const torch::Tensor& codes,
+                         const torch::Tensor& exponents) {
+    TORCH_CHECK(codes.is_cuda() && exponents.is_cuda(),
+                "tt_blockfloat_hip: weight must be on a CUDA/ROCm device");
+    TORCH_CHECK(codes.device() == exponents.device(),
+                "tt_blockfloat_hip: codes and exponents must share a device, got ",
+                codes.device(), " and ", exponents.device());
+}
+
 torch::Tensor dequant_dispatch(torch::Tensor codes, torch::Tensor exponents,
                                int64_t bits, int64_t rows, int64_t cols,
                                int64_t dtype) {
     check_bits(bits);
     check_weight(codes, exponents, bits, rows, cols);
-    TORCH_CHECK(codes.is_cuda() && exponents.is_cuda(),
-                "tt_blockfloat_hip: weight must be on a CUDA/ROCm device");
-    TORCH_CHECK(codes.device() == exponents.device(),
-                "tt_blockfloat_hip: codes and exponents must share a device");
+    check_weight_device(codes, exponents);
 
     auto options = torch::TensorOptions()
                        .dtype(scalar_type_from_code(dtype))
@@ -148,6 +159,7 @@ torch::Tensor embedding_dispatch(torch::Tensor ids, torch::Tensor codes,
     TORCH_CHECK(ids.scalar_type() == at::kLong || ids.scalar_type() == at::kInt,
                 "tt_blockfloat_hip: embedding ids must be int64 or int32, got ",
                 ids.scalar_type());
+    check_weight_device(codes, exponents);
     TORCH_CHECK(ids.is_cuda() && codes.is_cuda(),
                 "tt_blockfloat_hip: embedding tensors must be on device");
     TORCH_CHECK(ids.device() == codes.device(),
@@ -215,6 +227,7 @@ torch::Tensor linear_dispatch(torch::Tensor x, torch::Tensor codes,
                 "tt_blockfloat: in_features must be a multiple of 16, got ", k);
     const int64_t n = codes.numel() * (bits == 4 ? 2 : 1) / k;
     check_weight(codes, exponents, bits, n, k);
+    check_weight_device(codes, exponents);
     TORCH_CHECK(codes.device() == x.device(),
                 "tt_blockfloat: weight and activation must share a device");
     TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
