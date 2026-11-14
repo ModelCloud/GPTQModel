@@ -110,6 +110,27 @@ def supported(device: torch.device | str | None = None) -> bool:
     return capability[0] * 10 + capability[1] >= MIN_CAPABILITY
 
 
+def available(device: torch.device | str | None = None) -> bool:
+    """Whether the native block-float CUDA kernels can run here.
+
+    This is a capability probe, not a build: a supported SM architecture alone is
+    not native availability. The kernels are available when the extension is
+    already loaded/registered, a cached or configured prebuilt binary exists, or
+    the source build tools are present. Otherwise callers must keep the dense
+    reference path instead of running native-only assertions.
+    """
+
+    if not supported(device):
+        return False
+    if _EXTENSION.loadable_without_build():
+        return True
+    # A configured prebuilt library is authoritative: load() never falls back to
+    # a source build when one is set, so a missing file means unavailable.
+    if _EXTENSION.configured_prebuilt_library() is not None:
+        return False
+    return _EXTENSION.cuda_source_build_available()
+
+
 def prewarm() -> bool:
     """Compile/load the extension ahead of the first forward pass."""
 

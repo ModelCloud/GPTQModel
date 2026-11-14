@@ -76,7 +76,9 @@ def _cuda_kernel_available() -> bool:
         return False
     from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
 
-    return bf_cuda.supported()
+    # SM support alone is not native availability: the JIT extension must be
+    # loadable or buildable, otherwise only the dense fallback can run.
+    return bf_cuda.available()
 
 
 def _hip_kernel_available() -> bool:
@@ -121,7 +123,10 @@ def test_tied_head_fallback_does_not_narrow_the_shared_grid():
     assert torch.equal(got, expected)
 
 
-@pytest.mark.skipif(not _cuda_kernel_available(), reason="block-float CUDA kernels need sm_80+")
+@pytest.mark.skipif(
+    not _cuda_kernel_available(),
+    reason="block-float CUDA kernels need a loadable or buildable extension on sm_80+",
+)
 @pytest.mark.parametrize("case", [_bf16_cancellation, _fp16_range], ids=["bf16-cancellation", "fp16-range"])
 def test_cuda_kernel_adds_the_float32_bias_before_the_final_cast(case):
     weight, bias, x = case()

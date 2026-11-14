@@ -42,13 +42,18 @@ def _skip_reason() -> str | None:
         return reason
     if not torch.cuda.is_available():
         return "Tenstorrent block-float CUDA kernels need a CUDA device"
-    if bf_cuda.supported():
-        return None
-    capability = torch.cuda.get_device_capability()
-    return (
-        "Tenstorrent block-float CUDA kernels need sm_80 or newer, "
-        f"got sm{capability[0]}{capability[1]}"
-    )
+    if not bf_cuda.supported():
+        capability = torch.cuda.get_device_capability()
+        return (
+            "Tenstorrent block-float CUDA kernels need sm_80 or newer, "
+            f"got sm{capability[0]}{capability[1]}"
+        )
+    if not bf_cuda.available():
+        return (
+            "Tenstorrent block-float CUDA kernels need a loadable or buildable "
+            "native extension (no registered ops, cached binary, or CUDA build tools)"
+        )
+    return None
 
 
 _SKIP_REASON = _skip_reason()
