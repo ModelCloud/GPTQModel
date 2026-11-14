@@ -128,7 +128,7 @@ flowchart TD
     B -- yes --> D["rotary = root rotary for the target device"]
     D --> E{"rotary.forward has<br/>layer_type or attention_type?"}
     E -- no --> F["rotary(x, position_ids)<br/>unchanged"]
-    E -- yes --> G["read the attention module's<br/>layer_type or attention_type"]
+    E -- yes --> G["read layer_type or attention_type<br/>from the module or its self_attn"]
     G --> H["rotary(x, position_ids, layer_type=value)"]
     F --> C
     H --> C
@@ -213,6 +213,7 @@ and `::test_replay_kwargs_match_native_layer_type`).
 | `test_model_override_consumes_private_layer_type_capture_key` | no `_gptqmodel_*` key leaks from the eight fixed overrides |
 | `test_module_forward_passes_layer_type_to_typed_rotary` | AWQ passes `layer_type` to a typed rotary |
 | `test_module_forward_passes_attention_type_to_typed_rotary` | AWQ passes OLMo 3's `attention_type` |
+| `test_module_forward_reads_layer_type_from_nested_self_attn` | a later AWQ group that passes the decoder layer still resolves the attention type |
 | `test_support_batch_quantize_false_keeps_user_attention_mask` | non-batched calibration keeps a user padding mask |
 | `test_support_batch_quantize_false_keeps_concat_tail_padding` | the concat tail's pad tokens stay masked |
 
