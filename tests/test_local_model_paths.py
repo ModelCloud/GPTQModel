@@ -384,10 +384,77 @@ def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_
     result = GPTQModel.from_pretrained("gptq-source", quantize_config=target_config)
 
     assert result is sentinel
-    assert captured == {
-        "path": "gptq-source",
-        "kwargs": {"trust_remote_code": False},
-    }
+    assert captured["path"] == "gptq-source"
+    assert captured["kwargs"]["trust_remote_code"] is False
+    assert captured["kwargs"]["backend"] == BACKEND.AUTO
+    assert captured["kwargs"]["device"] is None
+    assert captured["kwargs"]["device_map"] is None
+
+
+def test_from_pretrained_redirect_preserves_explicit_load_options(monkeypatch):
+    """Regression: redirecting a quantized checkpoint must not drop load options."""
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
+    sentinel = object()
+    captured = {}
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: True)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(
+            lambda cls, model_id_or_path, **kwargs: captured.update(
+                path=model_id_or_path,
+                kwargs=kwargs,
+            )
+            or sentinel
+        ),
+    )
+
+    result = GPTQModel.from_pretrained(
+        "quantized-checkpoint",
+        quantize_config=None,
+        backend=BACKEND.TORCH,
+        device="cpu",
+        device_map={"": "cpu"},
+        dtype=torch.float32,
+        fuse=True,
+        revision="abc123",
+        tokenizer_trust_remote_code=True,
+    )
+
+    assert result is sentinel
+    assert captured["path"] == "quantized-checkpoint"
+    kwargs = captured["kwargs"]
+    assert kwargs["backend"] == BACKEND.TORCH
+    assert kwargs["device"] == "cpu"
+    assert kwargs["device_map"] == {"": "cpu"}
+    assert kwargs["dtype"] == torch.float32
+    assert kwargs["fuse"] is True
+    assert kwargs["revision"] == "abc123"
+    assert kwargs["tokenizer_trust_remote_code"] is True
+    assert kwargs["trust_remote_code"] is False
+
+
+def test_from_pretrained_redirect_rejects_inapplicable_profile(monkeypatch):
+    fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: True)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected quantized load"))),
+    )
+
+    with pytest.raises(ValueError, match="profile"):
+        GPTQModel.from_pretrained(
+            "quantized-checkpoint",
+            quantize_config=None,
+            profile=PROFILE.FAST,
+        )
 
 
 def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
