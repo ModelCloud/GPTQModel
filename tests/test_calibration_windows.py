@@ -58,8 +58,9 @@ def test_windows_stride_and_are_distinct():
     assert len(windows) == 4
     assert all(window.shape == (1, seqlen) for window in windows)
     starts = [int(window[0, 0]) for window in windows]
-    # span = 64 - 16 + 1 = 49, so the four windows sit at 0, 12, 24, 36.
-    assert starts == [0, 12, 24, 36]
+    # The legal start range is 0..(64 - 16) = 0..48, so four windows sit at
+    # 0, 16, 32 and 48 (both endpoints included).
+    assert starts == [0, 16, 32, 48]
     assert len({tuple(window[0].tolist()) for window in windows}) == 4
 
 
@@ -85,11 +86,55 @@ def test_windows_cover_the_whole_corpus():
     assert len(set(starts)) == nsamples
     # The old rule would have stopped at (nsamples - 1) * seqlen == 7936.
     assert starts[-1] > 10 * (nsamples - 1) * seqlen
-    # The last window must still end inside the text.
-    assert starts[-1] + seqlen <= total
+    # Both endpoints of the legal start range are selected, so the first window
+    # starts at the top and the last one ends exactly at the bottom.
+    assert starts[0] == 0
+    assert starts[-1] == total - seqlen
+    assert starts[-1] + seqlen == total
     # Consecutive windows stay ordered and non-overlapping.
     assert starts == sorted(starts)
     assert all(b - a >= seqlen for a, b in zip(starts, starts[1:]))
+
+
+def test_windows_cover_the_final_token():
+    """The corpus tail must be inside a window, not just inside the text.
+
+    With ``start = index * (total - seqlen + 1) // nsamples`` the last legal
+    start was never selected: 1000 tokens / 256 / 4 dropped the final 186
+    tokens.
+    """
+
+    cal = _calibration()
+    total, seqlen, nsamples = 1000, 256, 4
+    windows = list(
+        cal.iter_calibration_windows(
+            _Tok(total), "ignored", seqlen=seqlen, nsamples=nsamples
+        )
+    )
+
+    starts = [int(window[0, 0]) for window in windows]
+    assert starts == [0, 248, 496, 744]
+    assert starts[-1] + seqlen == total
+
+    covered = set()
+    for window in windows:
+        covered.update(window[0].tolist())
+    assert covered == set(range(total)), "every token, including the tail, is seen"
+
+
+def test_single_window_is_anchored_at_the_start_of_the_stream():
+    """One window cannot reach both ends, so the singleton policy is explicit."""
+
+    cal = _calibration()
+    windows = list(
+        cal.iter_calibration_windows(
+            _Tok(1000), "ignored", seqlen=256, nsamples=1
+        )
+    )
+
+    assert len(windows) == 1
+    assert int(windows[0][0, 0]) == 0
+    assert int(windows[0][0, -1]) == 255
 
 
 def test_overlapping_windows_stay_distinct():
@@ -167,8 +212,8 @@ def test_windows_accept_records_from_a_dataset():
 
     # 8 + 12 + 8 = 28 ids concatenated, so the windows stride across records.
     assert [tuple(window.shape) for window in windows] == [(1, 8), (1, 8)]
-    # span = 28 - 8 + 1 = 21, so the second window starts at 21 // 2 = 10.
-    assert [int(window[0, 0]) for window in windows] == [0, 10]
+    # The last legal start is 28 - 8 = 20, so the second window starts there.
+    assert [int(window[0, 0]) for window in windows] == [0, 20]
 
 
 def test_load_calibration_records_reads_json_gz(tmp_path):
