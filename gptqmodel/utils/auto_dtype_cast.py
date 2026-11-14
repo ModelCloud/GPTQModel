@@ -92,6 +92,27 @@ def eligible_source_module(module: nn.Module, device: torch.device | str) -> Sou
     )
 
 
+def _rowmajor_ops(device: torch.device):
+    """Resolve the row-major pack callable and native lookup namespace."""
+
+    if device.type != "cuda":
+        return None
+    if torch.version.hip is not None:
+        from . import nf12_hip
+
+        if not hasattr(nf12_hip, "rowmajor_pack"):
+            return None
+        return nf12_hip.rowmajor_pack, "nf12_hip"
+    if torch.cuda.get_device_capability(device)[0] < 8:
+        return None
+    import gptqmodel_nf12 as nf12
+
+    return (
+        lambda packed, escapes, base: nf12.rowmajor_pack(nf12.NF12Weight(packed, escapes, base)),
+        "nf12",
+    )
+
+
 class AutoNF12Embedding(nn.Module):
     """Packed BF16 embedding table with a lookup-oriented row layout."""
 
@@ -105,38 +126,21 @@ class AutoNF12Embedding(nn.Module):
         self._exp_base = int(result.exp_base)
         packed = result.packed.to(device)
         escapes = result.escapes.to(device)
-        self.row_major = (
-            device.type == "cuda" and torch.version.hip is None and torch.cuda.get_device_capability(device)[0] >= 8
-        )
+        ops = _rowmajor_ops(device)
+        self.row_major = ops is not None
         if self.row_major:
-            import gptqmodel_nf12 as nf12
-
-            row_packed, row_escapes, original, collisions = nf12.rowmajor_pack(
-                nf12.NF12Weight(packed, escapes, result.exp_base)
-            )
+            row_packed, row_escapes, original, collisions = ops[0](packed, escapes, result.exp_base)
             self.original_escapes = int(original)
             self.selected_half_collisions = int(collisions)
             self.register_buffer("nf12_row_packed", row_packed)
             self.register_buffer("nf12_row_escapes", row_escapes)
-            self._rowmajor_embedding_op = torch.ops.nf12.rowmajor_embedding
+            # Packing has loaded the extension, so bind the native dispatcher
+            # directly and keep the Python wrapper off the forward hot path.
+            self._rowmajor_embedding_op = getattr(getattr(torch.ops, ops[1]), "rowmajor_embedding")
         else:
-            if device.type == "cuda" and torch.version.hip is not None:
-                from . import nf12_hip
-
-                self.row_major = hasattr(nf12_hip, "rowmajor_pack") and hasattr(nf12_hip, "rowmajor_embedding")
-                if self.row_major:
-                    row_packed, row_escapes, original, collisions = nf12_hip.rowmajor_pack(
-                        packed, escapes, result.exp_base
-                    )
-                    self.original_escapes = int(original)
-                    self.selected_half_collisions = int(collisions)
-                    self.register_buffer("nf12_row_packed", row_packed)
-                    self.register_buffer("nf12_row_escapes", row_escapes)
-                    self._rowmajor_embedding_op = torch.ops.nf12_hip.rowmajor_embedding
-            if not self.row_major:
-                self._rowmajor_embedding_op = None
-                self.register_buffer("nf12_packed", packed)
-                self.register_buffer("nf12_escapes", escapes)
+            self._rowmajor_embedding_op = None
+            self.register_buffer("nf12_packed", packed)
+            self.register_buffer("nf12_escapes", escapes)
         self.register_buffer(
             "nf12_exp_base",
             torch.tensor([result.exp_base], dtype=torch.uint8, device=device),
@@ -200,20 +204,6 @@ class AutoNF12HookedLinear(NF12Linear):
     """Packed linear replacement that keeps calibration-hook behavior."""
 
     SUPPORTS_BACKEND_SELECTION = False
-    SUPPORTS_BACKENDS = NF12Linear.SUPPORTS_BACKENDS
-    SUPPORTS_METHODS = NF12Linear.SUPPORTS_METHODS
-    SUPPORTS_FORMATS = NF12Linear.SUPPORTS_FORMATS
-    SUPPORTS_BITS = NF12Linear.SUPPORTS_BITS
-    SUPPORTS_SHARDS = NF12Linear.SUPPORTS_SHARDS
-    SUPPORTS_TRAINING = NF12Linear.SUPPORTS_TRAINING
-    SUPPORTS_AUTO_PADDING = NF12Linear.SUPPORTS_AUTO_PADDING
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = NF12Linear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = NF12Linear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = NF12Linear.SUPPORTS_DEVICES
-    SUPPORTS_PLATFORM = NF12Linear.SUPPORTS_PLATFORM
-    SUPPORTS_PACK_DTYPES = NF12Linear.SUPPORTS_PACK_DTYPES
-    SUPPORTS_ADAPTERS = NF12Linear.SUPPORTS_ADAPTERS
-    SUPPORTS_DTYPES = NF12Linear.SUPPORTS_DTYPES
 
     @classmethod
     def from_linear(cls, source: HookedLinear) -> "AutoNF12HookedLinear":
@@ -250,6 +240,14 @@ class AutoNF12HookedLinear(NF12Linear):
             if getattr(self, "forward_hook_last", False):
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return _restore_output_device(output, original_device)
+
+
+# QuantLinear's validator inspects the concrete class dict, so mirror the
+# inherited capability declarations and keep backend selection disabled.
+for _name in dir(NF12Linear):
+    if _name.startswith("SUPPORTS_") and _name != "SUPPORTS_BACKEND_SELECTION":
+        setattr(AutoNF12HookedLinear, _name, getattr(NF12Linear, _name))
+AutoNF12HookedLinear.SUPPORTS_BACKEND_SELECTION = False
 
 
 def cast_source_module(module: nn.Module, spec: SourceModuleSpec) -> nn.Module:

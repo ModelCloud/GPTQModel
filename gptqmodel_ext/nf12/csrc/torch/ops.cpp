@@ -51,8 +51,7 @@ extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
                                     const uint64_t* escapes,
                                     int64_t num_escapes, int64_t n, int64_t k,
                                     uint32_t exp_base, int64_t num_ids,
-                                    uint64_t* out, int id_bytes, int threads,
-                                    int ids_per_cta, int mode,
+                                    uint64_t* out, int id_bytes,
                                     cudaStream_t stream);
 
 namespace {
@@ -458,17 +457,13 @@ Tensor rowmajor_embedding(const Tensor& ids_in, const Tensor& packed,
   const Tensor ids =
       ids_in.is_contiguous() ? ids_in : torch::stable::contiguous(ids_in);
   // The native entry point specializes one ID at K <= 2048 to one persistent
-  // CTA. Wider and larger gathers retain the 256-thread, eight-ID layout that
-  // balances launch count against occupancy.
-  int threads = 256;
-  int ids_per_cta = 8;
-  int mode = 2;
+  // CTA; every other gather uses the 256-thread, eight-ID layout.
   int status = nf12_rowmajor_lookup(
       ids.data_ptr(),
       static_cast<const uint8_t*>(packed.data_ptr()),
       escapes.size(0) ? static_cast<const uint64_t*>(escapes.data_ptr()) : nullptr,
       escapes.size(0), n, k, static_cast<uint32_t>(exp_base), num_ids,
-      static_cast<uint64_t*>(out.data_ptr()), ids.element_size(), threads, ids_per_cta, mode,
+      static_cast<uint64_t*>(out.data_ptr()), ids.element_size(),
       current_stream(device));
   STD_TORCH_CHECK(status == cudaSuccess, "nf12.rowmajor_embedding failed: ",
                   cudaGetErrorString(static_cast<cudaError_t>(status)));

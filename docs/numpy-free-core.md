@@ -178,5 +178,3 @@ The remaining NumPy surface is concentrated and intentional for now:
 | `utils/internal_gguf.py`, `qlinear/gguf.py`, `qlinear/gguf_cpp.py` | GGUF/ggml reader (`np.memmap`, dtype views) and codecs; provided by the `gguf` extra |
 | `qlinear/mlx*.py`, `quantization/mlx_*.py`, `utils/mlx*.py`, `quantization/rco_mlx.py` | NumPy is the `mx.array` ↔ `torch.Tensor` bridge; provided by the `mlx` extra |
 | `qlinear/bitblas.py` | `general_compress` takes a NumPy array; provided by the `bitblas` extra |
-
-`gptqmodel_nf12/experimental_rowmajor.py` is experimental and tracked separately.

@@ -135,16 +135,17 @@ inline void check_arch(const torch::Tensor& t) {
 // nf12_hip::decode_fp32(packed, escapes, exp_base) -> fp32 [N, K]
 // nf12_hip::sub_fp32(packed, escapes, exp_base, wq) -> fp32 [N, K]
 // ---------------------------------------------------------------------------
-std::pair<int64_t, int64_t> decode_geometry(const torch::Tensor& packed,
+std::pair<int64_t, int64_t> packed_geometry(const torch::Tensor& packed,
                                             const torch::Tensor& escapes,
-                                            int64_t exp_base, const char* op) {
+                                            int64_t exp_base, int64_t escape_cols,
+                                            const char* op) {
   check_arch(packed);
   TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte,
               op, ": packed must be a 2-D uint8 tensor");
   TORCH_CHECK(packed.is_contiguous(), op, ": packed must be contiguous");
   TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
-                  escapes.size(1) == 8,
-              op, ": escapes must be int16 [E, 8]");
+                  escapes.size(1) == escape_cols,
+              op, ": escapes must be int16 [E, ", escape_cols, "]");
   TORCH_CHECK(escapes.is_contiguous(), op, ": escapes must be contiguous");
   TORCH_CHECK(packed.device() == escapes.device(),
               op, ": packed and escapes must share a device");
@@ -159,7 +160,15 @@ std::pair<int64_t, int64_t> decode_geometry(const torch::Tensor& packed,
               op, ": packed row must be a multiple of 96 bytes");
   const int64_t k = row_bytes * 2 / 3;
   TORCH_CHECK(k % 64 == 0, op, ": K must be a multiple of 64");
+  TORCH_CHECK(escapes.size(0) <= std::numeric_limits<uint32_t>::max(),
+              op, ": escape table is too large");
   return {n, k};
+}
+
+std::pair<int64_t, int64_t> decode_geometry(const torch::Tensor& packed,
+                                            const torch::Tensor& escapes,
+                                            int64_t exp_base, const char* op) {
+  return packed_geometry(packed, escapes, exp_base, 8, op);
 }
 
 torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& escapes,
@@ -220,27 +229,12 @@ torch::Tensor embedding_dispatch(const torch::Tensor& ids_in,
                                  const torch::Tensor& packed,
                                  const torch::Tensor& escapes,
                                  int64_t exp_base) {
-  check_arch(packed);
+  const auto [n, k] =
+      packed_geometry(packed, escapes, exp_base, 8, "nf12_hip.embedding");
   TORCH_CHECK(ids_in.is_cuda() && ids_in.device() == packed.device(),
               "nf12_hip.embedding: ids and packed must share a CUDA/HIP device");
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.embedding: ids must be int32 or int64");
-  TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte && packed.is_contiguous(),
-              "nf12_hip.embedding: packed must be contiguous uint8 [N, 3*K/2]");
-  TORCH_CHECK(escapes.dim() == 2 && escapes.size(1) == 8 &&
-                  escapes.scalar_type() == at::kShort && escapes.is_contiguous() &&
-                  escapes.device() == packed.device(),
-              "nf12_hip.embedding: escapes must be contiguous int16 [E, 8] on the packed device");
-  TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
-              "nf12_hip.embedding: exp_base must be in [0, 120]");
-  const int64_t n = packed.size(0);
-  const int64_t row_bytes = packed.size(1);
-  TORCH_CHECK(n > 0 && n % 16 == 0 && row_bytes > 0 && row_bytes % 96 == 0,
-              "nf12_hip.embedding: N must be a positive multiple of 16 and K a positive multiple of 64");
-  const int64_t k = (row_bytes / 3) * 2;
-  TORCH_CHECK(escapes.size(0) <= std::numeric_limits<uint32_t>::max(),
-              "nf12_hip.embedding: escape table is too large");
-
   auto guard = device_guard(packed);
   const torch::Tensor ids = at::contiguous(ids_in);
   std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
@@ -270,23 +264,8 @@ std::tuple<torch::Tensor, torch::Tensor, int64_t, int64_t>
 rowmajor_pack_dispatch(const torch::Tensor& packed,
                        const torch::Tensor& escapes,
                        int64_t exp_base) {
-  check_arch(packed);
-  TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte &&
-                  packed.is_contiguous(),
-              "nf12_hip.rowmajor_pack: packed must be contiguous uint8 [N, 3*K/2]");
-  TORCH_CHECK(escapes.dim() == 2 && escapes.size(1) == 8 &&
-                  escapes.scalar_type() == at::kShort && escapes.is_contiguous() &&
-                  escapes.device() == packed.device(),
-              "nf12_hip.rowmajor_pack: escapes must be contiguous int16 [E, 8]");
-  TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
-              "nf12_hip.rowmajor_pack: exp_base must be in [0, 120]");
-  const int64_t n = packed.size(0);
-  const int64_t row_bytes = packed.size(1);
-  TORCH_CHECK(n > 0 && n % 16 == 0 && row_bytes > 0 && row_bytes % 96 == 0,
-              "nf12_hip.rowmajor_pack: N must be a positive multiple of 16 and K a positive multiple of 64");
-  const int64_t k = (row_bytes / 3) * 2;
-  TORCH_CHECK(escapes.size(0) <= std::numeric_limits<uint32_t>::max(),
-              "nf12_hip.rowmajor_pack: escape table is too large");
+  const auto [n, k] =
+      packed_geometry(packed, escapes, exp_base, 8, "nf12_hip.rowmajor_pack");
 
   auto guard = device_guard(packed);
   const hipStream_t stream = current_stream();
@@ -340,28 +319,12 @@ torch::Tensor rowmajor_embedding_dispatch(const torch::Tensor& ids_in,
                                           const torch::Tensor& packed,
                                           const torch::Tensor& escapes,
                                           int64_t exp_base) {
-  check_arch(packed);
+  const auto [n, k] =
+      packed_geometry(packed, escapes, exp_base, 4, "nf12_hip.rowmajor_embedding");
   TORCH_CHECK(ids_in.is_cuda() && ids_in.device() == packed.device(),
               "nf12_hip.rowmajor_embedding: ids and packed must share a CUDA/HIP device");
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.rowmajor_embedding: ids must be int32 or int64");
-  TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte &&
-                  packed.is_contiguous(),
-              "nf12_hip.rowmajor_embedding: packed must be contiguous uint8 [N, 3*K/2]");
-  TORCH_CHECK(escapes.dim() == 2 && escapes.size(1) == 4 &&
-                  escapes.scalar_type() == at::kShort && escapes.is_contiguous() &&
-                  escapes.device() == packed.device(),
-              "nf12_hip.rowmajor_embedding: escapes must be contiguous int16 [E, 4]");
-  TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
-              "nf12_hip.rowmajor_embedding: exp_base must be in [0, 120]");
-  const int64_t n = packed.size(0);
-  const int64_t row_bytes = packed.size(1);
-  TORCH_CHECK(n > 0 && n % 16 == 0 && row_bytes > 0 && row_bytes % 96 == 0,
-              "nf12_hip.rowmajor_embedding: N must be a positive multiple of 16 and K a positive multiple of 64");
-  const int64_t k = (row_bytes / 3) * 2;
-  TORCH_CHECK(escapes.size(0) <= std::numeric_limits<uint32_t>::max(),
-              "nf12_hip.rowmajor_embedding: escape table is too large");
-
   auto guard = device_guard(packed);
   const torch::Tensor ids = at::contiguous(ids_in);
   std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
