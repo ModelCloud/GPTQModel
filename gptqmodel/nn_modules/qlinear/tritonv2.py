@@ -152,6 +152,17 @@ class TritonV2Linear(TorchLinear):
         if self.training:
             return super().forward(x)
 
+        # The fused GEMV / small-M GEMM already dispatch from
+        # ``TorchLinear._forward_eager`` on Ada, Blackwell and ROCm.  This
+        # backend used to bypass them and always dequantize the whole weight,
+        # which made decode slower than ``BACKEND.TORCH`` on the same hardware.
+        x2 = x.reshape(-1, x.shape[-1])
+        if self._can_use_rocm_gemv(x2) or self._can_use_rocm_gemm(x2):
+            x2 = self._apply_rotation_to_input(x2)
+            return TorchLinear._forward_eager(
+                self, x2, x.shape[:-1] + (self.out_features,)
+            )
+
         x = self._apply_rotation_to_input(x)
 
         # if in_features is padded, we need to pad the input as well
