@@ -78,12 +78,15 @@
 #endif
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -653,11 +656,12 @@ inline int32_t current_device_index() {
 // allocation while asynchronous work still writes to it.
 //
 // Recreate the guarantee without unstable symbols: keep a reference to the
-// tensor until an event recorded on that stream completes. Completed entries
-// are reaped on the next call, which keeps the retained set to the calls that
-// are actually in flight without a background thread. Callers must record
-// *after* enqueuing the work that uses the tensor, which the original API
-// requires as well.
+// tensor until an event recorded on that stream completes. A small reaper
+// thread polls completed events so a finished request releases its buffers
+// without waiting for another kernel call. Callers must record *after*
+// enqueuing the work that uses the tensor, which the original API requires as
+// well. A null stream handle is the default stream and is tracked like any
+// other.
 namespace record_stream_detail {
 
 #if GPTQMODEL_STABLE_HIP
@@ -669,8 +673,11 @@ inline DeviceEvent create_event() {
       ? event
       : nullptr;
 }
+/// Only `success` means the recorded work finished. Any other status (for
+/// example the runtime unloading at process exit) must keep the tensor
+/// retained, so a teardown race cannot free a buffer early.
 inline bool event_completed(DeviceEvent event) {
-  return hipEventQuery(event) != hipErrorNotReady;
+  return hipEventQuery(event) == hipSuccess;
 }
 inline void destroy_event(DeviceEvent event) {
   if (event != nullptr) (void)hipEventDestroy(event);
@@ -681,6 +688,7 @@ inline bool record_event(DeviceEvent event, DeviceStream stream) {
 inline void stream_synchronize(DeviceStream stream) {
   (void)hipStreamSynchronize(stream);
 }
+inline void set_device(int device) { (void)hipSetDevice(device); }
 #else
 using DeviceEvent = cudaEvent_t;
 
@@ -690,8 +698,11 @@ inline DeviceEvent create_event() {
       ? event
       : nullptr;
 }
+/// Only `success` means the recorded work finished. Any other status (for
+/// example the runtime unloading at process exit) must keep the tensor
+/// retained, so a teardown race cannot free a buffer early.
 inline bool event_completed(DeviceEvent event) {
-  return cudaEventQuery(event) != cudaErrorNotReady;
+  return cudaEventQuery(event) == cudaSuccess;
 }
 inline void destroy_event(DeviceEvent event) {
   if (event != nullptr) (void)cudaEventDestroy(event);
@@ -702,18 +713,26 @@ inline bool record_event(DeviceEvent event, DeviceStream stream) {
 inline void stream_synchronize(DeviceStream stream) {
   (void)cudaStreamSynchronize(stream);
 }
+inline void set_device(int device) { (void)cudaSetDevice(device); }
 #endif
 
 struct RetainedTensor {
   Tensor tensor;
   DeviceEvent event;
+  int device;
 };
+
 
 // Leaked on purpose: a tensor may still be retained while static destructors
 // run at process exit.
 inline std::mutex& retained_mutex() {
   static std::mutex* mutex = new std::mutex();
   return *mutex;
+}
+
+inline std::condition_variable& retained_cv() {
+  static std::condition_variable* cv = new std::condition_variable();
+  return *cv;
 }
 
 inline std::vector<RetainedTensor>& retained_tensors() {
@@ -726,33 +745,138 @@ inline std::vector<DeviceEvent>& event_pool() {
   return *events;
 }
 
-/// Drop every tensor whose event has completed. Called from `record_stream`.
-inline void reap_completed() {
+struct ReaperState {
+  std::thread thread;
+  bool active = false;
+  bool shutdown = false;
+};
+
+inline ReaperState& reaper_state() {
+  static ReaperState* state = new ReaperState();
+  return *state;
+}
+
+/// Entries parked at process exit instead of being freed while the runtime is
+/// unloading.
+inline std::vector<RetainedTensor>& shutdown_leaks() {
+  static std::vector<RetainedTensor>* tensors = new std::vector<RetainedTensor>();
+  return *tensors;
+}
+
+/// Drop every completed tensor for one device. Callers hold the mutex.
+inline void reap_completed_locked(int device,
+                                  std::vector<RetainedTensor>& released) {
+  auto& tensors = retained_tensors();
+  for (auto it = tensors.begin(); it != tensors.end();) {
+    if (it->device == device && event_completed(it->event)) {
+      event_pool().push_back(it->event);
+      released.push_back(std::move(*it));
+      it = tensors.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+inline void reap_completed(int device) {
   std::vector<RetainedTensor> released;
   {
     std::lock_guard<std::mutex> lock(retained_mutex());
-    auto& tensors = retained_tensors();
-    for (auto it = tensors.begin(); it != tensors.end();) {
-      if (event_completed(it->event)) {
-        event_pool().push_back(it->event);
-        released.push_back(std::move(*it));
-        it = tensors.erase(it);
-      } else {
-        ++it;
-      }
-    }
+    reap_completed_locked(device, released);
   }
   // `released` drops the tensor handles here, outside the lock.
+}
+
+/// Background reclamation. A completed event releases its tensor even when no
+/// further kernel call happens, so a finished request does not pin its last
+/// caller-owned buffers until the next `record_stream`.
+///
+/// The thread only polls `*EventQuery` (never blocking) and exits on shutdown,
+/// which keeps it responsive to process teardown. Entries still pending at
+/// shutdown are parked instead of freed, because the allocator may already be
+/// unloading.
+inline void reaper_main() {
+  int current_device = -1;
+  std::unique_lock<std::mutex> lock(retained_mutex());
+  while (!reaper_state().shutdown) {
+    if (retained_tensors().empty()) {
+      retained_cv().wait(lock);
+      continue;
+    }
+    // `*EventQuery` is per-device, so make the front entry's device current
+    // before touching any handle.
+    const int device = retained_tensors().front().device;
+    if (device >= 0 && device != current_device) {
+      lock.unlock();
+      set_device(device);
+      lock.lock();
+      current_device = device;
+      continue;
+    }
+    std::vector<RetainedTensor> released;
+    reap_completed_locked(device, released);
+    if (released.empty()) {
+      retained_cv().wait_for(lock, std::chrono::milliseconds(1));
+      continue;
+    }
+    if (reaper_state().shutdown) {
+      // Keep the handles alive; freeing them now could touch a torn-down
+      // allocator.
+      auto& parked = shutdown_leaks();
+      for (auto& entry : released) parked.push_back(std::move(entry));
+      released.clear();
+      break;
+    }
+    lock.unlock();
+    released.clear();
+    lock.lock();
+  }
+  reaper_state().active = false;
+}
+
+inline void shutdown_reaper() {
+  {
+    std::lock_guard<std::mutex> lock(retained_mutex());
+    reaper_state().shutdown = true;
+    retained_cv().notify_all();
+  }
+  // Detach instead of joining: the loop observes `shutdown` within one poll
+  // interval, and joining here could block on a runtime that is unloading.
+  if (reaper_state().thread.joinable()) {
+    reaper_state().thread.detach();
+  }
+}
+
+/// Start the reaper once. Callers hold the mutex.
+inline void ensure_reaper_locked() {
+  auto& state = reaper_state();
+  if (state.active || state.shutdown) {
+    return;
+  }
+  state.active = true;
+  try {
+    state.thread = std::thread(reaper_main);
+    static bool registered = false;
+    if (!registered) {
+      registered = true;
+      std::atexit(shutdown_reaper);
+    }
+  } catch (...) {
+    // No thread: `record_stream` still reaps synchronously on its next call.
+    state.active = false;
+  }
 }
 
 }  // namespace record_stream_detail
 
 inline void record_stream(const Tensor& tensor, DeviceStream stream) {
-  if (!tensor.defined() || tensor.numel() == 0 || stream == nullptr ||
-      !tensor.device().is_cuda()) {
+  if (!tensor.defined() || tensor.numel() == 0 || !tensor.device().is_cuda()) {
     return;
   }
-  record_stream_detail::reap_completed();
+  // A null handle is the default stream, not "no stream": the default stream
+  // is asynchronous too, so it needs the same lifetime protection.
+  const int device = tensor.get_device();
+  record_stream_detail::reap_completed(device);
 
   record_stream_detail::DeviceEvent event = nullptr;
   {
@@ -774,8 +898,12 @@ inline void record_stream(const Tensor& tensor, DeviceStream stream) {
     record_stream_detail::stream_synchronize(stream);
     return;
   }
-  std::lock_guard<std::mutex> lock(record_stream_detail::retained_mutex());
-  record_stream_detail::retained_tensors().push_back({tensor, event});
+  {
+    std::lock_guard<std::mutex> lock(record_stream_detail::retained_mutex());
+    record_stream_detail::retained_tensors().push_back({tensor, event, device});
+    record_stream_detail::ensure_reaper_locked();
+    record_stream_detail::retained_cv().notify_all();
+  }
 }
 
 #if !GPTQMODEL_STABLE_HIP

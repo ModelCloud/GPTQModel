@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import gc
+import time
 from pathlib import Path
 from shutil import copy2, which
 
@@ -1570,4 +1572,161 @@ def test_marlin_record_stream_keeps_caller_output_alive():
 
     assert not reused, (
         "the caching allocator reused a buffer that the side stream was still writing"
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_record_stream_protects_default_stream_output():
+    """The default stream is asynchronous too and must be tracked.
+
+    A null CUDA stream handle is the default stream, not "no stream". Allocate
+    the caller-owned output on a side stream, run Marlin on the default stream,
+    drop the output, then allocate a same-sized replacement on the original
+    side stream: without tracking, the allocator reuses the block while the
+    default stream is still writing it.
+    """
+
+    if not marlin_utils.marlin_runtime_available(torch.float16):
+        pytest.skip(marlin_utils.marlin_runtime_error(torch.float16))
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    in_features, out_features, m = 256, 64, 17
+
+    module = _marlin_module_for_stream_tests(device, dtype)
+    x = torch.randn((m, in_features), device=device, dtype=dtype) * 0.01
+
+    # Warm the extension and allocator first: the very first call can grow the
+    # allocator pool, which synchronizes the device and would drain the delay
+    # below before the Marlin launch is even queued.
+    for _ in range(3):
+        warm = torch.empty((m, out_features), device=device, dtype=dtype)
+        marlin_utils.gptq_marlin_gemm(
+            x,
+            warm,
+            module.qweight,
+            None,
+            module.scales,
+            None,
+            module.qzeros,
+            module.g_idx,
+            module.g_idx_sort_indices,
+            module.workspace,
+            scalar_types.uint4b8,
+            size_m=m,
+            size_n=out_features,
+            size_k=in_features,
+            is_k_full=True,
+        )
+        del warm
+    torch.cuda.synchronize(device)
+
+    side = torch.cuda.Stream(device=device)
+    # Allocate the output on the side stream so its block belongs to that pool.
+    with torch.cuda.stream(side):
+        c = torch.empty((m, out_features), device=device, dtype=dtype)
+    ptr = c.data_ptr()
+    torch.cuda.synchronize(device)
+
+    # Keep the default stream busy so the Marlin launch below is still pending
+    # when the host drops the output.
+    torch.cuda._sleep(50_000_000)
+    out = marlin_utils.gptq_marlin_gemm(
+        x,
+        c,
+        module.qweight,
+        None,
+        module.scales,
+        None,
+        module.qzeros,
+        module.g_idx,
+        module.g_idx_sort_indices,
+        module.workspace,
+        scalar_types.uint4b8,
+        size_m=m,
+        size_n=out_features,
+        size_k=in_features,
+        is_k_full=True,
+    )
+    del out, c
+
+    with torch.cuda.stream(side):
+        probe = torch.empty((m, out_features), device=device, dtype=dtype)
+        probe.fill_(1.0)
+    reused = probe.data_ptr() == ptr
+    torch.cuda.synchronize(device)
+
+    assert not reused, (
+        "the caching allocator reused a buffer that the default stream was still writing"
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_releases_completed_caller_buffers_without_another_call():
+    """Completed caller-owned buffers must be freed even if no further op runs.
+
+    Reclaiming only from the next `record_stream` call pins the last batch of
+    outputs after a request finishes. The retained-event reaper must release
+    them once the GPU has completed, without another Marlin invocation.
+    """
+
+    if not marlin_utils.marlin_runtime_available(torch.float16):
+        pytest.skip(marlin_utils.marlin_runtime_error(torch.float16))
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    in_features, out_features, m = 256, 128, 4096
+
+    module = _marlin_module_for_stream_tests(
+        device, dtype, in_features=in_features, out_features=out_features
+    )
+    x = torch.randn((m, in_features), device=device, dtype=dtype) * 0.01
+    side = torch.cuda.Stream(device=device)
+
+    def run_with_output():
+        c = torch.empty((m, out_features), device=device, dtype=dtype)
+        with torch.cuda.stream(side):
+            out = marlin_utils.gptq_marlin_gemm(
+                x,
+                c,
+                module.qweight,
+                None,
+                module.scales,
+                None,
+                module.qzeros,
+                module.g_idx,
+                module.g_idx_sort_indices,
+                module.workspace,
+                scalar_types.uint4b8,
+                size_m=m,
+                size_n=out_features,
+                size_k=in_features,
+                is_k_full=True,
+            )
+        return out, c
+
+    # Warm the allocator with the same shapes and settle to a baseline.
+    for _ in range(4):
+        out, c = run_with_output()
+        del out, c
+    torch.cuda.synchronize(device)
+    gc.collect()
+    torch.cuda.empty_cache()
+    baseline = torch.cuda.memory_allocated(device)
+
+    held = [run_with_output() for _ in range(8)]
+    del held
+    torch.cuda.synchronize(device)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # No further kernel call: only the completion reaper can release these.
+    deadline = time.monotonic() + 5.0
+    while torch.cuda.memory_allocated(device) > baseline and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert torch.cuda.memory_allocated(device) <= baseline, (
+        "completed caller-owned buffers were still retained without another kernel call"
     )
