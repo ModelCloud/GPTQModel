@@ -1064,10 +1064,33 @@ class GPTQModel:
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        if format == "hf":
+            # Export through the checkpoint-level dequantizer: it understands
+            # every stored layout (AWQ, GPTQ, quantized embeddings, legacy
+            # quantize_config.json) instead of assuming a TorchLinear runtime.
+            from ..utils.hub import snapshot_download
+            from ..utils.model_dequant import dequantize_model
+
+            source_path = model_id_or_path
+            if not isdir(source_path):
+                source_path = snapshot_download(repo_id=model_id_or_path)
+            from pathlib import Path
+
+            target = Path(target_path)
+            empty_existing = target.is_dir() and not any(target.iterdir())
+            dequantize_model(
+                source_path,
+                target_path,
+                trust_remote_code=trust_remote_code,
+                resume=empty_existing,
+            )
+            return
+
         # load config
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if not config.quantization_config:
+        if not getattr(config, "quantization_config", None):
             raise ValueError("Model is not quantized")
 
         gptq_config = config.quantization_config
@@ -1109,12 +1132,6 @@ class GPTQModel:
             save_model(target_path, mlx_weights, donate_model=True)
 
             save_config(mlx_config, config_path=target_path + "/config.json")
-        elif format == "hf":
-            from ..nn_modules.qlinear.torch import dequantize_model
-
-            dequantized_model = dequantize_model(gptq_model.model)
-            dequantized_model.save_pretrained(target_path)
-
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 

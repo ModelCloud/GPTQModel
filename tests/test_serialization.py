@@ -48,6 +48,24 @@ class TestSerialization(unittest.TestCase):
 
             model = GPTQModel.load(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 
+    def test_save_keeps_live_model_inference(self):
+        model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]], device="cuda:0")
+
+        with torch.no_grad():
+            before = model.model(input_ids).logits.float()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save(tmpdir)
+
+        # `save()` must not swap `model.model` for a CPU shell whose logits
+        # differ from the live kernel.
+        with torch.no_grad():
+            after = model.model(input_ids).logits.float()
+
+        relative_error = ((after - before).norm() / before.norm()).item()
+        self.assertLess(relative_error, 1e-3)
+
     def test_gptq_v1_to_v2_runtime_convert(self):
         model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.EXLLAMA_V2)
         self.assertEqual(model.quantize_config.runtime_format, FORMAT.GPTQ_V2)

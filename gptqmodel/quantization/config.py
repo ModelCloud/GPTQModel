@@ -4087,10 +4087,13 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
 
     normalized = dict(kwargs)
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
-        raise ValueError(
-            "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
-            "or `format=\"gptq\"` for new GPTQ quantization."
-        )
+        # Third-party AutoGPTQ checkpoints write `is_marlin_format: false`.
+        # Only the legacy `true` value requested the removed runtime layout.
+        if _is_truthy_compat_flag(normalized.pop(FORMAT_FIELD_COMPAT_MARLIN)):
+            raise ValueError(
+                "QuantizeConfig: `is_marlin_format: true` is no longer supported. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
+                "or `format=\"gptq\"` for new GPTQ quantization."
+            )
     if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
         normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
     normalized.pop(QUANT_METHOD_FIELD, None)
@@ -4118,6 +4121,14 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         if SYMMETRIC_FIELD_CODE not in normalized:
             normalized[SYMMETRIC_FIELD_CODE] = not zero_point
     return normalized
+
+
+def _is_truthy_compat_flag(value: Any) -> bool:
+    """Interpret a legacy boolean field, tolerating JSON strings."""
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 @dataclass
@@ -4448,6 +4459,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             raise ValueError("telemetry must be a TelemetryConfig or dictionary")
 
         self.mse = _normalize_mse(self.mse)
+        # `sym: null` is written by some third-party configs; it means "use the
+        # default" rather than an unknown tri-state. Normalize before the bool
+        # field validation runs.
+        if self.sym is None:
+            self.sym = True
 
     def _validate_bool_fields(self) -> None:
         for field_name in (
@@ -4728,9 +4744,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             key = key.lower()
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
-                raise ValueError(
-                    "QuantizeConfig: `is_marlin_format` is no longer supported. Replace it with an explicit `format` field."
-                )
+                # Accept the `false` value that AutoGPTQ and hugging-quants
+                # checkpoints persist; only the removed `true` layout is an
+                # error.
+                if _is_truthy_compat_flag(val):
+                    raise ValueError(
+                        "QuantizeConfig: `is_marlin_format: true` is no longer supported. Replace it with an explicit `format` field."
+                    )
+                continue
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):
