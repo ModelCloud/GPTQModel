@@ -543,6 +543,48 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
     return expand_selector_device_family(selected)
 
 
+_ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
+
+
+def _is_accelerate_device_map_string(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered in _ACCELERATE_DEVICE_MAP_STRINGS or lowered.startswith("balanced_low_")
+
+
+def _validate_device_and_device_map_agree(device, device_map) -> None:
+    """Reject a `device` request that contradicts an explicit `device_map`."""
+
+    requested_family = selector_device_family(normalize_device_device_map(device, None))
+    mapped_family = selector_device_family(normalize_device_device_map(None, device_map))
+    if requested_family != mapped_family:
+        requested_name = requested_family.value if requested_family is not None else None
+        mapped_name = mapped_family.value if mapped_family is not None else None
+        raise ValueError(
+            f"`device={device!r}` conflicts with `device_map={device_map!r}`: "
+            f"`device` selects {requested_name} but `device_map` selects {mapped_name}. "
+            "Pass one placement argument, or make them agree."
+        )
+
+
+def _normalize_requested_device_map(device, device_map):
+    """Apply Hugging Face string shorthand and check device/device_map agreement.
+
+    Hugging Face accepts `device_map="cpu"` and `device_map="cuda:0"` as
+    shorthand for `{"": value}`. GPT-QModel used to reject those strings and
+    then let an explicit `device_map` silently replace `device`.
+    """
+
+    if device_map is None:
+        return None
+    if isinstance(device_map, str):
+        normalized = device_map if _is_accelerate_device_map_string(device_map) else {"": device_map}
+    else:
+        normalized = dict(device_map)
+    if device is not None:
+        _validate_device_and_device_map_agree(device, normalized)
+    return normalized
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -1732,7 +1774,7 @@ def ModelLoader(cls):
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = device_map
+        requested_device_map = _normalize_requested_device_map(device, device_map)
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.

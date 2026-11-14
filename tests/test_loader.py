@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 from gptqmodel.models import loader
@@ -41,3 +42,33 @@ def test_layerwise_rocm_mock_does_not_fall_back_to_cpu(monkeypatch):
         "cuda:0",
         "cuda:1",
     ]
+
+
+def test_device_map_string_device_is_hf_shorthand():
+    assert loader._normalize_requested_device_map(None, "cpu") == {"": "cpu"}
+    assert loader._normalize_requested_device_map(None, "cuda:1") == {"": "cuda:1"}
+    assert loader._normalize_requested_device_map(None, "auto") == "auto"
+    assert loader._normalize_requested_device_map(None, "balanced_low_0") == "balanced_low_0"
+
+
+@pytest.mark.parametrize(
+    ("device", "device_map"),
+    (
+        ("cpu", {"": "cuda:0"}),
+        ("cuda:0", {"": "cpu"}),
+    ),
+)
+def test_device_and_device_map_conflict_raises(device, device_map):
+    with pytest.raises(ValueError, match="conflicts"):
+        loader._normalize_requested_device_map(device, device_map)
+
+
+@pytest.mark.parametrize(
+    ("device", "device_map"),
+    (
+        ("cpu", {"": "cpu"}),
+        ("cuda:0", {"": "cuda:0"}),
+    ),
+)
+def test_device_and_device_map_agreement_is_accepted(device, device_map):
+    assert loader._normalize_requested_device_map(device, device_map) == device_map
