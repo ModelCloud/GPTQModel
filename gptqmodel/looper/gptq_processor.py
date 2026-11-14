@@ -641,7 +641,11 @@ class GPTQProcessor(LoopProcessor):
             try:
                 from ..utils.auto_dtype_cast import fused_w_minus_wq
 
-                fused = fused_w_minus_wq(packed_source, wq)
+                # ``wq`` is GPTQ's reconstruction in the source dtype; the
+                # fused op needs an FP32 operand. The original tensor stays
+                # untouched for replay and packing.
+                wq_fp32 = wq if wq.dtype == torch.float32 else wq.to(dtype=torch.float32)
+                fused = fused_w_minus_wq(packed_source, wq_fp32)
             except Exception:  # noqa: BLE001 - fall back to the dense expression
                 fused = None
             finally:

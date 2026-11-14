@@ -331,8 +331,13 @@ def move_module_to_cpu_pinned(
     streams: dict[torch.device, torch.cuda.Stream] = {}
 
     def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.device.type != "cuda":
+        if tensor.device.type == "meta":
+            # Meta tensors carry no storage; copying them raises.
             return tensor
+        if tensor.device.type != "cuda":
+            # XPU, MPS, NPU, XLA and CPU all take the ordinary path. Returning
+            # the accelerator tensor unchanged would defeat layer offload.
+            return tensor.to(device=CPU)
         if tensor.numel() * tensor.element_size() < pin_min_bytes:
             return tensor.to(device=CPU)
 

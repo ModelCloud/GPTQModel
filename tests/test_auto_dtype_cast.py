@@ -783,6 +783,109 @@ def test_pinned_cpu_offload_preserves_bits_and_pins_large_tensors():
     assert _bits_equal(module.small.weight, expected_small)
 
 
+def test_pinned_cpu_offload_moves_non_cuda_accelerators_to_cpu():
+    """XPU/MPS/NPU/XLA must still be offloaded; only meta may stay put."""
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        for device in ("xpu:0", "mps", "cpu", "meta"):
+            module = nn.Module()
+            module.register_buffer("b", torch.empty(4, device=device))
+
+            move_module_to_cpu_pinned(module)
+
+            expected = "meta" if device == "meta" else "cpu"
+            assert module.b.device.type == expected, (device, module.b.device)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not auto_dtype_cast.nf12_supported_device("cuda:0"),
+    reason="requires a native NF12 accelerator",
+)
+def test_gptq_process_uses_the_fused_diff_with_a_bf16_reconstruction(monkeypatch):
+    """Drive the real process path with a BF16 wq and a packed NF12 source."""
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.cuda.set_device(device)
+    linear = nn.Linear(64, 16, bias=False, device=device, dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn_like(linear.weight) * 0.02)
+    spec = auto_dtype_cast.eligible_source_module(linear, device)
+    assert spec is not None
+    packed = auto_dtype_cast.cast_source_module(linear, spec)
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device=device)
+
+    named = NamedModule(restored, name="proj", full_name="proj", layer_index=0)
+    named.state["auto_dtype_cast_packed_source"] = packed
+    object.__setattr__(
+        named,
+        "stream_state_payload_to_cpu",
+        lambda payload: named.state.update(payload),
+    )
+
+    wq = (restored.weight.detach() + 0.001).to(torch.bfloat16)
+    source = restored.weight.detach().clone()
+    q_scales = torch.ones((1,), dtype=torch.bfloat16)
+    q_zeros = torch.zeros((1,), dtype=torch.bfloat16)
+    q_g_idx = torch.zeros((64,), dtype=torch.int32)
+
+    class StubTask:
+        def __init__(self) -> None:
+            self.module = SimpleNamespace(weight=restored.weight, H=None)
+            self.gsq_diagnostics = None
+            self._borrow_workspace_last_summary = None
+            self._borrow_workspace_totals = None
+
+        def quantize(self):
+            return wq.clone(), q_scales, q_zeros, q_g_idx, 0.1, 0.5, 0.01, 1
+
+        def free(self) -> None:
+            pass
+
+        def log_workspace_stats(self, **_kwargs) -> None:
+            pass
+
+    processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
+    processor.tasks = {"proj": StubTask()}
+    processor.lock = threading.Lock()
+    processor.durations = []
+    processor.avg_losses = []
+    processor.module_names = []
+    processor.log = []
+    processor.qcfg = SimpleNamespace(dynamic=None, activation_mode="none")
+    processor.calculate_w_wq_diff = True
+    processor.draw_progress = lambda *_args, **_kwargs: None
+    processor.log_new_row = lambda *_args, **_kwargs: None
+    processor.module_feature_summary = lambda *_args, **_kwargs: ""
+    processor.module_dtype_size_summary = lambda *_args, **_kwargs: ""
+    processor.formatted_fwd_time = lambda *_args, **_kwargs: ""
+    processor.device_memory_report = lambda *_args, **_kwargs: ""
+    processor.name = lambda: "gptq"
+
+    real_fused = auto_dtype_cast.fused_w_minus_wq
+    calls = []
+
+    def spy(candidate, candidate_wq):
+        result = real_fused(candidate, candidate_wq)
+        calls.append((candidate_wq.dtype, result is not None))
+        return result
+
+    monkeypatch.setattr(auto_dtype_cast, "fused_w_minus_wq", spy)
+
+    processor.process(named, device=device)
+
+    diff = named.state["w_wq_diff"]
+    expected = source.to(torch.float32) - wq.to(torch.float32)
+    assert calls == [(torch.float32, True)]
+    assert diff.dtype is torch.float32
+    assert torch.equal(diff.view(torch.int32), expected.view(torch.int32))
+    assert "auto_dtype_cast_packed_source" not in named.state
+    assert all(not tensor.numel() for tensor in packed.buffers())
+    assert named.state["wq"].dtype is torch.bfloat16
+    assert named.state["wq"].device.type == "cpu"
+
+
 def test_quantization_pipeline_installs_nf12_modules_for_every_eligible_kind(monkeypatch):
     """Exercise the live module-installation boundary used by the quantizer."""
 
