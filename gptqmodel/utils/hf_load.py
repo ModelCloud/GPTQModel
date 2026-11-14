@@ -309,9 +309,6 @@ def hf_gptqmodel_prepare_model_for_load(
             module, _ = get_module_by_name_prefix(model, module_path)
             if module is not None:
                 defuser.convert_model(module, cleanup_original=True)
-        from .defuser_compat import apply_glm4_moe_router_compat
-
-        apply_glm4_moe_router_compat()
 
     # Expand MoE experts on meta to avoid materializing dense expert weights.
     if _module_has_meta_tensors(model):
