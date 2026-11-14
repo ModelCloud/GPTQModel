@@ -351,9 +351,15 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         assert child_policy == {
             "mode": "token_rows",
         }
-        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
+        # Dense modules also default to token rows: variable-length calibration
+        # used to collapse them to the latest (shortest) sample (#4063).
+        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") == {
+            "mode": "token_rows",
+        }
 
-    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") is None
+    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") == {
+        "mode": "token_rows",
+    }
 
 
 def test_qwen3_moe_awq_scaling_node_preserves_root_feature_name():
@@ -653,6 +659,54 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
 
     processor._feature_stats[module_name]["mode"] = "token_rows"
     assert processor._should_fallback_group([module_name], input_feat) is False
+
+
+def test_awq_fallback_group_checks_each_layer_independently():
+    """A starved sibling must not borrow coverage from the rest of the group."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    names = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+    input_feat = {name: torch.ones(1, 10, 4) for name in names}
+    processor._nsamples_total = 1000
+    processor.fallback = {"threshold": "50%"}
+    processor._feature_stats = {
+        "self_attn.q_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 600},
+        "self_attn.k_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 600},
+        "self_attn.v_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 10},
+    }
+
+    # Summed coverage is 1210 >= 500, but v_proj alone captured 1% of the corpus.
+    assert processor._should_fallback_group(names, input_feat) is True
+
+    processor._feature_stats["self_attn.v_proj"]["retained_tokens"] = 600
+    assert processor._should_fallback_group(names, input_feat) is False
+
+
+def test_awq_dense_variable_length_packs_every_batch_by_default():
+    """Default policy must keep samples from all captures, not only the last."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = Qwen3QModel.awq_input_feature_aggregation
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.full((1, 423, 4), 10.0),
+            torch.full((1, 36, 4), 20.0),
+        ],
+        "batch_indices": [0, 1],
+    }
+
+    features = processor._layer_input_features(state)
+
+    assert processor._feature_stats[module_name]["mode"] == "token_rows"
+    assert processor._feature_stats[module_name]["raw_tokens"] == 459
+    # One largest-batch equivalent: max(423, 2 batches) = 423 rows, not the
+    # 36-row latest (shortest) capture the old fallback kept.
+    assert processor._feature_stats[module_name]["retained_tokens"] == 423
+    assert features[module_name].shape == (1, 423, 4)
+    assert set(features[module_name][0, :, 0].tolist()) == {10.0, 20.0}
+    assert processor._awq_feature_kwargs[module_name] == {}
 
 
 def test_awq_previous_subset_scale_is_cached_per_subset_identity():

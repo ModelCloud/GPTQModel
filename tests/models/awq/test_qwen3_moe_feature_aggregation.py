@@ -109,9 +109,12 @@ def test_qwen3_moe_awq_aggregates_variable_length_features_across_batches():
             assert row["scale_feature"] == "mlp"
 
     attention_row = rows["self_attn.q_proj"]
-    assert attention_row["activation_aggregation"] == "latest_batch"
+    # Dense modules now use the same bounded token-row packing as MoE modules
+    # instead of collapsing to the last (shortest) variable-length capture.
+    assert attention_row["activation_aggregation"] == "token_rows"
     assert int(attention_row["activation_raw_tokens"]) == raw_tokens
-    assert int(attention_row["activation_retained_tokens"]) == CALIBRATION_LENGTHS[-1]
+    assert int(attention_row["activation_retained_tokens"]) == retained_tokens
+    assert int(attention_row["activation_batches"]) == len(CALIBRATION_LENGTHS)
 
     print(
         {
