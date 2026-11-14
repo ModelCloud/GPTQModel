@@ -791,10 +791,14 @@ def iter_calibration_windows(
     passage.
 
     Windows are spread across the whole stream, so the sample budget covers the
-    corpus instead of only its beginning: the first window starts at the top, the
-    last ends at the bottom, and the rest are evenly spaced between. When the text
-    is shorter than ``nsamples * seqlen`` the windows necessarily overlap, and the
-    warning says so.
+    corpus instead of only its beginning. With more than one sample the first
+    window starts at the top, the last ends at the bottom, and the rest are
+    evenly spaced between, so both endpoints of the legal start range
+    ``0..total - seqlen`` are selected. A single sample cannot both start at the
+    top and end at the bottom unless the corpus is exactly one window long, so
+    the singleton policy anchors that window at the top of the stream. When the
+    text is shorter than ``nsamples * seqlen`` the windows necessarily overlap,
+    and the warning says so.
     """
 
     if seqlen < min_tokens:
@@ -831,7 +835,7 @@ def iter_calibration_windows(
             yield ids
         return
 
-    span = total - seqlen + 1
+    last_start = total - seqlen
     budget = nsamples * seqlen
     if total < budget:
         log.warning(
@@ -839,14 +843,25 @@ def iter_calibration_windows(
             f"of {seqlen} need {budget}: the windows overlap, so the Hessian "
             f"describes only {total} tokens. Pass longer calibration text."
         )
-    for index in range(nsamples):
+
+    if nsamples == 1:
+        # One window cannot reach both ends of a stream longer than ``seqlen``.
+        # Anchor it at the beginning so the singleton case is explicit rather
+        # than an accidental consequence of the spacing formula.
+        starts = [0]
+    else:
         # Spread the windows over the whole stream rather than packing them at
         # ``index * seqlen``. Packing only ever reaches ``nsamples * seqlen``
         # tokens, so a 32 x 256 budget read the first ~8k tokens of a
-        # 100k-token corpus and silently ignored the other 92 %. Every sample
-        # still lands on a distinct offset, and the last window ends at the end
-        # of the stream.
-        start = (index * span) // nsamples
+        # 100k-token corpus and silently ignored the other 92 %. Dividing by
+        # ``nsamples - 1`` includes both endpoints of the legal start range, so
+        # the final window ends exactly at the end of the stream instead of one
+        # stride short of it.
+        starts = [
+            (index * last_start) // (nsamples - 1) for index in range(nsamples)
+        ]
+
+    for start in starts:
         yield ids[:, start : start + seqlen]
 
 
