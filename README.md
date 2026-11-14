@@ -931,6 +931,9 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12Config`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
+For the factory validation contract, EXL3 field normalisation, and the
+checkpoint metadata round trip, see [quantization config serialization](docs/config-serialization.md).
+
 `GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
 
 ##### QQQ Example: Llama 3.2 1B Instruct
