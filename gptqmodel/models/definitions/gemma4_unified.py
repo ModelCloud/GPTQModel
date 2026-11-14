@@ -106,6 +106,9 @@ class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 4 unified rope kwargs during cached layer replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma4_unified_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
 
@@ -135,4 +138,7 @@ class Gemma4UnifiedTextQModel(BaseQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 4 unified rope kwargs during cached layer replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma4_unified_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
