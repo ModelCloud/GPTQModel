@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
-"""JIT loader for the NF12 HIP/RDNA4 codec.
+"""JIT loader for the NF12 HIP/RDNA4 codec and inference operators.
 
 NF12 (NyoomFloat12) is Together AI's lossless 12-bit BF16 weight format
 (Liberman, Fang, Zhang, Dao, Fu, 2026). The reference implementation and CUDA
@@ -11,7 +11,8 @@ The vendored CUDA kernels in ``gptqmodel_ext/nf12`` use ``mma.sync`` m16n8k16,
 ``wgmma``, ``tcgen05`` and TMA, none of which exist on RDNA4. This module
 builds the HIP port in ``gptqmodel_ext/nf12_hip``, which decodes the identical
 NF12 byte stream to exact BF16 and hands it to rocBLAS through
-``torch.matmul`` (SPEC.md section 6.5, the decode-then-GEMM route).
+``torch.matmul`` (SPEC.md section 6.5, the decode-then-GEMM route). It also
+gathers embedding rows directly from packed storage.
 
 Validated on ROCm SDK 10.1.0 / HIP 7.16.26385 (R9700, gfx1201); see the
 vendored HIP README for the accompanying PyTorch build.
@@ -52,6 +53,8 @@ def _root() -> Path:
 _SOURCE_FILES = (
     "nf12_torch.cpp",
     "nf12_decode.hip",
+    "nf12_embedding.hip",
+    "nf12_rowmajor_embedding.hip",
     "nf12_encode.hip",
     "nf12_wmma.hip",
     "nf12_moe.hip",
@@ -164,7 +167,16 @@ def _include_paths() -> list[str]:
 _EXTENSION = TorchOpsJitExtension(
     name=_OPS_NAME,
     namespace=_NAMESPACE,
-    required_ops=("encode", "decode", "linear", "selftest", "arch_info"),
+    required_ops=(
+        "encode",
+        "decode",
+        "embedding",
+        "rowmajor_pack",
+        "rowmajor_embedding",
+        "linear",
+        "selftest",
+        "arch_info",
+    ),
     sources=_sources,
     build_root_env="GPTQMODEL_NF12_HIP_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("nf12_hip"),
@@ -180,6 +192,22 @@ _EXTENSION = TorchOpsJitExtension(
 )
 
 _SELFTESTED = False
+_EXTENSION_READY = False
+
+
+class _OperatorCache:
+    """Resolved dispatcher handles for the hot-path operator calls."""
+
+    __slots__ = ("linear", "embedding", "rowmajor_pack", "rowmajor_embedding")
+
+    def __init__(self) -> None:
+        self.linear = None
+        self.embedding = None
+        self.rowmajor_pack = None
+        self.rowmajor_embedding = None
+
+
+_OPERATORS = _OperatorCache()
 
 
 def nf12_hip_supported(device: torch.device | None = None) -> bool:
@@ -200,7 +228,7 @@ def nf12_hip_supported(device: torch.device | None = None) -> bool:
 def prewarm_nf12_hip_extension() -> bool:
     """Build and self-test the extension once per process."""
 
-    global _SELFTESTED
+    global _EXTENSION_READY, _SELFTESTED
     if not nf12_hip_supported():
         return False
     if not _EXTENSION.load():
@@ -213,13 +241,26 @@ def prewarm_nf12_hip_extension() -> bool:
                 "device code compiled empty or the wrong gfx target was used"
             )
         _SELFTESTED = True
+    _EXTENSION_READY = True
+    if _OPERATORS.embedding is None:
+        _OPERATORS.embedding = torch.ops.nf12_hip.embedding
+        _OPERATORS.rowmajor_pack = torch.ops.nf12_hip.rowmajor_pack
+        _OPERATORS.rowmajor_embedding = torch.ops.nf12_hip.rowmajor_embedding
     return True
 
 
 def available(device: torch.device | None = None) -> bool:
     """Return whether the HIP decode kernel can run on this device."""
 
-    return nf12_hip_supported(device) and _EXTENSION.load()
+    global _EXTENSION_READY
+    if not nf12_hip_supported(device):
+        return False
+    if _EXTENSION_READY:
+        return True
+    if not _EXTENSION.load():
+        return False
+    _EXTENSION_READY = True
+    return True
 
 
 def last_error() -> str:
@@ -249,6 +290,33 @@ def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.
     return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base))
 
 
+def decode_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
+    """Decode NF12 bytes straight to FP32 on RDNA4, with no BF16 intermediate.
+
+    BF16 -> FP32 is an exact bit shift, so the result is bit-identical to
+    ``decode(...).float()``.
+    """
+
+    if not _EXTENSION.load():
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    native = getattr(torch.ops.nf12_hip, "decode_fp32", None)
+    if callable(native):
+        return native(packed, escapes, int(exp_base))
+    return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base)).float()
+
+
+def sub_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int,
+             wq: torch.Tensor) -> torch.Tensor:
+    """``decode_fp32(...) - wq`` in one pass on RDNA4."""
+
+    if not _EXTENSION.load():
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    native = getattr(torch.ops.nf12_hip, "sub_fp32", None)
+    if callable(native):
+        return native(packed, escapes, int(exp_base), wq.contiguous())
+    return decode_fp32(packed, escapes, int(exp_base)) - wq
+
+
 def linear(
     x: torch.Tensor,
     packed: torch.Tensor,
@@ -258,18 +326,104 @@ def linear(
 ) -> torch.Tensor:
     """Decode-then-GEMM on RDNA4 (SPEC.md 6.5)."""
 
-    if not _EXTENSION.load():
-        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-    return torch.ops.nf12_hip.linear(x, packed, escapes, int(exp_base), bias)
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(
+                _EXTENSION.last_error_message() or "nf12_hip extension is unavailable"
+            )
+        _EXTENSION_READY = True
+    op = _OPERATORS.linear
+    if op is None:
+        # The dispatcher handle is immutable and safe to publish from concurrent
+        # free-threaded callers, as for the embedding operators below.
+        op = torch.ops.nf12_hip.linear
+        _OPERATORS.linear = op
+    return op(x, packed, escapes, int(exp_base), bias)
+
+
+def embedding(
+    ids: torch.Tensor,
+    packed: torch.Tensor,
+    escapes: torch.Tensor,
+    exp_base: int,
+) -> torch.Tensor:
+    """Gather exact BF16 rows from an NF12 table on RDNA4.
+
+    ``ids`` may be int32 or int64, with any shape. Invalid IDs produce zero
+    rows, matching the vendored CUDA embedding operator. Only requested rows
+    are decoded, and no dense weight is retained between calls.
+    """
+
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = _OPERATORS.embedding
+    if op is None:
+        # Assigning the same registered OpOverload from concurrent threads is
+        # safe on the free-threaded interpreter; it is an immutable dispatcher
+        # handle, not mutable state.
+        op = torch.ops.nf12_hip.embedding
+        _OPERATORS.embedding = op
+    return op(ids, packed, escapes, int(exp_base))
+
+
+def rowmajor_pack(
+    packed: torch.Tensor,
+    escapes: torch.Tensor,
+    exp_base: int,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Convert canonical NF12 to the embedding-only row-major layout."""
+
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = _OPERATORS.rowmajor_pack
+    if op is None:
+        op = torch.ops.nf12_hip.rowmajor_pack
+        _OPERATORS.rowmajor_pack = op
+    row_packed, row_escapes, original, collisions = op(
+        packed, escapes, int(exp_base)
+    )
+    return row_packed, row_escapes, int(original), int(collisions)
+
+
+def rowmajor_embedding(
+    ids: torch.Tensor,
+    row_packed: torch.Tensor,
+    row_escapes: torch.Tensor,
+    exp_base: int,
+) -> torch.Tensor:
+    """Gather exact BF16 rows from the row-major embedding layout."""
+
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = _OPERATORS.rowmajor_embedding
+    if op is None:
+        op = torch.ops.nf12_hip.rowmajor_embedding
+        _OPERATORS.rowmajor_embedding = op
+    return op(ids, row_packed, row_escapes, int(exp_base))
 
 
 __all__ = [
     "SUPPORTED_ARCHS",
     "available",
     "decode",
+    "decode_fp32",
+    "embedding",
     "encode",
     "last_error",
     "linear",
     "nf12_hip_supported",
     "prewarm_nf12_hip_extension",
+    "rowmajor_embedding",
+    "rowmajor_pack",
+    "sub_fp32",
 ]

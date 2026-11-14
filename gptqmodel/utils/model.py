@@ -309,6 +309,70 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
     return obj
 
 
+def move_module_to_cpu_pinned(
+    module: nn.Module,
+    *,
+    pin_min_bytes: int = 8 * 1024 * 1024,
+    chunk_bytes: int = 64 * 1024 * 1024,
+) -> nn.Module:
+    """Move a module to CPU with pinned staging for large accelerator tensors.
+
+    Pageable D2H copies synchronously fault each output page and dominated
+    layer offload. Large tensors keep pinned CPU storage so the device transfer
+    needs no second staging copy. Small tensors stay pageable to avoid pinning
+    allocator metadata and scalar state.
+    """
+
+    if pin_min_bytes < 0:
+        raise ValueError("pin_min_bytes must be non-negative")
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+
+    streams: dict[torch.device, torch.cuda.Stream] = {}
+
+    def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.device.type == "meta":
+            # Meta tensors carry no storage; copying them raises.
+            return tensor
+        if tensor.device.type != "cuda":
+            # XPU, MPS, NPU, XLA and CPU all take the ordinary path. Returning
+            # the accelerator tensor unchanged would defeat layer offload.
+            return tensor.to(device=CPU)
+        if tensor.numel() * tensor.element_size() < pin_min_bytes:
+            return tensor.to(device=CPU)
+
+        source = tensor if tensor.is_contiguous() else tensor.contiguous()
+        try:
+            result = torch.empty(
+                source.shape,
+                dtype=source.dtype,
+                device=CPU,
+                pin_memory=True,
+            )
+        except RuntimeError:
+            return source.to(device=CPU)
+
+        source_flat = source.view(-1)
+        result_flat = result.view(-1)
+        chunk_elements = max(1, chunk_bytes // source.element_size())
+        streams.setdefault(
+            source.device,
+            torch.cuda.current_stream(source.device),
+        )
+        for start in range(0, source.numel(), chunk_elements):
+            end = min(start + chunk_elements, source.numel())
+            result_flat[start:end].copy_(
+                source_flat[start:end],
+                non_blocking=True,
+            )
+        return result
+
+    moved = module._apply(to_cpu)
+    for stream in streams.values():
+        stream.synchronize()
+    return moved
+
+
 def nested_move_to(v, device, dtype: torch.dtype = None):
     if isinstance(v, torch.Tensor):
         return move_to(v, device=device, dtype=dtype)

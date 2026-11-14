@@ -291,6 +291,8 @@ class NF12Linear(WeightOnlyQuantLinear):
     def _install_result(self, result: NF12QuantResult, *, linear=None, bias=None):
         if hasattr(self, "nf12_packed"):
             target_device = self.nf12_packed.device
+        elif linear is not None:
+            target_device = weight_to_matrix(linear).device
         elif isinstance(getattr(self, "bias", None), torch.Tensor):
             target_device = self.bias.device
         else:
@@ -342,31 +344,42 @@ class NF12Linear(WeightOnlyQuantLinear):
         target = self.nf12_packed.device if device is None else torch.device(device)
         packed = self.nf12_packed.to(device=target)
         escapes = self.nf12_escapes.to(device=target)
+        base = self._exp_base()
+        # FP32 consumers decode and widen in one pass, so no 2 B/element BF16
+        # matrix is materialized and re-read. BF16 -> FP32 is exact, so the
+        # result is bit-identical to decoding BF16 and casting.
+        want_fp32 = dtype is torch.float32
         if target.type == "cuda" and _hip_path(target):
             try:
-                weight = nf12_hip_runtime.decode(packed, escapes, self._exp_base())
+                if want_fp32 and hasattr(nf12_hip_runtime, "decode_fp32"):
+                    weight = nf12_hip_runtime.decode_fp32(packed, escapes, base)
+                else:
+                    weight = nf12_hip_runtime.decode(packed, escapes, base)
             except Exception as exc:  # noqa: BLE001 - fall back to the codec
                 log.warn.once(
                     f"NF12 HIP decode failed ({type(exc).__name__}: {exc}); "
                     "using the Torch codec."
                 )
                 weight = nf12_codec.decode(
-                    packed, escapes, self._exp_base(), self.out_features, self.in_features
+                    packed, escapes, base, self.out_features, self.in_features
                 )
         elif target.type == "cuda" and nf12_runtime.available():
             try:
-                weight = nf12_runtime.decode(packed, escapes, self._exp_base())
+                if want_fp32 and hasattr(nf12_runtime, "decode_fp32"):
+                    weight = nf12_runtime.decode_fp32(packed, escapes, base)
+                else:
+                    weight = nf12_runtime.decode(packed, escapes, base)
             except Exception as exc:  # noqa: BLE001 - fall back to the codec
                 log.warn.once(
                     f"NF12 native decode failed ({type(exc).__name__}: {exc}); "
                     "using the Torch codec."
                 )
                 weight = nf12_codec.decode(
-                    packed, escapes, self._exp_base(), self.out_features, self.in_features
+                    packed, escapes, base, self.out_features, self.in_features
                 )
         else:
             weight = nf12_codec.decode(
-                packed, escapes, self._exp_base(), self.out_features, self.in_features
+                packed, escapes, base, self.out_features, self.in_features
             )
         return weight.to(dtype=dtype).contiguous()
 
@@ -419,6 +432,11 @@ class NF12Linear(WeightOnlyQuantLinear):
             return None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x)
+
+    def _forward_impl(self, x: torch.Tensor, *, apply_rotation: bool = True) -> torch.Tensor:
+        """Run the packed GEMM, optionally consuming a pre-rotated operand."""
+
         bias = getattr(self, "bias", None)
         if x.device.type == "meta":
             # Metadata-only modules (lazy load, offload shells) have packed
@@ -430,7 +448,7 @@ class NF12Linear(WeightOnlyQuantLinear):
             # `empty_linear_output` already applies the adapter, exactly once.
             return self.empty_linear_output(x)
 
-        if self.online_full_had or self.online_partial_had:
+        if apply_rotation and (self.online_full_had or self.online_partial_had):
             x = self._apply_rotation_to_input(x)
 
         if self.input_rows(x) == 0:

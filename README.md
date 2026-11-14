@@ -198,6 +198,12 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 
 `GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
+`BaseQuantizeConfig.auto_dtype_cast` defaults to `AUTO_NF12`, which uses
+lossless NF12 storage for eligible BF16 source matrices during calibration
+forwards and restores the exact source dtype before quantization. See
+[automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
+flow, FP16 eligibility rule, and native floatx precedence.
+
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
 SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
@@ -1051,6 +1057,18 @@ the SM80 packed lookup geometry, exact-row contract, and observed Lite shapes.
 The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
 describes matrix-core device selection, split-K scratch ownership, activation
 layout normalization, routing bounds, and exact-byte encoder scheduling.
+The [NF12 HIP embedding dispatch](docs/nf12-hip-embedding-dispatch.md)
+documents the one-ID and packed-ID CTA geometry, exact invalid-row contract,
+and 32-bit/64-bit index boundary.
+The [NF12 row-major embedding storage](docs/nf12-row-major-embedding.md)
+describes the lookup-oriented packed record, exact restore path, and measured
+CUDA and ROCm speedups.
+The [NF12 linear reduction association](docs/nf12-reduction-association.md)
+explains the architecture-specific pairwise reductions and their measured
+effect on Llama 3.2 1B logits drift.
+The [NF12 short-M dispatch](docs/nf12-short-m-dispatch.md) documents the
+M=1/4/8/16 launch plans, batched embedding shapes, and measured CUDA and ROCm
+speedups.
 
 ##### W4A Example: Llama 3.2 1B Instruct (GB10)
 

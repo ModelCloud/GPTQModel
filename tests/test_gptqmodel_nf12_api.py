@@ -18,6 +18,12 @@ import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
 from tests.accelerator_gates import nf12_skip_reason
+from tests.nf12_embedding_cases import (
+    OBSERVED_LITE_PREFILL_CASES,
+    assert_embedding_lookup_exact,
+    observed_lite_prefill_case,
+    small_embedding_case,
+)
 
 
 def _cuda():
@@ -38,6 +44,37 @@ def test_native_runtime_stays_testable_without_build_tools(monkeypatch):
     actual = nf12.linear(x, packed)
     assert actual.dtype == x.dtype
     assert torch.equal(actual, torch.full((2, 16), 64, device=device, dtype=x.dtype))
+
+
+_FP32_DECODE_EDGE_BITS = (
+    0x0000, 0x8000, 0x0001, 0x8001, 0x007F, 0x807F, 0x7F7F, 0xFF7F,
+    0x7F80, 0xFF80, 0x7FC0, 0x7FFF, 0x7F81, 0x0002, 0x0080, 0x8080,
+)
+
+
+@pytest.mark.parametrize("shape", [(16, 64), (32, 128), (256, 512)])
+def test_native_decode_fp32_is_bit_identical_to_decode_then_widen(shape):
+    device = _cuda()
+    n, k = shape
+    generator = torch.Generator(device=device).manual_seed(9100 + n + k)
+    dense = (torch.randn(shape, generator=generator, device=device) * 0.02).bfloat16()
+    edge = torch.tensor(_FP32_DECODE_EDGE_BITS, dtype=torch.uint16).view(torch.int16)
+    dense.view(torch.int16)[0, : edge.numel()] = edge.to(device)
+    dense.view(torch.int16)[1, : edge.numel()] = edge.flip(0).to(device)
+    packed = nf12.encode(dense)
+
+    fused = nf12.decode_fp32(packed)
+    widened = nf12.decode(packed).float()
+
+    assert fused.dtype == torch.float32
+    assert tuple(fused.shape) == shape
+    # Widening is exact, so the two routes must agree bit for bit, including
+    # signed zero, subnormals, infinities and NaN payloads.
+    assert torch.equal(fused.view(torch.int32), widened.view(torch.int32))
+    assert bool(torch.signbit(fused[0, 1]))
+    assert bool(torch.isinf(fused[0, 8]))
+    assert bool(torch.isnan(fused[0, 10]))
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
 @pytest.mark.parametrize("shape", [
@@ -73,15 +110,9 @@ def test_native_linear_and_exact_weight_roundtrip(shape):
 
 def test_native_embedding_preserves_row_bits_and_shape():
     device = _cuda()
-    generator = torch.Generator(device=device).manual_seed(121)
-    weight = torch.randn((128, 256), generator=generator, device=device).bfloat16()
-    weight[3, 0] = -0.0
-    ids = torch.tensor([[3, 127], [0, 9]], device=device, dtype=torch.int64)
+    weight, ids = small_embedding_case(device)
     packed = nf12.encode(weight)
-    actual = nf12.embedding(ids, packed)
-    oracle = F.embedding(ids, weight)
-    assert actual.shape == (2, 2, 256)
-    assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
+    actual = assert_embedding_lookup_exact(lambda values: nf12.embedding(values, packed), weight, ids)
     assert torch.equal(nf12.NF12Embedding.from_weight(packed)(ids), actual)
 
 
@@ -136,36 +167,52 @@ def test_native_embedding_repeat4_matches_dense_torch_and_keeps_packed_weight(m,
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 
-@pytest.mark.parametrize("m,id_dtype", [
-    (256, torch.int64), (312, torch.int32), (313, torch.int64),
-    (512, torch.int32), (513, torch.int64), (1536, torch.int64),
-    (2048, torch.int32), (2049, torch.int64), (3072, torch.int32),
-    (3072, torch.int64), (4095, torch.int64),
-])
+@pytest.mark.parametrize("m,id_dtype", OBSERVED_LITE_PREFILL_CASES)
 def test_native_embedding_observed_lite_prefill_rows_are_exact_and_packed(m, id_dtype):
     device = _cuda()
-    generator = torch.Generator(device=device).manual_seed(10101 + m)
-    weight = (torch.randn((512, 5120), generator=generator, device=device) * 0.02).bfloat16()
-    weight[0, 0] = -0.0
-    weight[-1, -1] = 2.0**-20
-    ids = torch.randint(weight.shape[0], (m,), generator=generator, device=device, dtype=id_dtype)
-    ids[0], ids[-1] = 0, weight.shape[0] - 1
+    weight, ids = observed_lite_prefill_case(device, m, id_dtype)
     packed = nf12.encode(weight)
     module = nf12.NF12Embedding.from_weight(packed)
-    oracle = F.embedding(ids, weight)
-    for _ in range(2):
-        actual = module(ids)
-        assert torch.equal(actual.view(torch.int16), oracle.view(torch.int16))
-    if m == 512:
-        invalid = ids.clone()
-        invalid[1], invalid[2] = -1, weight.shape[0]
-        actual = module(invalid)
-        assert torch.equal(actual[1:3].view(torch.int16), torch.zeros_like(actual[1:3]).view(torch.int16))
-        assert torch.equal(actual[3:].view(torch.int16), oracle[3:].view(torch.int16))
+    assert_embedding_lookup_exact(module, weight, ids, check_invalid=m == 512)
     assert packed.nbytes < weight.nbytes
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
     assert {name for name, _ in module.named_buffers()} == {"nf12_packed", "nf12_escapes"}
     assert all(buffer.dtype != torch.bfloat16 for _, buffer in module.named_buffers())
+
+
+def test_native_rowmajor_embedding_shares_lite_prefill_cases():
+    device = _cuda()
+    weight, ids = observed_lite_prefill_case(device, 256, torch.int64)
+    packed = nf12.encode(weight)
+    row_packed, row_escapes, original, collisions = nf12.rowmajor_pack(packed)
+
+    assert original == packed.num_escapes
+    assert collisions >= 0
+    assert row_escapes.shape == (2 * original + collisions, 4)
+    assert (
+        row_packed.nbytes + row_escapes.nbytes
+        <= packed.nbytes + packed.escapes.nbytes + 8 * collisions
+    )
+    assert_embedding_lookup_exact(
+        lambda values: nf12.rowmajor_embedding(
+            values, row_packed, row_escapes, packed.exp_base
+        ),
+        weight,
+        ids,
+        check_invalid=True,
+    )
+    shaped_ids = (
+        torch.arange(24, device=device, dtype=torch.int32)
+        .remainder(weight.shape[0])
+        .reshape(2, 3, 4)
+        .transpose(0, 2)
+    )
+    assert not shaped_ids.is_contiguous()
+    actual = nf12.rowmajor_embedding(
+        shaped_ids, row_packed, row_escapes, packed.exp_base
+    )
+    assert tuple(actual.shape) == (*shaped_ids.shape, weight.shape[1])
+    assert torch.equal(actual.view(torch.int16), F.embedding(shaped_ids, weight).view(torch.int16))
 
 
 @pytest.mark.parametrize("n,m", [(384, 128), (384, 512), (512, 128), (512, 512)])
@@ -236,6 +283,12 @@ _CUDA_SYNC_SHAPES = [
     (9, 512, 512),    # outside specialized M range
 ]
 
+_SM89_CALIBRATION_SHAPES = [
+    (2048, 2048),
+    (512, 2048),
+    (2048, 8192),
+]
+
 
 @pytest.mark.parametrize("m,n,k", _CUDA_SYNC_SHAPES)
 @pytest.mark.parametrize("static_weights", [False, True])
@@ -256,6 +309,28 @@ def test_cuda_sync_linear_matches_twin_and_torch(m, n, k, static_weights):
     oracle = F.linear(x.double(), dense.double(), bias.double())
     torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
     assert torch.equal(nf12.linear(x, packed, bias, static_weights=static_weights), actual)
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
+@pytest.mark.parametrize("n,k", _SM89_CALIBRATION_SHAPES)
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_sm89_calibration_schedule_matches_bf16_twin_and_torch(n, k, static_weights):
+    device = _cuda()
+    if torch.cuda.get_device_capability(device) != (8, 9):
+        pytest.skip("the calibration schedule override is specific to SM89")
+    generator = torch.Generator(device=device).manual_seed(20261116 + n + k)
+    dense = (torch.randn((n, k), generator=generator, device=device) * 0.02).bfloat16()
+    dense[0, 0], dense[-1, -1] = -0.0, 2.0**-20
+    packed = nf12.encode(dense)
+    x = (torch.randn((512, k), generator=generator, device=device) * 0.05).bfloat16()
+    bias = (torch.randn((n,), generator=generator, device=device) * 0.01).bfloat16()
+
+    actual = nf12.linear(x, packed, bias, static_weights=static_weights)
+    twin = torch.ops.nf12.linear_bf16t(x, nf12.pack_bf16t(dense), bias)
+
+    assert torch.equal(actual.view(torch.int16), twin.view(torch.int16))
+    oracle = F.linear(x.double(), dense.double(), bias.double())
+    torch.testing.assert_close(actual.double(), oracle, rtol=2e-3, atol=2e-3)
     assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
 
 

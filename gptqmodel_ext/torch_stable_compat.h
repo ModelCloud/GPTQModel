@@ -155,7 +155,9 @@ using torch::stable::parallel_for;
 using torch::stable::sum;
 using torch::stable::matmul;
 using torch::stable::reshape;
+using torch::stable::select;
 using torch::stable::transpose;
+using torch::stable::zero_;
 
 /// A minimal TensorOptions replacement. The stable API takes individual
 /// dtype/device/layout arguments, so kernels keep the familiar builder style
@@ -496,6 +498,18 @@ inline Tensor bitwise_right_shift(const Tensor& lhs, const Tensor& rhs) {
   return torch::stable::detail::to<Tensor>(stack[0]);
 }
 
+/// `aten::cumsum` only accepts its dtype as an optional ScalarType, which the
+/// stable surface does not wrap in a free function.
+inline Tensor cumsum(const Tensor& self, int64_t dim, ScalarType dtype) {
+  std::array<StableIValue, 3> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(dim),
+      torch::stable::detail::from(std::optional<ScalarType>(dtype))};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::cumsum", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
 inline Tensor cat(const std::vector<Tensor>& tensors, int64_t dim) {
   std::array<StableIValue, 2> stack{
       torch::stable::detail::from(tensors),
@@ -626,13 +640,13 @@ inline bool event_completed(DeviceEvent event) {
   return hipEventQuery(event) != hipErrorNotReady;
 }
 inline void destroy_event(DeviceEvent event) {
-  if (event != nullptr) hipEventDestroy(event);
+  if (event != nullptr) (void)hipEventDestroy(event);
 }
 inline bool record_event(DeviceEvent event, DeviceStream stream) {
   return hipEventRecord(event, stream) == hipSuccess;
 }
 inline void stream_synchronize(DeviceStream stream) {
-  hipStreamSynchronize(stream);
+  (void)hipStreamSynchronize(stream);
 }
 #else
 using DeviceEvent = cudaEvent_t;
@@ -647,13 +661,13 @@ inline bool event_completed(DeviceEvent event) {
   return cudaEventQuery(event) != cudaErrorNotReady;
 }
 inline void destroy_event(DeviceEvent event) {
-  if (event != nullptr) cudaEventDestroy(event);
+  if (event != nullptr) (void)cudaEventDestroy(event);
 }
 inline bool record_event(DeviceEvent event, DeviceStream stream) {
   return cudaEventRecord(event, stream) == cudaSuccess;
 }
 inline void stream_synchronize(DeviceStream stream) {
-  cudaStreamSynchronize(stream);
+  (void)cudaStreamSynchronize(stream);
 }
 #endif
 

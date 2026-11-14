@@ -626,6 +626,36 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
+    def _w_wq_diff(self, module: NamedModule, wq: torch.Tensor) -> torch.Tensor:
+        """Build the FP32 ``w - wq`` EoRA consumes.
+
+        When AUTO_NF12 kept the packed source alive, fuse the widening decode
+        with the subtraction so the source is never materialized as FP32. The
+        packed bytes are released in all cases; an unavailable native path falls
+        back to the dense expression.
+        """
+
+        packed_source = module.state.pop("auto_dtype_cast_packed_source", None)
+        if packed_source is not None:
+            fused = None
+            try:
+                from ..utils.auto_dtype_cast import fused_w_minus_wq
+
+                # ``wq`` is GPTQ's reconstruction in the source dtype; the
+                # fused op needs an FP32 operand. The original tensor stays
+                # untouched for replay and packing.
+                wq_fp32 = wq if wq.dtype == torch.float32 else wq.to(dtype=torch.float32)
+                fused = fused_w_minus_wq(packed_source, wq_fp32)
+            except Exception:  # noqa: BLE001 - fall back to the dense expression
+                fused = None
+            finally:
+                from ..utils.auto_dtype_cast import release_packed_source_storage
+
+                release_packed_source_storage(packed_source)
+            if fused is not None:
+                return fused
+        return module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
     def process(
         self,
         module: NamedModule,
@@ -794,7 +824,7 @@ class GPTQProcessor(LoopProcessor):
 
         if self.calculate_w_wq_diff:
             # diff in float32
-            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            w_wq_diff = self._w_wq_diff(module, wq)
             # assert module.weight.data.dtype in (torch.float16, torch.bfloat16)
 
             with self.lock:
@@ -867,6 +897,14 @@ class GPTQProcessor(LoopProcessor):
 
         module.state.pop("w", None)  #
         module.state.pop("w_wq_diff", None)
+
+        # A module that never reached the EoRA diff step (skipped process or an
+        # error path) may still hold the packed source.
+        packed_source = module.state.pop("auto_dtype_cast_packed_source", None)
+        if packed_source is not None:
+            from ..utils.auto_dtype_cast import release_packed_source_storage
+
+            release_packed_source_storage(packed_source)
 
         # need to clone to due to steamed pinned memory and access on diff thread
         q_zeros = module.state.pop("q_zeros").clone()

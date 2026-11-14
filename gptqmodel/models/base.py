@@ -41,6 +41,7 @@ from ..quantization.config import (
     FORMAT,
     METHOD,
     QUANTIZE_BLACK_LIST,
+    AutoDtypeCast,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     GcMode,
@@ -83,6 +84,7 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
     get_module_name,
+    move_module_to_cpu_pinned,
     move_to,
     warn_fused_unit_dynamic_conflicts,
 )
@@ -561,6 +563,7 @@ class BaseQModel(nn.Module):
         self.turtle_model = turtle_model
         # Captures forward-role auto-decoder choices for regression tests and debug logs.
         self.auto_module_decoder_events: List[Dict[str, Any]] = []
+        self.auto_dtype_cast_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -2248,6 +2251,18 @@ class BaseQModel(nn.Module):
             "calibration": calibration_config,
             "calculate_w_wq_diff": ProcessorStep.EORA in run_plan.processors,
         }
+        # EoRA consumes state stored on the NamedModule, so the layer inventory
+        # must keep that wrapper instead of unwrapping it to the live module.
+        self._has_eora = bool(args["calculate_w_wq_diff"])
+        # GPTQ's EoRA path needs ``w - wq`` in FP32. Keep the packed NF12 source
+        # alive until the processor consumes it so the difference fuses the
+        # widening decode with the subtraction instead of materializing an FP32
+        # source copy. Other quantizers compute their diff in the source dtype,
+        # so they keep the existing release-on-restore behavior.
+        self._needs_w_wq_diff = (
+            self._has_eora
+            and ProcessorStep.GPTQ in run_plan.processors
+        )
 
         processors = []
         for step in run_plan.processors:
@@ -3316,7 +3331,7 @@ class BaseQModel(nn.Module):
                 return result
 
             return module._apply(to_cpu_bounded)
-        return move_to(module, device=CPU)
+        return move_module_to_cpu_pinned(module)
 
     def after_quantize(self) -> None:
         """Run model-specific finalization after the complete quantization loop."""
@@ -3333,6 +3348,68 @@ class BaseQModel(nn.Module):
         module_path = _get_qualified_name(self.model, current_submodule)
         parent, leaf = _get_parent_and_leaf_by_path(self.model, module_path)
         setattr(parent, leaf, replacement)
+        return replacement
+
+    def _maybe_auto_dtype_cast_forward_module(
+        self,
+        module: nn.Module,
+        *,
+        device: torch.device,
+        named_module: "NamedModule",
+    ) -> nn.Module:
+        """Keep a calibration source packed until its quantizer needs it."""
+
+        qcfg = getattr(self, "quantize_config", None)
+        if qcfg is None or qcfg.auto_dtype_cast != AutoDtypeCast.AUTO_NF12:
+            return module
+        if qcfg.method == METHOD.NF12:
+            return module
+        native_plan = getattr(qcfg, "_native_floatx_forward_plan", None)
+        if isinstance(native_plan, dict) and native_plan.get("mode") == "native":
+            return module
+        # EoRA captures statistics after quantization; its forward must consume
+        # the quantized layer instead of a freshly packed dense source.
+        if named_module is not None and named_module.state.get("auto_dtype_cast_forward_disabled"):
+            return module
+        # A post-quantization forward (EoRA adapter capture) must consume the
+        # quantized layer that already lives in the model tree. Re-packing the
+        # restored dense source here would replace that layer for the forward.
+        full_name = getattr(named_module, "full_name", None)
+        if full_name:
+            try:
+                live = self.model.get_submodule(full_name)
+            except AttributeError:
+                live = None
+            if getattr(live, "QUANT_TYPE", None) is not None:
+                return module
+        from ..utils.auto_dtype_cast import cast_source_module, eligible_source_module
+
+        spec = eligible_source_module(module, device)
+        if spec is None:
+            return module
+        replacement = cast_source_module(module, spec)
+        named_module.state["auto_dtype_cast_source_spec"] = spec
+        named_module.state["auto_dtype_cast_was_applied"] = True
+        replacement = self._replace_live_submodule(module, replacement)
+        source_bias = getattr(module, "bias", None)
+        source_bytes = module.weight.numel() * module.weight.element_size()
+        if isinstance(source_bias, torch.Tensor):
+            source_bytes += source_bias.numel() * source_bias.element_size()
+        event = {
+            "module": named_module.full_name,
+            "device": str(device),
+            "kind": spec.kind,
+            "source_dtype": str(spec.dtype).split(".")[-1],
+            "source_bytes": source_bytes,
+            "packed_bytes": sum(t.numel() * t.element_size() for t in replacement.buffers()),
+        }
+        events = getattr(self, "auto_dtype_cast_events", None)
+        if events is not None:
+            events.append(event)
+        emit_device_telemetry(
+            "auto_dtype_cast_nf12",
+            **event,
+        )
         return replacement
 
     def _build_decoder_quant_source_module(
@@ -4331,8 +4408,16 @@ class BaseQModel(nn.Module):
     ) -> torch.nn.Module:
         device = as_torch_device(device)
         with self._turtle_lock:
+            if role == "forward" and named_module is not None and named_module.state.get("auto_dtype_cast_source_spec") is not None:
+                return target_submodule
             if role == "quant_source" and named_module is not None:
+                source_spec = named_module.state.get("auto_dtype_cast_source_spec")
                 quant_source = named_module.state.get("quant_source_module")
+                if not isinstance(quant_source, nn.Module):
+                    if source_spec is not None:
+                        from ..utils.auto_dtype_cast import restore_source_module
+
+                        quant_source = restore_source_module(target_submodule, source_spec, device=device)
                 if not isinstance(quant_source, nn.Module):
                     decoder_plan = named_module.state.get("auto_module_decoder") or {}
                     target_dtype = decoder_plan.get(
@@ -4366,6 +4451,16 @@ class BaseQModel(nn.Module):
                     )
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
+                if source_spec is not None:
+                    from ..utils.auto_dtype_cast import release_packed_source_storage
+
+                    if getattr(self, "_needs_w_wq_diff", False):
+                        # EoRA builds ``w - wq`` from this packed source; the
+                        # processor releases it once the FP32 diff exists.
+                        named_module.state["auto_dtype_cast_packed_source"] = target_submodule
+                    else:
+                        release_packed_source_storage(target_submodule)
+                named_module.state.pop("auto_dtype_cast_source_spec", None)
                 if get_device(module) != device:
                     safe_module_to(module, device)
                 return module
@@ -4413,6 +4508,9 @@ class BaseQModel(nn.Module):
                     target_submodule=module,
                     device=torch.device(device),
                     named_module=named_module,
+                )
+                module = self._maybe_auto_dtype_cast_forward_module(
+                    module, device=torch.device(device), named_module=named_module,
                 )
         return module
 

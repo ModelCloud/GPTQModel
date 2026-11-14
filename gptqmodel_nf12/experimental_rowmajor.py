@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Experimental row-major NF12 embedding layout; production dispatch is unchanged.
+"""Row-major NF12 embedding layout and conversion helpers.
 
 ``from_nf12`` converts a canonical packed NF12 weight on its current device.
-The CPU path uses NumPy and the SM80 CUDA path uses bounded native passes.
+The CPU path uses NumPy and the CUDA path uses the production NF12 extension.
 Only packed bytes, row escape bits, and scalar metadata live in the result.
 """
 
@@ -24,6 +24,8 @@ import numpy as np
 import torch
 
 from .api import NF12Weight, check_weight_shape
+from .api import rowmajor_embedding as _native_rowmajor_embedding
+from .api import rowmajor_pack as _native_rowmajor_pack
 
 
 _LAYOUT_VERSION = 1
@@ -182,16 +184,27 @@ def _from_nf12_cpu(source: NF12Weight, chunk_blocks: int) -> NF12RowMajorWeight:
                                orig_e, collision_count)
 
 
-def _check_sm80(device: torch.device) -> None:
+def _check_nvidia_cuda(device: torch.device) -> None:
     if device.type != "cuda" or torch.version.hip is not None:
-        raise ValueError("experimental row-major native path requires NVIDIA CUDA")
+        raise ValueError("row-major native path requires NVIDIA CUDA")
+    if torch.cuda.get_device_capability(device)[0] < 8:
+        raise ValueError("row-major native path requires SM80 or newer")
+
+
+def _check_sm80(device: torch.device) -> None:
+    """The repeat4 comparison kernel still has an SM80-only standalone build."""
+    if device.type != "cuda" or torch.version.hip is not None:
+        raise ValueError("experimental repeat4 native path requires NVIDIA CUDA")
     if torch.cuda.get_device_capability(device) != (8, 0):
-        raise ValueError("experimental row-major native path is validated only on SM80")
+        raise ValueError("experimental repeat4 native path is validated only on SM80")
 
 
 @lru_cache(maxsize=1)
 def _native() -> ctypes.CDLL:
-    source = Path(__file__).resolve().parents[1] / "gptqmodel_ext/nf12/experiments/rowmajor_embedding.cu"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext/nf12/csrc/torch/rowmajor_embedding.cu"
+    )
     digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
     library_path = Path(tempfile.gettempdir()) / f"nf12-rowmajor-native-{digest}.so"
     if not library_path.is_file():
@@ -228,31 +241,17 @@ def _cuda_error(code: int, operation: str) -> None:
 
 def _from_nf12_gpu(source: NF12Weight) -> NF12RowMajorWeight:
     _check_source(source, "cuda")
-    _check_sm80(source.device)
+    _check_nvidia_cuda(source.device)
     n, k = source.shape
-    tiles = (n // 16) * (k // 64)
-    lib = _native()
-    with torch.cuda.device(source.device):
-        stream = torch.cuda.current_stream(source.device).cuda_stream
-        counts = torch.empty((tiles,), dtype=torch.int32, device=source.device)
-        _cuda_error(lib.nf12_rowmajor_count(source.packed.data_ptr(), n, k,
-                                            counts.data_ptr(), stream), "collision count")
-        prefix = torch.cumsum(counts, dim=0, dtype=torch.int64)
-        collisions = int(prefix[-1].item())
-        original_count = source.num_escapes
-        total_escapes = 2 * original_count + collisions
-        if total_escapes > 1 << 32:
-            raise OverflowError("row-major escape index exceeds uint32 capacity")
-        packed = torch.empty((n, k * 3 // 2), dtype=torch.uint8, device=source.device)
-        escapes = torch.empty((total_escapes, 4), dtype=torch.int16, device=source.device)
-        invalid = torch.zeros((), dtype=torch.int32, device=source.device)
-        _cuda_error(lib.nf12_rowmajor_pack(source.packed.data_ptr(), source.escapes.data_ptr(),
-                                           original_count, n, k, source.exp_base,
-                                           prefix.data_ptr(), packed.data_ptr(),
-                                           escapes.data_ptr(), invalid.data_ptr(), stream), "pack")
-        if int(invalid.item()):
-            raise ValueError("canonical escape index out of range")
-    return NF12RowMajorWeight(packed, escapes, source.exp_base, original_count, collisions)
+    try:
+        packed, escapes, original_count, collisions = _native_rowmajor_pack(source)
+    except RuntimeError as exc:
+        if "escape index out of range" in str(exc):
+            raise ValueError("canonical escape index out of range") from exc
+        raise
+    return NF12RowMajorWeight(
+        packed, escapes, source.exp_base, original_count, collisions
+    )
 
 
 def from_nf12(source: NF12Weight, *, backend: Literal["cpu", "cuda"] | None = None,
@@ -279,25 +278,17 @@ def embedding(ids: torch.Tensor, weight: NF12RowMajorWeight, *, threads: int = 2
     """Look up exact BF16 bits, including +0 rows for invalid int32/int64 IDs."""
     if not isinstance(weight, NF12RowMajorWeight):
         raise TypeError("row-major embedding requires NF12RowMajorWeight")
-    _check_sm80(weight.device)
-    if (ids.device != weight.device or ids.dtype not in (torch.int32, torch.int64)
-            or not ids.is_contiguous()):
-        raise ValueError("ids must be contiguous int32/int64 on the row-major CUDA device")
-    if threads not in (64, 128, 256, 512) or ids_per_cta not in (1, 2, 4, 8, 16):
-        raise ValueError("unsupported row-major CTA geometry")
-    if ids_per_cta > threads // 4:
-        raise ValueError("IDs per CTA exceed available four-lane groups")
-    n, k = weight.shape
-    output = torch.empty((*ids.shape, k), dtype=torch.bfloat16, device=ids.device)
-    if ids.numel():
-        mode = 2 if cache_global_stores else 1
-        with torch.cuda.device(ids.device):
-            stream = torch.cuda.current_stream(ids.device).cuda_stream
-            _cuda_error(_native().nf12_rowmajor_lookup(
-                ids.data_ptr(), weight.packed.data_ptr(), weight.escapes.data_ptr(),
-                weight.escapes.shape[0], n, k, weight.exp_base, ids.numel(),
-                output.data_ptr(), ids.element_size(), threads, ids_per_cta, mode, stream), "lookup")
-    return output
+    _check_nvidia_cuda(weight.device)
+    if ids.device != weight.device or ids.dtype not in (torch.int32, torch.int64):
+        raise ValueError("ids must be int32/int64 on the row-major CUDA device")
+    if (threads, ids_per_cta, cache_global_stores) != (256, 8, True):
+        raise ValueError(
+            "the production row-major operator uses its measured 256-thread, "
+            "eight-ID geometry"
+        )
+    return _native_rowmajor_embedding(
+        ids, weight.packed, weight.escapes, weight.exp_base
+    )
 
 
 def embedding_repeat4(ids: torch.Tensor, weight: NF12RowMajorWeight, *,

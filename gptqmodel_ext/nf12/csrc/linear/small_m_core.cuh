@@ -132,6 +132,11 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
                                              int xstride, int kc, int rank, XRow xrow, Prep prep, Store store) {
   using T = WeightTraits<S, CoherentWeights>;
   constexpr bool kBulk = kStages > 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 890
+  constexpr bool kPairwiseParts = true;
+#else
+  constexpr bool kPairwiseParts = false;
+#endif
   constexpr int kDepth = kSmallMDepth;
   constexpr int kAtoms = kSmallMBulkAtoms;
   constexpr int kStageBytes = kAtoms * T::kSuperAtomBytes;
@@ -367,12 +372,29 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
         const int tok = e / pairs;
         const int rp = e - tok * pairs;
         const int off = tok * RS + 2 * rp;
-        float2 sum = *reinterpret_cast<const float2*>(part + off);
+        float2 sum;
+        if constexpr (kPairwiseParts) {
+          float2 vals[8];
 #pragma unroll
-        for (int p = 1; p < KP; ++p) {
-          const float2 value = *reinterpret_cast<const float2*>(part + p * m * RS + off);
-          sum.x += value.x;
-          sum.y += value.y;
+          for (int p = 0; p < KP; ++p)
+            vals[p] = *reinterpret_cast<const float2*>(part + p * m * RS + off);
+#pragma unroll
+          for (int width = 1; width < KP; width *= 2) {
+#pragma unroll
+            for (int p = 0; p + width < KP; p += 2 * width) {
+              vals[p].x += vals[p + width].x;
+              vals[p].y += vals[p + width].y;
+            }
+          }
+          sum = vals[0];
+        } else {
+          sum = *reinterpret_cast<const float2*>(part + off);
+#pragma unroll
+          for (int p = 1; p < KP; ++p) {
+            const float2 value = *reinterpret_cast<const float2*>(part + p * m * RS + off);
+            sum.x += value.x;
+            sum.y += value.y;
+          }
         }
         store(tok, rp, sum);
       }
@@ -381,19 +403,33 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
   }
 #endif
   if constexpr (KP > 1) {
-    // Sum the parts into part 0, in part order.
+    // SM89 pairs independent K parts to reduce cancellation. Other families
+    // retain their measured linear rank-order association.
     __syncthreads();
     for (int e = threadIdx.x; e < m * RW * 16; e += WARPS * 32) {
       const int off = e / (RW * 16) * RS + e % (RW * 16);
-      float s = part[off];
+      if constexpr (kPairwiseParts) {
+        float vals[8];
 #pragma unroll
-      for (int p = 1; p < KP; ++p) s += part[p * m * RS + off];
-      part[off] = s;
+        for (int p = 0; p < KP; ++p) vals[p] = part[p * m * RS + off];
+#pragma unroll
+        for (int width = 1; width < KP; width *= 2) {
+#pragma unroll
+          for (int p = 0; p + width < KP; p += 2 * width) vals[p] += vals[p + width];
+        }
+        part[off] = vals[0];
+      } else {
+        float s = part[off];
+#pragma unroll
+        for (int p = 1; p < KP; ++p) s += part[p * m * RS + off];
+        part[off] = s;
+      }
     }
   }
 
   // Each cluster rank finalizes a contiguous share of the CTA's outputs,
-  // summing the partials of ranks 0..kc-1 in order.
+  // summing the partials of ranks 0..kc-1. SM89 uses a pairwise tree;
+  // other families retain rank order.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   namespace cg = cooperative_groups;
   if (kc > 1)
@@ -414,18 +450,31 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     if (kc > 1) {
       // Issue all remote loads before adding to overlap DSMEM latency.
-      // The sum still runs in rank order.
       const auto cluster = cg::this_cluster();
       float2 v[8];
 #pragma unroll
       for (int q = 0; q < 8; ++q)
         if (q < kc) v[q] = *reinterpret_cast<const float2*>(cluster.map_shared_rank(part, q) + off);
-      s = v[0];
+      if constexpr (kPairwiseParts) {
 #pragma unroll
-      for (int q = 1; q < 8; ++q) {
-        if (q < kc) {
-          s.x += v[q].x;
-          s.y += v[q].y;
+        for (int width = 1; width < 8; width *= 2) {
+#pragma unroll
+          for (int q = 0; q + width < 8; q += 2 * width) {
+            if (q + width < kc) {
+              v[q].x += v[q + width].x;
+              v[q].y += v[q + width].y;
+            }
+          }
+        }
+        s = v[0];
+      } else {
+        s = v[0];
+#pragma unroll
+        for (int q = 1; q < 8; ++q) {
+          if (q < kc) {
+            s.x += v[q].x;
+            s.y += v[q].y;
+          }
         }
       }
     } else

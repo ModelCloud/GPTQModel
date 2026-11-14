@@ -371,6 +371,13 @@ Choice choose(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   // beats small-M here for both real weights and escape-heavy weights.
   if (dev.sm_arch == 86 && m > 32 && m <= 64 && k > 24576 && k <= 25600 && n >= 4352 && n <= 4608)
     return Choice{2, Plan{2, 8, 0}};
+  // SM89 calibration uses M=512 blocks. These shapes are the Llama 1B
+  // projections; each override is bit-identical to the previous schedule.
+  if (dev.sm_arch == 89 && m == 512) {
+    if (n == 2048 && k == 2048) return Choice{2, Plan{1, 8, 0}};
+    if (n == 512 && k == 2048) return Choice{3, Plan{2, 8, 0}};
+    if (n == 2048 && k == 8192) return Choice{1, Plan{4, 8, 0}};
+  }
   const Machine mc = machine_of(dev);
   const int64_t sms = std::max(dev.num_sms, 1);
   const int64_t kblocks = k / 64;

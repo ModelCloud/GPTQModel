@@ -137,14 +137,20 @@ __global__ void __launch_bounds__(WARPS * 32) small_m_kernel(const SmallMParams 
   }
 }
 
-// Below SM90, after small_m_kernel with kc > 1: y = bf16(partials of ranks
-// 0..kc-1 summed in rank order + bias), four columns per thread. SM90+
-// images carry no code for it.
+// Below SM90, after small_m_kernel with kc > 1: y = bf16(reduced partials of
+// ranks 0..kc-1 + bias), four columns per thread. SM89 uses pairwise
+// association because it lowered measured Llama logits drift; other SM8x
+// images retain rank order. SM90+ images carry no code for it.
 __global__ void small_m_split_reduce_kernel(const float* __restrict__ partials, int kc, int m, int n,
                                             const __nv_bfloat16* __restrict__ bias, __nv_bfloat16* y, int64_t ldy) {
   if constexpr (kDeviceHasClusters) {
     __trap();
   } else {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 890
+    constexpr bool kPairwiseRanks = true;
+#else
+    constexpr bool kPairwiseRanks = false;
+#endif
     const int quads = n / 4;
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= int64_t{m} * quads) return;
@@ -152,13 +158,30 @@ __global__ void small_m_split_reduce_kernel(const float* __restrict__ partials, 
     const int c = static_cast<int>(i % quads) * 4;
     const size_t rank_stride = static_cast<size_t>(m) * n;
     const float* src = partials + static_cast<size_t>(tok) * n + c;
-    float4 s = *reinterpret_cast<const float4*>(src);
-    for (int r = 1; r < kc; ++r) {
-      const float4 v = *reinterpret_cast<const float4*>(src + r * rank_stride);
-      s.x += v.x;
-      s.y += v.y;
-      s.z += v.z;
-      s.w += v.w;
+    float4 s;
+    if constexpr (kPairwiseRanks) {
+      // The launcher admits kc through 8, including non-powers of two, so a
+      // leftover odd rank carries to the next level.
+      float4 vals[8];
+      for (int r = 0; r < kc; ++r)
+        vals[r] = *reinterpret_cast<const float4*>(src + static_cast<size_t>(r) * rank_stride);
+      for (int width = 1; width < kc; width *= 2)
+        for (int r = 0; r + width < kc; r += 2 * width) {
+          vals[r].x += vals[r + width].x;
+          vals[r].y += vals[r + width].y;
+          vals[r].z += vals[r + width].z;
+          vals[r].w += vals[r + width].w;
+        }
+      s = vals[0];
+    } else {
+      s = *reinterpret_cast<const float4*>(src);
+      for (int r = 1; r < kc; ++r) {
+        const float4 v = *reinterpret_cast<const float4*>(src + r * rank_stride);
+        s.x += v.x;
+        s.y += v.y;
+        s.z += v.z;
+        s.w += v.w;
+      }
     }
     if (bias != nullptr) {
       const float2 b0 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(bias + c));
@@ -583,6 +606,13 @@ SmallMConfig small_m_heuristic(int64_t m, int64_t n, int64_t k, const DeviceInfo
     SmallMConfig tuned{1, 16, 5, 0, 8};
     tuned.slice = heuristic_slice(tuned, m, n, k, dev);
     if (tuned.slice >= 0 && small_m_config_supported(tuned, m, n, k, dev)) return tuned;
+  }
+  // SM120's M=16, short-K wide tiles need more independent row blocks than
+  // the generic cost model selects. Four cluster ranks and eight warps
+  // measured 6-7% faster on 8192x2048 without changing the reduction order.
+  if ((dev.sm_arch == 120 || dev.sm_arch == 121) && m == 16 && k <= 2048 && n >= 8192 && n < 65536) {
+    SmallMConfig tuned{2, 8, 4, 1, 0};
+    if (small_m_config_supported(tuned, m, n, k, dev)) return tuned;
   }
   const auto key = std::make_tuple(m, n, k, dev.device);
   {

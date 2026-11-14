@@ -1,6 +1,6 @@
 # NF12 HIP port (AMD RDNA4)
 
-Decode, encode and fused matrix-core kernels plus Torch bindings that run the
+Decode, encode, embedding and fused matrix-core kernels plus Torch bindings that run the
 **NF12** (`nf12`) quantization format on AMD RDNA4 GPUs — `gfx1200` /
 `gfx1201` / `gfx1250` (Radeon AI PRO R9700, RX 9000 series).
 
@@ -46,8 +46,10 @@ NF12 → **exact BF16** first, so none of them introduces new numerics.
 16-row output block and splits K across its eight warps; the decoded super-atom
 stays in registers and is reduced against the activation tile with
 `v_dot2_f32_bf16` (two columns per instruction), then the per-warp partials are
-summed in fixed warp order in shared memory. Every token in flight reuses the
-same decoded super-atom, so the packed weight is read once per launch.
+summed pairwise in shared memory. Every token in flight reuses the same decoded
+super-atom, so the packed weight is read once per launch. On Llama 3.2 1B this
+reduced maximum logits drift from 0.28125 to 0.1875 and mean drift from
+0.0278205 to 0.0176995 on R9700, with identical token IDs.
 
 This is the route that matters most for decode: materialising the weight would
 move `packed + dense_write + dense_read` = **88 MiB** for a 4096² matrix, where
@@ -82,11 +84,10 @@ runtime `n_tiles` loop defeats `#pragma unroll`, spills `acc[]` to local memory
 and measured 3–5× slower, which is why this is a template and not a parameter.
 
 **Split-K** over `grid.z` uses disjoint K slices and separate FP32 partial
-planes; a small reduce kernel sums them and rounds to BF16 exactly once, so the
-result is identical to a single-pass FP32 accumulation followed by one rounding.
-Atomics measured 2.6–3.8× slower. Each call obtains its partial workspace from
-PyTorch's stream-aware caching allocator; directly calling `hipMalloc`/`hipFree`
-per launch had cost +110 µs at m=32 and erased the win.
+planes; a small reduce kernel sums them pairwise and rounds to BF16 exactly
+once. Atomics measured 2.6–3.8× slower. Each call obtains its partial workspace
+from PyTorch's stream-aware caching allocator; directly calling
+`hipMalloc`/`hipFree` per launch had cost +110 µs at m=32 and erased the win.
 The current split planner uses CTA count, `m`, and K-block count. It selects
 eight splits for very narrow launches, two for very wide launches, and can use
 four for wide, short-K launches at small `m`; other shapes may remain unsplit.
@@ -117,6 +118,93 @@ quantization critical path. A forced `exp_base` still routes through the codec.
 `scripts/validate_nf12.py` calls `hip.encode()` and compares packed bytes,
 escapes and the decode round-trip against the reference codec, so the native
 encoder is gated rather than assumed.
+
+## Decoding
+
+`nf12_hip.decode(packed, escapes, exp_base)` returns the exact BF16 matrix.
+`nf12_hip.decode_fp32` returns the same elements as FP32: the kernel widens
+each decoded register pair with a bit shift during the store, so the FP32
+route never materializes a BF16 matrix. Both share `decode_nf12_matrix` and
+`store_decoded_tile` in `nf12_decode.hip`, so they cannot drift apart. Measured
+on an R9700, the fused FP32 store is 1.37× to 2.41× faster than decoding BF16
+and widening the dense result.
+
+`nf12_hip.sub_fp32(packed, escapes, exp_base, wq)` extends that store with a
+subtraction: `out = widen(decode(W)) - wq` for a contiguous FP32 `wq`. It
+shares `decode_nf12_matrix` and `store_row_tile_sub_fp32`, so the EoRA
+`w - wq` path never materializes the FP32 source and matches
+`decode_fp32 - wq` bit for bit.
+
+## Embedding lookup
+
+`nf12_hip.embedding(ids, packed, escapes, exp_base)` gathers BF16 rows directly
+from the packed matrix on RDNA4. It accepts contiguous or strided int32/int64
+ID tensors of any shape and returns `[*ids.shape, K]`. IDs outside `[0, N)`
+produce `+0.0` rows, matching the CUDA NF12 operator's vocabulary-shard
+behavior. The kernel decodes only the requested 16-byte row segments in
+registers, then writes the BF16 output; it never creates or caches a dense
+`[N, K]` table.
+
+Dispatch is selected from the number of IDs. A one-ID call uses a 256-quad,
+1,024-thread CTA (`<256, 1>`); for the 5120-column table below, one CTA covers
+the complete row. Calls with two or more IDs use a 32-quad, 128-thread CTA
+(`<32, 16>`) that packs 16 IDs and two 64-column quads per ID. Its K grid has
+40 blocks for the same 5120-column table. The 32-bit kernel indexes the packed
+table when the table and launch bounds fit; otherwise the binding launches
+the 64-bit specialization.
+See the [embedding dispatch reference](../../docs/nf12-hip-embedding-dispatch.md)
+for the complete flow and boundary contracts.
+
+The row and 64-column quad ownership, selected-half group decode, and
+self-inverse quad transpose follow `../nf12/csrc/codec/embedding.cu`. RDNA4
+uses wave32 `__shfl_xor` and ordinary vector stores; the CUDA cache-hint
+stores and SM-specific prefill route do not apply to this HIP path.
+
+Production `AUTO_NF12` embedding modules use the row-major representation
+instead of the canonical paired-row lookup above. Each row and 64-column block
+is 96 contiguous bytes: 32 metadata bytes followed by 64 low-mantissa bytes.
+`nf12_hip.rowmajor_pack` converts canonical NF12 on device, including selected
+half collision escapes. `nf12_hip.rowmajor_embedding` reads only requested
+rows and writes exact BF16 output. The canonical `embedding` operator remains
+available for compatibility and comparison.
+
+The binding guards the packed weight's concrete HIP device before selecting
+the stream and rejects mismatched devices, invalid dtypes, unaligned shapes,
+and invalid exponent bases. `tests/test_nf12_hip_embedding.py` shares the CUDA
+runtime's 128×256 small case and 512×5120 observed Lite prefill vectors through
+`tests/nf12_embedding_cases.py`. Both backends compare the exact BF16 bits
+against an independent dense Torch gather, including signed
+zeros, subnormals, infinities, NaN payloads, invalid IDs, strided IDs, and
+repeated calls. The storage test checks live allocator bytes after each call.
+
+On one R9700 with PyTorch 2.16.0.dev20261025+rocm10.1, the production
+row-major path produced exact BF16 bits. Three independent processes each
+used seven warmed trials of 200 calls, with synchronization after every trial:
+
+| Table | IDs | dense `F.embedding` | row-major NF12 | row-major / dense |
+| --- | ---: | ---: | ---: | ---: |
+| `[512, 5120]` | 1 | 4.68553 µs | 5.53393 µs | 0.847x |
+| `[512, 5120]` | 64 | 5.80548 µs | 5.49112 µs | 1.057x |
+| `[512, 5120]` | 256 | 5.84294 µs | 5.42302 µs | 1.077x |
+| `[128256, 2048]` | 1 | 4.64912 µs | 5.45021 µs | 0.853x |
+| `[128256, 2048]` | 64 | 5.66658 µs | 5.41130 µs | 1.047x |
+| `[128256, 2048]` | 256 | 14.25602 µs | 5.42758 µs | 2.627x |
+
+The `[512, 5120]` packed data plus escapes occupied 3,935,504 bytes versus
+5,242,880 dense bytes. The `[128256, 2048]` table occupied 394,325,856 bytes
+versus 525,336,576 dense bytes. Multi-token lookup meets the 1.0x gate.
+One-token lookup is launch limited.
+
+The same traffic bound applies on both vendors: a row-major lookup reads
+96 packed bytes and writes 128 BF16 bytes per 64 columns, versus 128 read plus
+128 write for dense BF16. The ideal ceiling is `256 / 224 = 1.143x` before
+decode and launch overhead. The Llama-shape 2.627x result reflects ROCm's
+slower dense gather at the 4 KiB row stride, not a universal bandwidth ratio.
+
+The canonical paired-row path remains slower at 5120 columns. Its selected row
+fetches both row halves from each canonical group, so it moves about 192 packed
+bytes for 128 BF16 output bytes. That is why the production embedding storage
+changed to row-major while matrix modules retain canonical super-atoms.
 
 ## Measured performance
 

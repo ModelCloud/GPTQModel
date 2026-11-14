@@ -41,12 +41,28 @@ constexpr int kDecodeSuperAtomsPerWarp = 2;
 // once and running a real GEMM wins (SPEC.md 6.5), so callers fall back.
 constexpr int kFusedMaxM = 16;
 
-template <WeightSource S, int kPerWarp>
+// Widening store: BF16 output keeps the canonical `store_row_tile`; FP32 output
+// decodes and widens in one pass, so no BF16 matrix is materialized.
+template <typename OutT>
+__device__ __forceinline__ void store_decoded_tile(OutT* __restrict__ out, int64_t off, int64_t ld,
+                                                   const RowTile& x) {
+  if constexpr (std::is_same_v<OutT, float>) {
+    store_row_tile_fp32(out, off, ld, x);
+  } else {
+    store_row_tile(out, off, ld, x);
+  }
+}
+
+// `sub` is null for a plain decode. When set it points at a dense FP32 matrix
+// and the decoded tile is written as `widen(x) - sub`, fusing the subtraction
+// with the widening store.
+template <WeightSource S, typename OutT, int kPerWarp>
 __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
                                             const uint4* __restrict__ escapes,
                                             uint32_t base_x4, int64_t num_sa,
                                             int64_t k_blocks,
-                                            __hip_bfloat16* __restrict__ out, int64_t ldo) {
+                                            OutT* __restrict__ out, int64_t ldo,
+                                            const float* __restrict__ sub = nullptr) {
   const int lane = threadIdx.x % kWarpSize;
   uint4 planes[kPerWarp][SourceTraits<S>::kLoads];
 #pragma unroll
@@ -70,16 +86,21 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
 #pragma unroll
       for (int p = 0; p < 2; ++p) quad_transpose(x[h][p], lane);
     }
-    store_row_tile(out, row_tile_offset(super_atom(sa, k_blocks), ldo, lane), ldo, x);
+    const int64_t off = row_tile_offset(super_atom(sa, k_blocks), ldo, lane);
+    if (sub != nullptr) {
+      store_row_tile_sub_fp32(reinterpret_cast<float*>(out), sub, off, ldo, x);
+    } else {
+      store_decoded_tile(out, off, ldo, x);
+    }
   }
 }
 
-template <WeightSource S, int kPerWarp>
+template <WeightSource S, typename OutT, int kPerWarp>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
                   uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
-                  __hip_bfloat16* __restrict__ out, int64_t ldo) {
-  decode_rows<S, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
+                  OutT* __restrict__ out, int64_t ldo, const float* __restrict__ sub) {
+  decode_rows<S, OutT, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo, sub);
 }
 
 
@@ -108,10 +129,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // "the small-M kernel splits K inside the CTA (warps summed in part order)").
 //
 // One CTA owns one 16-row output block. Its kWarpsPerBlock warps each walk a
-// contiguous K slice, accumulate in FP32, then a single pass sums the per-warp
-// partials in fixed warp order. Reducing inside the CTA keeps the whole
-// reduction deterministic (SPEC 6.4) and costs one barrier instead of a
-// second kernel launch.
+// contiguous K slice, accumulate in FP32, then a pairwise pass sums the
+// per-warp partials. Reducing inside the CTA keeps the whole reduction
+// deterministic (SPEC 6.4) and costs one barrier instead of a second kernel
+// launch.
 //
 // Why split K at all: with one warp owning the full K span a 4096-row matrix
 // exposes only N/16 = 256 warps, each serialising 64 super-atoms. Splitting K
@@ -281,14 +302,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
   __syncthreads();
 
-  // Sum the warp partials in fixed warp order so the result is deterministic.
+  // Sum the independent warp partials pairwise. The partials have equal K
+  // spans, but their magnitudes can still differ sharply after cancellation.
   const int64_t total = int64_t(kM) * kSuperAtomRows;
   for (int64_t idx = threadIdx.x; idx < total; idx += kThreadsPerBlock) {
     const int64_t mi = idx / kSuperAtomRows;
     const int64_t row = idx % kSuperAtomRows;
-    float sum = 0.0f;
+    float vals[kWarpsPerBlock];
 #pragma unroll
-    for (int w = 0; w < kWarpsPerBlock; ++w) sum += part[w][mi][row];
+    for (int w = 0; w < kWarpsPerBlock; ++w) vals[w] = part[w][mi][row];
+#pragma unroll
+    for (int width = 1; width < kWarpsPerBlock; width *= 2) {
+#pragma unroll
+      for (int w = 0; w + width < kWarpsPerBlock; w += 2 * width)
+        vals[w] += vals[w + width];
+    }
+    float sum = vals[0];
     // Bias joins the FP32 reduction, so the result is rounded to BF16 once.
     // Adding it to the already-rounded BF16 output instead double-rounds:
     // on gfx1201 that measured 1.00 ULP / 1.7e-3 RMS relative error versus
@@ -354,13 +383,12 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
 
 using namespace nf12_hip;
 
-extern "C" {
+namespace {
 
-// Decode a whole [N, K] NF12 matrix to row-major BF16.
-hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                          int64_t n, int64_t k, void* out, int64_t ldo,
-                          hipStream_t stream) {
-  __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
+template <typename OutT>
+hipError_t decode_nf12_matrix(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                              int64_t n, int64_t k, OutT* out, int64_t ldo, hipStream_t stream,
+                              const float* sub = nullptr) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   // SPEC.md 4 geometry; n / 16 and k / 64 below would otherwise truncate and
   // decode a smaller matrix than the caller asked for.
@@ -371,11 +399,40 @@ hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp
   const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
   if (blocks == 0) return hipSuccess;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
-  decode_kernel<WeightSource::kNf12, kDecodeSuperAtomsPerWarp>
+  decode_kernel<WeightSource::kNf12, OutT, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
           reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa,
-          k / kSuperAtomCols, out_bf16, ldo);
+          k / kSuperAtomCols, out, ldo, sub);
   return hipGetLastError();
+}
+
+}  // namespace
+
+extern "C" {
+
+// Decode a whole [N, K] NF12 matrix to row-major BF16.
+hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                          int64_t n, int64_t k, void* out, int64_t ldo,
+                          hipStream_t stream) {
+  return decode_nf12_matrix(packed, escapes, exp_base, n, k,
+                            reinterpret_cast<__hip_bfloat16*>(out), ldo, stream);
+}
+
+// Same elements as nf12_decode, widened to FP32 during the store.
+hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                            int64_t n, int64_t k, void* out, int64_t ldo,
+                            hipStream_t stream) {
+  return decode_nf12_matrix(packed, escapes, exp_base, n, k, reinterpret_cast<float*>(out), ldo,
+                            stream);
+}
+
+// out = widen(decode) - wq, fused so no FP32 source copy is materialized.
+hipError_t nf12_sub_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                         int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
+                         hipStream_t stream) {
+  if (wq == nullptr || out == nullptr || wq == out) return hipErrorInvalidValue;
+  return decode_nf12_matrix(packed, escapes, exp_base, n, k, reinterpret_cast<float*>(out), ldo,
+                            stream, static_cast<const float*>(wq));
 }
 
 // Uncompressed bf16t twin (SPEC.md 4.4). Same walk, no escape table and no
@@ -390,10 +447,10 @@ hipError_t nf12_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* 
   const int64_t blocks = grid_blocks<kDecodeSuperAtomsPerWarp>(num_sa);
   if (blocks == 0) return hipSuccess;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
-  decode_kernel<WeightSource::kBf16t, kDecodeSuperAtomsPerWarp>
+  decode_kernel<WeightSource::kBf16t, __hip_bfloat16, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
           reinterpret_cast<const uint4*>(packed), nullptr, 0u, num_sa, k / kSuperAtomCols,
-          out_bf16, ldo);
+          out_bf16, ldo, nullptr);
   return hipGetLastError();
 }
 

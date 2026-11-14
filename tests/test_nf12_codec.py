@@ -709,6 +709,69 @@ def test_linear_fallback_adds_mixed_dtype_bias_before_rounding(
     assert linear.bias.dtype == bias_dtype
 
 
+def test_module_fp32_dequantize_widens_without_a_bf16_matrix(monkeypatch):
+    """FP32 consumers must decode and widen in one pass, bit for bit."""
+    from gptqmodel.nn_modules.qlinear import nf12 as nf12_module
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
+    from gptqmodel.utils import nf12 as nf12_runtime
+
+    native = torch.cuda.is_available() and nf12_runtime.available()
+    weight = _adversarial_bits(32, 128, seed=17)
+    if native:
+        weight = weight.to("cuda")
+    result = quantize_nf12_weight(weight)
+
+    module = nf12_module.NF12Linear(bits=12, in_features=128, out_features=32)
+    module.register_buffer("nf12_packed", result.packed)
+    module.register_buffer("nf12_escapes", result.escapes)
+    module.register_buffer("nf12_exp_base", torch.tensor([result.exp_base], dtype=torch.uint8))
+
+    expected = weight.float()
+    assert torch.equal(module.dequantize_weight(dtype=torch.float32).view(torch.int32),
+                       expected.view(torch.int32))
+
+    if not native or torch.version.hip is not None:
+        return
+
+    def fail_bf16_decode(*_args, **_kwargs):
+        raise AssertionError("FP32 dequantize must not materialize a BF16 matrix")
+
+    monkeypatch.setattr(nf12_runtime, "decode", fail_bf16_decode)
+    fused = module.dequantize_weight(dtype=torch.float32)
+    assert fused.dtype == torch.float32
+    assert torch.equal(fused.view(torch.int32), expected.view(torch.int32))
+
+
+def test_sub_fp32_fuses_the_widening_decode_with_the_difference(monkeypatch):
+    """`sub_fp32` must equal `decode_fp32 - wq` without a source matrix."""
+    from gptqmodel.utils import nf12 as nf12_runtime
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("requires the CUDA NF12 runtime")
+    if not nf12_runtime.available():
+        pytest.skip(f"NF12 runtime unavailable: {nf12_runtime.last_error()}")
+    assert callable(getattr(torch.ops.nf12, "sub_fp32", None))
+
+    weight = _adversarial_bits(64, 128, seed=23).to("cuda")
+    packed, escapes, exp_base = nf12_runtime.encode(weight)
+    wq = torch.randn((64, 128), device="cuda", dtype=torch.float32)
+
+    fused = nf12_runtime.sub_fp32(packed, escapes, int(exp_base), wq)
+    widened = nf12_runtime.decode_fp32(packed, escapes, int(exp_base))
+    expected = widened - wq
+
+    assert fused.dtype == torch.float32
+    assert torch.equal(fused.view(torch.int32), expected.view(torch.int32))
+
+    def fail_decode(*_args, **_kwargs):
+        raise AssertionError("sub_fp32 must not materialize a source matrix")
+
+    monkeypatch.setattr(nf12_runtime, "decode_fp32", fail_decode)
+    monkeypatch.setattr(nf12_runtime, "decode", fail_decode)
+    again = nf12_runtime.sub_fp32(packed, escapes, int(exp_base), wq)
+    assert torch.equal(again.view(torch.int32), expected.view(torch.int32))
+
+
 def test_hip_kernel_is_bit_exact_when_available():
     """RDNA4 HIP decode must reproduce every BF16 bit the Torch codec encodes."""
     if not torch.cuda.is_available() or torch.version.hip is None:
@@ -725,6 +788,50 @@ def test_hip_kernel_is_bit_exact_when_available():
             packed.to("cuda"), escapes.to("cuda"), int(exp_base)
         ).cpu()
         assert torch.equal(decoded.view(torch.int16), weight.contiguous().view(torch.int16))
+
+
+def test_hip_decode_fp32_is_bit_identical_to_decode_then_widen():
+    """The HIP widening store must match BF16 decode followed by a cast."""
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("requires an AMD ROCm device")
+    from gptqmodel.utils import nf12_hip
+
+    if not nf12_hip.prewarm_nf12_hip_extension():
+        pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
+
+    for shape in [(16, 64), (256, 256), (1024, 512)]:
+        weight = _adversarial_bits(*shape, seed=9).to("cuda")
+        packed, escapes, exp_base = nf12_hip.encode(weight)
+        fused = nf12_hip.decode_fp32(packed, escapes, int(exp_base))
+        widened = nf12_hip.decode(packed, escapes, int(exp_base)).float()
+
+        assert fused.dtype == torch.float32
+        assert tuple(fused.shape) == shape
+        assert torch.equal(fused.view(torch.int32), widened.view(torch.int32))
+        # 0x8000 is the second edge value, so signed zero must survive.
+        assert bool(torch.signbit(fused[0, 1]))
+
+
+def test_hip_sub_fp32_is_bit_identical_to_decode_fp32_minus_wq():
+    """The HIP fused subtract must match the widening decode minus ``wq``."""
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("requires an AMD ROCm device")
+    from gptqmodel.utils import nf12_hip
+
+    if not nf12_hip.prewarm_nf12_hip_extension():
+        pytest.skip(f"NF12 HIP kernel unavailable: {nf12_hip.last_error()}")
+
+    for shape in [(16, 64), (256, 256), (1024, 512)]:
+        weight = _adversarial_bits(*shape, seed=31).to("cuda")
+        packed, escapes, exp_base = nf12_hip.encode(weight)
+        wq = torch.randn(shape, device="cuda", dtype=torch.float32)
+
+        fused = nf12_hip.sub_fp32(packed, escapes, int(exp_base), wq)
+        expected = nf12_hip.decode_fp32(packed, escapes, int(exp_base)) - wq
+
+        assert fused.dtype == torch.float32
+        assert tuple(fused.shape) == shape
+        assert torch.equal(fused.view(torch.int32), expected.view(torch.int32))
 
 
 def test_hip_wmma_uses_weight_device_when_current_device_differs():

@@ -284,10 +284,16 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     with torch.cuda.device(device):
                         w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
                         p = nf12.encode(w)
+                        decoded = nf12.decode_fp32(p)
+                        nf12.sub_fp32(p, torch.zeros_like(decoded))
                         x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
                         nf12.linear_fp32(x, p)
                         nf12.linear(x.bfloat16(), p)
                         nf12.embedding(torch.tensor([0, 127], device="cuda"), p)
+                        row_p, row_e, _, _ = nf12.rowmajor_pack(p)
+                        nf12.rowmajor_embedding(
+                            torch.tensor([0, 127], device="cuda"), row_p, row_e, p.exp_base
+                        )
                         short = nf12.encode(torch.full(
                             (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
                         nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
@@ -301,19 +307,143 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
         ids = torch.tensor([0, 127], device="cuda")
         restored = nf12.decode(p)
+        restored_fp32 = nf12.decode_fp32(p)
+        wq_zero = torch.zeros_like(restored_fp32)
+        restored_sub = nf12.sub_fp32(p, wq_zero)
         y_bf16 = nf12.linear(x.bfloat16(), p)
         y_fp32 = nf12.linear_fp32(x, p)
         gathered = nf12.embedding(ids, p)
+        row_p, row_e, _, _ = nf12.rowmajor_pack(p)
+        row_gathered = nf12.rowmajor_embedding(ids, row_p, row_e, p.exp_base)
+        row_gathered_one = nf12.rowmajor_embedding(
+            ids[:1], row_p, row_e, p.exp_base
+        )
         short = nf12.encode(torch.full(
             (1024, 256), 0.015625, dtype=torch.bfloat16, device="cuda"))
         y_mma_fp32 = nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
         torch.cuda.current_stream().synchronize()
         if not (torch.equal(restored, w)
+                and torch.equal(restored_fp32.view(torch.int32), restored.float().view(torch.int32))
+                and torch.equal(restored_sub.view(torch.int32), restored_fp32.view(torch.int32))
                 and bool(torch.all(y_bf16 == 1))
                 and bool(torch.all(y_fp32 == 1))
                 and bool(torch.all(y_mma_fp32 == 0.5))
-                and bool(torch.all(gathered == 0.015625))):
-            raise AssertionError("concurrent NF12 encode/decode/linear/embedding returned wrong values")
+                and bool(torch.all(gathered == 0.015625))
+                and bool(torch.equal(row_gathered, gathered))
+                and bool(torch.equal(row_gathered_one, gathered[:1]))):
+            raise AssertionError(
+                "concurrent NF12 encode/decode/linear/embedding/rowmajor returned wrong values"
+            )
+        return True
+
+    nf12_hip_embedding_lock = threading.Lock()
+    nf12_hip_embedding_thread = threading.local()
+    nf12_hip_embedding_next_device = [0]
+    nf12_hip_embedding_state = {}
+
+    def nf12_hip_embedding() -> bool:
+        """Exercise packed row lookup and linear concurrently on two ROCm GPUs."""
+        from gptqmodel.utils import nf12_codec, nf12_hip
+
+        with nf12_hip_embedding_lock:
+            if not nf12_hip_embedding_state:
+                weight = torch.arange(128 * 512, dtype=torch.float32).reshape(128, 512)
+                weight = (weight * 0.00001).bfloat16()
+                weight[7, 0] = -0.0
+                packed, escapes, base = nf12_codec.encode(weight)
+                ids_cpu = torch.tensor([0, 7, 63, 127, -1, 128], dtype=torch.int64)
+                golden = torch.zeros((ids_cpu.numel(), 512), dtype=torch.bfloat16)
+                golden[:4] = weight[ids_cpu[:4]]
+                linear_x = torch.zeros((16, 512), dtype=torch.bfloat16)
+                linear_x[:, 0] = 1
+                linear_golden = weight[:, 0].expand(16, weight.shape[0]).contiguous()
+                linear_golden[:, 7] = 0.0
+                for device in range(2):
+                    with torch.cuda.device(device):
+                        if not nf12_hip.prewarm_nf12_hip_extension():
+                            raise RuntimeError(f"NF12 HIP extension unavailable: {nf12_hip.last_error()}")
+                        p = packed.to("cuda")
+                        e = escapes.to("cuda")
+                        row_p, row_e, _, _ = nf12_hip.rowmajor_pack(p, e, base)
+                        ids = ids_cpu.to("cuda")
+                        nf12_hip.embedding(ids, p, e, base)
+                        nf12_hip.rowmajor_embedding(ids, row_p, row_e, base)
+                        decode_golden = nf12_hip.decode(p, e, base)
+                        decode_golden_fp32 = nf12_hip.decode_fp32(p, e, base)
+                        nf12_hip.sub_fp32(
+                            p, e, base, torch.zeros_like(decode_golden_fp32)
+                        )
+                        x = linear_x.to("cuda")
+                        nf12_hip.linear(x, p, e, base)
+                        torch.cuda.current_stream().synchronize()
+                        nf12_hip_embedding_state[device] = (
+                            p,
+                            e,
+                            row_p,
+                            row_e,
+                            base,
+                            ids,
+                            golden.to("cuda"),
+                            x,
+                            linear_golden.to("cuda"),
+                            decode_golden,
+                        )
+            if not hasattr(nf12_hip_embedding_thread, "device"):
+                nf12_hip_embedding_thread.device = nf12_hip_embedding_next_device[0] % 2
+                nf12_hip_embedding_next_device[0] += 1
+                nf12_hip_embedding_thread.stream = torch.cuda.Stream(
+                    device=nf12_hip_embedding_thread.device
+                )
+            device = nf12_hip_embedding_thread.device
+
+        torch.cuda.set_device(device)
+        (
+            packed,
+            escapes,
+            row_packed,
+            row_escapes,
+            base,
+            ids,
+            golden,
+            linear_x,
+            linear_golden,
+            decode_golden,
+        ) = (
+            nf12_hip_embedding_state[device]
+        )
+        with torch.cuda.stream(nf12_hip_embedding_thread.stream):
+            actual = nf12_hip.embedding(ids, packed, escapes, base)
+            row_actual = nf12_hip.rowmajor_embedding(
+                ids, row_packed, row_escapes, base
+            )
+            fused_fp32 = nf12_hip.decode_fp32(packed, escapes, base)
+            wq_zero = torch.zeros_like(fused_fp32)
+            fused_sub = nf12_hip.sub_fp32(packed, escapes, base, wq_zero)
+            linear_actual = nf12_hip.linear(linear_x, packed, escapes, base)
+            nf12_hip_embedding_thread.stream.synchronize()
+            if not (
+                torch.equal(actual.view(torch.int16), golden.view(torch.int16))
+                and torch.equal(
+                    row_actual.view(torch.int16), golden.view(torch.int16)
+                )
+                and torch.equal(
+                    fused_fp32.view(torch.int32),
+                    decode_golden.float().view(torch.int32),
+                )
+                and torch.equal(
+                    fused_sub.view(torch.int32),
+                    fused_fp32.view(torch.int32),
+                )
+            ):
+                raise AssertionError(
+                    "concurrent HIP NF12 embedding changed BF16 row bits"
+                )
+            if not torch.equal(
+                linear_actual.view(torch.int16), linear_golden.view(torch.int16)
+            ):
+                raise AssertionError(
+                    "concurrent HIP NF12 M16 linear changed BF16 output bits"
+                )
         return True
 
     nf12_gate_ready = [False]
@@ -648,6 +778,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel.p2p.allocator_guard": p2p_allocator_guard,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
+        "gptqmodel_nf12_hip.embedding": nf12_hip_embedding,
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
@@ -746,6 +877,7 @@ def _requires_two_gpus(name: str) -> bool:
     return (".comm." in name or "cuda:0 -> cuda:1" in name
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
             or name in (
+                "gptqmodel_nf12_hip.embedding",
                 "AWQ FP32 dequantize_gemm",
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
@@ -763,6 +895,9 @@ def run_child(name: str) -> int:
         return 0
     if name.startswith("gptqmodel_nf12.") and torch.version.hip is not None:
         print(json.dumps({"status": "SKIP", "detail": "native NF12 operator is NVIDIA-only"}))
+        return 0
+    if name == "gptqmodel_nf12_hip.embedding" and torch.version.hip is None:
+        print(json.dumps({"status": "SKIP", "detail": "native HIP NF12 embedding is AMD-only"}))
         return 0
     try:
         if name in SINGLE_SHOT:

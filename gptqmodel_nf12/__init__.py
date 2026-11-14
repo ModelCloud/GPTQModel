@@ -11,6 +11,7 @@ from ._library import library_path, load
 from .api import (
     NF12Weight,
     decode,
+    decode_fp32,
     embedding,
     embedding_repeat4,
     encode,
@@ -22,6 +23,9 @@ from .api import (
     linear_staged_b1,
     pack_bf16t,
     prepare_fp32_gate,
+    rowmajor_embedding,
+    rowmajor_pack,
+    sub_fp32,
 )
 from .moe import (
     NF12MoEWeight,
@@ -45,6 +49,7 @@ __all__ = [
     "NF12MoEWeight",
     "NF12Weight",
     "decode",
+    "decode_fp32",
     "embedding",
     "embedding_repeat4",
     "encode",
@@ -66,4 +71,7 @@ __all__ = [
     "pack_bf16t",
     "pack_bf16t_moe",
     "prepare_fp32_gate",
+    "rowmajor_embedding",
+    "rowmajor_pack",
+    "sub_fp32",
 ]
