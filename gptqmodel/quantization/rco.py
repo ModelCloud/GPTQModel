@@ -194,11 +194,12 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
 def _rco_dp_compiled():
     """Build the stable-ABI DP once; ``None`` when no C++ toolchain is available."""
     try:
-        from ..utils.rco_cpp import _RCO_DP_EXTENSION
+        from ..utils.rco_cpp import rco_dp_extension
 
-        if not _RCO_DP_EXTENSION.load():
+        extension = rco_dp_extension()
+        if not extension.load():
             return None
-        return _RCO_DP_EXTENSION.op("rco_dp")
+        return extension.op("rco_dp")
     except Exception:
         return None
 
