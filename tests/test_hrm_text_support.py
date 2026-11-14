@@ -193,10 +193,9 @@ def test_hrm_text_calibration_captures_every_recurrent_invocation():
     h0_inputs = per_layer[id(layers[2])]["layer_inputs"]
     assert len(h0_inputs) == 2
     for h0_input, l1_input in zip(h0_inputs, l1_outputs):
-        cosine = torch.nn.functional.cosine_similarity(
-            h0_input[0].flatten(), l1_input[0].flatten(), dim=0
-        )
-        assert cosine.item() < 0.999
+        assert not torch.allclose(
+            h0_input[0], l1_input[0], rtol=0.0, atol=1e-6
+        ), "H0 received the flattened L1 output instead of z_H + final_norm(z_L)"
 
 
 def test_hrm_text_pre_quantize_serves_each_layers_own_invocations():

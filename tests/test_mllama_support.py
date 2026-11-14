@@ -72,6 +72,17 @@ class _LanguageModel(nn.Module):
         self.layers = nn.ModuleList(layers or [_DecoderLayer(), _DecoderLayer()])
         self.norm = nn.LayerNorm(4)
         self.rotary_emb = _Rotary()
+        # `run_input_capture` forwards the live text config to the mask builder.
+        self.config = SimpleNamespace(
+            model_type="mllama_text_model",
+            _attn_implementation="eager",
+            hidden_size=4,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            head_dim=4,
+            layer_types=["full_attention", "full_attention"],
+            sliding_window=None,
+        )
 
 
 class _CurrentMllamaWrapper(nn.Module):
