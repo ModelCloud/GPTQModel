@@ -209,6 +209,8 @@ flow, FP16 eligibility rule, and native floatx precedence.
 
 SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
 
+Prompts and attention masks are translated before they reach vLLM or SGLang. Only boolean or 0/1 masks that remove contiguous left or right padding are accepted; an interior hole, a non-binary value, or a mask supplied with a text prompt is rejected instead of silently changing the prompt. See [runtime prompt input normalization](docs/runtime-prompt-input-normalization.md) for the contract and the vLLM/SGLang comparison.
+
 ### Quant Method / Format / Backend Matrix 📋
 
 Canonical backend names are shown below. Method-specific aliases are only accepted where explicitly implemented by that quant method.
