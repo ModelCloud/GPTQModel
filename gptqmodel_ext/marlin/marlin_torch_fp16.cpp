@@ -1,4 +1,4 @@
-#include <torch/library.h>
+#include "../torch_stable_compat.h"
 #include <vector>
 #include <tuple>
 
@@ -72,30 +72,38 @@ torch::Tensor awq_marlin_repack_dispatch(torch::Tensor b_q_weight,
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_marlin_fp16, m) {
-  // Alias annotations tell the dispatcher which arguments may be mutated and
-  // that the optional output aliases the returned tensor.
+STABLE_TORCH_LIBRARY(gptqmodel_marlin_core_fp16, m) {
+  // Internal: the torch-version-specific adapter owns the public name and adds
+  // allocator-backed stream tracking before forwarding here.
   m.def(
       "gptq_marlin_gemm_fp16(Tensor a, Tensor(a!)? c, Tensor b_q_weight, Tensor? b_bias, Tensor b_scales, "
       "Tensor? global_scale, Tensor? b_zeros, Tensor? g_idx, Tensor? perm, Tensor(b!) workspace, int b_q_type_id, "
       "int size_m, int size_n, int size_k, bool is_k_full=True, bool use_atomic_add=False, "
       "bool use_fp32_reduce=False, bool is_zp_float=False, Tensor(c!)? c_tmp=None, "
       "Tensor(d!)? a_tmp=None) -> Tensor(a!)");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_marlin_core_fp16, CUDA, m) {
+  m.impl("gptq_marlin_gemm_fp16", TORCH_BOX(&gptq_marlin_gemm_fp16_dispatch));
+}
+
+STABLE_TORCH_LIBRARY(gptqmodel_marlin_fp16, m) {
+  // These ops have no caller-owned stream lifetime requirement, so they stay
+  // public on the stable core.
   m.def("marlin_scratch_sizes(Tensor a, int size_m, int size_k, bool use_fp32_reduce, bool has_act_order) -> (int, int)");
   m.def("gptq_marlin_repack(Tensor b_q_weight, Tensor perm, int size_k, int size_n, int num_bits) -> Tensor");
   m.def("awq_marlin_repack(Tensor b_q_weight, int size_k, int size_n, int num_bits) -> Tensor");
   m.def("marlin_device_profile(int device) -> int[]");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_marlin_fp16, CUDA, m) {
-  m.impl("gptq_marlin_gemm_fp16", &gptq_marlin_gemm_fp16_dispatch);
-  m.impl("marlin_scratch_sizes", &gptq_marlin_scratch_sizes_fp16_dispatch);
-  m.impl("gptq_marlin_repack", &gptq_marlin_repack_dispatch);
-  m.impl("awq_marlin_repack", &awq_marlin_repack_dispatch);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_marlin_fp16, CUDA, m) {
+  m.impl("marlin_scratch_sizes", TORCH_BOX(&gptq_marlin_scratch_sizes_fp16_dispatch));
+  m.impl("gptq_marlin_repack", TORCH_BOX(&gptq_marlin_repack_dispatch));
+  m.impl("awq_marlin_repack", TORCH_BOX(&awq_marlin_repack_dispatch));
 }
 
 // `marlin_device_profile` takes no tensor, so the dispatcher has no device
-// key to consult; CatchAll lets it be called directly.
-TORCH_LIBRARY_IMPL(gptqmodel_marlin_fp16, CatchAll, m) {
-  m.impl("marlin_device_profile", &marlin_device_profile_dispatch);
+// key to consult; CompositeExplicitAutograd lets it be called directly.
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_marlin_fp16, CompositeExplicitAutograd, m) {
+  m.impl("marlin_device_profile", TORCH_BOX(&marlin_device_profile_dispatch));
 }

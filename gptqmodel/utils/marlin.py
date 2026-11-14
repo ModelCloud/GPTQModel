@@ -16,6 +16,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     cuda_include_paths_with_fallback,
     default_jit_cflags,
@@ -35,6 +36,13 @@ _MARLIN_FP16_OPS_NAME = "gptqmodel_marlin_fp16_ops"
 _MARLIN_FP16_NAMESPACE = "gptqmodel_marlin_fp16"
 _MARLIN_BF16_OPS_NAME = "gptqmodel_marlin_bf16_ops"
 _MARLIN_BF16_NAMESPACE = "gptqmodel_marlin_bf16"
+# The heavy kernel lives in an internal stable-ABI namespace. The small
+# torch-version-specific adapter below owns the public names above and forwards
+# through the dispatcher.
+_MARLIN_FP16_CORE_OPS_NAME = "gptqmodel_marlin_fp16_core_ops"
+_MARLIN_FP16_CORE_NAMESPACE = "gptqmodel_marlin_core_fp16"
+_MARLIN_BF16_CORE_OPS_NAME = "gptqmodel_marlin_bf16_core_ops"
+_MARLIN_BF16_CORE_NAMESPACE = "gptqmodel_marlin_core_bf16"
 _MARLIN_REQUIRED_CUDA_HEADERS = (
     "cuda_runtime_api.h",
     "cusparse.h",
@@ -241,51 +249,139 @@ def _marlin_extra_cuda_cflags() -> list[str]:
     return flags
 
 
-_MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+def _marlin_adapter_extra_cflags(bf16: bool) -> list[str]:
+    return [f"-DMARLIN_ADAPTER_BF16={1 if bf16 else 0}"]
+
+
+def _marlin_core_extension(
+    *,
+    dtype_tag: str,
+    name: str,
+    namespace: str,
+    op_name: str,
+    build_root_tag: str,
+    build_root_env: str,
+    display_name: str,
+) -> TorchOpsJitExtension:
+    """Build the heavy Marlin kernels against the stable ABI."""
+    return TorchOpsJitExtension(
+        name=name,
+        namespace=namespace,
+        required_ops=(op_name,),
+        sources=lambda: _marlin_sources(dtype_tag),
+        build_root_env=build_root_env,
+        default_build_root=lambda: default_torch_ops_build_root(build_root_tag),
+        display_name=display_name,
+        extra_cflags=_marlin_extra_cflags,
+        extra_cuda_cflags=_marlin_extra_cuda_cflags,
+        extra_include_paths=_marlin_include_paths,
+        force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
+        verbose_env="GPTQMODEL_EXT_VERBOSE",
+        requires_cuda=True,
+        python_abi_dependent=False,
+        torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
+    )
+
+
+class _MarlinAdapterExtension(TorchOpsJitExtension):
+    """Per-torch adapter that owns the public Marlin GEMM operator.
+
+    The stable core has no ``Tensor::record_stream``, so this thin library is
+    rebuilt against the installed torch, records the caller-owned output and
+    scratch buffers on the executing stream, then forwards to the stable core
+    through the dispatcher.
+    """
+
+    def __init__(self, *, core: TorchOpsJitExtension, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._core_extension = core
+
+    def load(self) -> bool:
+        if not self._core_extension.load():
+            self._load_attempted = True
+            self._load_result = False
+            self._last_error = self._core_extension.last_error_message()
+            return False
+        return super().load()
+
+    def clear_cache(self) -> None:
+        super().clear_cache()
+        self._core_extension.clear_cache()
+
+
+_MARLIN_FP16_CORE_EXTENSION = _marlin_core_extension(
+    dtype_tag="fp16",
+    name=_MARLIN_FP16_CORE_OPS_NAME,
+    namespace=_MARLIN_FP16_CORE_NAMESPACE,
+    op_name="gptq_marlin_gemm_fp16",
+    build_root_tag="marlin_fp16_core",
+    build_root_env="GPTQMODEL_MARLIN_FP16_BUILD_ROOT",
+    display_name="Marlin fp16 core",
+)
+
+
+_MARLIN_BF16_CORE_EXTENSION = _marlin_core_extension(
+    dtype_tag="bf16",
+    name=_MARLIN_BF16_CORE_OPS_NAME,
+    namespace=_MARLIN_BF16_CORE_NAMESPACE,
+    op_name="gptq_marlin_gemm_bf16",
+    build_root_tag="marlin_bf16_core",
+    build_root_env="GPTQMODEL_MARLIN_BF16_BUILD_ROOT",
+    display_name="Marlin bf16 core",
+)
+
+
+def _marlin_adapter_extension(
+    *,
+    core: TorchOpsJitExtension,
+    name: str,
+    namespace: str,
+    op_name: str,
+    build_root_tag: str,
+    build_root_env: str,
+    display_name: str,
+    bf16: bool,
+) -> _MarlinAdapterExtension:
+    return _MarlinAdapterExtension(
+        core=core,
+        name=name,
+        namespace=namespace,
+        required_ops=(op_name,),
+        sources=lambda: [str(_marlin_root() / "adapter.cpp")],
+        build_root_env=build_root_env,
+        default_build_root=lambda: default_torch_ops_build_root(build_root_tag),
+        display_name=display_name,
+        extra_cflags=lambda: _marlin_adapter_extra_cflags(bf16),
+        force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
+        verbose_env="GPTQMODEL_EXT_VERBOSE",
+        requires_cuda=True,
+        with_cuda=True,
+        python_abi_dependent=False,
+    )
+
+
+_MARLIN_FP16_TORCH_OPS_EXTENSION = _marlin_adapter_extension(
+    core=_MARLIN_FP16_CORE_EXTENSION,
     name=_MARLIN_FP16_OPS_NAME,
     namespace=_MARLIN_FP16_NAMESPACE,
-    required_ops=(
-        "gptq_marlin_gemm_fp16",
-        "marlin_scratch_sizes",
-        "gptq_marlin_repack",
-        "awq_marlin_repack",
-    ),
-    sources=lambda: _marlin_sources("fp16"),
+    op_name="gptq_marlin_gemm_fp16",
+    build_root_tag="marlin_fp16_adapter",
     build_root_env="GPTQMODEL_MARLIN_FP16_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("marlin_fp16"),
-    display_name="Marlin fp16",
-    extra_cflags=_marlin_extra_cflags,
-    extra_cuda_cflags=_marlin_extra_cuda_cflags,
-    extra_include_paths=_marlin_include_paths,
-    force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
-    verbose_env="GPTQMODEL_EXT_VERBOSE",
-    requires_cuda=True,
-    python_abi_dependent=False,
+    display_name="Marlin fp16 adapter",
+    bf16=False,
 )
 
 
-_MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+_MARLIN_BF16_TORCH_OPS_EXTENSION = _marlin_adapter_extension(
+    core=_MARLIN_BF16_CORE_EXTENSION,
     name=_MARLIN_BF16_OPS_NAME,
     namespace=_MARLIN_BF16_NAMESPACE,
-    required_ops=(
-        "gptq_marlin_gemm_bf16",
-        "marlin_scratch_sizes",
-        "gptq_marlin_repack",
-        "awq_marlin_repack",
-    ),
-    sources=lambda: _marlin_sources("bf16"),
+    op_name="gptq_marlin_gemm_bf16",
+    build_root_tag="marlin_bf16_adapter",
     build_root_env="GPTQMODEL_MARLIN_BF16_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("marlin_bf16"),
-    display_name="Marlin bf16",
-    extra_cflags=_marlin_extra_cflags,
-    extra_cuda_cflags=_marlin_extra_cuda_cflags,
-    extra_include_paths=_marlin_include_paths,
-    force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
-    verbose_env="GPTQMODEL_EXT_VERBOSE",
-    requires_cuda=True,
-    python_abi_dependent=False,
+    display_name="Marlin bf16 adapter",
+    bf16=True,
 )
-
 
 def _extension_api():
     from gptqmodel import extension as extension_api

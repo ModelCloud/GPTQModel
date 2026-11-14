@@ -24,6 +24,7 @@ from gptqmodel.utils import (
     exllamav2,
     hadamard,
     machete,
+    marlin,
     nf12_hip,
     paroquant,
     qqq,
@@ -140,6 +141,52 @@ def test_vptq_cuda_uses_stable_abi():
     _assert_stable(vptq_cuda._VPTQ_TORCH_OPS_EXTENSION)
 
 
+def test_marlin_fp16_core_uses_stable_abi():
+    _assert_stable(marlin._MARLIN_FP16_CORE_EXTENSION)
+
+
+def test_marlin_bf16_core_uses_stable_abi():
+    _assert_stable(marlin._MARLIN_BF16_CORE_EXTENSION)
+
+
+def test_marlin_adapter_is_intentionally_torch_specific():
+    """The public GEMM name lives in a thin per-torch adapter.
+
+    `Tensor::record_stream` is not part of the stable surface, so the adapter
+    is rebuilt for the installed torch while the heavy core stays on the
+    stable ABI. It must load its core first and never claim the stable floor.
+    """
+
+    for adapter, core in (
+        (marlin._MARLIN_FP16_TORCH_OPS_EXTENSION, marlin._MARLIN_FP16_CORE_EXTENSION),
+        (marlin._MARLIN_BF16_TORCH_OPS_EXTENSION, marlin._MARLIN_BF16_CORE_EXTENSION),
+    ):
+        assert adapter.torch_stable_abi_target is None
+        assert adapter.with_cuda is True
+        assert adapter._core_extension is core
+        assert core.torch_stable_abi_target == cpp._TORCH_STABLE_ABI_TARGET
+
+
+def test_marlin_core_cache_key_ignores_torch_version(monkeypatch):
+    """The heavy core must reuse one artifact across torch releases."""
+
+    core = marlin._MARLIN_FP16_CORE_EXTENSION
+    monkeypatch.setattr(cpp.torch, "__version__", "2.10.0+cu128")
+    fingerprint = core._cache_fingerprint()
+    monkeypatch.setattr(cpp.torch, "__version__", "2.15.0+cu132")
+    assert core._cache_fingerprint() == fingerprint
+
+
+def test_marlin_adapter_cache_key_tracks_torch_version(monkeypatch):
+    """The adapter uses the unstable ABI, so it rebuilds per torch release."""
+
+    adapter = marlin._MARLIN_FP16_TORCH_OPS_EXTENSION
+    monkeypatch.setattr(cpp.torch, "__version__", "2.10.0+cu128")
+    fingerprint = adapter._cache_fingerprint()
+    monkeypatch.setattr(cpp.torch, "__version__", "2.15.0+cu132")
+    assert adapter._cache_fingerprint() != fingerprint
+
+
 def test_swordfish_uses_stable_abi():
     _assert_stable(swordfish._SWORDFISH_TORCH_OPS_EXTENSION)
 
@@ -155,13 +202,6 @@ def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
 def test_every_jit_loader_declares_the_stable_abi():
     """Any product JIT loader must opt into the stable ABI."""
 
-    # Marlin is deferred: its caller-owned output/scratch lifetime relies on
-    # `Tensor::record_stream`, which the stable ABI does not expose. Replacing
-    # it in-tree needed a custom event pool/reaper that could not be qualified
-    # for concurrent multi-GPU execution, so Marlin stays on the unstable ABI
-    # until the stable surface grows a record_stream hook.
-    deferred = {"gptqmodel/utils/marlin.py"}
-
     root = Path(__file__).resolve().parents[1] / "gptqmodel"
     missing = []
     for path in root.rglob("*.py"):
@@ -169,8 +209,6 @@ def test_every_jit_loader_declares_the_stable_abi():
         if "TorchOpsJitExtension(" not in text:
             continue
         relative = path.relative_to(root.parent).as_posix()
-        if relative in deferred:
-            continue
         for match in re.finditer(r"TorchOpsJitExtension\(", text):
             depth = 0
             index = match.end() - 1

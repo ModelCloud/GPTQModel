@@ -1,3 +1,4 @@
+#include "../torch_stable_compat.h"
 /*
  * Modified by Neural Magic
  * Copyright (C) Marlin.2024 Elias Frantar
@@ -43,11 +44,6 @@
   #error "At least one Marlin compute dtype must be enabled."
 #endif
 
-#include <ATen/ATen.h>
-#include <ATen/DeviceGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/types.h>
 #include <climits>
 #include <cstdint>
 #include <limits>
@@ -66,15 +62,7 @@
 template <typename T, T v>
 struct is_valid_value { static constexpr bool value = true; };
 
-#if defined(__has_include)
-#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
-#    define HAS_FLOAT8_E8M0FNU 1
-#  else
-#    define HAS_FLOAT8_E8M0FNU 0
-#  endif
-#else
-#  define HAS_FLOAT8_E8M0FNU 0
-#endif
+#define HAS_FLOAT8_E8M0FNU 1
 
 #include "kernel.h"
 #include "marlin_scratch.cuh"
@@ -805,7 +793,7 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
-               void* s, void* s2, void* zp, void* g_idx, void* perm,
+               void* s, const void* s2, void* zp, void* g_idx, void* perm,
                void* a_tmp, int prob_m, int prob_n, int prob_k, int lda,
                void* workspace, vllm::ScalarType const& q_type, bool has_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
@@ -1145,7 +1133,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
 
   // Alloc buffers
   const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(a));
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  auto options = torch::TensorOptions().dtype(a.scalar_type()).device(a.device());
   torch::Tensor c;
   if (c_or_none.has_value()) {
     // Keep caller-owned output storage; the returned tensor aliases this c.
@@ -1280,7 +1268,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
                             torch::Tensor const& other,
                             const char* other_name) {
     if (other.defined()) {
-      TORCH_CHECK(!scratch.is_alias_of(other), scratch_name,
+      TORCH_CHECK(!at::is_alias_of(scratch, other), scratch_name,
                   " must not alias ", other_name);
     }
   };
@@ -1411,24 +1399,22 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
               "scalar type of global_scale must be float");
   const auto stream = at::cuda::getCurrentCUDAStream(dev);
-  // Explicit caller-owned workspaces can otherwise be returned to the caching
-  // allocator before this asynchronous launch completes on a non-current
-  // stream.  Recording the stream preserves their lifetime without a sync.
-  if (c_or_none.has_value()) c.record_stream(stream);
-  if (c_tmp_or_none.has_value()) c_tmp.record_stream(stream);
-  if (a_tmp_or_none.has_value()) a_tmp.record_stream(stream);
+  // Caller-owned output and scratch lifetime is owned by the public adapter
+  // (see adapter.cpp): the stable ABI has no `Tensor::record_stream`, so the
+  // torch-version-specific adapter records those buffers on this stream before
+  // forwarding here. This core is invoked only through that adapter.
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
-        scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+        scales_ptr = b_scales.mutable_data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
         #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+          scales_ptr = b_scales.mutable_data_ptr<at::Float8_e8m0fnu>();
         #else
           TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
+            "float8_e8m0fnu is not available in this torch build.");
         #endif
       } else
         TORCH_CHECK(false,
@@ -1442,14 +1428,14 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
 #endif
 
     } else {
-      scales_ptr = b_scales.data_ptr<at::Half>();
+      scales_ptr = b_scales.mutable_data_ptr<at::Half>();
     }
 
     marlin::marlin_mm<half>(
-        a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
-        global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), kernel_size_m,
+        a.mutable_data_ptr<at::Half>(), b_q_weight.data_ptr(), c.mutable_data_ptr<at::Half>(),
+        c_tmp.mutable_data_ptr<float>(), b_bias.mutable_data_ptr<at::Half>(), scales_ptr,
+        global_scale.const_data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.mutable_data_ptr<at::Half>(), kernel_size_m,
         kernel_size_n, kernel_size_k, kernel_lda, workspace.data_ptr(),
         b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
@@ -1464,13 +1450,13 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
-        scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+        scales_ptr = b_scales.mutable_data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
         #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+          scales_ptr = b_scales.mutable_data_ptr<at::Float8_e8m0fnu>();
         #else
           TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
+            "float8_e8m0fnu is not available in this torch build.");
         #endif
      } else
         TORCH_CHECK(false,
@@ -1482,18 +1468,18 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       TORCH_CHECK(group_size == 32,
                   "float8_e4m3fn only supports group_size == 32 (MXFP8) when "
                   "using float8_e8m0fnu scales.");
-      scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      scales_ptr = b_scales.mutable_data_ptr<at::Float8_e8m0fnu>();
 #endif
     } else {
-      scales_ptr = b_scales.data_ptr<at::BFloat16>();
+      scales_ptr = b_scales.mutable_data_ptr<at::BFloat16>();
     }
 
     marlin::marlin_mm<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_bias.data_ptr<at::BFloat16>(), scales_ptr,
-        global_scale.data_ptr<float>(), b_zeros.data_ptr(),
-        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+        a.mutable_data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+        c.mutable_data_ptr<at::BFloat16>(), c_tmp.mutable_data_ptr<float>(),
+        b_bias.mutable_data_ptr<at::BFloat16>(), scales_ptr,
+        global_scale.const_data_ptr<float>(), b_zeros.data_ptr(),
+        g_idx.data_ptr(), perm.data_ptr(), a_tmp.mutable_data_ptr<at::BFloat16>(),
         kernel_size_m, kernel_size_n, kernel_size_k, kernel_lda,
         workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
