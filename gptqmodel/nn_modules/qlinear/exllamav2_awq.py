@@ -228,8 +228,15 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
         self._ensure_q_handle()
-        if not exllamav2_awq_runtime_available():
-            raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
+        # The availability probe resolves the JIT extension, so pay it once per
+        # module. A failed probe is never memoised.
+        if not getattr(self, "_runtime_ok", False):
+            if not exllamav2_awq_runtime_available():
+                raise ModuleNotFoundError(
+                    "ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: "
+                    + exllamav2_awq_runtime_error()
+                )
+            self._runtime_ok = True
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
