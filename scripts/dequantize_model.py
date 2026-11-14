@@ -72,6 +72,14 @@ def _parse_args() -> argparse.Namespace:
         help="Reuse valid output shards already present in the output directory",
     )
     parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help=(
+            "Allow executing Python files bundled in the checkpoint. Only use "
+            "this for a repository whose code you have reviewed."
+        ),
+    )
+    parser.add_argument(
         "--env",
         action="append",
         metavar="KEY=VALUE",
@@ -108,6 +116,7 @@ def main() -> None:
         "output_path": str(Path(output_path)),
         "dtype": dtype,
         "device": device,
+        "trust_remote_code": args.trust_remote_code,
     }
     print(f"[dequantize_model] parsed args: {debug_payload}")
 
@@ -117,6 +126,7 @@ def main() -> None:
         target_dtype=dtype,
         device=device,
         resume=args.resume,
+        trust_remote_code=args.trust_remote_code,
     )
 
 

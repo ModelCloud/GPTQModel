@@ -117,7 +117,7 @@ class LFM3OmniQModel(LFM3QModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=True)
+        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample

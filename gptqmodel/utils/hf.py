@@ -1726,9 +1726,11 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # legacy RoPE fields or nothing but a default `rope_theta`.
     _normalize_rope_parameters_config_compat(config)
 
-    auto_map = getattr(config, "auto_map", None) or {}
-    has_remote_automap = isinstance(auto_map.get("AutoModelForCausalLM"), str)
-    if not trust_remote_code and not has_remote_automap:
+    # `auto_map` is checkpoint data, not an opt-in. A config can carry a native
+    # `model_type` (so it loads as a built-in class) and still list remote
+    # classes; applying remote-code shims from that data would execute the
+    # snapshot without the caller's consent.
+    if not trust_remote_code:
         return
 
     _patch_transformers_remote_code_compat()
@@ -1897,8 +1899,17 @@ def _bridge_legacy_vision2seq_remote_code(model_cls: Any, config: Any) -> Option
         return model_cls
 
 
-def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
-    if not model_id_or_path:
+def prepare_remote_model_init_compat(
+    model_id_or_path: Optional[str],
+    config: Any,
+    *,
+    trust_remote_code: bool = False,
+) -> None:
+    # Importing `auto_map` classes is remote-code execution. It is gated by the
+    # caller's explicit `trust_remote_code`; `auto_map` alone is checkpoint data
+    # and must never enable it. This also covers transformers' cross-repo
+    # `repo--module.Class` form, which resolves to another repository's code.
+    if not trust_remote_code or not model_id_or_path:
         return
 
     deci_init_compat(config)

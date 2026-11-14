@@ -39,7 +39,12 @@ def reference(utils):
     ))
     if not (path / "modeling_kimi_linear.py").is_file():
         pytest.skip("Kimi K3 checkpoint reference code is not cached; set KIMI_K3_SNAPSHOT")
-    return utils.load_calibration_reference(path)
+    return utils.load_calibration_reference(path, trust_remote_code=True)
+
+
+def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
+    with pytest.raises(ValueError, match="trust_remote_code=True"):
+        utils.load_calibration_reference(tmp_path)
 
 
 @pytest.mark.parametrize("model_type,definition", [
@@ -133,8 +138,8 @@ def test_source_reads_dense_and_packed_tensors_without_loading_other_weights(uti
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
         "weight_map": dict.fromkeys(names, "model.safetensors"),
     }))
-    monkeypatch.setattr(utils, "load_calibration_reference", lambda _: SimpleNamespace())
-    source = utils.KimiK3Source(tmp_path)
+    monkeypatch.setattr(utils, "load_calibration_reference", lambda *_, **__: SimpleNamespace())
+    source = utils.KimiK3Source(tmp_path, trust_remote_code=True)
     torch.testing.assert_close(source.decoded("dense.weight"), dense, rtol=0, atol=0)
     torch.testing.assert_close(source.decoded("expert.w1.weight"),
                                utils.decode_mxfp4(packed, scales), rtol=0, atol=0)

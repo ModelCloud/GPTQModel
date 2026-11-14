@@ -418,7 +418,7 @@ def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatc
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=1426)],
@@ -450,7 +450,7 @@ def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(mon
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     DummyRemoteModel().tie_weights(missing_keys={"lm_head.weight"}, recompute_mapping=False)
 
@@ -477,7 +477,7 @@ def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monke
 
     assert "_supports_flash_attn" not in DummyRemoteBase.__dict__
 
-    prepare_remote_model_init_compat("/tmp/ling", config)
+    prepare_remote_model_init_compat("/tmp/ling", config, trust_remote_code=True)
 
     assert DummyRemoteBase._supports_flash_attn is True
     assert DummyRemoteModel._supports_flash_attn is True
@@ -505,7 +505,7 @@ def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(mo
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     assert "TokenizersBackend" in Llama3ConversationFormatter.support_tokenizer_types
     assert getattr(Llama3ConversationFormatter, "_gptqmodel_tokenizer_backend_patch", False) is True
@@ -563,7 +563,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registra
         visual_tokenizer_config=RuntimeVisualConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVisualConfig
     assert captured["model_class"] is DummyVisualModel
@@ -615,7 +615,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monke
         vit_config=RuntimeVitConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis2_5", config)
+    prepare_remote_model_init_compat("/tmp/ovis2_5", config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVitConfig
     assert captured["model_class"] is DummyVitModel
@@ -647,7 +647,7 @@ def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=895)],
@@ -685,7 +685,7 @@ def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
 
     monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     peft_awq = pytest.importorskip("peft.tuners.lora.awq")
 
@@ -717,7 +717,7 @@ def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(mo
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     model_inputs = Phi4MMModel().prepare_inputs_for_generation(input_ids="ids", past_key_values="cache")
 
@@ -754,7 +754,7 @@ def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monke
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     model = Phi4MMForCausalLM()
 
@@ -785,7 +785,7 @@ def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     assert not hasattr(Phi4MMForCausalLM, "_gptqmodel_input_mode_patch")
 

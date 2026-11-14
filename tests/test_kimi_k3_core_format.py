@@ -143,7 +143,7 @@ def write_source(tmp_path, monkeypatch):
                 "hidden_size": 128,"routed_expert_hidden_size": 128,"moe_intermediate_size": 128}}
     (tmp_path/'config.json').write_text(json.dumps(config))
     (tmp_path/'model.safetensors.index.json').write_text(json.dumps({"weight_map": dict.fromkeys(tensors, 'model.safetensors')}))
-    monkeypatch.setattr(kimi_k3,'load_calibration_reference',lambda _:SimpleNamespace())
+    monkeypatch.setattr(kimi_k3,'load_calibration_reference',lambda *_,**__:SimpleNamespace())
     return prefix
 
 
@@ -157,7 +157,7 @@ def test_exl3_source_reads_exact_base_packed_components(tmp_path,monkeypatch):
         calls.append(device)
         return torch.full(logical_shape,3,dtype=torch.bfloat16)
     monkeypatch.setattr(core,'reconstruct_core_projection',reconstruct)
-    source=core.KimiK3EXL3Source(tmp_path)
+    source=core.KimiK3EXL3Source(tmp_path, trust_remote_code=True)
     assert torch.equal(source.decoded('native.weight'),torch.arange(8,dtype=torch.bfloat16).reshape(2,4))
     assert source.decoded(prefix+'.weight').shape==(128,128)
     assert calls==['cpu']

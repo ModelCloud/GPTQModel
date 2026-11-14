@@ -33,7 +33,12 @@ def _indexer_f32_inputs(module, inputs):
 
 class KimiK31Source(KimiK3EXL3Source):
     """Official MXFP4 source with one active shard and deferred BF16 experts."""
-    def __init__(self, snapshot, *, reference_root):
+    def __init__(self, snapshot, *, reference_root, trust_remote_code: bool = False):
+        if trust_remote_code is not True:
+            raise ValueError(
+                "Kimi K3.1 calibration executes the pinned reference decoder; "
+                "pass trust_remote_code=True to opt in."
+            )
         self.snapshot = Path(snapshot).resolve()
         self.config = json.loads((self.snapshot / "config.json").read_text())
         if (self.snapshot.name != REVISION or self.config.get("model_type") != "kimi_k31"

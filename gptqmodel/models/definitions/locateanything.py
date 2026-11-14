@@ -66,7 +66,7 @@ class LocateAnythingQModel(BaseQModel):
     def load_processor(self):
         return AutoProcessor.from_pretrained(
             self.model_local_path,
-            trust_remote_code=True,
+            trust_remote_code=self.trust_remote_code,
         )
 
     def pre_quantize_generate_hook_start(self):

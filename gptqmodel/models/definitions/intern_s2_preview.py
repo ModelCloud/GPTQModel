@@ -82,7 +82,7 @@ class InternS2PreviewQModel(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(
             self.model_local_path,
-            trust_remote_code=True,
+            trust_remote_code=self.trust_remote_code,
         )
 
     def monkey_patch(self):

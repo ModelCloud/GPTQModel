@@ -91,7 +91,7 @@ class MiniCPMVQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=True)
+        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
 
     @staticmethod
     def _normalize_conversation(
