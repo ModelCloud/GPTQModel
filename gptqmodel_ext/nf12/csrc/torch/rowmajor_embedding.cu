@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
-#include "../common/rowmajor_format.cuh"
+#include "../common/rowmajor_pack.cuh"
 
 namespace {
 
@@ -78,96 +78,6 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
   }
 }
 
-// The transform maps one canonical 1536-byte super-atom to sixteen 96-byte
-// row records. Each of 128 threads owns one canonical eight-value group.
-// Count only selected-half zero-sentinel collisions; original escapes already
-// have indices in the canonical table.
-__global__ void count_row_collisions(const uint8_t* __restrict__ source,
-                                     int32_t* __restrict__ counts) {
-  const int tile = blockIdx.x;
-  const int tid = threadIdx.x;
-  const uint32_t* meta = reinterpret_cast<const uint32_t*>(source + int64_t(tile) * 1536);
-  const int count = nf12_rowmajor::collision_count(meta[tid]);
-  const int warp_sum = __reduce_add_sync(0xffffffffu, count);
-  __shared__ int warp_counts[4];
-  if ((tid & 31) == 0) warp_counts[tid >> 5] = warp_sum;
-  __syncthreads();
-  if (tid == 0) counts[tile] = warp_counts[0] + warp_counts[1] + warp_counts[2] + warp_counts[3];
-}
-
-__global__ void pack_rowmajor(const uint8_t* __restrict__ source,
-                              int64_t original_escapes, int64_t k_blocks,
-                              uint32_t base, const int64_t* __restrict__ prefix,
-                              uint8_t* __restrict__ dest,
-                              uint64_t* __restrict__ dest_escapes,
-                              int32_t* __restrict__ invalid_escape) {
-  const int tile = blockIdx.x;
-  const int tid = threadIdx.x;
-  const int lane = tid >> 2;
-  const int atom = tid & 3;
-  const uint8_t* src = source + int64_t(tile) * 1536;
-  const uint32_t meta = reinterpret_cast<const uint32_t*>(src)[tid];
-  const int plane = atom < 2 ? 1 : 2;
-  const int lo_index = lane * 4 + 2 * (atom & 1);
-  const uint32_t* lows_plane = reinterpret_cast<const uint32_t*>(src + plane * 512);
-  const uint32_t lo0 = lows_plane[lo_index];
-  const uint32_t lo1 = lows_plane[lo_index + 1];
-  const uint16_t lower_meta = nf12_rowmajor::selected_meta(meta, 0);
-  const uint16_t upper_meta = nf12_rowmajor::selected_meta(meta, 1);
-  const bool lower_collision = meta != 0 && lower_meta == 0;
-  const bool upper_collision = meta != 0 && upper_meta == 0;
-  const int count = int(lower_collision) + int(upper_collision);
-
-  // A 128-thread block-wide prefix gives stable, compact collision indices
-  // without a full-weight flag tensor or atomic allocation order.
-  int warp_prefix = count;
-#pragma unroll
-  for (int offset = 1; offset < 32; offset *= 2) {
-    const int other = __shfl_up_sync(0xffffffffu, warp_prefix, offset);
-    if ((tid & 31) >= offset) warp_prefix += other;
-  }
-  __shared__ int warp_totals[4];
-  if ((tid & 31) == 31) warp_totals[tid >> 5] = warp_prefix;
-  __syncthreads();
-  int prior_warps = 0;
-#pragma unroll
-  for (int warp = 0; warp < 4; ++warp) {
-    if (warp < (tid >> 5)) prior_warps += warp_totals[warp];
-  }
-  const int64_t prior_tiles = tile ? prefix[tile - 1] : 0;
-  const uint32_t first_collision = uint32_t(2 * original_escapes + prior_tiles +
-                                            prior_warps + warp_prefix - count);
-  const int64_t block = tile / k_blocks;
-  const int64_t kb = tile - block * k_blocks;
-  const int ri = lane >> 2;
-  const int group = 4 * atom + (lane & 3);
-  if (meta == 0 && lo0 >= original_escapes) atomicExch(invalid_escape, 1);
-#pragma unroll
-  for (int upper = 0; upper < 2; ++upper) {
-    const uint16_t selected = upper ? upper_meta : lower_meta;
-    const uint32_t normal_lows = nf12_rowmajor::selected_lows(lo0, lo1, upper);
-    const bool collision = upper ? upper_collision : lower_collision;
-    const uint32_t escape_index = first_collision + (upper ? int(lower_collision) : 0);
-    const uint32_t out_lows = meta == 0 ? uint32_t(lo0 * 2 + upper) :
-                              collision ? escape_index : normal_lows;
-    const int64_t row = block * 16 + ri + upper * 8;
-    uint8_t* dst = dest + (row * k_blocks + kb) * 96;
-    reinterpret_cast<uint16_t*>(dst)[group] = selected;
-    reinterpret_cast<uint32_t*>(dst + 32)[group] = out_lows;
-    if (collision) dest_escapes[escape_index] = nf12_rowmajor::collision_escape(normal_lows, base);
-  }
-}
-
-__global__ void split_row_escapes(const uint4* __restrict__ source,
-                                  int64_t original_count,
-                                  uint64_t* __restrict__ dest) {
-  const int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= original_count) return;
-  const uint4 bits = source[index];
-  dest[2 * index] = uint64_t(bits.x) | (uint64_t(bits.z) << 32);
-  dest[2 * index + 1] = uint64_t(bits.y) | (uint64_t(bits.w) << 32);
-}
-
 }  // namespace
 
 extern "C" int nf12_rowmajor_count(const uint8_t* source, int64_t n, int64_t k,
@@ -176,7 +86,7 @@ extern "C" int nf12_rowmajor_count(const uint8_t* source, int64_t n, int64_t k,
     return cudaErrorInvalidValue;
   const int64_t tiles = (n / 16) * (k / 64);
   if (tiles > 0x7fffffffu) return cudaErrorInvalidValue;
-  count_row_collisions<<<static_cast<unsigned>(tiles), 128, 0, stream>>>(source, counts);
+  nf12_rowmajor::count_collisions<<<static_cast<unsigned>(tiles), 128, 0, stream>>>(source, counts);
   return cudaGetLastError();
 }
 
@@ -192,11 +102,11 @@ extern "C" int nf12_rowmajor_pack(const uint8_t* source,
     return cudaErrorInvalidValue;
   const int64_t tiles = (n / 16) * (k / 64);
   if (tiles > 0x7fffffffu) return cudaErrorInvalidValue;
-  pack_rowmajor<<<static_cast<unsigned>(tiles), 128, 0, stream>>>(
+  nf12_rowmajor::pack<<<static_cast<unsigned>(tiles), 128, 0, stream>>>(
       source, original_count, k / 64, base, prefix, dest, dest_escapes, invalid_escape);
   if (cudaError_t err = cudaGetLastError(); err != cudaSuccess) return err;
   if (original_count) {
-    split_row_escapes<<<static_cast<unsigned>((original_count + 255) / 256), 256, 0, stream>>>(
+    nf12_rowmajor::split_escapes<<<static_cast<unsigned>((original_count + 255) / 256), 256, 0, stream>>>(
         original_escapes, original_count, dest_escapes);
   }
   return cudaGetLastError();

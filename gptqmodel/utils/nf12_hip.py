@@ -60,6 +60,7 @@ _SOURCE_FILES = (
 # them beside the kernels so the include stays backend-local.
 _SHARED_SOURCES = (
     ("../nf12/csrc/common/rowmajor_format.cuh", "rowmajor_format.cuh"),
+    ("../nf12/csrc/common/rowmajor_pack.cuh", "rowmajor_pack.cuh"),
 )
 
 
