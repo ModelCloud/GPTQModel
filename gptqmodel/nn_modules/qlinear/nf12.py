@@ -448,11 +448,14 @@ class NF12Linear(WeightOnlyQuantLinear):
             # `empty_linear_output` already applies the adapter, exactly once.
             return self.empty_linear_output(x)
 
-        if apply_rotation and (self.online_full_had or self.online_partial_had):
-            x = self._apply_rotation_to_input(x)
-
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
+
+        # Answer the empty-rows case before the online rotation. The rotation
+        # used to run first and both its native and Torch implementations
+        # rejected a zero-element operand.
+        if apply_rotation and (self.online_full_had or self.online_partial_had):
+            x = self._apply_rotation_to_input(x)
 
         out = self._native_forward(x, bias)
         if out is None:
